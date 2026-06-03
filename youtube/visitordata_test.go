@@ -30,7 +30,11 @@ func TestGenerateVisitorData(t *testing.T) {
 }
 
 func TestGenerateVisitorData_Randomized(t *testing.T) {
-	if generateVisitorData("US") == generateVisitorData("US") {
+	// Two calls should differ (random nonce + timestamp). Separate vars avoid a
+	// false self-comparison warning.
+	first := generateVisitorData("US")
+	second := generateVisitorData("US")
+	if first == second {
 		t.Error("expected randomized visitorData across calls")
 	}
 }
