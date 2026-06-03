@@ -20,6 +20,10 @@ type Options struct {
 	// installs its own handler.
 	Logger *slog.Logger
 
+	// Locale sets the InnerTube host language (hl) and content region (gl). The
+	// zero value defaults to en / US.
+	Locale Locale
+
 	// CacheDir holds the on-disk player cache. Empty selects
 	// os.UserCacheDir()/waxtap. The disk cache is default-on for the CLI and
 	// opt-in for library use via DisableDiskCache.
@@ -48,6 +52,16 @@ type Options struct {
 	// receives only stable public structs (POTokenRequest/POTokenResponse), not
 	// WaxTap's internal client profile or session.
 	POTokenProvider POTokenProvider
+}
+
+// Locale sets InnerTube localization hints. The zero value uses en / US.
+//
+// HL affects localized UI text YouTube returns, including some error reasons.
+// GL is a content-region hint; it does not change the request IP or bypass geo
+// restrictions. Titles and descriptions are usually returned as-authored.
+type Locale struct {
+	HL string // host language, e.g. "en", "de", "ja"
+	GL string // content region, e.g. "US", "DE", "JP"
 }
 
 // Concurrency bounds parallel work. Zero values select conservative defaults at

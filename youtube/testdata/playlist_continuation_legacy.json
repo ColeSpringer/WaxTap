@@ -1,0 +1,16 @@
+{
+  "continuationContents": {
+    "playlistVideoListContinuation": {
+      "contents": [
+        {
+          "playlistVideoRenderer": {
+            "videoId": "ddddddddddd",
+            "title": { "runs": [{ "text": "Song D" }] },
+            "shortBylineText": { "runs": [{ "text": "Artist D" }] },
+            "lengthSeconds": "123"
+          }
+        }
+      ]
+    }
+  }
+}

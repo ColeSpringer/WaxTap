@@ -13,6 +13,10 @@ type Extraction struct {
 	video   *Video
 	profile ClientProfile
 	session *session
+	// rawAudio stores the resolver input for each public Format. It is kept in
+	// the same order as Video.Formats because itag is not unique on videos with
+	// multiple languages or DRC variants.
+	rawAudio []rawFormat
 }
 
 // Video returns the extracted metadata and candidate formats.
@@ -21,6 +25,14 @@ func (e *Extraction) Video() *Video {
 		return nil
 	}
 	return e.video
+}
+
+// rawFormatByIndex returns the raw resolver input for Video.Formats[i].
+func (e *Extraction) rawFormatByIndex(i int) (rawFormat, bool) {
+	if i < 0 || i >= len(e.rawAudio) {
+		return rawFormat{}, false
+	}
+	return e.rawAudio[i], true
 }
 
 // ResolvedStream is a resolved, playable stream URL with the metadata needed to

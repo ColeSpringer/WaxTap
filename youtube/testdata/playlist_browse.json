@@ -1,0 +1,60 @@
+{
+  "responseContext": { "visitorData": "Cgtwb..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "My Playlist" } },
+  "header": {
+    "playlistHeaderRenderer": {
+      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "playlistVideoListRenderer": {
+                            "contents": [
+                              {
+                                "playlistVideoRenderer": {
+                                  "videoId": "aaaaaaaaaaa",
+                                  "title": { "runs": [{ "text": "Song A" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist A" }] },
+                                  "lengthSeconds": "180"
+                                }
+                              },
+                              {
+                                "playlistVideoRenderer": {
+                                  "videoId": "bbbbbbbbbbb",
+                                  "title": { "runs": [{ "text": "Song B" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist B" }] },
+                                  "lengthSeconds": "240"
+                                }
+                              },
+                              {
+                                "continuationItemRenderer": {
+                                  "continuationEndpoint": {
+                                    "continuationCommand": { "token": "CONT_TOKEN_1" }
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

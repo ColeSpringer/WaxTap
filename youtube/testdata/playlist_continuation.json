@@ -1,0 +1,18 @@
+{
+  "onResponseReceivedActions": [
+    {
+      "appendContinuationItemsAction": {
+        "continuationItems": [
+          {
+            "playlistVideoRenderer": {
+              "videoId": "ccccccccccc",
+              "title": { "runs": [{ "text": "Song C" }] },
+              "shortBylineText": { "runs": [{ "text": "Artist C" }] },
+              "lengthSeconds": "300"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

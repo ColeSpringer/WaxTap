@@ -1,0 +1,10 @@
+{
+  "playabilityStatus": {
+    "status": "LOGIN_REQUIRED",
+    "reason": "Sign in to confirm your age"
+  },
+  "videoDetails": {
+    "videoId": "dQw4w9WgXcQ",
+    "title": "Age Gated"
+  }
+}

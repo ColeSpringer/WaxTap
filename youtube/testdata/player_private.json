@@ -1,0 +1,11 @@
+{
+  "playabilityStatus": {
+    "status": "LOGIN_REQUIRED",
+    "reason": "This video is private."
+  },
+  "videoDetails": {
+    "videoId": "dQw4w9WgXcQ",
+    "title": "Private Video",
+    "isPrivate": true
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "responseContext": { "visitorData": "CgtleGFtcGxlVmlz" },
+  "playabilityStatus": { "status": "OK" },
+  "streamingData": {
+    "expiresInSeconds": "21540",
+    "adaptiveFormats": [
+      {
+        "itag": 251,
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 160000,
+        "averageBitrate": 130000,
+        "contentLength": "3500000",
+        "audioSampleRate": "48000",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
+        "url": "https://r1---example.googlevideo.com/videoplayback?itag=251"
+      },
+      {
+        "itag": 140,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 130000,
+        "averageBitrate": 128000,
+        "contentLength": "3400000",
+        "audioSampleRate": "44100",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
+        "signatureCipher": "s=SIGSIG&sp=sig&url=https%3A%2F%2Fexample.googlevideo.com%2Fvideoplayback%3Fitag%3D140"
+      },
+      {
+        "itag": 137,
+        "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+        "bitrate": 4000000,
+        "contentLength": "50000000",
+        "url": "https://r1---example.googlevideo.com/videoplayback?itag=137"
+      }
+    ]
+  },
+  "videoDetails": {
+    "videoId": "dQw4w9WgXcQ",
+    "title": "Test Song",
+    "lengthSeconds": "212",
+    "channelId": "UCabcdefghijklmnopqrstuv",
+    "author": "Test Channel",
+    "shortDescription": "A test track.",
+    "viewCount": "1000",
+    "isLiveContent": false,
+    "thumbnail": {
+      "thumbnails": [
+        { "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", "width": 480, "height": 360 }
+      ]
+    }
+  },
+  "microformat": {
+    "playerMicroformatRenderer": {
+      "lengthSeconds": "212",
+      "publishDate": "2009-10-25T00:00:00-07:00",
+      "ownerChannelName": "Test Channel"
+    }
+  }
+}
