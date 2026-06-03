@@ -14,11 +14,15 @@ type session struct {
 	// Reserved for cookies and per-scope PO tokens keyed by potoken.Scope.
 }
 
-// newSession starts a per-attempt session. The consent ID is randomized so
-// repeated calls do not reuse the exact same CONSENT cookie value; visitorData
-// is filled after the first response that provides it.
-func newSession() *session {
-	return &session{consentID: strconv.Itoa(rand.IntN(900) + 100)}
+// newSession starts a per-attempt session for the given content region. It
+// pre-seeds synthetic visitorData so the first player request carries a visitor
+// identity; learnVisitorData replaces it when YouTube returns a server-issued
+// value.
+func newSession(countryCode string) *session {
+	return &session{
+		visitorData: generateVisitorData(countryCode),
+		consentID:   strconv.Itoa(rand.IntN(900) + 100),
+	}
 }
 
 // consentCookieValue is the CONSENT cookie value sent on YouTube requests.

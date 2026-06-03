@@ -99,11 +99,13 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 	}
 }
 
-func TestExtract_TerminalUnavailableStopsChain(t *testing.T) {
-	un := readFixture(t, "player_unavailable.json")
-	var calls int
+func TestExtract_PlayabilityErrorTriesAllClients(t *testing.T) {
+	un := readFixture(t, "player_unavailable.json") // status ERROR
+	var playerCalls int
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		calls++
+		if strings.Contains(r.URL.Path, "/player") {
+			playerCalls++
+		}
 		return fixtureResp(http.StatusOK, un), nil
 	}))
 
@@ -111,8 +113,10 @@ func TestExtract_TerminalUnavailableStopsChain(t *testing.T) {
 	if !errors.Is(err, waxerr.ErrVideoUnavailable) {
 		t.Fatalf("err = %v, want ErrVideoUnavailable", err)
 	}
-	if calls != 1 {
-		t.Errorf("calls = %d, want 1 (terminal error stops the chain)", calls)
+	// A generic ERROR is no longer terminal: every client in the chain is tried
+	// before extraction gives up.
+	if want := len(DefaultProfiles()); playerCalls != want {
+		t.Errorf("player calls = %d, want %d (all clients tried past ERROR)", playerCalls, want)
 	}
 }
 

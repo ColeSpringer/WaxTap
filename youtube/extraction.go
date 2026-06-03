@@ -17,6 +17,10 @@ type Extraction struct {
 	// the same order as Video.Formats because itag is not unique on videos with
 	// multiple languages or DRC variants.
 	rawAudio []rawFormat
+	// expiresAt is when the player response's stream URLs are expected to expire
+	// (now + streamingData.expiresInSeconds at extraction time). It is a fallback
+	// for resolution when the signed URL itself carries no expire parameter.
+	expiresAt time.Time
 }
 
 // Video returns the extracted metadata and candidate formats.

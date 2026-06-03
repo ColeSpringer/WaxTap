@@ -39,15 +39,19 @@ type innertubeContext struct {
 // driven by the same profile (see makeProfile), so the wire identity is
 // consistent across body and headers.
 type innertubeClient struct {
-	HL            string `json:"hl"`
-	GL            string `json:"gl"`
-	ClientName    string `json:"clientName"`
-	ClientVersion string `json:"clientVersion"`
-	UserAgent     string `json:"userAgent,omitempty"`
-	DeviceModel   string `json:"deviceModel,omitempty"`
-	TimeZone      string `json:"timeZone"`
-	UTCOffset     int    `json:"utcOffsetMinutes"`
-	VisitorData   string `json:"visitorData,omitempty"`
+	HL                string `json:"hl"`
+	GL                string `json:"gl"`
+	ClientName        string `json:"clientName"`
+	ClientVersion     string `json:"clientVersion"`
+	UserAgent         string `json:"userAgent,omitempty"`
+	DeviceMake        string `json:"deviceMake,omitempty"`
+	DeviceModel       string `json:"deviceModel,omitempty"`
+	OSName            string `json:"osName,omitempty"`
+	OSVersion         string `json:"osVersion,omitempty"`
+	AndroidSDKVersion int    `json:"androidSdkVersion,omitempty"`
+	TimeZone          string `json:"timeZone"`
+	UTCOffset         int    `json:"utcOffsetMinutes"`
+	VisitorData       string `json:"visitorData,omitempty"`
 }
 
 type playbackContext struct {
@@ -61,15 +65,19 @@ type contentPlaybackContext struct {
 func (c *Client) newInnertubeContext(p ClientProfile, s *session) innertubeContext {
 	return innertubeContext{
 		Client: innertubeClient{
-			HL:            c.hl,
-			GL:            c.gl,
-			ClientName:    p.InnerTubeName,
-			ClientVersion: p.Version,
-			UserAgent:     p.UserAgent,
-			DeviceModel:   p.DeviceModel,
-			TimeZone:      "UTC",
-			UTCOffset:     0,
-			VisitorData:   s.visitorData,
+			HL:                c.hl,
+			GL:                c.gl,
+			ClientName:        p.InnerTubeName,
+			ClientVersion:     p.Version,
+			UserAgent:         p.UserAgent,
+			DeviceMake:        p.DeviceMake,
+			DeviceModel:       p.DeviceModel,
+			OSName:            p.OSName,
+			OSVersion:         p.OSVersion,
+			AndroidSDKVersion: p.AndroidSDKVersion,
+			TimeZone:          "UTC",
+			UTCOffset:         0,
+			VisitorData:       s.visitorData,
 		},
 	}
 }
@@ -109,6 +117,16 @@ func acceptLanguage(hl string) string {
 	return hl + ",en-US;q=0.8,en;q=0.6"
 }
 
+// addConsentCookie attaches the cookie-consent marker, but only when the client
+// has no cookie jar. When a jar is present it already carries the consent cookie
+// (seeded at construction) plus the bootstrapped session cookies, so adding one
+// manually would duplicate it.
+func (c *Client) addConsentCookie(req *http.Request, s *session) {
+	if c.http.Jar() == nil {
+		req.AddCookie(&http.Cookie{Name: "CONSENT", Value: s.consentCookieValue(), Path: "/", Domain: ".youtube.com"})
+	}
+}
+
 // innertubePost marshals body and sends it to endpoint with the profile's static
 // headers plus the session's visitor-id header and consent cookie, returning the
 // response bytes. Retry/backoff and rate-limit handling live in the httpx client.
@@ -134,7 +152,7 @@ func (c *Client) innertubePost(ctx context.Context, p ClientProfile, s *session,
 	if s.visitorData != "" {
 		req.Header.Set("X-Goog-Visitor-Id", s.visitorData)
 	}
-	req.AddCookie(&http.Cookie{Name: "CONSENT", Value: s.consentCookieValue(), Path: "/", Domain: ".youtube.com"})
+	c.addConsentCookie(req, s)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -157,7 +175,7 @@ func (c *Client) httpGet(ctx context.Context, p ClientProfile, s *session, rawUR
 	}
 	req.Header.Set("User-Agent", p.UserAgent)
 	req.Header.Set("Accept-Language", acceptLanguage(c.hl))
-	req.AddCookie(&http.Cookie{Name: "CONSENT", Value: s.consentCookieValue(), Path: "/", Domain: ".youtube.com"})
+	c.addConsentCookie(req, s)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

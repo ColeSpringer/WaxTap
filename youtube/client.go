@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/cookiejar"
+	"time"
 
 	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/youtube/cache"
 	"github.com/colespringer/waxtap/youtube/internal/resolver"
 )
 
@@ -17,8 +22,10 @@ type Client struct {
 	http     *httpx.Client
 	log      *slog.Logger
 	profiles []ClientProfile
-	resolver resolver.Resolver // stream-URL resolution; nil until configured
-	hl, gl   string            // InnerTube host language / content region
+	resolver resolver.Resolver    // stream-URL resolution
+	potoken  potoken.Provider     // PO-token provider, when configured
+	visitors *cache.Store[string] // bootstrapped guest visitorData, singleflighted
+	hl, gl   string               // InnerTube host language / content region
 }
 
 // Config configures a Client.
@@ -29,9 +36,16 @@ type Config struct {
 	Logger *slog.Logger
 	// Profiles overrides the client strategy chain. If empty, DefaultProfiles().
 	Profiles []ClientProfile
-	// Resolver resolves candidate formats into playable URLs. Metadata extraction
-	// does not need one; stream resolution does.
+	// Resolver resolves candidate formats into playable URLs. If nil, New builds
+	// a default base.js/goja resolver over the same HTTP client. Metadata
+	// extraction does not need one; stream resolution (Resolve) does.
 	Resolver resolver.Resolver
+	// POTokenProvider supplies PO tokens when the winning profile requires one.
+	// Nil means no provider is configured.
+	POTokenProvider potoken.Provider
+	// ResolveTimeout bounds each cipher JS execution during resolution. Zero
+	// uses the resolver default.
+	ResolveTimeout time.Duration
 	// HL (host language, e.g. "en") and GL (content region, e.g. "US") set the
 	// InnerTube locale. Empty defaults to en / US. These are localization hints:
 	// geo-restricted availability is still governed by the request IP.
@@ -46,11 +60,16 @@ func New(cfg Config) *Client {
 		log:      cfg.Logger,
 		profiles: cfg.Profiles,
 		resolver: cfg.Resolver,
+		potoken:  cfg.POTokenProvider,
 		hl:       cfg.HL,
 		gl:       cfg.GL,
 	}
 	if c.http == nil {
-		c.http = httpx.New(httpx.Config{})
+		// The default client owns a cookie jar so guest-session cookies survive
+		// the visitor bootstrap and later player requests. Per-request contexts,
+		// not a global client timeout, bound operations.
+		jar, _ := cookiejar.New(nil)
+		c.http = httpx.New(httpx.Config{HTTPClient: &http.Client{Jar: jar}})
 	}
 	if c.log == nil {
 		c.log = slog.New(slog.DiscardHandler)
@@ -58,11 +77,22 @@ func New(cfg Config) *Client {
 	if len(c.profiles) == 0 {
 		c.profiles = DefaultProfiles()
 	}
+	if c.resolver == nil {
+		c.resolver = resolver.New(resolver.Config{
+			HTTP:          c.http,
+			Logger:        c.log,
+			CipherTimeout: cfg.ResolveTimeout,
+		})
+	}
 	if c.hl == "" {
 		c.hl = "en"
 	}
 	if c.gl == "" {
 		c.gl = "US"
+	}
+	c.visitors = cache.NewStore[string](cache.Options{TTL: visitorTTL, MaxEntries: 4})
+	if jar := c.http.Jar(); jar != nil {
+		seedConsentCookie(jar)
 	}
 	return c
 }
@@ -73,7 +103,7 @@ func New(cfg Config) *Client {
 // session are carried in the returned Extraction so stream resolution uses the
 // same identity.
 func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, error) {
-	sess := newSession()
+	sess := c.newBootstrappedSession(ctx)
 	var lastErr error
 
 	for i, profile := range c.profiles {
@@ -99,13 +129,13 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		sess.learnVisitorData(pr.ResponseContext.VisitorData)
 
 		if perr := pr.playabilityError(); perr != nil {
+			// Playability failures can be client-specific: stale versions, sparse
+			// context, and bot checks often report generic ERROR or UNPLAYABLE.
+			// Keep the latest error, try the remaining clients, then fall back to
+			// the watch page before returning it.
 			lastErr = perr
-			if errors.Is(perr, waxerr.ErrLoginRequired) {
-				// Age/login gate: a different client (e.g. embedded) may succeed.
-				c.log.DebugContext(ctx, "login/age gate; trying next client", "client", profile.Name)
-				continue
-			}
-			return nil, perr // private/unavailable/live are terminal
+			c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", perr)
+			continue
 		}
 
 		video, raw, err := pr.toVideo(videoID)
@@ -118,7 +148,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		if i > 0 {
 			c.log.DebugContext(ctx, "extracted via fallback client", "client", profile.Name)
 		}
-		return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw}, nil
+		return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw, expiresAt: pr.expiresAt(time.Now())}, nil
 	}
 
 	// Final fallback: scrape the watch page for ytInitialPlayerResponse. This
@@ -143,7 +173,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 // ytInitialPlayerResponse, as a fallback when the InnerTube clients fail.
 func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Extraction, error) {
 	profile := webProfile()
-	sess := newSession()
+	sess := c.newBootstrappedSession(ctx)
 
 	body, err := c.httpGet(ctx, profile, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
 	if err != nil {
@@ -161,7 +191,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	if err != nil {
 		return nil, err
 	}
-	return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw}, nil
+	return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw, expiresAt: pr.expiresAt(time.Now())}, nil
 }
 
 // Info returns just the video metadata and candidate formats.
@@ -179,7 +209,7 @@ func (c *Client) Info(ctx context.Context, videoID string) (*Video, error) {
 // rather than discarding the entries already gathered.
 func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int) (*Playlist, error) {
 	profile := c.playlistProfile()
-	sess := newSession()
+	sess := c.newBootstrappedSession(ctx)
 	pl := &Playlist{ID: playlistID}
 
 	body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))

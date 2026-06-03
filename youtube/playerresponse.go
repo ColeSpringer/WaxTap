@@ -110,9 +110,19 @@ func (pr *playerResponse) isLiveNow() bool {
 	return pr.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
 }
 
-// playabilityError classifies playabilityStatus into the error taxonomy. A nil
-// return means the video is downloadable. Login/age failures are returned so the
-// caller can try the next client; private/unavailable/live are terminal.
+// expiresAt converts streamingData.expiresInSeconds to an absolute time. The
+// signed stream URL's expire parameter is preferred later; this is the fallback
+// when the URL does not carry one.
+func (pr *playerResponse) expiresAt(now time.Time) time.Time {
+	secs := atoi(pr.StreamingData.ExpiresInSeconds)
+	if secs <= 0 {
+		return time.Time{}
+	}
+	return now.Add(time.Duration(secs) * time.Second)
+}
+
+// playabilityError classifies playabilityStatus into WaxTap's error taxonomy. A
+// nil return means the response is usable by the download pipeline.
 func (pr *playerResponse) playabilityError() error {
 	status := pr.PlayabilityStatus.Status
 	reason := pr.PlayabilityStatus.Reason

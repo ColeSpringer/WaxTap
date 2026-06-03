@@ -76,6 +76,11 @@ type Client struct {
 	cfg  Config
 }
 
+// Jar returns the cookie jar of the underlying *http.Client, or nil if it has
+// none. Higher layers use this to decide whether a cookie-dependent session
+// bootstrap is worthwhile (and where to seed cookies).
+func (c *Client) Jar() http.CookieJar { return c.http.Jar }
+
 // New returns a Client, filling unset Config fields with defaults.
 func New(cfg Config) *Client {
 	if cfg.HTTPClient == nil {

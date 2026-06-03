@@ -17,7 +17,15 @@ type ClientProfile struct {
 	Version       string
 	APIKey        string
 	UserAgent     string
-	DeviceModel   string
+
+	// Device and OS fields sent in the InnerTube client context. Mobile and VR
+	// clients need these populated; sparse identities are more likely to hit the
+	// bot-check path. Zero values are omitted from the request.
+	DeviceMake        string
+	DeviceModel       string
+	OSName            string
+	OSVersion         string
+	AndroidSDKVersion int
 
 	RequiresPOToken   potoken.Scope
 	SupportsCookies   bool
@@ -67,12 +75,20 @@ const innerTubeOrigin = "https://www.youtube.com"
 // Config.Profiles to override the built-ins.
 var (
 	profileAndroidVR = ClientProfile{
-		Name:              "ANDROID_VR",
-		InnerTubeName:     "ANDROID_VR",
-		InnerTubeID:       28,
-		Version:           "1.65.10",
-		APIKey:            "", // ANDROID_VR needs no API key
-		UserAgent:         "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+		Name:          "ANDROID_VR",
+		InnerTubeName: "ANDROID_VR",
+		InnerTubeID:   28,
+		Version:       "1.65.10",
+		// The built-ins use keyless InnerTube POSTs. APIKey remains configurable
+		// for caller-supplied profiles.
+		APIKey:    "",
+		UserAgent: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+		// Oculus Quest fingerprint used by the android_vr InnerTube client.
+		DeviceMake:        "Oculus",
+		DeviceModel:       "Quest 3",
+		OSName:            "Android",
+		OSVersion:         "12L",
+		AndroidSDKVersion: 32,
 		RequiresPOToken:   potoken.ScopeNone,
 		SupportsPlaylists: false,
 	}
@@ -81,7 +97,6 @@ var (
 		InnerTubeName:     "IOS",
 		InnerTubeID:       5,
 		Version:           "19.45.4",
-		APIKey:            "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
 		UserAgent:         "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
 		DeviceModel:       "iPhone16,2",
 		RequiresPOToken:   potoken.ScopeNone,
@@ -92,7 +107,6 @@ var (
 		InnerTubeName:     "WEB_EMBEDDED_PLAYER",
 		InnerTubeID:       56,
 		Version:           "1.20250310.01.00",
-		APIKey:            "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
 		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		RequiresPOToken:   potoken.ScopeNone,
 		SupportsPlaylists: false,
@@ -102,7 +116,6 @@ var (
 		InnerTubeName:     "WEB",
 		InnerTubeID:       1,
 		Version:           "2.20250310.01.00",
-		APIKey:            "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
 		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		RequiresPOToken:   potoken.ScopeGVS, // web stream URLs increasingly need a GVS token
 		SupportsPlaylists: true,
@@ -125,11 +138,9 @@ func makeProfile(base ClientProfile) ClientProfile {
 	return NewClientProfile(base, headers)
 }
 
-// DefaultProfiles returns the ordered client strategy chain. Extraction tries
-// them in order, each with an immutable profile and a fresh session, and the
-// first success wins. ANDROID_VR leads (no PO token, direct stream URLs); the
-// embedded client can reach some age-gated videos; WEB is the JS/cipher
-// fallback.
+// DefaultProfiles returns the ordered client strategy chain. ANDROID_VR leads
+// because it usually returns direct URLs without a PO token; the embedded and WEB
+// clients cover fallback cases.
 func DefaultProfiles() []ClientProfile {
 	return []ClientProfile{
 		makeProfile(profileAndroidVR),
