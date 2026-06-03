@@ -1,0 +1,29 @@
+# Vendored reference implementation (github.com/kkdai/youtube), reference-only.
+# It carries its own go.mod, so it is excluded from `go ./...` builds already;
+# we also keep it out of version control. Do not copy or ship code from it.
+/youtube-master_temp/
+
+# Build artifacts
+/dist/
+/waxtap
+/cmd/waxtap/waxtap
+
+# Test & coverage artifacts
+*.test
+*.out
+/coverage.txt
+/coverage.html
+
+# Licensing-sensitive real captures: authored/minimized fixtures under
+# testdata/ are committed; real YouTube base.js / player-response captures are not.
+/testdata/real/
+*.real.js
+*.real.json
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+i-am-looking-to-optimized-sloth.md
