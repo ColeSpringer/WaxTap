@@ -77,8 +77,7 @@ func TestHeaderRange_Validate(t *testing.T) {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
 			if tt.wantStatusError {
-				var se *waxerr.HTTPStatusError
-				if !errors.As(err, &se) {
+				if _, ok := errors.AsType[*waxerr.HTTPStatusError](err); !ok {
 					t.Fatalf("err = %v, want *waxerr.HTTPStatusError", err)
 				}
 			}

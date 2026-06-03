@@ -63,8 +63,8 @@ func TestDo_RetryAfterBeyondCapFailsFast(t *testing.T) {
 		t.Fatalf("expected fail-fast, but slept %s", elapsed)
 	}
 
-	var rl *waxerr.RateLimitError
-	if !errors.As(err, &rl) {
+	rl, ok := errors.AsType[*waxerr.RateLimitError](err)
+	if !ok {
 		t.Fatalf("err = %v, want *waxerr.RateLimitError", err)
 	}
 	if !errors.Is(err, waxerr.ErrRateLimited) {
@@ -106,8 +106,8 @@ func TestDo_403WithRetryAfterIsRateLimited(t *testing.T) {
 	c := New(Config{MaxRetryWait: 30 * time.Second, MaxRetries: 5})
 	_, err := c.Do(newReq(t, context.Background(), srv.URL))
 
-	var rl *waxerr.RateLimitError
-	if !errors.As(err, &rl) {
+	rl, ok := errors.AsType[*waxerr.RateLimitError](err)
+	if !ok {
 		t.Fatalf("err = %v, want *waxerr.RateLimitError", err)
 	}
 	if rl.StatusCode != http.StatusForbidden {

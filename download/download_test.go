@@ -232,8 +232,8 @@ func TestFetch_403ClassifiedAsNeedRefresh(t *testing.T) {
 
 	d := newTestDownloader(1<<10, 2)
 	_, err := d.fetch(context.Background(), Source{URL: srv.URL}, 0, -1)
-	var nr *needRefreshError
-	if !errors.As(err, &nr) {
+	nr, ok := errors.AsType[*needRefreshError](err)
+	if !ok {
 		t.Fatalf("err = %v, want *needRefreshError", err)
 	}
 	if nr.failure == nil || nr.failure.StatusCode != http.StatusForbidden {

@@ -289,8 +289,8 @@ func retryable(ctx context.Context, err error) bool {
 	if errors.Is(err, waxerr.ErrRateLimited) {
 		return false
 	}
-	var nr *needRefreshError
-	return !errors.As(err, &nr)
+	_, ok := errors.AsType[*needRefreshError](err)
+	return !ok
 }
 
 // backoff sleeps an exponential, attempt-scaled duration, honoring ctx.

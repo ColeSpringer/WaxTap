@@ -112,8 +112,7 @@ func runTransform(ctx context.Context, prog *goja.Program, name, arg string, tim
 // errCipherTimeout) when the runtime was interrupted, otherwise to an
 // ErrCipherSolve carrying the underlying JS error.
 func cipherRunError(ctx context.Context, stage string, err error) error {
-	var interrupted *goja.InterruptedError
-	if errors.As(err, &interrupted) {
+	if _, ok := errors.AsType[*goja.InterruptedError](err); ok {
 		if cause := context.Cause(ctx); cause != nil {
 			return cause
 		}

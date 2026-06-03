@@ -1,12 +1,9 @@
-// Package tempfile encodes WaxTap's temp-file ownership contract: intermediate
-// data is written to a temporary file in the destination directory and only
-// becomes visible at the final path via an atomic rename on success. On
-// cancellation or error the temp is removed, so a partial or expired-URL
-// download is never mistaken for a finished file.
+// Package tempfile stages output in the destination directory and publishes it
+// with an atomic rename. Failed or canceled work removes the staged file, leaving
+// the final path untouched.
 //
-// Ownership rule: whoever creates a temp owns cleaning it up. Callers should
-// `defer f.Discard()` immediately after New (Discard is a no-op once Commit
-// succeeds), giving correct cleanup on every error and context-cancel path.
+// The creator owns cleanup. Defer the returned value's Discard method
+// immediately after New or NewExternal; Discard is a no-op after Commit succeeds.
 package tempfile
 
 import (
@@ -72,6 +69,67 @@ func (f *File) Discard() error {
 
 // Path returns the final destination path (valid only after Commit).
 func (f *File) Path() string { return f.finalPath }
+
+// External stages output written by another process, such as ffmpeg. It reserves
+// a temp path in the destination directory, then renames that path into place on
+// Commit. Unlike File, External does not keep the file open for writing.
+//
+// Reserve a name with NewExternal, pass Path to the process, then call Commit to
+// publish or Discard to remove the temp.
+type External struct {
+	finalPath string
+	tmpPath   string
+	committed bool
+}
+
+// NewExternal reserves a temp path next to finalPath for an external writer.
+//
+// The temp name preserves finalPath's extension (for example,
+// out.flac.*.flac), because tools like ffmpeg infer the output container from
+// the filename extension.
+func NewExternal(finalPath string) (*External, error) {
+	dir := filepath.Dir(finalPath)
+	base := filepath.Base(finalPath)
+	ext := filepath.Ext(base) // includes the dot, or "" when there is none
+	f, err := os.CreateTemp(dir, base+".*"+ext)
+	if err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	_ = f.Close() // the external process reopens and overwrites this path
+	return &External{finalPath: finalPath, tmpPath: name}, nil
+}
+
+// Path returns the temp path reserved for the external writer.
+func (e *External) Path() string { return e.tmpPath }
+
+// Commit atomically renames the temp path to the final path. After a successful
+// Commit, Discard is a no-op.
+func (e *External) Commit() error {
+	if e.committed {
+		return nil
+	}
+	if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
+		return err
+	}
+	e.committed = true
+	return nil
+}
+
+// Discard removes the temp path. It is safe to call multiple times and is a
+// no-op after a successful Commit.
+func (e *External) Discard() error {
+	if e.committed {
+		return nil
+	}
+	if err := os.Remove(e.tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// Final returns the destination path (valid after Commit).
+func (e *External) Final() string { return e.finalPath }
 
 // Scratch creates an unnamed temporary file in dir (or the OS temp dir if dir
 // is "") and returns it with a cleanup func that closes and removes it. Use it

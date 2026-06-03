@@ -85,6 +85,108 @@ func TestDiscardAfterCommitIsNoop(t *testing.T) {
 	}
 }
 
+func TestExternalCommit(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.flac")
+
+	e, err := NewExternal(final)
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	defer e.Discard()
+
+	// The temp path must preserve the final extension so external muxers can
+	// infer the container, and it must sit in the destination directory.
+	if filepath.Ext(e.Path()) != ".flac" {
+		t.Errorf("temp path %q does not preserve the .flac extension", e.Path())
+	}
+	if filepath.Dir(e.Path()) != dir {
+		t.Errorf("temp path %q is not in the destination dir %q", e.Path(), dir)
+	}
+	if e.Final() != final {
+		t.Errorf("Final() = %q, want %q", e.Final(), final)
+	}
+
+	// Simulate an external process overwriting the reserved path.
+	if err := os.WriteFile(e.Path(), []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := e.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	got, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatalf("ReadFile(final): %v", err)
+	}
+	if string(got) != "audio" {
+		t.Fatalf("final content = %q, want %q", got, "audio")
+	}
+	// Only the final file remains; no temp left behind.
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want 1 (only the final file)", len(entries))
+	}
+}
+
+func TestExternalDiscardRemovesTemp(t *testing.T) {
+	dir := t.TempDir()
+	e, err := NewExternal(filepath.Join(dir, "out.mp3"))
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	if err := os.WriteFile(e.Path(), []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := e.Discard(); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	// Discard is idempotent and safe after the temp is already gone.
+	if err := e.Discard(); err != nil {
+		t.Fatalf("second Discard: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("dir has %d entries, want 0 after Discard", len(entries))
+	}
+}
+
+func TestExternalDiscardAfterCommitIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.wav")
+
+	e, err := NewExternal(final)
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	if err := os.WriteFile(e.Path(), []byte("data"), 0o600); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := e.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := e.Discard(); err != nil {
+		t.Fatalf("Discard after Commit: %v", err)
+	}
+	if _, err := os.Stat(final); err != nil {
+		t.Fatalf("committed file should still exist, stat err = %v", err)
+	}
+}
+
+func TestExternalNoExtension(t *testing.T) {
+	dir := t.TempDir()
+	e, err := NewExternal(filepath.Join(dir, "noext"))
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	defer e.Discard()
+	// With no extension to preserve there is nothing to assert about one; the
+	// temp must still land in the destination directory for an atomic rename.
+	if filepath.Dir(e.Path()) != dir {
+		t.Errorf("temp path %q is not in the destination dir %q", e.Path(), dir)
+	}
+}
+
 func TestScratchCleanup(t *testing.T) {
 	dir := t.TempDir()
 	f, cleanup, err := Scratch(dir, "")

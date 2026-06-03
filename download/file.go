@@ -162,8 +162,7 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 			if cancel != nil {
 				cancel()
 			}
-			var nr *needRefreshError
-			if errors.As(err, &nr) {
+			if nr, ok := errors.AsType[*needRefreshError](err); ok {
 				if _, _, rerr := shared.renew(ctx, gen, nr.failure); rerr != nil {
 					return rerr
 				}

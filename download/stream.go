@@ -183,8 +183,7 @@ func (r *resumableReader) openNext() error {
 			return nil
 		}
 
-		var nr *needRefreshError
-		if errors.As(err, &nr) {
+		if nr, ok := errors.AsType[*needRefreshError](err); ok {
 			if _, _, rerr := r.shared.renew(r.ctx, gen, nr.failure); rerr != nil {
 				return rerr
 			}
