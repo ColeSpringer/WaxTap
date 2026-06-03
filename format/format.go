@@ -1,15 +1,15 @@
-// Package format models audio (and incidental video) stream formats and
-// provides audio-first selection over them. It is YouTube-agnostic in shape:
-// the youtube package populates Format values from a player response, the facade
-// surfaces them, and the selectors here choose among candidates.
+// Package format defines WaxTap's stream-format model and the rules for picking
+// an audio source from a candidate list.
 //
-// A Format is only a candidate. It does not carry a signed URL or expiry; those
-// live in youtube.ResolvedStream. This keeps "what audio is available" separate
-// from "how to fetch it right now".
+// The package keeps YouTube details at the edge. The youtube package fills
+// Format values from player responses, while this package owns comparison and
+// selection. A Format is only a candidate; signed media URLs and expiry metadata
+// live in youtube.ResolvedStream.
 package format
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -34,8 +34,9 @@ func (t Tri) String() string {
 	}
 }
 
-// Format describes a single playable audio rendition (audio-first; incidental
-// video formats may also be represented but are not the focus).
+// Format describes a playable stream candidate. Most WaxTap callers deal with
+// audio, but video formats can appear in unfiltered player responses and are
+// excluded by audio selectors.
 type Format struct {
 	Itag int
 
@@ -80,6 +81,11 @@ func (f Format) EffectiveBitrate() int {
 	return f.Bitrate
 }
 
+// IsAudio reports whether MIMEType is explicitly audio/*.
+func (f Format) IsAudio() bool {
+	return strings.HasPrefix(f.MIMEType, "audio/")
+}
+
 func (f Format) String() string {
 	return fmt.Sprintf("itag=%d codec=%s ext=%s bitrate=%d", f.Itag, f.Codec, f.Extension, f.EffectiveBitrate())
 }
@@ -103,8 +109,8 @@ type AudioSelector struct {
 	codec string
 }
 
-// BestAudio selects the highest-quality audio-only stream (preferring non-DRC,
-// original audio, then highest effective bitrate).
+// BestAudio selects the best audio stream, preferring the original track,
+// non-DRC audio, then higher effective bitrate.
 func BestAudio() AudioSelector { return AudioSelector{kind: selBestAudio} }
 
 // Itag selects the stream with the exact itag.
@@ -127,7 +133,7 @@ func (s AudioSelector) String() string {
 type policyKind uint8
 
 const (
-	polMinimizeLoss policyKind = iota // zero value: minimize generational loss
+	polMinimizeLoss policyKind = iota // zero value: prefer target codec family
 	polBestNative
 	polPreferCodec
 )
@@ -139,14 +145,14 @@ type SourcePolicy struct {
 	codec string
 }
 
-// MinimizeLoss prefers a source whose codec is copy-compatible with the target
-// to avoid generational loss (e.g. pick AAC for an AAC target).
+// MinimizeLoss prefers a source in the target codec family, avoiding a
+// cross-codec transcode when possible.
 func MinimizeLoss() SourcePolicy { return SourcePolicy{kind: polMinimizeLoss} }
 
-// BestNative always picks the highest-bitrate source, then transcodes.
+// BestNative ignores target codec matching and uses normal best-audio ranking.
 func BestNative() SourcePolicy { return SourcePolicy{kind: polBestNative} }
 
-// PreferCodec biases source selection toward a specific codec.
+// PreferCodec prefers a source in the named codec family when policy is active.
 func PreferCodec(codec string) SourcePolicy { return SourcePolicy{kind: polPreferCodec, codec: codec} }
 
 func (p SourcePolicy) String() string {

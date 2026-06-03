@@ -30,7 +30,8 @@ const (
 	No      = format.No
 )
 
-// BestAudio selects the highest-quality audio-only stream (the default).
+// BestAudio selects the best audio stream, preferring the original track,
+// non-DRC audio, then higher effective bitrate.
 func BestAudio() AudioSelector { return format.BestAudio() }
 
 // Itag selects the stream with the exact itag.
@@ -39,14 +40,14 @@ func Itag(itag int) AudioSelector { return format.Itag(itag) }
 // Codec selects the best stream whose codec matches (e.g. "opus", "aac").
 func Codec(codec string) AudioSelector { return format.Codec(codec) }
 
-// MinimizeLoss prefers a copy-compatible source to avoid generational loss
-// (the default source policy).
+// MinimizeLoss prefers a source in the target codec family, avoiding a
+// cross-codec transcode when possible.
 func MinimizeLoss() SourcePolicy { return format.MinimizeLoss() }
 
-// BestNative always picks the highest-bitrate source, then transcodes.
+// BestNative ignores target codec matching and uses normal best-audio ranking.
 func BestNative() SourcePolicy { return format.BestNative() }
 
-// PreferCodec biases source selection toward a specific codec.
+// PreferCodec prefers a source in the named codec family when policy is active.
 func PreferCodec(codec string) SourcePolicy { return format.PreferCodec(codec) }
 
 // Extraction models (package youtube). Part of the volatile surface; may evolve
