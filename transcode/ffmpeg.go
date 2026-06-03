@@ -28,14 +28,21 @@ type Command struct {
 
 func (c Command) String() string { return "ffmpeg " + strings.Join(c.Args, " ") }
 
-// Spec describes a transcode: the target codec, an optional bitrate override for
-// lossy codecs (bits/sec; 0 selects the preset default), and optional audio
-// filters applied before encoding. The pipeline injects loudnorm and cut filters
-// through Filters. The zero Spec is a stream copy with no filters.
+// Spec describes a transcode. Codec selects the output codec, Bitrate overrides
+// lossy preset defaults in bits/sec, and the optional filter fields run before
+// encoding. The zero value is a stream copy with no filters.
 type Spec struct {
 	Codec   Codec
 	Bitrate int
+	// Filters is a comma-joined -af chain for linear audio filters such as
+	// loudnorm. It is mutually exclusive with FilterComplex.
 	Filters []string
+	// FilterComplex is a complete -filter_complex graph. The graph must read the
+	// source audio from [0:a:0] and write the final audio to [out]; buildCommand
+	// maps [out] as the only output stream. Use it for labeled or multi-input
+	// graphs such as concat/acrossfade. It is mutually exclusive with Filters and
+	// cannot be used with CodecCopy.
+	FilterComplex string
 }
 
 // buildCommand assembles the ffmpeg arguments to read input, apply spec's
@@ -56,7 +63,12 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 		return Command{}, err
 	}
 	isCopy := spec.Codec == CodecCopy
-	if isCopy && len(spec.Filters) > 0 {
+	hasAF := len(spec.Filters) > 0
+	hasFC := spec.FilterComplex != ""
+	switch {
+	case hasAF && hasFC:
+		return Command{}, fmt.Errorf("%w: -af filters and filter_complex are mutually exclusive", waxerr.ErrIncompatibleSpec)
+	case isCopy && (hasAF || hasFC):
 		return Command{}, fmt.Errorf("%w: stream copy cannot apply audio filters", waxerr.ErrIncompatibleSpec)
 	}
 	encoder := p.encoder
@@ -64,9 +76,17 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 		encoder = encoderOverride
 	}
 
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input, "-vn", "-map", "0:a:0"}
-	if len(spec.Filters) > 0 {
-		args = append(args, "-af", strings.Join(spec.Filters, ","))
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input}
+	switch {
+	case hasFC:
+		// The graph owns audio selection and writes [out]. Mapping only [out]
+		// keeps cover-art/video streams out of audio-only outputs.
+		args = append(args, "-filter_complex", spec.FilterComplex, "-map", "[out]")
+	default:
+		args = append(args, "-vn", "-map", "0:a:0")
+		if hasAF {
+			args = append(args, "-af", strings.Join(spec.Filters, ","))
+		}
 	}
 	args = append(args, "-c:a", encoder)
 	if !isCopy && !p.lossless {

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/colespringer/waxtap/internal/cache"
 	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube/cache"
 )
 
 // schemaVersion namespaces cached player programs and discovered player URLs.

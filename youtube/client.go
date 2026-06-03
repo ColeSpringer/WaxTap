@@ -8,10 +8,10 @@ import (
 	"net/http/cookiejar"
 	"time"
 
+	"github.com/colespringer/waxtap/internal/cache"
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube/cache"
 	"github.com/colespringer/waxtap/youtube/internal/resolver"
 )
 

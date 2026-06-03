@@ -106,6 +106,45 @@ func TestBuildCommand_CopyWithFiltersRejected(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_FilterComplex(t *testing.T) {
+	graph := "[0:a:0]atrim=start=0.000000:end=5.000000,asetpts=PTS-STARTPTS[out]"
+	cmd, err := buildCommand("in.webm", "out.flac", Spec{Codec: CodecFLAC, FilterComplex: graph})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-filter_complex", graph, "-map", "[out]")
+	assertSeq(t, cmd.Args, "-c:a", "flac")
+	if hasFlag(cmd.Args, "-af") {
+		t.Errorf("filter_complex path must not emit -af: %v", cmd.Args)
+	}
+	// The graph maps [out] explicitly, so the default -vn/-map 0:a:0 is dropped.
+	if slices.Contains(cmd.Args, "0:a:0") {
+		t.Errorf("filter_complex path should map [out] only, not 0:a:0: %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_FilterComplexCopyRejected(t *testing.T) {
+	_, err := buildCommand("in.webm", "out.webm", Spec{
+		Codec:         CodecCopy,
+		FilterComplex: "[0:a:0]anull[out]",
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+}
+
+func TestBuildCommand_FilterComplexAndFiltersRejected(t *testing.T) {
+	// -af and -filter_complex on the same output are mutually exclusive.
+	_, err := buildCommand("in.webm", "out.flac", Spec{
+		Codec:         CodecFLAC,
+		Filters:       []string{"loudnorm=I=-14"},
+		FilterComplex: "[0:a:0]anull[out]",
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+}
+
 func TestBuildCommand_AlwaysAudioOnly(t *testing.T) {
 	// Every command must drop video and pin the first audio stream so embedded
 	// cover-art video streams can never be selected.

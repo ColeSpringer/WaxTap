@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Options configures a Store. Zero values get sane defaults at NewStore time.
+// Options configures a Store. NewStore fills zero values with defaults.
 type Options struct {
 	MaxEntries    int           // 0 => default
 	TTL           time.Duration // 0 => default
