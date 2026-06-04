@@ -26,7 +26,7 @@ type Context struct {
 	VideoID   string
 	PlayerURL string      // base.js URL, if already discovered
 	Headers   http.Header // request headers derived from the winning client profile
-	Token     *Token      // supplied PO token, if any (v1: externally provided)
+	Token     *Token      // supplied PO token, if any
 }
 
 // Token is a resolved PO token plus any header/query additions it requires on
@@ -63,4 +63,13 @@ type Stream struct {
 // signed URL.
 type Resolver interface {
 	Resolve(ctx context.Context, rc Context, candidate Candidate) (Stream, error)
+}
+
+// SourceCache stores base.js source between process runs. Player uses it behind
+// the in-memory compiled-program cache; misses and write failures fall back to
+// network fetches. Implementations must be safe for concurrent use. A nil
+// SourceCache disables persistence.
+type SourceCache interface {
+	Get(key string) ([]byte, bool)
+	Put(key string, data []byte)
 }

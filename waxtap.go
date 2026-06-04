@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -16,6 +18,11 @@ import (
 	"github.com/colespringer/waxtap/transcode"
 	"github.com/colespringer/waxtap/youtube"
 )
+
+// cacheDirName is the WaxTap subdirectory under the OS user cache directory. The
+// CLI's cache subcommands resolve the same path so cache clean targets the
+// directory the library actually writes.
+const cacheDirName = "waxtap"
 
 // Client is the main WaxTap entry point for library callers and the CLI. It is
 // safe for concurrent use after construction.
@@ -43,6 +50,14 @@ func New(opts Options) (*Client, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+
+	var profiles []youtube.ClientProfile
+	if opts.ProfileOverridePath != "" {
+		var err error
+		if profiles, err = loadProfileOverrides(opts.ProfileOverridePath); err != nil {
+			return nil, err
+		}
 	}
 
 	base := opts.HTTPClient
@@ -74,12 +89,15 @@ func New(opts Options) (*Client, error) {
 		log:  log,
 		http: hc,
 		yt: youtube.New(youtube.Config{
-			HTTP:            hc,
-			Logger:          log,
-			ResolveTimeout:  opts.Timeouts.Resolve,
-			POTokenProvider: opts.POTokenProvider,
-			HL:              opts.Locale.HL,
-			GL:              opts.Locale.GL,
+			HTTP:             hc,
+			Logger:           log,
+			Profiles:         profiles, // nil => youtube.DefaultProfiles()
+			ResolveTimeout:   opts.Timeouts.Resolve,
+			CacheDir:         resolveCacheDir(opts, log),
+			DisableDiskCache: opts.DisableDiskCache,
+			POTokenProvider:  opts.POTokenProvider,
+			HL:               opts.Locale.HL,
+			GL:               opts.Locale.GL,
 		}),
 		dl: download.New(download.Config{
 			HTTPClient:      hc,
@@ -97,6 +115,26 @@ func New(opts Options) (*Client, error) {
 		}),
 	}
 	return c, nil
+}
+
+// resolveCacheDir returns the base directory for WaxTap's on-disk caches, or ""
+// when disk caching is disabled or no location can be determined. An empty
+// CacheDir defaults to os.UserCacheDir()/waxtap, matching the CLI's cache
+// subcommands. A failure to locate the user cache dir degrades to memory-only
+// caching rather than failing construction.
+func resolveCacheDir(opts Options, log *slog.Logger) string {
+	if opts.DisableDiskCache {
+		return ""
+	}
+	if opts.CacheDir != "" {
+		return opts.CacheDir
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		log.Debug("disk cache disabled: cannot locate user cache dir", "err", err)
+		return ""
+	}
+	return filepath.Join(base, cacheDirName)
 }
 
 // ffmpeg returns the shared transcode runner, creating it on first use. Metadata

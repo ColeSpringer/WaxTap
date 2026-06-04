@@ -51,10 +51,11 @@ type appConfig struct {
 	perHostQPS float64
 	hl, gl     string
 
-	ffmpegProcs int
-	chunks      int
-	downloads   int
-	sbBaseURL   string
+	ffmpegProcs     int
+	chunks          int
+	downloads       int
+	sbBaseURL       string
+	profileOverride string
 
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
@@ -77,6 +78,7 @@ type fileConfig struct {
 	Chunks              *int     `json:"chunkParallelism"`
 	Downloads           *int     `json:"downloadConcurrency"`
 	SponsorBlockBaseURL *string  `json:"sponsorBlockBaseURL"`
+	ProfileOverridePath *string  `json:"profileOverridePath"`
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
@@ -121,10 +123,11 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		hl:         str("hl", rootFlagsValue.hl, fc.HL, ec.HL, ""),
 		gl:         str("gl", rootFlagsValue.gl, fc.GL, ec.GL, ""),
 
-		ffmpegProcs: coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
-		chunks:      coalesceInt(0, fc.Chunks, ec.Chunks, nil),
-		downloads:   coalesceInt(0, fc.Downloads, ec.Downloads, nil),
-		sbBaseURL:   str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
+		ffmpegProcs:     coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
+		chunks:          coalesceInt(0, fc.Chunks, ec.Chunks, nil),
+		downloads:       coalesceInt(0, fc.Downloads, ec.Downloads, nil),
+		sbBaseURL:       str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
+		profileOverride: str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
 
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
@@ -225,6 +228,7 @@ func envOverlay() (fileConfig, error) {
 	ec.Chunks = getInt("WAXTAP_CHUNKS")
 	ec.Downloads = getInt("WAXTAP_DOWNLOAD_CONCURRENCY")
 	ec.SponsorBlockBaseURL = getStr("WAXTAP_SPONSORBLOCK_BASE_URL")
+	ec.ProfileOverridePath = getStr("WAXTAP_PROFILE_OVERRIDE")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
@@ -256,12 +260,13 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		return waxtap.Options{}, err
 	}
 	return waxtap.Options{
-		HTTPClient:       hc,
-		Logger:           log,
-		Locale:           waxtap.Locale{HL: a.hl, GL: a.gl},
-		CacheDir:         a.cacheDir,
-		DisableDiskCache: a.noCache,
-		TempDir:          a.tempDir,
+		HTTPClient:          hc,
+		Logger:              log,
+		Locale:              waxtap.Locale{HL: a.hl, GL: a.gl},
+		CacheDir:            a.cacheDir,
+		DisableDiskCache:    a.noCache,
+		TempDir:             a.tempDir,
+		ProfileOverridePath: a.profileOverride,
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,

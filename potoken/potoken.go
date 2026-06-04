@@ -13,8 +13,10 @@ package potoken
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -42,6 +44,25 @@ func (s Scope) String() string {
 	}
 }
 
+// ParseScope is the inverse of Scope.String. It accepts the canonical names
+// ("none", "player", "gvs", "subtitles"), case-insensitively, plus the empty
+// string as "none". It is used to decode scopes from configuration such as the
+// client-profile override file.
+func ParseScope(s string) (Scope, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "none":
+		return ScopeNone, nil
+	case "player":
+		return ScopePlayer, nil
+	case "gvs":
+		return ScopeGVS, nil
+	case "subtitles":
+		return ScopeSubtitles, nil
+	default:
+		return ScopeNone, fmt.Errorf("unknown PO-token scope %q", s)
+	}
+}
+
 // Request is passed to a Provider when WaxTap needs a token. It carries only
 // stable public data, not WaxTap's internal client profile or session.
 type Request struct {
@@ -49,8 +70,12 @@ type Request struct {
 	ClientName    string // InnerTube client name in play, e.g. "WEB"
 	ClientVersion string
 	VisitorData   string
-	Scope         Scope
-	Failure       *HTTPFailure // the 403 that triggered this refresh, if any
+	// UserAgent is the exact User-Agent WaxTap will send on the stream request.
+	// Providers that bind tokens to request headers should use it when minting.
+	// Empty means the provider can use its own default.
+	UserAgent string
+	Scope     Scope
+	Failure   *HTTPFailure // the 403 that triggered this refresh, if any
 }
 
 // Response is what a Provider returns. A token is rarely just a string: it may

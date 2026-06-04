@@ -1,0 +1,67 @@
+name: doctor
+
+# Daily extraction health check: build the CLI and run `waxtap doctor`, which
+# extracts a known-good video, resolves its best audio, and reads a few KiB to
+# prove byte delivery. It is an early-warning signal for YouTube-side breakage
+# and doubles as a container healthcheck reference.
+#
+# Tolerance: GitHub-hosted runner IPs are frequently throttled or bot-walled by
+# YouTube, so environmental failures (availability, rate limiting) only warn and
+# keep the job green. Only an extraction/cipher failure (doctor exit code 4 — the
+# class that means *our* code needs updating) fails the job so it surfaces loudly.
+
+on:
+  schedule:
+    - cron: "17 7 * * *" # daily, ~07:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build -o waxtap ./cmd/waxtap
+
+      - name: run doctor
+        run: |
+          set +e
+          status=99
+          for attempt in 1 2 3; do
+            echo "doctor attempt $attempt"
+            ./waxtap doctor --json | tee doctor.json
+            status=${PIPESTATUS[0]}
+            [ "$status" -eq 0 ] && break
+            echo "attempt $attempt: doctor exited $status; backing off"
+            sleep $((attempt * 30))
+          done
+
+          case "$status" in
+            0)
+              echo "healthy"
+              ;;
+            4)
+              echo "::error::doctor reports an extraction/cipher failure (exit 4) — YouTube likely changed something WaxTap must fix (see MAINTENANCE.md)"
+              exit 1
+              ;;
+            *)
+              echo "::warning::doctor did not report healthy (exit $status); treating as environmental (GitHub-IP rate limiting / availability) and not failing the job"
+              ;;
+          esac
+
+      - name: upload doctor report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-report
+          path: doctor.json
+          if-no-files-found: ignore

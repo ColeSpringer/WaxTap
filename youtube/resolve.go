@@ -96,8 +96,11 @@ func (c *Client) resolveToken(ctx context.Context, ext *Extraction, failure *pot
 		ClientName:    ext.profile.InnerTubeName,
 		ClientVersion: ext.profile.Version,
 		VisitorData:   ext.session.visitorData,
-		Scope:         scope,
-		Failure:       failure,
+		// Some token services bind the token to request headers. Use the same
+		// UA that streamHeaders will send to googlevideo.
+		UserAgent: ext.profile.UserAgent,
+		Scope:     scope,
+		Failure:   failure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: PO token provider failed: %v", waxerr.ErrNeedsPOToken, err)

@@ -112,6 +112,10 @@ func TestResolve_TokenFromProvider(t *testing.T) {
 	if fp.gotReq.ClientName != "WEB" || fp.gotReq.VideoID != "vid123" || fp.gotReq.VisitorData != "VISITOR1" {
 		t.Errorf("provider request = %+v", fp.gotReq)
 	}
+	// The provider sees the same UA that the googlevideo request will use.
+	if want := profileWeb.UserAgent; fp.gotReq.UserAgent != want {
+		t.Errorf("provider UserAgent = %q, want %q", fp.gotReq.UserAgent, want)
+	}
 	if fr.gotCtx.Token == nil || fr.gotCtx.Token.Value != "POT-XYZ" {
 		t.Errorf("token not passed to resolver: %+v", fr.gotCtx.Token)
 	}

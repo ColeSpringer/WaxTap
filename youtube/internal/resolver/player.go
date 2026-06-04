@@ -59,6 +59,9 @@ type Config struct {
 	CipherTimeout time.Duration
 	// CacheSize caps retained compiled players. Zero uses the cache default.
 	CacheSize int
+	// SourceCache persists base.js source across process runs. Nil keeps the
+	// resolver memory-only.
+	SourceCache SourceCache
 }
 
 // Player resolves candidate formats into playable, signed stream URLs by locating
@@ -70,8 +73,9 @@ type Player struct {
 	log     *slog.Logger
 	timeout time.Duration
 
-	programs *cache.Store[*playerProgram] // keyed by base.js URL
+	programs *cache.Store[*playerProgram] // in-memory, keyed by base.js URL
 	urls     *cache.Store[string]         // discovered base.js URL (global)
+	source   SourceCache                  // optional cross-run base.js source cache
 }
 
 // New returns a Player with defaults applied.
@@ -80,6 +84,7 @@ func New(cfg Config) *Player {
 		http:    cfg.HTTP,
 		log:     cfg.Logger,
 		timeout: cfg.CipherTimeout,
+		source:  cfg.SourceCache,
 	}
 	if p.log == nil {
 		p.log = slog.New(slog.DiscardHandler)
@@ -237,17 +242,38 @@ func (p *Player) discoverPlayerURL(ctx context.Context, videoID string) (string,
 	return "", lastErr
 }
 
-// program returns the compiled player for playerURL, fetching and compiling
-// base.js once across concurrent callers. A successfully fetched but partially
-// un-extractable base.js is cached too (the per-transform error is deferred to
-// use), so a broken player is not re-fetched on every resolution.
+// program returns the compiled player for playerURL, using the in-memory program
+// cache first, then the optional source cache, then the network. Only base.js
+// source is persisted; goja programs are rebuilt in each process.
+//
+// A fetched player may be returned even when one transform failed to extract.
+// The missing-transform error is surfaced only if that transform is used, which
+// avoids refetching a real player on every resolution.
+//
+// Source cache entries are accepted only after at least one transform compiles.
+// That filters out bogus HTTP 200 bodies such as HTML interstitials, captive
+// portals, or truncated responses without discarding a real player whose other
+// transform is temporarily unrecognized.
 func (p *Player) program(ctx context.Context, playerURL string) (*playerProgram, error) {
 	return p.programs.GetOrLoad(ctx, playerURL, func(ctx context.Context) (*playerProgram, error) {
+		if p.source != nil {
+			if body, ok := p.source.Get(playerURL); ok {
+				if prog := compilePlayerProgram(playerURL, string(body)); prog.extractedTransform() {
+					return prog, nil
+				}
+				// Older cache files may predate validation. Treat a cached body
+				// with no transforms as a miss and fetch a fresh player.
+			}
+		}
 		body, err := p.get(ctx, playerURL)
 		if err != nil {
 			return nil, err
 		}
-		return compilePlayerProgram(playerURL, string(body)), nil
+		prog := compilePlayerProgram(playerURL, string(body))
+		if p.source != nil && prog.extractedTransform() {
+			p.source.Put(playerURL, body)
+		}
+		return prog, nil
 	})
 }
 

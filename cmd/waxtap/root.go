@@ -21,6 +21,7 @@ type rootFlags struct {
 	hl              string
 	gl              string
 	sponsorblockURL string
+	profileOverride string
 }
 
 var rootFlagsValue rootFlags
@@ -59,6 +60,7 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.hl, "hl", "", "InnerTube host language, e.g. en, de, ja (default: en)")
 	pf.StringVar(&rootFlagsValue.gl, "gl", "", "content region hint, e.g. US, DE, JP (default: US)")
 	pf.StringVar(&rootFlagsValue.sponsorblockURL, "sponsorblock-url", "", "override the SponsorBlock API base URL (default: public server)")
+	pf.StringVar(&rootFlagsValue.profileOverride, "profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
 
 	root.AddCommand(
 		newInfoCmd(),

@@ -24,10 +24,10 @@ type Options struct {
 	// zero value defaults to en / US.
 	Locale Locale
 
-	// CacheDir holds the on-disk player cache. Empty selects
-	// os.UserCacheDir()/waxtap. The disk cache is default-on for the CLI and
-	// opt-in for library use via DisableDiskCache.
-	CacheDir         string
+	// CacheDir is the base directory for the on-disk player cache. Empty selects
+	// os.UserCacheDir()/waxtap.
+	CacheDir string
+	// DisableDiskCache turns off on-disk player cache reads and writes.
 	DisableDiskCache bool
 
 	// TempDir is where intermediate/staging files are written; empty uses the OS
@@ -41,16 +41,16 @@ type Options struct {
 	Retry       RetryPolicy
 	Politeness  Politeness
 
-	// ProfileOverridePath points at a runtime client-profile override file. It
-	// allows a deployment to update client versions or headers with config and a
-	// restart instead of a rebuild.
+	// ProfileOverridePath points at a strict JSON file that replaces the built-in
+	// YouTube client profile chain at startup. Use it to refresh client versions,
+	// user agents, or device fingerprints without rebuilding.
 	ProfileOverridePath string
 
 	SponsorBlock SponsorBlockOptions
 
-	// POTokenProvider supplies PO tokens on a 403 (v1: nil = none configured). It
-	// receives only stable public structs (POTokenRequest/POTokenResponse), not
-	// WaxTap's internal client profile or session.
+	// POTokenProvider supplies PO tokens for profiles that require them. When a
+	// download refresh follows a 403, WaxTap passes the failure details in the
+	// request. Nil means no provider is configured.
 	POTokenProvider POTokenProvider
 }
 

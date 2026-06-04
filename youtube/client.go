@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	"path/filepath"
 	"time"
 
 	"github.com/colespringer/waxtap/internal/cache"
+	"github.com/colespringer/waxtap/internal/diskcache"
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/waxerr"
@@ -46,12 +48,24 @@ type Config struct {
 	// ResolveTimeout bounds each cipher JS execution during resolution. Zero
 	// uses the resolver default.
 	ResolveTimeout time.Duration
+	// CacheDir is the base directory for on-disk caches. When set, and when
+	// DisableDiskCache is false, the default resolver stores base.js source under
+	// CacheDir/players. Empty leaves the resolver memory-only. Ignored when a
+	// Resolver is injected.
+	CacheDir string
+	// DisableDiskCache turns off the on-disk base.js source cache even when
+	// CacheDir is set.
+	DisableDiskCache bool
 	// HL (host language, e.g. "en") and GL (content region, e.g. "US") set the
 	// InnerTube locale. Empty defaults to en / US. These are localization hints:
 	// geo-restricted availability is still governed by the request IP.
 	HL string
 	GL string
 }
+
+// playerCacheSchema namespaces the on-disk base.js source cache. Bump it if the
+// persisted representation ever changes so older files are ignored.
+const playerCacheSchema = 1
 
 // New returns a Client, applying defaults for unset Config fields.
 func New(cfg Config) *Client {
@@ -78,10 +92,19 @@ func New(cfg Config) *Client {
 		c.profiles = DefaultProfiles()
 	}
 	if c.resolver == nil {
+		var source resolver.SourceCache
+		if cfg.CacheDir != "" && !cfg.DisableDiskCache {
+			source = diskcache.New(diskcache.Options{
+				Dir:           filepath.Join(cfg.CacheDir, "players"),
+				SchemaVersion: playerCacheSchema,
+				Logger:        c.log,
+			})
+		}
 		c.resolver = resolver.New(resolver.Config{
 			HTTP:          c.http,
 			Logger:        c.log,
 			CipherTimeout: cfg.ResolveTimeout,
+			SourceCache:   source,
 		})
 	}
 	if c.hl == "" {
@@ -124,6 +147,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		if err != nil {
 			lastErr = &waxerr.ExtractionError{Stage: "player-response", Cause: err}
 			c.log.DebugContext(ctx, "player-response parse failed; trying next client", "client", profile.Name, "err", err)
+			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
 			continue
 		}
 		sess.learnVisitorData(pr.ResponseContext.VisitorData)
@@ -135,6 +159,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 			// the watch page before returning it.
 			lastErr = perr
 			c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", perr)
+			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
 			continue
 		}
 
@@ -142,6 +167,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		if err != nil {
 			lastErr = err
 			c.log.DebugContext(ctx, "no usable formats; trying next client", "client", profile.Name, "err", err)
+			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
 			continue
 		}
 
@@ -181,6 +207,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	}
 	pr, err := parseWatchPage(body)
 	if err != nil {
+		c.dumpArtifact(ctx, "watchpage-"+videoID+".html", body)
 		return nil, &waxerr.ExtractionError{Stage: "watch-page", Cause: err}
 	}
 	sess.learnVisitorData(pr.ResponseContext.VisitorData)

@@ -122,9 +122,10 @@ var (
 	}
 )
 
-// makeProfile returns base with its static request headers derived from its
-// scalar fields and deep-copied in (so the profile owns an isolated map).
-func makeProfile(base ClientProfile) ClientProfile {
+// BuildProfile derives the static InnerTube request headers from base and
+// returns an isolated profile. Use it for configured profiles so headers such as
+// X-Youtube-Client-Name stay tied to the scalar client identity.
+func BuildProfile(base ClientProfile) ClientProfile {
 	// Accept-Language is intentionally not set here; it is applied per request
 	// from the configured locale (see Client.hl / acceptLanguage).
 	headers := map[string]string{
@@ -137,6 +138,8 @@ func makeProfile(base ClientProfile) ClientProfile {
 	}
 	return NewClientProfile(base, headers)
 }
+
+func makeProfile(base ClientProfile) ClientProfile { return BuildProfile(base) }
 
 // DefaultProfiles returns the ordered client strategy chain. ANDROID_VR leads
 // because it usually returns direct URLs without a PO token; the embedded and WEB

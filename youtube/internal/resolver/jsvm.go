@@ -62,6 +62,13 @@ func compilePlayerProgram(playerURL, js string) *playerProgram {
 	return p
 }
 
+// extractedTransform reports whether at least one cipher transform compiled.
+// Real base.js can have one locator break while the other still works; HTML and
+// other non-player bodies generally produce neither and are unsafe to persist.
+func (p *playerProgram) extractedTransform() bool {
+	return p.sigErr == nil || p.nErr == nil
+}
+
 // decipherSignature runs the extracted signature transform on s.
 func (p *playerProgram) decipherSignature(ctx context.Context, s string, timeout time.Duration) (string, error) {
 	if p.sigErr != nil {

@@ -14,9 +14,11 @@ func newCacheCmd() *cobra.Command {
 		Use:   "cache",
 		Short: "Inspect or clear the on-disk cache directory",
 		Long: "Manage the WaxTap cache directory.\n\n" +
-			"Note: this build caches player programs in memory per invocation; the\n" +
-			"on-disk directory is reserved for cached extraction artifacts. `cache\n" +
-			"clean` is safe to run any time — WaxTap re-fetches whatever it needs.",
+			"WaxTap persists YouTube's player JS (base.js) here so a fresh run can\n" +
+			"compile the cipher from disk instead of re-downloading several megabytes.\n" +
+			"Entries are size-capped and schema-versioned. `cache clean` is safe to run\n" +
+			"any time — WaxTap re-fetches whatever it needs. Disable persistence with\n" +
+			"--no-cache.",
 	}
 	cmd.AddCommand(newCacheDirCmd(), newCacheCleanCmd())
 	return cmd
