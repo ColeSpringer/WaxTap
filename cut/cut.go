@@ -115,7 +115,7 @@ func Render(ctx context.Context, r *transcode.Runner, input, output string, spec
 	if err != nil {
 		return Result{}, err
 	}
-	if err := validateCrossfade(keeps, spec.Crossfade); err != nil {
+	if err := ValidateCrossfade(keeps, spec.Crossfade); err != nil {
 		return Result{}, err
 	}
 

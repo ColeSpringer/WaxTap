@@ -19,6 +19,14 @@ import (
 // across languages and DRC variants. rawAudio[i] is kept parallel to
 // Video.Formats[i] so the selected public format maps to the right raw format.
 func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) (ResolvedStream, error) {
+	return c.ResolveWithFailure(ctx, ext, formatIndex, nil)
+}
+
+// ResolveWithFailure resolves the selected format like Resolve and passes the
+// HTTP failure that caused a refresh to the PO-token provider. Initial resolution
+// passes nil. When refreshing an expired signed URL, call this with a fresh
+// Extraction; the old player response still contains the old URL.
+func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (ResolvedStream, error) {
 	if ext == nil {
 		return ResolvedStream{}, fmt.Errorf("%w: nil extraction", waxerr.ErrExtractionFailed)
 	}
@@ -30,7 +38,7 @@ func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) 
 		return ResolvedStream{}, fmt.Errorf("%w: format index %d out of range", waxerr.ErrExtractionFailed, formatIndex)
 	}
 
-	token, err := c.resolveToken(ctx, ext, nil)
+	token, err := c.resolveToken(ctx, ext, failure)
 	if err != nil {
 		return ResolvedStream{}, err
 	}

@@ -72,8 +72,9 @@ type Concurrency struct {
 	// Chunks is the max parallel ranged chunks within a single download. Kept
 	// low by default, especially for CLI playlist runs.
 	Chunks int
-	// FFmpeg limits concurrent ffmpeg/ffprobe processes. This guards local CPU
-	// independently from network parallelism.
+	// FFmpeg limits concurrent ffmpeg/ffprobe processes, guarding local CPU
+	// independently from network parallelism. Zero selects a conservative default
+	// (GOMAXPROCS); a negative value disables the limit.
 	FFmpeg int
 }
 

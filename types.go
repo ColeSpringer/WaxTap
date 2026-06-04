@@ -21,7 +21,22 @@ type (
 	Tri           = format.Tri
 	AudioSelector = format.AudioSelector
 	SourcePolicy  = format.SourcePolicy
+	// Target describes a transcode output for source selection. The facade maps
+	// a TranscodeSpec onto it; most callers do not construct one directly.
+	Target = format.Target
 )
+
+// ErrNoMatch reports that audio selection found no candidate satisfying the
+// request. Download/Process translate it to ErrNoAudioFormats; it is re-exported
+// for callers using BestForTarget directly.
+var ErrNoMatch = format.ErrNoMatch
+
+// BestForTarget chooses the best source audio index for a transcode target under
+// a SourcePolicy. It is the selection BestAudio uses; exposed for callers that
+// resolve formats themselves.
+func BestForTarget(candidates []Format, policy SourcePolicy, target Target) (int, error) {
+	return format.BestForTarget(candidates, policy, target)
+}
 
 // Tri values.
 const (
@@ -137,8 +152,9 @@ const (
 	FormatVorbis
 )
 
-// TranscodeSpec requests a transcode. The zero value (FormatCopy) remuxes
-// without re-encoding.
+// TranscodeSpec requests ffmpeg processing. An explicit FormatCopy stream-copies
+// through ffmpeg to remux into the destination container; a nil TranscodeSpec
+// keeps the selected source bytes untouched.
 type TranscodeSpec struct {
 	Format TranscodeFormat
 	// Bitrate is the target bits per second for lossy presets (e.g. 256000).
@@ -286,10 +302,10 @@ func (k SourceKind) String() string {
 	}
 }
 
-// Result reports the outcome of a Download or Process. The boolean flags are
-// true only when work actually happened: a SponsorBlock request that matched no
-// segments leaves SponsorBlockApplied false (with an informational Warning), and
-// ranges that vanish after clamping leave CutApplied false.
+// Result reports the outcome of a Download or Process. Boolean flags describe
+// completed effects, not requested work: an empty SponsorBlock match leaves
+// SponsorBlockApplied false, and ranges that vanish after clamping leave
+// CutApplied false.
 type Result struct {
 	SourceKind SourceKind
 	VideoID    string // empty for local files
@@ -330,8 +346,8 @@ type StreamInfo struct {
 type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
 	MaxItems int
-	// Enrich fetches full per-video metadata for each entry (extra requests).
-	// Off by default; enumeration returns lightweight entries.
+	// Enrich is reserved for a future full-metadata pass. Current enumeration
+	// returns lightweight entries regardless of this value.
 	Enrich bool
 }
 
@@ -441,7 +457,8 @@ type Warning struct {
 
 // Event is a best-effort progress signal. Callbacks are invoked synchronously
 // from the worker and are panic-recovered. A terminal event always fires:
-// StageDone on success or StageFailed (carrying Err) on failure.
+// StageDone on success or StageFailed with Err. For Stream, the terminal event
+// is emitted when the returned reader is closed.
 type Event struct {
 	Stage   Stage
 	VideoID string

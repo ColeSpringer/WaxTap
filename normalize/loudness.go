@@ -88,6 +88,103 @@ func Measure(ctx context.Context, r *transcode.Runner, input string, pre []strin
 	return l, nil
 }
 
+// MeasureComplex runs a loudnorm analysis pass after a -filter_complex graph.
+// graph must read [0:a:0] and write the named sink label; MeasureComplex appends
+// loudnorm to that label and maps the result to a null output. It writes no
+// output file.
+//
+// Use it when the pre-processing cannot be expressed as a linear -af chain, such
+// as a multi-segment cut whose atrim/concat graph only fits -filter_complex. The
+// measured loudness then matches the post-cut audio a fused encode will produce.
+// Use Measure for the linear case.
+func MeasureComplex(ctx context.Context, r *transcode.Runner, input, graph, sink string) (Loudness, error) {
+	full := graph + ";[" + sink + "]" + measureFilter + "[out]"
+	args := []string{
+		"-hide_banner", "-nostdin",
+		"-i", input,
+		"-filter_complex", full,
+		"-map", "[out]",
+		"-f", "null", "-",
+	}
+	// As in Measure, the default (info) log level must stay: loudnorm prints its
+	// JSON at info, so -loglevel error would suppress the output we parse.
+	res, err := r.Run(ctx, transcode.Command{Args: args})
+	if err != nil {
+		return Loudness{}, err
+	}
+	return parseLoudness(res.Stderr)
+}
+
+// MeasureAlbum measures a set of tracks as a group and individually. The album
+// value is the EBU R128 result for the concatenated tracks, including normal
+// gating and energy weighting; it is not an average of per-track LUFS. perTrack
+// follows input order.
+//
+// Inputs may differ in sample rate and channel layout; each is conformed to a
+// common measurement format before concatenation so the group pass does not fail
+// on a layout mismatch.
+func MeasureAlbum(ctx context.Context, r *transcode.Runner, inputs []string) (album Loudness, perTrack []Loudness, err error) {
+	if len(inputs) == 0 {
+		return Loudness{}, nil, fmt.Errorf("normalize: MeasureAlbum: no inputs")
+	}
+	perTrack = make([]Loudness, len(inputs))
+	for i, in := range inputs {
+		l, err := Measure(ctx, r, in, nil)
+		if err != nil {
+			return Loudness{}, nil, fmt.Errorf("normalize: measure track %d: %w", i, err)
+		}
+		perTrack[i] = l
+	}
+	album, err = measureConcat(ctx, r, inputs)
+	if err != nil {
+		return Loudness{}, nil, err
+	}
+	return album, perTrack, nil
+}
+
+// albumMeasureFormat conforms each track to a common sample rate and stereo
+// layout before the group measurement, so concat does not fail when tracks differ
+// in rate or channel layout. ffmpeg auto-inserts the resampler/rematrix needed to
+// satisfy aformat.
+const albumMeasureFormat = "aformat=sample_rates=48000:channel_layouts=stereo"
+
+// measureConcat runs one analysis pass over every input concatenated, returning
+// the group loudness.
+func measureConcat(ctx context.Context, r *transcode.Runner, inputs []string) (Loudness, error) {
+	args := []string{"-hide_banner", "-nostdin"}
+	var g strings.Builder
+	for i := range inputs {
+		args = append(args, "-i", inputs[i])
+		fmt.Fprintf(&g, "[%d:a:0]%s[a%d];", i, albumMeasureFormat, i)
+	}
+	for i := range inputs {
+		fmt.Fprintf(&g, "[a%d]", i)
+	}
+	fmt.Fprintf(&g, "concat=n=%d:v=0:a=1[c];[c]%s[out]", len(inputs), measureFilter)
+	args = append(args, "-filter_complex", g.String(), "-map", "[out]", "-f", "null", "-")
+
+	res, err := r.Run(ctx, transcode.Command{Args: args})
+	if err != nil {
+		return Loudness{}, err
+	}
+	return parseLoudness(res.Stderr)
+}
+
+// AlbumGainFilter builds the per-track filter for destructive album
+// normalization. Each track receives the same target-albumIntegrated dB offset,
+// preserving track-to-track loudness differences across the album. Use
+// ApplyFilter for independent track normalization.
+//
+// It returns anull when either value is not finite (for example a silent album),
+// matching ApplyFilter's silent-input behavior.
+func AlbumGainFilter(target, albumIntegrated float64) string {
+	if math.IsInf(target, 0) || math.IsNaN(target) ||
+		math.IsInf(albumIntegrated, 0) || math.IsNaN(albumIntegrated) {
+		return passthroughFilter
+	}
+	return fmt.Sprintf("volume=%sdB", ftoa(target-albumIntegrated))
+}
+
 // ApplyFilter builds the loudnorm filter for a normalizing encode, targeting the
 // given LUFS value. It uses values from a prior Measure pass and enables
 // loudnorm's linear mode. Pass the result through transcode.Spec.Filters to run

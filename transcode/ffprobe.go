@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/waxerr"
@@ -64,15 +66,29 @@ func (p ProbeResult) AudioStream() (ProbeStream, bool) {
 	return ProbeStream{}, false
 }
 
-// Probe runs ffprobe on input and returns the parsed result. ffprobe failures,
-// malformed JSON, and media with no audio stream are reported as
+// Probe runs ffprobe on a local input and returns the parsed result. ffprobe
+// failures, malformed JSON, and media with no audio stream are reported as
 // waxerr.ErrUnsupportedInput.
 func (r *Runner) Probe(ctx context.Context, input string) (ProbeResult, error) {
-	args := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-print_format", "json", "-show_format", "-show_streams",
-		input,
+	return r.probe(ctx, input, nil)
+}
+
+// ProbeURL probes a remote input with the supplied HTTP headers. This is used for
+// signed media URLs whose User-Agent or token headers must match the resolver.
+// Empty headers behave like Probe. ProbeURL can block on the network, so callers
+// should pass a bounded context.
+func (r *Runner) ProbeURL(ctx context.Context, url string, headers http.Header) (ProbeResult, error) {
+	return r.probe(ctx, url, headers)
+}
+
+func (r *Runner) probe(ctx context.Context, input string, headers http.Header) (ProbeResult, error) {
+	args := []string{"-hide_banner", "-loglevel", "error", "-print_format", "json", "-show_format", "-show_streams"}
+	if h := formatProbeHeaders(headers); h != "" {
+		// -headers is an input option, so it must precede the input argument.
+		args = append(args, "-headers", h)
 	}
+	args = append(args, input)
+
 	stdout, stderr, err := r.run(ctx, r.ffprobePath, args, true)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -91,6 +107,24 @@ func (r *Runner) Probe(ctx context.Context, input string) (ProbeResult, error) {
 		return ProbeResult{}, fmt.Errorf("%w: no audio stream", waxerr.ErrUnsupportedInput)
 	}
 	return pr, nil
+}
+
+// formatProbeHeaders renders HTTP headers as ffmpeg's -headers value: CRLF-
+// terminated "Key: Value" lines. It returns "" for no headers.
+func formatProbeHeaders(h http.Header) string {
+	if len(h) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for k, vs := range h {
+		for _, v := range vs {
+			b.WriteString(k)
+			b.WriteString(": ")
+			b.WriteString(v)
+			b.WriteString("\r\n")
+		}
+	}
+	return b.String()
 }
 
 // rawProbe mirrors ffprobe's JSON, where numeric fields are encoded as strings.

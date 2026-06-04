@@ -76,12 +76,12 @@ func TestValidateCrossfade(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateCrossfade(c.keeps, c.d)
+			err := ValidateCrossfade(c.keeps, c.d)
 			if c.ok && err != nil {
-				t.Errorf("validateCrossfade = %v, want nil", err)
+				t.Errorf("ValidateCrossfade = %v, want nil", err)
 			}
 			if !c.ok && !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-				t.Errorf("validateCrossfade = %v, want ErrIncompatibleSpec", err)
+				t.Errorf("ValidateCrossfade = %v, want ErrIncompatibleSpec", err)
 			}
 		})
 	}

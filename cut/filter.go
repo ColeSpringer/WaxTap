@@ -55,12 +55,11 @@ func encodeGraph(keeps []Range, crossfade, total time.Duration, filters []string
 	return Graph(keeps, crossfade, total, "cut") + ";[cut]" + strings.Join(filters, ",") + "[out]"
 }
 
-// validateCrossfade rejects a crossfade longer than the retained spans can
-// support. acrossfade consumes the fade duration from the end of the left span
-// and the start of the right span; an interior span feeds two fades and needs
-// twice the duration. When a span is too short, ffmpeg can exit 0 after emitting
-// no frames, so Render rejects the graph before writing an output file.
-func validateCrossfade(keeps []Range, d time.Duration) error {
+// ValidateCrossfade checks whether the retained spans can supply the requested
+// overlap. acrossfade consumes d from both sides of each join, so an interior
+// span must be at least 2*d. Rejecting short spans before ffmpeg avoids a
+// successful command that emits no audio.
+func ValidateCrossfade(keeps []Range, d time.Duration) error {
 	if d <= 0 || len(keeps) < 2 {
 		return nil // no acrossfade is emitted
 	}

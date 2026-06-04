@@ -128,6 +128,28 @@ func TestResolve_ProviderReturnsNothing(t *testing.T) {
 	}
 }
 
+func TestResolveWithFailure_ThreadsFailureToProvider(t *testing.T) {
+	fr := &fakeResolver{stream: resolver.Stream{URL: "https://signed/"}}
+	fp := &fakeProvider{resp: potoken.Response{Token: "POT-XYZ"}}
+	c := New(Config{Resolver: fr, POTokenProvider: fp})
+
+	failure := &potoken.HTTPFailure{StatusCode: 403, Status: "403 Forbidden", URL: "https://expired/"}
+	if _, err := c.ResolveWithFailure(context.Background(), newExtraction(makeProfile(profileWeb)), 0, failure); err != nil {
+		t.Fatal(err)
+	}
+	if fp.gotReq.Failure == nil || fp.gotReq.Failure.StatusCode != 403 {
+		t.Errorf("provider did not receive the triggering failure: %+v", fp.gotReq.Failure)
+	}
+	// Plain Resolve passes no failure.
+	fp.gotReq = potoken.Request{}
+	if _, err := c.Resolve(context.Background(), newExtraction(makeProfile(profileWeb)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if fp.gotReq.Failure != nil {
+		t.Errorf("Resolve should pass a nil failure, got %+v", fp.gotReq.Failure)
+	}
+}
+
 func TestResolve_IndexOutOfRange(t *testing.T) {
 	c := New(Config{Resolver: &fakeResolver{}})
 	_, err := c.Resolve(context.Background(), newExtraction(makeProfile(profileAndroidVR)), 5)
