@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	// DefaultBaseURL is the public SponsorBlock API server. It is configurable so
-	// a deployment can point at a mirror or self-hosted instance.
-	DefaultBaseURL = "https://sponsor.ajax.dev"
+	// DefaultBaseURL is the public SponsorBlock API endpoint. It is configurable so
+	// deployments can point at a mirror or self-hosted instance.
+	DefaultBaseURL = "https://sponsor.ajay.app"
 
 	// hashPrefixLen is how many leading SHA-256 hex characters of the video ID we
 	// send. The privacy endpoint accepts 4-32; 4 keeps the exact video ID private

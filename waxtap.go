@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -16,8 +17,8 @@ import (
 	"github.com/colespringer/waxtap/youtube"
 )
 
-// Client is the stable WaxTap entry point used by library callers and the CLI.
-// It is safe for concurrent use after construction.
+// Client is the main WaxTap entry point for library callers and the CLI. It is
+// safe for concurrent use after construction.
 //
 // The same httpx.Client backs extraction, media download, and SponsorBlock. Its
 // per-host limiter is shared by all request paths, while each host keeps its own
@@ -98,9 +99,8 @@ func New(opts Options) (*Client, error) {
 	return c, nil
 }
 
-// ffmpeg returns the shared transcode Runner, creating it on first use. Keeping
-// this lazy lets metadata calls and source-only downloads run without ffmpeg
-// installed.
+// ffmpeg returns the shared transcode runner, creating it on first use. Metadata
+// calls and source-only downloads do not require ffmpeg on PATH.
 func (c *Client) ffmpeg() (*transcode.Runner, error) {
 	c.runnerOnce.Do(func() {
 		// Options.Concurrency.FFmpeg uses zero for the default limit, while
@@ -177,15 +177,90 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 	return video, nil
 }
 
-// Enumerate expands a playlist URL into lightweight entries without downloading.
-// EnumerateOptions.MaxItems caps the result. Enrichment of per-entry metadata is
-// not performed; entries carry the lightweight fields the listing provides.
+// Enumerate expands a playlist URL into entries without downloading media.
+// EnumerateOptions.MaxItems caps the listing. With Enrich set, entries are
+// refreshed with bounded-parallel InfoBasic calls; item-level failures are kept
+// on Playlist.Errors.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
 	id, err := youtube.ExtractPlaylistID(url)
 	if err != nil {
 		return nil, err
 	}
-	return c.yt.Enumerate(ctx, id, opts.MaxItems)
+	pl, err := c.yt.Enumerate(ctx, id, opts.MaxItems)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Enrich {
+		if err := c.enrichEntries(ctx, pl); err != nil {
+			return pl, err
+		}
+	}
+	return pl, nil
+}
+
+// enrichEntries refreshes playlist entries with InfoBasic. Each worker owns one
+// entry; only pl.Errors is shared. Ordinary item failures stay on the playlist,
+// but context cancellation is returned to the caller.
+func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
+	limit := c.opts.Concurrency.Downloads
+	if limit <= 0 {
+		limit = 4
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := range pl.Entries {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
+			if err != nil {
+				// Return cancellation through ctx.Err(), not as an item error.
+				if ctx.Err() == nil {
+					mu.Lock()
+					pl.Errors = append(pl.Errors, fmt.Errorf("enrich %s: %w", pl.Entries[i].VideoID, err))
+					mu.Unlock()
+				}
+				return
+			}
+			pl.Entries[i].Title = v.Title
+			pl.Entries[i].Author = v.Author
+			pl.Entries[i].Duration = v.Duration
+		}(i)
+	}
+	wg.Wait()
+	return ctx.Err()
+}
+
+// Resolve selects and resolves an audio stream without downloading it. The zero
+// AudioSelector means best audio. The returned ResolvedStream contains a
+// temporary googlevideo URL, its expiry, content length, and request headers.
+//
+// It is exposed for diagnostics: the CLI's info --show-urls and doctor. Most
+// callers use Download or Stream, which never expose the raw URL.
+func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector) (ResolvedStream, error) {
+	id, err := youtube.ExtractVideoID(url)
+	if err != nil {
+		return ResolvedStream{}, err
+	}
+	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
+	defer ecancel()
+	ext, err := c.yt.Extract(ectx, id)
+	if err != nil {
+		return ResolvedStream{}, err
+	}
+	idx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, ext.Video().Formats)
+	if err != nil {
+		return ResolvedStream{}, err
+	}
+	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
+	defer rcancel()
+	return c.yt.Resolve(rctx, ext, idx)
 }
 
 // InfoDepth selects how much work Info does. Callers do not pay for what they do

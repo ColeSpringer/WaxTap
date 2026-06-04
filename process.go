@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/normalize"
+	"github.com/colespringer/waxtap/transcode"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -124,13 +125,12 @@ type AlbumLoudnessResult struct {
 	PerTrack []LoudnessInfo
 }
 
-// MeasureAlbum measures a set of local audio files as an album: the group
-// loudness plus each track individually. It is the non-destructive,
-// ReplayGain-oriented path for library-wide loudness consistency; callers apply
-// the derived album gain at playback or tag time.
+// MeasureAlbum measures local audio files as one album and also returns each
+// track's loudness. It does not write output files; callers can use the album
+// value for ReplayGain tags or playback gain.
 //
-// It requires ffmpeg. Use normalize.AlbumGainFilter when the same album gain
-// should be baked into each track.
+// It requires ffmpeg. Use normalize.AlbumGainFilter to bake the same album gain
+// into each track.
 func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudnessResult, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("waxtap.MeasureAlbum: no inputs")
@@ -149,6 +149,93 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
+	}
+	return res, nil
+}
+
+// AlbumTrack names one album input and where its processed output should be
+// written.
+type AlbumTrack struct {
+	Input  string
+	Output string
+}
+
+// AlbumProcessResult reports the album loudness, the gain applied to every track,
+// the input measurements, and the output paths.
+type AlbumProcessResult struct {
+	Album    LoudnessInfo
+	GainDB   float64 // Target - album integrated LUFS, applied to every track (0 for a silent album)
+	PerTrack []LoudnessInfo
+	Outputs  []string
+}
+
+// ProcessAlbum measures local files as one album, then bakes the same gain into
+// every track. The shared offset preserves track-to-track loudness differences;
+// per-track normalization would flatten them.
+//
+// Album processing requires ffmpeg and a non-copy transcode format. A silent
+// album bakes a no-op gain, leaving each track unchanged apart from re-encoding.
+func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target float64, spec TranscodeSpec) (*AlbumProcessResult, error) {
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf("waxtap.ProcessAlbum: no inputs")
+	}
+	if spec.Format == FormatCopy {
+		return nil, fmt.Errorf("%w: album normalization requires an encode, not copy", waxerr.ErrIncompatibleSpec)
+	}
+	for _, t := range tracks {
+		if t.Input == "" || t.Output == "" {
+			return nil, fmt.Errorf("waxtap.ProcessAlbum: each track needs an input and an output path")
+		}
+	}
+	// Validate the whole album before the first write. Otherwise one track could
+	// replace another track's source, or two tracks could share an output path.
+	for i, ti := range tracks {
+		for j, tj := range tracks {
+			if sameFile(ti.Output, tj.Input) {
+				return nil, fmt.Errorf("%w: album output %q would overwrite track input %q", waxerr.ErrIncompatibleSpec, ti.Output, tj.Input)
+			}
+			if i < j && sameFile(ti.Output, tj.Output) {
+				return nil, fmt.Errorf("%w: album tracks %d and %d share output %q", waxerr.ErrIncompatibleSpec, i, j, ti.Output)
+			}
+		}
+	}
+
+	runner, err := c.ffmpeg()
+	if err != nil {
+		return nil, err
+	}
+
+	inputs := make([]string, len(tracks))
+	for i, t := range tracks {
+		inputs[i] = t.Input
+	}
+	album, perTrack, err := normalize.MeasureAlbum(ctx, runner, inputs)
+	if err != nil {
+		return nil, err
+	}
+
+	tspec := transcode.Spec{
+		Codec:   transcodeCodec(spec.Format),
+		Bitrate: spec.Bitrate,
+		Filters: []string{normalize.AlbumGainFilter(target, album.IntegratedLUFS)},
+	}
+
+	res := &AlbumProcessResult{
+		Album:    loudnessInfo(album),
+		PerTrack: make([]LoudnessInfo, len(perTrack)),
+		Outputs:  make([]string, len(tracks)),
+	}
+	if album.Finite() {
+		res.GainDB = target - album.IntegratedLUFS
+	}
+	for i, l := range perTrack {
+		res.PerTrack[i] = loudnessInfo(l)
+	}
+	for i, t := range tracks {
+		if _, err := runner.Transcode(ctx, t.Input, t.Output, tspec); err != nil {
+			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
+		}
+		res.Outputs[i] = t.Output
 	}
 	return res, nil
 }

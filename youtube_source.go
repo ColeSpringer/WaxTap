@@ -14,8 +14,26 @@ import (
 	"github.com/colespringer/waxtap/download"
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/sponsorblock"
 	"github.com/colespringer/waxtap/youtube"
 )
+
+// SponsorBlockSegments returns skip segments for videoURL using the client's
+// SponsorBlock settings and shared HTTP client. It does not cut or download
+// media.
+func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, categories []sponsorblock.Category) ([]sponsorblock.Segment, error) {
+	id, err := youtube.ExtractVideoID(videoURL)
+	if err != nil {
+		return nil, err
+	}
+	d := c.opts.Timeouts.SponsorBlock
+	if c.opts.SponsorBlock.Timeout > 0 {
+		d = c.opts.SponsorBlock.Timeout
+	}
+	sbCtx, cancel := withTimeout(ctx, d)
+	defer cancel()
+	return c.sb.FetchSegments(sbCtx, id, categories)
+}
 
 // acquired holds the result of extract -> select -> resolve for one video: the
 // chosen source plus a refresh callback for expiry re-resolution.
@@ -223,9 +241,8 @@ func (c *Client) produce(ctx context.Context, req Request, a *acquired, jobDir, 
 	}
 
 	// A SponsorBlock-only request can resolve to no ranges. In that case, deliver
-	// the staged source unchanged and do not require ffmpeg just because the
-	// SponsorBlock fetch was attempted. Explicit FormatCopy still goes through
-	// ffmpeg because it asks for a remux.
+	// the staged source unchanged without requiring ffmpeg. Explicit FormatCopy
+	// still goes through ffmpeg because it asks for a remux.
 	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil {
 		res := &Result{
 			SourceKind:   SourceYouTube,
