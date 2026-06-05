@@ -29,7 +29,7 @@ const validOverride = `{
       "userAgent": "com.google.android.apps.youtube.vr.oculus/1.99.0",
       "deviceMake": "Oculus",
       "deviceModel": "Quest 3",
-      "requiresPoToken": "none",
+      "requiresPoTokens": [],
       "supportsPlaylists": false
     },
     {
@@ -38,7 +38,7 @@ const validOverride = `{
       "innerTubeId": 1,
       "version": "2.99.0",
       "userAgent": "Mozilla/5.0 web",
-      "requiresPoToken": "gvs",
+      "requiresPoTokens": ["player", "gvs"],
       "supportsPlaylists": true
     }
   ]
@@ -56,9 +56,9 @@ func TestLoadProfileOverrides_Valid(t *testing.T) {
 	if profiles[0].Name != "ANDROID_VR" || profiles[1].Name != "WEB" {
 		t.Fatalf("profile order = %q, %q", profiles[0].Name, profiles[1].Name)
 	}
-	// Scope names are decoded.
-	if profiles[1].RequiresPOToken != potoken.ScopeGVS {
-		t.Errorf("WEB RequiresPOToken = %v, want GVS", profiles[1].RequiresPOToken)
+	// Scope names are decoded into the set the client needs.
+	if got := profiles[1].RequiresPOTokens; len(got) != 2 || got[0] != potoken.ScopePlayer || got[1] != potoken.ScopeGVS {
+		t.Errorf("WEB RequiresPOTokens = %v, want [player gvs]", got)
 	}
 	// Headers are derived (not left to the caller to assemble by hand).
 	if got := profiles[0].Header("X-Youtube-Client-Name"); got != "28" {
@@ -90,7 +90,10 @@ func TestLoadProfileOverrides_Errors(t *testing.T) {
 		{"missing version", `{"profiles":[{"name":"X","innerTubeName":"X","innerTubeId":1}]}`},
 		{"missing innerTubeId", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1"}]}`},
 		{"zero innerTubeId", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":0}]}`},
-		{"bad scope", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":1,"requiresPoToken":"wat"}]}`},
+		{"bad scope", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":1,"requiresPoTokens":["wat"]}]}`},
+		{"singular key rejected", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":1,"requiresPoToken":"gvs"}]}`},
+		{"none combined with real scope", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":1,"requiresPoTokens":["none","gvs"]}]}`},
+		{"unconsumed scope", `{"profiles":[{"name":"X","innerTubeName":"X","version":"1","innerTubeId":1,"requiresPoTokens":["subtitles"]}]}`},
 		{"trailing object", validOverride + " {\"profiles\":[]}"},
 		{"trailing garbage", validOverride + " garbage"},
 	}

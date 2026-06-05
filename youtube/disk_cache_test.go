@@ -67,7 +67,7 @@ func (s *stubTransport) hits() int {
 func directURLExtraction() *Extraction {
 	return &Extraction{
 		video:   &Video{ID: "vid123"},
-		profile: makeProfile(profileAndroidVR), // ScopeNone: no PO token needed
+		profile: makeProfile(profileAndroidVR), // no PO token needed
 		session: newSession("US"),
 		rawAudio: []rawFormat{{
 			Itag:          140,

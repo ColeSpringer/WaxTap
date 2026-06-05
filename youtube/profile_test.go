@@ -1,8 +1,13 @@
 package youtube
 
-import "testing"
+import (
+	"slices"
+	"testing"
 
-// TestAndroidVRFingerprint guards the android_vr request shape. The device and
+	"github.com/colespringer/waxtap/potoken"
+)
+
+// TestAndroidVRFingerprint checks the android_vr request shape. The device and
 // OS fields must stay populated and must reach the InnerTube body context.
 func TestAndroidVRFingerprint(t *testing.T) {
 	p := DefaultProfiles()[0]
@@ -21,5 +26,55 @@ func TestAndroidVRFingerprint(t *testing.T) {
 		ictx.Client.OSName != "Android" ||
 		ictx.Client.OSVersion != "12L" {
 		t.Errorf("android_vr InnerTube context missing fingerprint: %+v", ictx.Client)
+	}
+}
+
+// TestWebRequiresBothPOTokenGates checks that WEB declares both PO-token scopes:
+// one for the /player body and one for the stream URL.
+func TestWebRequiresBothPOTokenGates(t *testing.T) {
+	var web ClientProfile
+	for _, p := range DefaultProfiles() {
+		if p.Name == "WEB" {
+			web = p
+		}
+	}
+	if web.Name == "" {
+		t.Fatal("WEB profile not present in the default chain")
+	}
+	if !web.requiresPOToken(potoken.ScopePlayer) || !web.requiresPOToken(potoken.ScopeGVS) {
+		t.Errorf("WEB RequiresPOTokens = %v, want both player and gvs", web.RequiresPOTokens)
+	}
+}
+
+func TestCanonicalizeScopes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []potoken.Scope
+		want []potoken.Scope
+	}{
+		{"nil", nil, nil},
+		{"empty", []potoken.Scope{}, nil},
+		{"only none", []potoken.Scope{potoken.ScopeNone}, nil},
+		{"drops none", []potoken.Scope{potoken.ScopeNone, potoken.ScopePlayer}, []potoken.Scope{potoken.ScopePlayer}},
+		{"dedupes", []potoken.Scope{potoken.ScopeGVS, potoken.ScopeGVS}, []potoken.Scope{potoken.ScopeGVS}},
+		{"preserves order", []potoken.Scope{potoken.ScopeGVS, potoken.ScopePlayer}, []potoken.Scope{potoken.ScopeGVS, potoken.ScopePlayer}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalizeScopes(tc.in); !slices.Equal(got, tc.want) {
+				t.Errorf("canonicalizeScopes(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalizeScopes_DoesNotAliasInput checks that the constructor owns its slice:
+// mutating the caller's input must not reach a built profile.
+func TestCanonicalizeScopes_DoesNotAliasInput(t *testing.T) {
+	in := []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS}
+	got := canonicalizeScopes(in)
+	in[0] = potoken.ScopeNone
+	if got[0] != potoken.ScopePlayer {
+		t.Errorf("result aliases input: got[0] = %v after mutating input", got[0])
 	}
 }

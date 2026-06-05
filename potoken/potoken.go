@@ -1,10 +1,14 @@
 // Package potoken defines the PO-token provider contract.
 //
-// PO ("proof of origin") tokens are sometimes required on YouTube stream URLs.
-// They are bound to a specific video and expire; a missing or expired token
-// usually surfaces as HTTP 403 on the stream URL. WaxTap accepts caller-supplied
-// providers and invokes them when a token refresh is needed. It does not include
-// a built-in token generator.
+// PO ("proof of origin") tokens are used by some YouTube clients at two points. A
+// player-scope token goes in the /player request body; without it, WEB-family
+// clients can return formats without URLs. A GVS-scope token goes on the
+// googlevideo stream URL; without it, downloads usually return 403. Tokens are
+// bound to a video and expire, and are not interchangeable across scopes.
+//
+// WaxTap accepts caller-supplied providers and invokes them when a token is needed;
+// it does not include a built-in token generator. A single video can drive one
+// call per scope, so a caching provider needs to key by scope and token binding.
 //
 // This is a leaf package (standard library only) so both the top-level facade
 // (which holds the Provider in Options) and the internal resolver (which needs
@@ -20,13 +24,13 @@ import (
 	"time"
 )
 
-// Scope identifies which class of URL a token is needed for. Tokens are not
-// interchangeable across scopes.
+// Scope identifies where a PO token is applied. Tokens are not interchangeable
+// across scopes.
 type Scope uint8
 
 const (
 	ScopeNone      Scope = iota
-	ScopePlayer          // format URLs inside the player response
+	ScopePlayer          // /player request body
 	ScopeGVS             // googlevideo stream (download) URLs
 	ScopeSubtitles       // subtitle/timedtext URLs
 )
@@ -70,7 +74,7 @@ type Request struct {
 	ClientName    string // InnerTube client name in play, e.g. "WEB"
 	ClientVersion string
 	VisitorData   string
-	// UserAgent is the exact User-Agent WaxTap will send on the stream request.
+	// UserAgent is the exact User-Agent WaxTap will send for this scope.
 	// Providers that bind tokens to request headers should use it when minting.
 	// Empty means the provider can use its own default.
 	UserAgent string
@@ -78,9 +82,8 @@ type Request struct {
 	Failure   *HTTPFailure // the 403 that triggered this refresh, if any
 }
 
-// Response is what a Provider returns. A token is rarely just a string: it may
-// also require additional headers and/or query parameters on the stream
-// request, so the provider can supply all three.
+// Response is what a Provider returns. Response.Token is the token string; stream
+// tokens may also require additional request headers or query parameters.
 type Response struct {
 	Token     string
 	Headers   http.Header // additional headers to send (may be nil)

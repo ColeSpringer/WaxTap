@@ -27,14 +27,17 @@ func (f *fakeResolver) Resolve(_ context.Context, rc resolver.Context, cand reso
 	return f.stream, f.err
 }
 
-// fakeProvider is a stub potoken.Provider.
+// fakeProvider is a stub potoken.Provider. It records the last request and the
+// number of calls so tests can assert how often the provider was invoked.
 type fakeProvider struct {
 	gotReq potoken.Request
+	calls  int
 	resp   potoken.Response
 	err    error
 }
 
 func (f *fakeProvider) ProvidePOToken(_ context.Context, req potoken.Request) (potoken.Response, error) {
+	f.calls++
 	f.gotReq = req
 	return f.resp, f.err
 }

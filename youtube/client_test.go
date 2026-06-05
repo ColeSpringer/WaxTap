@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -35,6 +36,88 @@ func newTestClient(rt http.RoundTripper) *Client {
 		BaseBackoff:  time.Millisecond,
 		MaxBackoff:   2 * time.Millisecond,
 	})})
+}
+
+// newTestClientWith builds a test client with an explicit profile chain and
+// PO-token provider, reusing the fast-retry transport config of newTestClient.
+func newTestClientWith(rt http.RoundTripper, profiles []ClientProfile, provider potoken.Provider) *Client {
+	return New(Config{
+		HTTP: httpx.New(httpx.Config{
+			HTTPClient:   &http.Client{Transport: rt},
+			MaxRetries:   1,
+			MaxRetryWait: 50 * time.Millisecond,
+			BaseBackoff:  time.Millisecond,
+			MaxBackoff:   2 * time.Millisecond,
+		}),
+		Profiles:        profiles,
+		POTokenProvider: provider,
+	})
+}
+
+// TestExtract_InjectsPlayerPOToken checks that Extract requests ScopePlayer before
+// the /player POST and sends the returned token in the body.
+func TestExtract_InjectsPlayerPOToken(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	fp := &fakeProvider{resp: potoken.Response{Token: "PLAYER-TOK"}}
+	var playerBody []byte
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/player") {
+			playerBody, _ = io.ReadAll(r.Body)
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileWeb)}, fp)
+
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
+		t.Fatal(err)
+	}
+	if fp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1", fp.calls)
+	}
+	if fp.gotReq.Scope != potoken.ScopePlayer {
+		t.Errorf("provider scope = %v, want ScopePlayer", fp.gotReq.Scope)
+	}
+	if !strings.Contains(string(playerBody), `"serviceIntegrityDimensions":{"poToken":"PLAYER-TOK"}`) {
+		t.Errorf("player request body missing player token: %s", playerBody)
+	}
+}
+
+// TestExtract_RejectsHeaderOnlyPlayerToken covers a provider response that is
+// useful for stream resolution but not for /player, where the body needs
+// Response.Token.
+func TestExtract_RejectsHeaderOnlyPlayerToken(t *testing.T) {
+	fp := &fakeProvider{resp: potoken.Response{Headers: http.Header{"X-Foo": {"bar"}}}} // no Token
+	var playerCalls int
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/player") {
+			playerCalls++
+			return fixtureResp(http.StatusOK, nil), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil // fail the watch-page fallback
+	}), []ClientProfile{makeProfile(profileWeb)}, fp)
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if !errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Fatalf("err = %v, want ErrNeedsPOToken", err)
+	}
+	if playerCalls != 0 {
+		t.Errorf("/player POST count = %d, want 0 (an empty player token must not be sent)", playerCalls)
+	}
+}
+
+// TestExtract_NoProviderForPlayerToken uses a WEB-only chain and a failing
+// watch-page fallback so the missing-provider error comes from the player-token
+// path.
+func TestExtract_NoProviderForPlayerToken(t *testing.T) {
+	c := newTestClientWith(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileWeb)}, nil)
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if !errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Fatalf("err = %v, want ErrNeedsPOToken (WEB needs a player token, no provider)", err)
+	}
 }
 
 func TestExtract_FirstClientSucceeds(t *testing.T) {
@@ -102,12 +185,14 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 func TestExtract_PlayabilityErrorTriesAllClients(t *testing.T) {
 	un := readFixture(t, "player_unavailable.json") // status ERROR
 	var playerCalls int
-	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	// The WEB profile needs a player-scope token before its /player POST; configure
+	// a provider so the test exercises every profile in the chain.
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if strings.Contains(r.URL.Path, "/player") {
 			playerCalls++
 		}
 		return fixtureResp(http.StatusOK, un), nil
-	}))
+	}), nil, &fakeProvider{resp: potoken.Response{Token: "TOK"}})
 
 	_, err := c.Extract(context.Background(), "testVideo01")
 	if !errors.Is(err, waxerr.ErrVideoUnavailable) {

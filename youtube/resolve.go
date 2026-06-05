@@ -72,52 +72,6 @@ func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, format
 	return out, nil
 }
 
-// resolveToken obtains a PO token for the winning profile's required scope, or
-// nil when no token is needed. The youtube package calls the provider because it
-// owns the profile and session values needed in the request.
-//
-// failure carries the HTTP 403 that triggered a refresh, if any. Initial
-// resolution passes nil; retry paths can pass the triggering failure so providers
-// can use it for diagnostics.
-func (c *Client) resolveToken(ctx context.Context, ext *Extraction, failure *potoken.HTTPFailure) (*resolver.Token, error) {
-	scope := ext.profile.RequiresPOToken
-	if scope == potoken.ScopeNone {
-		return nil, nil
-	}
-	if c.potoken == nil {
-		// A required token is unavailable; fail before returning a URL that is
-		// expected to 403 when downloaded.
-		return nil, fmt.Errorf("%w: client %q requires a %s PO token but no provider is configured",
-			waxerr.ErrNeedsPOToken, ext.profile.Name, scope)
-	}
-
-	resp, err := c.potoken.ProvidePOToken(ctx, potoken.Request{
-		VideoID:       ext.video.ID,
-		ClientName:    ext.profile.InnerTubeName,
-		ClientVersion: ext.profile.Version,
-		VisitorData:   ext.session.visitorData,
-		// Some token services bind the token to request headers. Use the same
-		// UA that streamHeaders will send to googlevideo.
-		UserAgent: ext.profile.UserAgent,
-		Scope:     scope,
-		Failure:   failure,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%w: PO token provider failed: %v", waxerr.ErrNeedsPOToken, err)
-	}
-	if resp.Token == "" && len(resp.Headers) == 0 && len(resp.Query) == 0 {
-		return nil, fmt.Errorf("%w: PO token provider returned nothing for client %q",
-			waxerr.ErrNeedsPOToken, ext.profile.Name)
-	}
-	return &resolver.Token{
-		Scope:   scope,
-		Value:   resp.Token,
-		Headers: resp.Headers,
-		Query:   resp.Query,
-		Expires: resp.ExpiresAt,
-	}, nil
-}
-
 // streamHeaders derives the request headers a media (googlevideo) request should
 // carry from the winning client profile. The user agent must match the client
 // that extracted the formats.

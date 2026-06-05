@@ -42,8 +42,9 @@ type Config struct {
 	// a default base.js/goja resolver over the same HTTP client. Metadata
 	// extraction does not need one; stream resolution (Resolve) does.
 	Resolver resolver.Resolver
-	// POTokenProvider supplies PO tokens when the winning profile requires one.
-	// Nil means no provider is configured.
+	// POTokenProvider supplies PO tokens when a profile requires one. WaxTap may
+	// call it during extraction for a player-scope token and during resolution for
+	// a GVS-scope stream token. Nil means no provider is configured.
 	POTokenProvider potoken.Provider
 	// ResolveTimeout bounds each cipher JS execution during resolution. Zero
 	// uses the resolver default.
@@ -130,7 +131,24 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 	var lastErr error
 
 	for i, profile := range c.profiles {
-		body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, videoID))
+		// WEB-family profiles need a player-scope PO token in the /player body
+		// before YouTube returns usable stream URLs. Profiles that do not list
+		// ScopePlayer skip the provider lookup.
+		playerResp, err := c.fetchPOToken(ctx, profile, sess, videoID, potoken.ScopePlayer, nil)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			lastErr = err
+			c.log.DebugContext(ctx, "player PO token unavailable; trying next client", "client", profile.Name, "err", err)
+			continue
+		}
+		var playerTok string
+		if playerResp != nil {
+			playerTok = playerResp.Token
+		}
+
+		body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, videoID, playerTok))
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr

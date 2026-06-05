@@ -27,7 +27,11 @@ type ClientProfile struct {
 	OSVersion         string
 	AndroidSDKVersion int
 
-	RequiresPOToken   potoken.Scope
+	// RequiresPOTokens lists the PO-token scopes this client must supply: a
+	// player-scope token in the /player body, a GVS token on the stream URL,
+	// or both. Empty means none. NewClientProfile clones and canonicalizes
+	// the slice.
+	RequiresPOTokens  []potoken.Scope
 	SupportsCookies   bool
 	SupportsPlaylists bool
 
@@ -38,6 +42,7 @@ type ClientProfile struct {
 // that owns an isolated header map callers cannot mutate.
 func NewClientProfile(base ClientProfile, headers map[string]string) ClientProfile {
 	base.headers = cloneStringMap(headers)
+	base.RequiresPOTokens = canonicalizeScopes(base.RequiresPOTokens)
 	return base
 }
 
@@ -62,6 +67,44 @@ func cloneStringMap(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	return maps.Clone(m)
+}
+
+// requiresPOToken reports whether the profile needs a PO token for scope s.
+// ScopeNone is a zero-value sentinel, not a required scope, so it returns false
+// even if malformed input reached the profile.
+func (p ClientProfile) requiresPOToken(s potoken.Scope) bool {
+	if s == potoken.ScopeNone {
+		return false
+	}
+	for _, sc := range p.RequiresPOTokens {
+		if sc == s {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalizeScopes returns an owned, order-preserving copy with ScopeNone and
+// duplicates removed. The profile constructor cannot return an error, so it
+// normalizes programmatic input: {ScopeNone, ScopePlayer} becomes {ScopePlayer},
+// and an empty or all-ScopeNone input yields nil.
+func canonicalizeScopes(scopes []potoken.Scope) []potoken.Scope {
+	if len(scopes) == 0 {
+		return nil
+	}
+	out := make([]potoken.Scope, 0, len(scopes))
+	seen := make(map[potoken.Scope]bool, len(scopes))
+	for _, s := range scopes {
+		if s == potoken.ScopeNone || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // innerTubeOrigin is the Origin header value used for InnerTube requests.
@@ -89,7 +132,6 @@ var (
 		OSName:            "Android",
 		OSVersion:         "12L",
 		AndroidSDKVersion: 32,
-		RequiresPOToken:   potoken.ScopeNone,
 		SupportsPlaylists: false,
 	}
 	profileIOS = ClientProfile{
@@ -99,7 +141,6 @@ var (
 		Version:           "19.45.4",
 		UserAgent:         "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
 		DeviceModel:       "iPhone16,2",
-		RequiresPOToken:   potoken.ScopeNone,
 		SupportsPlaylists: false,
 	}
 	profileWebEmbedded = ClientProfile{
@@ -108,16 +149,17 @@ var (
 		InnerTubeID:       56,
 		Version:           "1.20250310.01.00",
 		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		RequiresPOToken:   potoken.ScopeNone,
 		SupportsPlaylists: false,
 	}
 	profileWeb = ClientProfile{
-		Name:              "WEB",
-		InnerTubeName:     "WEB",
-		InnerTubeID:       1,
-		Version:           "2.20250310.01.00",
-		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		RequiresPOToken:   potoken.ScopeGVS, // web stream URLs increasingly need a GVS token
+		Name:          "WEB",
+		InnerTubeName: "WEB",
+		InnerTubeID:   1,
+		Version:       "2.20250310.01.00",
+		UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		// WEB requires both PO-token scopes: player for the /player body and GVS
+		// for the stream URL.
+		RequiresPOTokens:  []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS},
 		SupportsPlaylists: true,
 	}
 )

@@ -48,9 +48,11 @@ type Options struct {
 
 	SponsorBlock SponsorBlockOptions
 
-	// POTokenProvider supplies PO tokens for profiles that require them. When a
-	// download refresh follows a 403, WaxTap passes the failure details in the
-	// request. Nil means no provider is configured.
+	// POTokenProvider supplies PO tokens for profiles that require them. WaxTap may
+	// call it during extraction for a player-scope token and during resolution for
+	// a GVS-scope stream token. When a download refresh follows a 403, WaxTap
+	// passes the failure details in the request. Nil means no provider is
+	// configured.
 	POTokenProvider POTokenProvider
 }
 

@@ -25,23 +25,22 @@ type profileOverrideFile struct {
 }
 
 // profileSpec is the JSON form of the client-profile fields WaxTap allows at
-// runtime. requiresPoToken uses scope names ("none", "gvs", "player",
-// "subtitles") rather than Go enum values.
+// runtime. requiresPoTokens is a list of scope names; omit it or use [] for none.
 type profileSpec struct {
-	Name              string `json:"name"`
-	InnerTubeName     string `json:"innerTubeName"`
-	InnerTubeID       int    `json:"innerTubeId"`
-	Version           string `json:"version"`
-	APIKey            string `json:"apiKey"`
-	UserAgent         string `json:"userAgent"`
-	DeviceMake        string `json:"deviceMake"`
-	DeviceModel       string `json:"deviceModel"`
-	OSName            string `json:"osName"`
-	OSVersion         string `json:"osVersion"`
-	AndroidSDKVersion int    `json:"androidSdkVersion"`
-	RequiresPOToken   string `json:"requiresPoToken"`
-	SupportsCookies   bool   `json:"supportsCookies"`
-	SupportsPlaylists bool   `json:"supportsPlaylists"`
+	Name              string   `json:"name"`
+	InnerTubeName     string   `json:"innerTubeName"`
+	InnerTubeID       int      `json:"innerTubeId"`
+	Version           string   `json:"version"`
+	APIKey            string   `json:"apiKey"`
+	UserAgent         string   `json:"userAgent"`
+	DeviceMake        string   `json:"deviceMake"`
+	DeviceModel       string   `json:"deviceModel"`
+	OSName            string   `json:"osName"`
+	OSVersion         string   `json:"osVersion"`
+	AndroidSDKVersion int      `json:"androidSdkVersion"`
+	RequiresPOTokens  []string `json:"requiresPoTokens"`
+	SupportsCookies   bool     `json:"supportsCookies"`
+	SupportsPlaylists bool     `json:"supportsPlaylists"`
 }
 
 // loadProfileOverrides reads a client-profile override file and returns the
@@ -76,9 +75,9 @@ func loadProfileOverrides(path string) ([]youtube.ClientProfile, error) {
 		if sp.Name == "" || sp.InnerTubeName == "" || sp.Version == "" || sp.InnerTubeID <= 0 {
 			return nil, fmt.Errorf("profile override %s: profile %d needs name, innerTubeName, version, and a positive innerTubeId", path, i)
 		}
-		scope, err := potoken.ParseScope(sp.RequiresPOToken)
+		scopes, err := parsePOTokenScopes(path, sp)
 		if err != nil {
-			return nil, fmt.Errorf("profile override %s: profile %q: %w", path, sp.Name, err)
+			return nil, err
 		}
 		profiles = append(profiles, youtube.BuildProfile(youtube.ClientProfile{
 			Name:              sp.Name,
@@ -92,10 +91,40 @@ func loadProfileOverrides(path string) ([]youtube.ClientProfile, error) {
 			OSName:            sp.OSName,
 			OSVersion:         sp.OSVersion,
 			AndroidSDKVersion: sp.AndroidSDKVersion,
-			RequiresPOToken:   scope,
+			RequiresPOTokens:  scopes,
 			SupportsCookies:   sp.SupportsCookies,
 			SupportsPlaylists: sp.SupportsPlaylists,
 		}))
 	}
 	return profiles, nil
+}
+
+// parsePOTokenScopes decodes a profile's requiresPoTokens list into the scopes
+// WaxTap can apply. It is deliberately strict, like the rest of the loader: an
+// unknown name, a scope with no injection path yet (for example, "subtitles"), or
+// "none" mixed with real scopes is a hard error. BuildProfile later clones and
+// deduplicates the result.
+func parsePOTokenScopes(path string, sp profileSpec) ([]potoken.Scope, error) {
+	var scopes []potoken.Scope
+	hasNone := false
+	for _, name := range sp.RequiresPOTokens {
+		scope, err := potoken.ParseScope(name)
+		if err != nil {
+			return nil, fmt.Errorf("profile override %s: profile %q: %w", path, sp.Name, err)
+		}
+		switch scope {
+		case potoken.ScopeNone:
+			hasNone = true
+		case potoken.ScopePlayer, potoken.ScopeGVS:
+			scopes = append(scopes, scope)
+		default:
+			return nil, fmt.Errorf("profile override %s: profile %q: PO-token scope %q is not supported by profile overrides (supported: player, gvs)",
+				path, sp.Name, scope)
+		}
+	}
+	if hasNone && len(scopes) > 0 {
+		return nil, fmt.Errorf("profile override %s: profile %q: %q cannot be combined with other PO-token scopes",
+			path, sp.Name, "none")
+	}
+	return scopes, nil
 }

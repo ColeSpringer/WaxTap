@@ -40,7 +40,7 @@ reference for the knobs that let you respond without rebuilding.
 4. **Fix the smallest surface.** Breakage usually lands in one of three files:
    | Symptom | File |
    |---|---|
-   | Bot wall / playability `ERROR` / stale client version | `youtube/profile.go` (client versions, user agents, device fingerprints, `RequiresPOToken`) |
+   | Bot wall / playability `ERROR` / stale client version | `youtube/profile.go` (client versions, user agents, device fingerprints, `RequiresPOTokens`) |
    | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators) |
    | Player response shape changed (parse/format extraction) | `youtube/playerresponse.go` |
 
@@ -94,7 +94,7 @@ template mirrors the current defaults in `youtube/profile.go`:
       "osName": "Android",
       "osVersion": "12L",
       "androidSdkVersion": 32,
-      "requiresPoToken": "none",
+      "requiresPoTokens": [],
       "supportsPlaylists": false
     },
     {
@@ -104,7 +104,7 @@ template mirrors the current defaults in `youtube/profile.go`:
       "version": "19.45.4",
       "userAgent": "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
       "deviceModel": "iPhone16,2",
-      "requiresPoToken": "none",
+      "requiresPoTokens": [],
       "supportsPlaylists": false
     },
     {
@@ -113,7 +113,7 @@ template mirrors the current defaults in `youtube/profile.go`:
       "innerTubeId": 56,
       "version": "1.20250310.01.00",
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "requiresPoToken": "none",
+      "requiresPoTokens": [],
       "supportsPlaylists": false
     },
     {
@@ -122,7 +122,7 @@ template mirrors the current defaults in `youtube/profile.go`:
       "innerTubeId": 1,
       "version": "2.20250310.01.00",
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "requiresPoToken": "gvs",
+      "requiresPoTokens": ["player", "gvs"],
       "supportsPlaylists": true
     }
   ]
@@ -131,7 +131,9 @@ template mirrors the current defaults in `youtube/profile.go`:
 
 Notes:
 
-- `requiresPoToken` is a scope name: `none`, `gvs`, `player`, or `subtitles`.
+- `requiresPoTokens` is a list of scope names. WaxTap currently applies `player`
+  and `gvs`; omit the field or use `[]` for none. The `none` sentinel must appear
+  alone, and unsupported scopes such as `subtitles` are rejected.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - The loader is strict: unknown keys, trailing data after the JSON document, an
@@ -146,9 +148,9 @@ URLs that now need a PO token, refresh the profile deliberately:
 
 - Verify `clientName`, numeric `innerTubeId`, version, user agent, device fields,
   and whether the client should post to a different InnerTube host.
-- Recheck `requiresPoToken` against live behavior and current extractor
-  references. If a client needs a player-scope token during extraction, wire that
-  hook before moving it earlier in the default chain.
+- Recheck `requiresPoTokens` against live behavior. Player-scope tokens go in the
+  `/player` body during extraction, and GVS-scope tokens go on stream URLs during
+  resolution. WEB declares `["player", "gvs"]`.
 - Keep at least one playlist-capable profile (`WEB` today) in the chain unless
   playlist support has moved elsewhere.
 - Add or update a fixture that captures the new behavior before changing parser
@@ -176,9 +178,15 @@ instead of re-downloading it.
 ## PO tokens
 
 WaxTap does not ship a PO-token generator. It accepts a caller-supplied
-`potoken.Provider` through `waxtap.Options.POTokenProvider`; if the winning
-profile requires a token and no provider is configured, resolution fails with
+`potoken.Provider` through `waxtap.Options.POTokenProvider`; if a profile requires
+a token and no provider is configured, extraction or resolution fails with
 `ErrNeedsPOToken`.
+
+Two scopes are implemented:
+
+- `player`: sent as `serviceIntegrityDimensions.poToken` in the `/player` request
+  body during extraction.
+- `gvs`: added to the googlevideo stream URL during resolution.
 
 When integrating a provider:
 
@@ -188,14 +196,14 @@ When integrating a provider:
   browser/session identity. If you let WaxTap build its default client, its jar is
   internal to WaxTap and cannot be shared with an external provider.
 - **Use the threaded user agent.** `potoken.Request.UserAgent` carries the exact
-  UA the googlevideo request will send. Providers that bind tokens to request
-  headers should mint with that UA.
+  UA WaxTap will send for the request that needs the token. Providers that bind
+  tokens to request headers should mint with that UA.
 - **Use the threaded failure.** On an expired or invalid stream token,
   `youtube.Client.ResolveWithFailure` passes the triggering
   `potoken.HTTPFailure` into the provider for diagnosis before re-resolving.
 
-Only stream-time token requests are wired today. A player-scope PO hook at
-extraction time should be added when a maintained profile actually requires it.
+Cache by scope and binding. Player and GVS tokens are requested separately so a
+provider can mint or reuse the right token for each scope.
 
 ## Fixtures policy
 

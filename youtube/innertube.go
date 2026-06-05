@@ -29,6 +29,16 @@ type innertubeRequest struct {
 	ContentCheckOK  bool             `json:"contentCheckOk,omitempty"`
 	RacyCheckOK     bool             `json:"racyCheckOk,omitempty"`
 	Params          string           `json:"params,omitempty"`
+	// ServiceIntegrityDimensions carries the player-scope PO token in the
+	// request body. Keep it as a pointer so omitempty drops the field entirely
+	// for profiles that do not send a player token.
+	ServiceIntegrityDimensions *serviceIntegrityDimensions `json:"serviceIntegrityDimensions,omitempty"`
+}
+
+// serviceIntegrityDimensions contains YouTube's player-request integrity fields.
+// WaxTap currently sets only the PO token.
+type serviceIntegrityDimensions struct {
+	POToken string `json:"poToken,omitempty"`
 }
 
 type innertubeContext struct {
@@ -82,8 +92,8 @@ func (c *Client) newInnertubeContext(p ClientProfile, s *session) innertubeConte
 	}
 }
 
-func (c *Client) newPlayerRequest(p ClientProfile, s *session, videoID string) innertubeRequest {
-	return innertubeRequest{
+func (c *Client) newPlayerRequest(p ClientProfile, s *session, videoID, poToken string) innertubeRequest {
+	req := innertubeRequest{
 		VideoID:        videoID,
 		Context:        c.newInnertubeContext(p, s),
 		ContentCheckOK: true,
@@ -92,6 +102,10 @@ func (c *Client) newPlayerRequest(p ClientProfile, s *session, videoID string) i
 			ContentPlaybackContext: contentPlaybackContext{HTML5Preference: "HTML5_PREF_WANTS"},
 		},
 	}
+	if poToken != "" {
+		req.ServiceIntegrityDimensions = &serviceIntegrityDimensions{POToken: poToken}
+	}
+	return req
 }
 
 func (c *Client) newPlaylistRequest(p ClientProfile, s *session, playlistID, continuation string) innertubeRequest {
