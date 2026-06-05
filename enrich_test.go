@@ -16,7 +16,7 @@ func TestEnrichEntriesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	pl := &Playlist{Entries: []PlaylistEntry{{VideoID: "jNQXAC9IVRw"}, {VideoID: "dQw4w9WgXcQ"}}}
+	pl := &Playlist{Entries: []PlaylistEntry{{VideoID: "testVideo01"}, {VideoID: "testVideo02"}}}
 	if err := c.enrichEntries(ctx, pl); !errors.Is(err, context.Canceled) {
 		t.Errorf("enrichEntries(canceled) = %v, want context.Canceled", err)
 	}

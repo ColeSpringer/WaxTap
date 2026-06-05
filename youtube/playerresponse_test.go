@@ -27,7 +27,7 @@ func TestParsePlayerResponse_OK(t *testing.T) {
 		t.Fatalf("playabilityError = %v, want nil", perr)
 	}
 
-	v, raw, err := pr.toVideo("dQw4w9WgXcQ")
+	v, raw, err := pr.toVideo("testVideo01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestParseWatchPageFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseWatchPage: %v", err)
 	}
-	v, _, err := pr.toVideo("dQw4w9WgXcQ")
+	v, _, err := pr.toVideo("testVideo01")
 	if err != nil {
 		t.Fatal(err)
 	}

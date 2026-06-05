@@ -77,7 +77,7 @@ func TestExtract_DumpsOnFailure(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	if _, err := c.Extract(context.Background(), "dQw4w9WgXcQ"); err == nil {
+	if _, err := c.Extract(context.Background(), "testVideo01"); err == nil {
 		t.Fatal("expected extraction to fail")
 	}
 	entries, err := os.ReadDir(dir)

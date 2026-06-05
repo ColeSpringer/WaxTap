@@ -8,7 +8,7 @@ import (
 )
 
 func TestExtractVideoID(t *testing.T) {
-	const id = "dQw4w9WgXcQ"
+	const id = "testVideo01"
 	tests := []struct {
 		name  string
 		input string
@@ -73,9 +73,9 @@ func TestExtractPlaylistID(t *testing.T) {
 	}{
 		{"bare", list, list, nil},
 		{"playlist url", "https://www.youtube.com/playlist?list=" + list, list, nil},
-		{"watch with list", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=" + list, list, nil},
-		{"radio mix", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDabcdefghij", "RDabcdefghij", nil},
-		{"not a playlist", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "", waxerr.ErrInvalidPlaylistID},
+		{"watch with list", "https://www.youtube.com/watch?v=testVideo01&list=" + list, list, nil},
+		{"radio mix", "https://www.youtube.com/watch?v=testVideo01&list=RDabcdefghij", "RDabcdefghij", nil},
+		{"not a playlist", "https://www.youtube.com/watch?v=testVideo01", "", waxerr.ErrInvalidPlaylistID},
 		{"garbage", "hello", "", waxerr.ErrInvalidPlaylistID},
 	}
 

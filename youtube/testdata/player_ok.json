@@ -38,7 +38,7 @@
     ]
   },
   "videoDetails": {
-    "videoId": "dQw4w9WgXcQ",
+    "videoId": "testVideo01",
     "title": "Test Song",
     "lengthSeconds": "212",
     "channelId": "UCabcdefghijklmnopqrstuv",
@@ -48,7 +48,7 @@
     "isLiveContent": false,
     "thumbnail": {
       "thumbnails": [
-        { "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", "width": 480, "height": 360 }
+        { "url": "https://i.ytimg.com/vi/testVideo01/hqdefault.jpg", "width": 480, "height": 360 }
       ]
     }
   },

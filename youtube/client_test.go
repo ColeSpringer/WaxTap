@@ -49,7 +49,7 @@ func TestExtract_FirstClientSucceeds(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	ext, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	ext, err := c.Extract(context.Background(), "testVideo01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 		return fixtureResp(http.StatusOK, ok), nil
 	}))
 
-	ext, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	ext, err := c.Extract(context.Background(), "testVideo01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestExtract_PlayabilityErrorTriesAllClients(t *testing.T) {
 		return fixtureResp(http.StatusOK, un), nil
 	}))
 
-	_, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	_, err := c.Extract(context.Background(), "testVideo01")
 	if !errors.Is(err, waxerr.ErrVideoUnavailable) {
 		t.Fatalf("err = %v, want ErrVideoUnavailable", err)
 	}
@@ -136,7 +136,7 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	ext, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	ext, err := c.Extract(context.Background(), "testVideo01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestExtract_RateLimitShortCircuits(t *testing.T) {
 		return resp, nil
 	}))
 
-	_, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	_, err := c.Extract(context.Background(), "testVideo01")
 	if !errors.Is(err, waxerr.ErrRateLimited) {
 		t.Fatalf("err = %v, want ErrRateLimited", err)
 	}
@@ -173,7 +173,7 @@ func TestExtract_DefaultLocale(t *testing.T) {
 		body, _ = io.ReadAll(r.Body)
 		return fixtureResp(http.StatusOK, ok), nil
 	}))
-	if _, err := c.Extract(context.Background(), "dQw4w9WgXcQ"); err != nil {
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(body, []byte(`"hl":"en"`)) || !bytes.Contains(body, []byte(`"gl":"US"`)) {
@@ -194,7 +194,7 @@ func TestExtract_ConfiguredLocale(t *testing.T) {
 			return fixtureResp(http.StatusOK, ok), nil
 		})}}),
 	})
-	if _, err := c.Extract(context.Background(), "dQw4w9WgXcQ"); err != nil {
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(body, []byte(`"hl":"de"`)) || !bytes.Contains(body, []byte(`"gl":"DE"`)) {

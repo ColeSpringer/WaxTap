@@ -25,7 +25,7 @@ func TestExtract_PlayabilityErrorFallsThrough(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	ext, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	ext, err := c.Extract(context.Background(), "testVideo01")
 	if err != nil {
 		t.Fatalf("extract should fall through ERROR to the next client: %v", err)
 	}

@@ -217,7 +217,9 @@ git push origin vX.Y.Z      # triggers .github/workflows/release.yml
 ```
 
 The workflow runs `goreleaser release --clean` and creates a **draft** GitHub
-release for a final review before publishing. To dry-run locally:
-`goreleaser release --snapshot --clean`. `go install
-github.com/colespringer/waxtap/cmd/waxtap@vX.Y.Z` also works (the version
-subcommand reads module build info when no ldflags are injected).
+release for final review before publishing. For a local dry run, use
+`goreleaser release --snapshot --clean`; for a config-only check, use
+`goreleaser check`. After publishing,
+`go install github.com/colespringer/waxtap/cmd/waxtap@vX.Y.Z` should also work
+because the version subcommand reads module build info when no ldflags are
+injected.

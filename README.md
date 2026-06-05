@@ -56,20 +56,70 @@ keeps the selected source stream and does not re-encode.
 
 ## Install
 
-**CLI:**
+Install either the CLI or the Go package. The CLI is meant to run from a shell;
+the release archives do not install a desktop app. See [Using the prebuilt
+binaries](#using-the-prebuilt-binaries) for platform notes.
+
+**With Go:**
 
 ```sh
 go install github.com/colespringer/waxtap/cmd/waxtap@latest
 ```
 
-Tagged releases also ship prebuilt binaries for Linux, macOS, and Windows on the
-GitHub Releases page.
+This installs `waxtap` into `$(go env GOBIN)` (or `$(go env GOPATH)/bin`); make
+sure that directory is on your `PATH`.
+
+**Prebuilt binaries:** tagged releases include Linux, macOS, and Windows
+archives (amd64/arm64) on the GitHub Releases page.
 
 **Library:**
 
 ```sh
 go get github.com/colespringer/waxtap
 ```
+
+### Using the prebuilt binaries
+
+Each release archive contains the `waxtap` executable and documentation. Extract
+the archive for your platform, put the executable somewhere on your `PATH`, then
+run it from a terminal like any other CLI.
+
+**Linux / macOS:**
+
+```sh
+# 1. Extract the archive for your platform
+tar -xzf waxtap_*_linux_amd64.tar.gz      # or _darwin_arm64, etc.
+
+# 2. Move it to a directory on your PATH
+sudo mv waxtap /usr/local/bin/            # or ~/.local/bin, ~/bin, etc.
+
+# 3. Run it from a terminal
+waxtap --help
+```
+
+The archive preserves the executable bit; a standalone downloaded binary may need
+`chmod +x waxtap` first.
+
+> **macOS Gatekeeper:** the binaries are not code-signed, so macOS may block the
+> first launch ("cannot be opened because Apple cannot check it for malware" /
+> "developer cannot be verified"). Clear the quarantine flag for the installed
+> binary:
+>
+> ```sh
+> xattr -d com.apple.quarantine /usr/local/bin/waxtap
+> ```
+>
+> You can also right-click the binary in Finder and choose **Open** the first
+> time.
+
+**Windows:**
+
+1. Unzip `waxtap_*_windows_amd64.zip`.
+2. Move `waxtap.exe` into a folder on your `PATH` (or add its folder to `PATH`).
+3. Open **PowerShell** or **Command Prompt** and run `waxtap --help`.
+
+> **SmartScreen:** because the `.exe` is not signed, Windows may show "Windows
+> protected your PC". Choose **More info > Run anyway** on first launch.
 
 ## Usage
 
@@ -82,17 +132,17 @@ command has `--help`.
 
 ```sh
 # Inspect audio formats (no download)
-waxtap info https://youtu.be/dQw4w9WgXcQ
-waxtap formats https://youtu.be/dQw4w9WgXcQ
+waxtap info <video-url>
+waxtap formats <video-url>
 
 # Download the best audio with no re-encode (the default, keep-source)
-waxtap download https://youtu.be/dQw4w9WgXcQ -o track
+waxtap download <video-url> -o track
 
 # Download and transcode to FLAC in a single ffmpeg pass
-waxtap download https://youtu.be/dQw4w9WgXcQ --transcode flac -o track.flac
+waxtap download <video-url> --transcode flac -o track.flac
 
 # Remove SponsorBlock non-music segments and normalize loudness in one pass
-waxtap download <url> --cut-sponsorblock --transcode mp3 --normalize --loudness-target -14 -o track.mp3
+waxtap download <video-url> --cut-sponsorblock --transcode mp3 --normalize --loudness-target -14 -o track.mp3
 
 # Process a LOCAL file (no network)
 waxtap transcode song.flac song.mp3
@@ -126,9 +176,9 @@ func main() {
 	}
 
 	// Download the best audio, remove SponsorBlock "music_offtopic" segments, and
-	// transcode to FLAC in one fused ffmpeg pass.
+	// transcode to FLAC in one ffmpeg pass.
 	res, err := client.Download(context.Background(), waxtap.Request{
-		URL: "https://youtu.be/dQw4w9WgXcQ",
+		URL: "https://youtu.be/VIDEO_ID_01",
 		ProcessSpec: waxtap.ProcessSpec{
 			Transcode: &waxtap.TranscodeSpec{Format: waxtap.FormatFLAC},
 			Cut: &waxtap.CutSpec{

@@ -56,23 +56,23 @@ func TestHeaderRange_Validate(t *testing.T) {
 		name             string
 		resp             *http.Response
 		start, end       int64
-		ranged           bool
 		wantErr          bool
 		wantStatusError  bool
 		wantIgnoredRange bool
 	}{
-		{"ranged 206 correct length", resp(206, 90, nil), 10, 99, true, false, false, false},
-		{"ranged 206 wrong length", resp(206, 50, nil), 10, 99, true, true, false, false},
-		{"ranged 206 unknown length", resp(206, -1, nil), 10, 99, true, false, false, false},
-		{"ranged 200 ignored range", resp(200, 100, nil), 10, 99, true, true, false, true},
-		{"ranged 404", resp(404, 0, nil), 10, 99, true, true, true, false},
-		{"unranged 200", resp(200, 100, nil), 0, -1, false, false, false, false},
-		{"unranged 500", resp(500, 0, nil), 0, -1, false, true, true, false},
-		{"open-ended 206", resp(206, -1, nil), 4000, -1, true, false, false, false},
+		{"bounded 206 correct length", resp(206, 90, nil), 10, 99, false, false, false},
+		{"bounded 206 wrong length", resp(206, 50, nil), 10, 99, true, false, false},
+		{"bounded 206 unknown length", resp(206, -1, nil), 10, 99, false, false, false},
+		{"bounded 200 ignored range", resp(200, 100, nil), 10, 99, true, false, true},
+		{"bounded 404", resp(404, 0, nil), 10, 99, true, true, false},
+		{"open-ended from zero 200 is safe", resp(200, 100, nil), 0, -1, false, false, false},
+		{"open-ended resume rejects 200", resp(200, 100, nil), 4000, -1, true, false, true},
+		{"open-ended 500", resp(500, 0, nil), 0, -1, true, true, false},
+		{"open-ended 206", resp(206, -1, nil), 4000, -1, false, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := HeaderRange{}.Validate(tt.resp, tt.start, tt.end, tt.ranged)
+			err := HeaderRange{}.Validate(tt.resp, tt.start, tt.end)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -89,15 +89,19 @@ func TestHeaderRange_Validate(t *testing.T) {
 }
 
 func TestQueryRange_Validate(t *testing.T) {
-	// googlevideo answers a &range= query with 200, not 206.
-	if err := (QueryRange{}).Validate(resp(200, 90, nil), 10, 99, true); err != nil {
-		t.Errorf("200 ranged: unexpected error %v", err)
+	// googlevideo responds to &range= with 200, not 206.
+	if err := (QueryRange{}).Validate(resp(200, 90, nil), 10, 99); err != nil {
+		t.Errorf("200 bounded: unexpected error %v", err)
 	}
-	if err := (QueryRange{}).Validate(resp(206, 90, nil), 10, 99, true); err == nil {
+	if err := (QueryRange{}).Validate(resp(206, 90, nil), 10, 99); err == nil {
 		t.Errorf("206 should be rejected by QueryRange (expects 200)")
 	}
-	if err := (QueryRange{}).Validate(resp(200, 50, nil), 10, 99, true); err == nil {
+	if err := (QueryRange{}).Validate(resp(200, 50, nil), 10, 99); err == nil {
 		t.Errorf("wrong length should error")
+	}
+	// Without a known end, there is no byte count to validate.
+	if err := (QueryRange{}).Validate(resp(200, -1, nil), 0, -1); err != nil {
+		t.Errorf("200 open-ended: unexpected error %v", err)
 	}
 }
 
@@ -130,22 +134,22 @@ func TestHeaderRange_ValidateContentRangeMismatch(t *testing.T) {
 		return resp(http.StatusPartialContent, cl, h)
 	}
 	// A matching length is not enough if the bytes belong to a different offset.
-	if err := (HeaderRange{}).Validate(mk("bytes 0-999/8000", 1000), 1000, 1999, true); err == nil {
+	if err := (HeaderRange{}).Validate(mk("bytes 0-999/8000", 1000), 1000, 1999); err == nil {
 		t.Error("expected error for Content-Range starting at the wrong offset")
 	}
 	// Wrong end.
-	if err := (HeaderRange{}).Validate(mk("bytes 1000-1998/8000", 999), 1000, 1999, true); err == nil {
+	if err := (HeaderRange{}).Validate(mk("bytes 1000-1998/8000", 999), 1000, 1999); err == nil {
 		t.Error("expected error for Content-Range ending at the wrong offset")
 	}
 	// Correct Content-Range passes.
-	if err := (HeaderRange{}).Validate(mk("bytes 1000-1999/8000", 1000), 1000, 1999, true); err != nil {
+	if err := (HeaderRange{}).Validate(mk("bytes 1000-1999/8000", 1000), 1000, 1999); err != nil {
 		t.Errorf("correct Content-Range: unexpected error %v", err)
 	}
 	// Open-ended resume: only the start offset is verified.
-	if err := (HeaderRange{}).Validate(mk("bytes 4000-7999/8000", -1), 4000, -1, true); err != nil {
+	if err := (HeaderRange{}).Validate(mk("bytes 4000-7999/8000", -1), 4000, -1); err != nil {
 		t.Errorf("open-ended resume: unexpected error %v", err)
 	}
-	if err := (HeaderRange{}).Validate(mk("bytes 3999-7999/8000", -1), 4000, -1, true); err == nil {
+	if err := (HeaderRange{}).Validate(mk("bytes 3999-7999/8000", -1), 4000, -1); err == nil {
 		t.Error("expected error for open-ended resume starting at the wrong offset")
 	}
 }

@@ -73,6 +73,13 @@ func (r *progressReporter) finish() {
 }
 
 func (r *progressReporter) renderDownloading(ev waxtap.Event) {
+	// Non-TTY output is line-oriented: announce the stage once and leave byte
+	// counts to the final summary. The transition event carries no progress data,
+	// and small downloads can finish before a progress snapshot arrives.
+	if !r.tty {
+		r.renderStage(waxtap.StageDownloading)
+		return
+	}
 	var line string
 	if ev.Total > 0 {
 		frac := float64(ev.Bytes) / float64(ev.Total)
@@ -81,15 +88,7 @@ func (r *progressReporter) renderDownloading(ev waxtap.Event) {
 	} else {
 		line = fmt.Sprintf("downloading %s", humanBytes(ev.Bytes))
 	}
-	if r.tty {
-		r.writeLineLocked(line)
-		return
-	}
-	// Off a TTY, announce the download stage once and skip byte-by-byte updates.
-	if !r.haveStg || r.lastStg != waxtap.StageDownloading {
-		fmt.Fprintln(r.w, line)
-		r.lastStg, r.haveStg = waxtap.StageDownloading, true
-	}
+	r.writeLineLocked(line)
 }
 
 func (r *progressReporter) renderStage(s waxtap.Stage) {

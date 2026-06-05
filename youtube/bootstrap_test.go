@@ -75,7 +75,7 @@ func TestExtract_BootstrapsRealVisitorData(t *testing.T) {
 	}))
 
 	for i := 0; i < 2; i++ {
-		if _, err := c.Extract(context.Background(), "dQw4w9WgXcQ"); err != nil {
+		if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
 			t.Fatalf("extract %d: %v", i, err)
 		}
 	}
@@ -107,7 +107,7 @@ func TestExtract_BootstrapFailureFallsBack(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	ext, err := c.Extract(context.Background(), "dQw4w9WgXcQ")
+	ext, err := c.Extract(context.Background(), "testVideo01")
 	if err != nil {
 		t.Fatalf("extraction should survive a failed bootstrap: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestExtract_NoJarSkipsBootstrap(t *testing.T) {
 		t.Errorf("unexpected request (bootstrap should be skipped without a jar): %s", r.URL)
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
-	if _, err := c.Extract(context.Background(), "dQw4w9WgXcQ"); err != nil {
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
 		t.Fatal(err)
 	}
 }

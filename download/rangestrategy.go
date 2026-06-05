@@ -9,23 +9,21 @@ import (
 	"github.com/colespringer/waxtap/waxerr"
 )
 
-// RangeStrategy defines how a byte range is requested and how the response is
-// validated. Standard HTTP servers use a Range header and answer 206; some media
-// origins expect a &range= query parameter and answer 200 with the requested
-// bytes.
+// RangeStrategy describes the wire format for byte ranges and the checks needed
+// before the downloader writes bytes at an offset. Standard HTTP servers use a
+// Range header and answer 206; some media origins expect a &range= query
+// parameter and answer 200 with the requested bytes.
 //
 // Ranges are inclusive: [start, end] selects end-start+1 bytes. An end < 0 means
-// "to the end of the resource" (open-ended), used by the streaming sinks when
-// resuming from an offset.
+// "to the end of the resource" (open-ended), used by the streaming sinks for the
+// initial bytes=0- GET and when resuming from an offset.
 type RangeStrategy interface {
-	// Apply sets the range on req. It is only called when a range is requested
-	// (start > 0 or end >= 0).
+	// Apply adds the requested range to req. The downloader calls it for every
+	// fetch, including the initial open-ended bytes=0- request.
 	Apply(req *http.Request, start, end int64)
-	// Validate checks that resp is a correct answer for the requested range.
-	// ranged reports whether Apply was called. It returns an error when the
-	// status is unexpected, the server ignored the range, or the declared length
-	// disagrees with the request.
-	Validate(resp *http.Response, start, end int64, ranged bool) error
+	// Validate rejects responses that cannot be safely copied to the requested
+	// offset: wrong status, ignored range, or conflicting range/length headers.
+	Validate(resp *http.Response, start, end int64) error
 }
 
 // HeaderRange requests ranges with the standard Range header and expects a 206
@@ -41,22 +39,18 @@ func (HeaderRange) Apply(req *http.Request, start, end int64) {
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 }
 
-// Validate accepts 206 for a ranged request and 200 for an un-ranged one. A 200
-// answer to a ranged request means the server ignored the Range header and
-// returned the whole resource, which would corrupt offset-based writes, so it is
-// rejected.
-func (HeaderRange) Validate(resp *http.Response, start, end int64, ranged bool) error {
-	if !ranged {
-		if resp.StatusCode != http.StatusOK {
-			return statusError(resp)
-		}
-		return nil
-	}
+// Validate accepts 206 for any range. A 200 is safe only for bytes=0-, where the
+// full body starts at the requested offset. For bounded chunks and resumes, 200
+// means the server ignored the Range header and would corrupt an offset write.
+func (HeaderRange) Validate(resp *http.Response, start, end int64) error {
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
 		return checkRangedLength(resp, start, end)
 	case http.StatusOK:
-		return fmt.Errorf("download: server ignored Range header (got 200 for bytes=%d-%d)", start, end)
+		if start == 0 && end < 0 {
+			return nil
+		}
+		return fmt.Errorf("download: server ignored Range header (got 200 for %s)", rangeLabel(start, end))
 	default:
 		return statusError(resp)
 	}
@@ -77,15 +71,14 @@ func (QueryRange) Apply(req *http.Request, start, end int64) {
 	req.URL.RawQuery = q.Encode()
 }
 
-// Validate accepts 200 and checks the declared length for a bounded range.
-func (QueryRange) Validate(resp *http.Response, start, end int64, ranged bool) error {
+// Validate accepts 200 and verifies the declared range or length when the
+// response provides enough information. Open-ended requests have no expected byte
+// count, so Content-Length alone is not useful.
+func (QueryRange) Validate(resp *http.Response, start, end int64) error {
 	if resp.StatusCode != http.StatusOK {
 		return statusError(resp)
 	}
-	if ranged {
-		return checkRangedLength(resp, start, end)
-	}
-	return nil
+	return checkRangedLength(resp, start, end)
 }
 
 // checkRangedLength validates that a ranged response covers the requested span.
@@ -120,6 +113,15 @@ func statusError(resp *http.Response) error {
 		e.URL = resp.Request.URL.String()
 	}
 	return e
+}
+
+// rangeLabel renders the same bytes=start- or bytes=start-end form used on the
+// wire.
+func rangeLabel(start, end int64) string {
+	if end < 0 {
+		return fmt.Sprintf("bytes=%d-", start)
+	}
+	return fmt.Sprintf("bytes=%d-%d", start, end)
 }
 
 // parseContentRange parses a "bytes start-end/total" header. ok is false when the

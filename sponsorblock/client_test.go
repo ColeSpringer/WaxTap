@@ -15,7 +15,7 @@ import (
 	"github.com/colespringer/waxtap/waxerr"
 )
 
-const testVideoID = "dQw4w9WgXcQ"
+const testVideoID = "testVideo01"
 
 // serveJSON starts a test server returning status and body, and records the last
 // request path for prefix/route assertions.

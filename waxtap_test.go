@@ -364,7 +364,7 @@ func TestDownloadRejectsPlaylistURL(t *testing.T) {
 
 func TestDownloadRequiresOutput(t *testing.T) {
 	c := newOfflineClient(t)
-	_, err := c.Download(context.Background(), Request{URL: "dQw4w9WgXcQ"})
+	_, err := c.Download(context.Background(), Request{URL: "testVideo01"})
 	if err == nil {
 		t.Fatal("Download without Output should error")
 	}
@@ -386,7 +386,7 @@ func TestDownloadSkipIfExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := c.Download(context.Background(), Request{
-		URL:         "dQw4w9WgXcQ",
+		URL:         "testVideo01",
 		ProcessSpec: ProcessSpec{Output: ToFile(out), SkipIfExists: true},
 	})
 	if err != nil {

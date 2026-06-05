@@ -11,8 +11,8 @@ import (
 	"github.com/colespringer/waxtap/sponsorblock"
 )
 
-// ExampleClient_Download downloads the best audio stream to a file without
-// re-encoding, the default keep-source behavior.
+// ExampleClient_Download downloads the best audio stream to a file. With no
+// processing requested, WaxTap keeps the source encoding.
 func ExampleClient_Download() {
 	client, err := waxtap.New(waxtap.Options{})
 	if err != nil {
@@ -20,7 +20,7 @@ func ExampleClient_Download() {
 	}
 
 	res, err := client.Download(context.Background(), waxtap.Request{
-		URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		URL: "https://www.youtube.com/watch?v=VIDEO_ID_01",
 		ProcessSpec: waxtap.ProcessSpec{
 			Output: waxtap.ToFile("track.opus"),
 		},
@@ -31,8 +31,8 @@ func ExampleClient_Download() {
 	fmt.Printf("%s -> %s (%d bytes)\n", res.VideoID, res.OutputPath, res.OutputBytes)
 }
 
-// ExampleClient_Download_transcodeAndSponsorBlock downloads, removes SponsorBlock
-// "music_offtopic" segments, and transcodes to FLAC in a single fused ffmpeg
+// ExampleClient_Download_transcodeAndSponsorBlock downloads a video, removes
+// SponsorBlock "music_offtopic" segments, and transcodes to FLAC in one ffmpeg
 // pass. SourcePolicy defaults to MinimizeLoss.
 func ExampleClient_Download_transcodeAndSponsorBlock() {
 	client, err := waxtap.New(waxtap.Options{})
@@ -41,7 +41,7 @@ func ExampleClient_Download_transcodeAndSponsorBlock() {
 	}
 
 	res, err := client.Download(context.Background(), waxtap.Request{
-		URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		URL: "https://www.youtube.com/watch?v=VIDEO_ID_01",
 		ProcessSpec: waxtap.ProcessSpec{
 			Transcode: &waxtap.TranscodeSpec{Format: waxtap.FormatFLAC},
 			Cut: &waxtap.CutSpec{
@@ -71,7 +71,7 @@ func ExampleClient_Stream() {
 	}
 
 	rc, info, err := client.Stream(context.Background(), waxtap.Request{
-		URL: "https://youtu.be/dQw4w9WgXcQ",
+		URL: "https://youtu.be/VIDEO_ID_01",
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -127,13 +127,13 @@ func ExampleClient_Enumerate() {
 		log.Fatal(err)
 	}
 	for _, entry := range pl.Entries {
-		// The video ID is the stable key WaxBin dedupes on.
+		// The video ID is the stable key WaxTap uses for deduplication.
 		fmt.Printf("%d. %s (%s)\n", entry.Index, entry.Title, entry.VideoID)
 	}
 }
 
-// ExampleClient_MeasureAlbum measures a set of files as an album for ReplayGain
-// album-gain tagging, the non-destructive path for library-wide consistency.
+// ExampleClient_MeasureAlbum measures several files as one album, useful for
+// ReplayGain-style album tags without rewriting the files.
 func ExampleClient_MeasureAlbum() {
 	client, err := waxtap.New(waxtap.Options{})
 	if err != nil {
@@ -160,7 +160,7 @@ func ExampleClient_Info() {
 		log.Fatal(err)
 	}
 
-	video, err := client.Info(context.Background(), "dQw4w9WgXcQ", waxtap.InfoBasic)
+	video, err := client.Info(context.Background(), "VIDEO_ID_01", waxtap.InfoBasic)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -188,11 +188,13 @@ func (e *needRefreshError) Error() string {
 	return "download: stream URL needs refresh"
 }
 
-// fetch performs one GET for the byte range [start, end]. end < 0 requests an
-// open-ended range from start to the end of the resource; start == 0 with
-// end < 0 issues a plain (un-ranged) GET. On success the caller owns resp.Body.
-// A 403/410 is returned as *needRefreshError; other unexpected statuses become a
-// *waxerr.HTTPStatusError via the range strategy's validation.
+// fetch performs one GET and applies the Source's range strategy to every
+// request. A bounded request asks for [start, end]; end < 0 asks for
+// bytes=start-, including the initial bytes=0- streaming request. Some media
+// origins throttle plain GETs to playback speed but serve ranged requests at full
+// speed. On success the caller owns resp.Body. A 403/410 is returned as
+// *needRefreshError; other unexpected statuses become a *waxerr.HTTPStatusError
+// via the strategy's validation.
 func (d *Downloader) fetch(ctx context.Context, src Source, start, end int64) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
@@ -208,10 +210,7 @@ func (d *Downloader) fetch(ctx context.Context, src Source, start, end int64) (*
 	if strategy == nil {
 		strategy = HeaderRange{}
 	}
-	ranged := start > 0 || end >= 0
-	if ranged {
-		strategy.Apply(req, start, end)
-	}
+	strategy.Apply(req, start, end)
 
 	resp, err := d.http.Do(req)
 	if err != nil {
@@ -224,7 +223,7 @@ func (d *Downloader) fetch(ctx context.Context, src Source, start, end int64) (*
 		drainClose(resp)
 		return nil, &needRefreshError{failure: failure}
 	}
-	if err := strategy.Validate(resp, start, end, ranged); err != nil {
+	if err := strategy.Validate(resp, start, end); err != nil {
 		drainClose(resp)
 		return nil, err
 	}

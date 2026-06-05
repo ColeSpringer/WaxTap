@@ -2,6 +2,8 @@ module github.com/colespringer/waxtap
 
 go 1.26.3
 
+retract v1.0.0
+
 require (
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/spf13/cobra v1.10.2

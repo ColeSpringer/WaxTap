@@ -64,9 +64,9 @@ func TestToWriter_RefreshOnExpiry(t *testing.T) {
 	}
 }
 
-// dropOnceOrigin serves only the first half of the payload on the first plain
-// GET (while declaring the full length), so the client sees a premature EOF and
-// must resume. Subsequent ranged requests are served normally.
+// dropOnceOrigin declares the full payload but closes the first response halfway.
+// That forces the downloader through its premature-EOF resume path. Later
+// requests are served normally.
 type dropOnceOrigin struct {
 	payload  []byte
 	mu       sync.Mutex
@@ -76,13 +76,13 @@ type dropOnceOrigin struct {
 
 func (o *dropOnceOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
-	firstPlain := !o.dropped && r.Header.Get("Range") == ""
-	if firstPlain {
+	first := !o.dropped
+	if first {
 		o.dropped = true
 	}
 	o.mu.Unlock()
 
-	if firstPlain {
+	if first {
 		half := len(o.payload) / 2
 		o.resumeAt.Store(int64(half))
 		w.Header().Set("Content-Length", strconv.Itoa(len(o.payload)))
