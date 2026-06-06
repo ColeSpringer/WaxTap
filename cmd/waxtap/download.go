@@ -44,9 +44,12 @@ type downloadFlags struct {
 	archivePath   string
 	writeInfoJSON bool
 
-	maxItems    int
-	concurrency int
-	listOnly    bool
+	maxItems         int
+	concurrency      int
+	maxDownloads     int
+	sleepInterval    time.Duration
+	maxSleepInterval time.Duration
+	listOnly         bool
 
 	collision collisionMode // resolved in RunE
 	archive   *downloadArchive
@@ -97,6 +100,9 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.BoolVar(&df.writeInfoJSON, "write-info-json", false, "write a <output>.info.json sidecar")
 	f.IntVar(&df.maxItems, "max-items", 0, "cap playlist items (0 = all)")
 	f.IntVar(&df.concurrency, "concurrency", 0, "parallel downloads for playlists (0 = config/default)")
+	f.IntVar(&df.maxDownloads, "max-downloads", 0, "maximum download attempts per playlist run (0 = unlimited; skips do not count)")
+	f.DurationVar(&df.sleepInterval, "sleep-interval", 0, "minimum delay before each playlist download after the first (e.g. 5s)")
+	f.DurationVar(&df.maxSleepInterval, "max-sleep-interval", 0, "maximum randomized delay between playlist downloads (requires --sleep-interval)")
 	f.BoolVar(&df.listOnly, "list", false, "list playlist entries without downloading")
 
 	// Allow `--cut-sponsorblock` with no value to mean the default category.
@@ -135,21 +141,7 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 		}
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
 	case isVideo:
-		out, skipped, err := downloadOne(cmd.Context(), env, df, nil, arg, "", "", 0)
-		if err != nil {
-			return err
-		}
-		if skipped != "" {
-			env.info("skipped (%s)\n", skipped)
-			if env.jsonMode() {
-				return env.emitJSON(struct {
-					SchemaVersion int    `json:"schemaVersion"`
-					Skipped       string `json:"skipped"`
-				}{schemaVersion, skipped})
-			}
-			return nil
-		}
-		return emitResult(env, out)
+		return runSingleDownload(cmd.Context(), env, df, arg)
 	case hasPlaylist || errors.Is(idErr, waxtap.ErrIsPlaylist):
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
 	default:
@@ -182,6 +174,20 @@ func (df *downloadFlags) resolve(cmd *cobra.Command) error {
 	}
 	df.collision = mode
 
+	// Validate playlist pacing before starting network work.
+	if df.sleepInterval < 0 || df.maxSleepInterval < 0 {
+		return usagef("--sleep-interval and --max-sleep-interval must be non-negative")
+	}
+	if df.maxDownloads < 0 {
+		return usagef("--max-downloads must be non-negative")
+	}
+	if df.maxSleepInterval > 0 && df.sleepInterval == 0 {
+		return usagef("--max-sleep-interval requires --sleep-interval")
+	}
+	if df.maxSleepInterval > 0 && df.maxSleepInterval < df.sleepInterval {
+		return usagef("--max-sleep-interval must be >= --sleep-interval")
+	}
+
 	// Validate the processing spec up front (it is pure); buildRequest rebuilds it
 	// per item later. This surfaces incompatible flag combinations before any
 	// extraction or download.
@@ -191,120 +197,130 @@ func (df *downloadFlags) resolve(cmd *cobra.Command) error {
 	return nil
 }
 
-// runPlaylistDownload expands a playlist and downloads its entries with bounded
-// parallelism. With --list it prints the (enriched) entries without downloading.
+// runPlaylistDownload lists or downloads a playlist.
 func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, url string) error {
 	if df.out != "" {
 		return usagef("--out cannot name a whole playlist; use --dir")
 	}
-	pl, err := env.client.Enumerate(ctx, url, waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: df.listOnly})
-	if err != nil {
-		return err
-	}
 	if df.listOnly {
+		pl, err := env.client.Enumerate(ctx, url, waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true})
+		if err != nil {
+			return err
+		}
 		return emitPlaylistList(env, pl)
-	}
-
-	// Enumerate can return a partial listing with item errors. Keep downloading
-	// what was found, but make the final summary fail the command.
-	for _, perr := range pl.Errors {
-		env.info("warning: playlist enumeration: %v\n", perr)
-	}
-
-	conc := df.concurrency
-	if conc <= 0 {
-		conc = env.cfg.downloads
-	}
-	if conc <= 0 {
-		conc = 2
 	}
 
 	out := &syncWriter{env: env}
 	reserver := newPathReserver()
-	var (
-		wg                       sync.WaitGroup
-		sem                      = make(chan struct{}, conc)
-		mu                       sync.Mutex
-		nOK, nSkip, nFail, total int
-	)
-	total = len(pl.Entries)
-	for i := range pl.Entries {
-		entry := pl.Entries[i]
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			res, skipped, derr := downloadOne(ctx, env, df, reserver, entry.VideoID, entry.Title, entry.Author, entry.Index+1)
-			mu.Lock()
-			switch {
-			case derr != nil:
-				nFail++
-			case skipped != "":
-				nSkip++
-			default:
-				nOK++
+	res, runErr := env.client.DownloadPlaylist(ctx, url, waxtap.PlaylistDownloadOptions{
+		MaxItems:         df.maxItems,
+		Concurrency:      df.concurrency, // 0 => library uses config/default
+		MaxDownloads:     df.maxDownloads,
+		SleepInterval:    df.sleepInterval,
+		MaxSleepInterval: df.maxSleepInterval,
+		Resolve: func(rctx context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
+			return resolveItem(rctx, env, df, reserver, e.VideoID, e.Title, e.Author, e.Index+1)
+		},
+		OnItem: func(o waxtap.PlaylistItemOutcome) {
+			// Write sidecars and the archive before the result line.
+			if o.Attempted && o.Err == nil && o.Result != nil {
+				finishItem(env, df, o.Entry.VideoID, o.Result)
 			}
-			mu.Unlock()
-			out.emitItem(entry, res, skipped, derr)
-		}()
+			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
+		},
+	})
+	if res == nil {
+		return runErr
 	}
-	wg.Wait()
 
-	return out.emitSummary(total, nOK, nSkip, nFail, len(pl.Errors))
+	// Enumeration may return a partial listing with item errors.
+	for _, perr := range res.EnumErrors {
+		env.info("warning: playlist enumeration: %v\n", perr)
+	}
+	sumErr := out.emitSummary(playlistSummary{
+		total:          res.Enumerated,
+		ok:             res.Downloaded,
+		skipped:        res.Skipped,
+		resolveFailed:  res.ResolveFailed,
+		downloadFailed: res.DownloadFailed,
+		remaining:      res.Remaining,
+		enumErrors:     len(res.EnumErrors),
+		capReached:     res.CapReached,
+	})
+	if runErr != nil {
+		return runErr // the partial-run summary has already been written
+	}
+	return sumErr
 }
 
-// downloadOne resolves the target path (skipping via archive/collision) and
-// downloads a single video. It returns the Result, or a non-empty skip reason, or
-// an error. fallbackTitle/fallbackAuthor seed naming for playlist items (avoiding
-// an extra metadata fetch when the extension is already known).
-func downloadOne(ctx context.Context, env *appEnv, df *downloadFlags, reserve *pathReserver, idOrURL, fallbackTitle, fallbackAuthor string, index int) (*waxtap.Result, string, error) {
+// runSingleDownload downloads one video with a live progress bar.
+func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg string) error {
+	req, skipped, err := resolveItem(ctx, env, df, nil, arg, "", "", 0)
+	if err != nil {
+		return err
+	}
+	if skipped != "" {
+		env.info("skipped (%s)\n", skipped)
+		if env.jsonMode() {
+			return env.emitJSON(struct {
+				SchemaVersion int    `json:"schemaVersion"`
+				Skipped       string `json:"skipped"`
+			}{schemaVersion, skipped})
+		}
+		return nil
+	}
+
+	prog := env.newProgress()
+	req.Events = prog.handle
+	res, err := env.client.Download(ctx, req)
+	prog.finish()
+	if err != nil {
+		return err
+	}
+
+	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
+	finishItem(env, df, id, res)
+	return emitResult(env, res)
+}
+
+// resolveItem builds a request for one item, or returns a skip reason. Playlist
+// callers pass a reserver and fallback metadata; single-video callers pass nil
+// and empty fallbacks.
+func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *pathReserver, idOrURL, fallbackTitle, fallbackAuthor string, index int) (waxtap.Request, string, error) {
 	id, err := youtube.ExtractVideoID(idOrURL)
 	if err != nil {
-		return nil, "", err
+		return waxtap.Request{}, "", err
 	}
 	if df.archive != nil && df.archive.Has(id) {
-		return nil, "archive", nil
+		return waxtap.Request{}, "archive", nil
 	}
 
 	target := df.out
 	if target == "" {
 		td, nerr := env.namingData(ctx, idOrURL, df, fallbackTitle, fallbackAuthor, index)
 		if nerr != nil {
-			return nil, "", nerr
+			return waxtap.Request{}, "", nerr
 		}
 		target = filepath.Join(df.dir, resolveOutputName(df.template, td))
 	}
-	// Reserve the path under a shared lock for playlist runs so two concurrent
-	// entries resolving to the same target get distinct names instead of racing
-	// resolveCollision and overwriting each other.
 	resolved, skip, err := reserve.reserveOr(target, df.collision)
 	if err != nil {
-		return nil, "", err
+		return waxtap.Request{}, "", err
 	}
 	if skip {
-		return nil, "exists", nil
+		return waxtap.Request{}, "exists", nil
 	}
 
 	req, err := df.buildRequest(idOrURL, resolved)
 	if err != nil {
-		return nil, "", err
+		return waxtap.Request{}, "", err
 	}
+	return req, "", nil
+}
 
-	// A live progress bar only makes sense for a single foreground download.
-	var prog *progressReporter
-	if index == 0 {
-		prog = env.newProgress()
-		req.Events = prog.handle
-	}
-	res, err := env.client.Download(ctx, req)
-	if prog != nil {
-		prog.finish()
-	}
-	if err != nil {
-		return nil, "", err
-	}
-
+// finishItem writes the optional sidecar and archive entry after a successful
+// download. Errors are reported as warnings.
+func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 	if df.writeInfoJSON && res.OutputPath != "" {
 		if werr := writeInfoSidecar(res.OutputPath, res); werr != nil {
 			env.info("warning: could not write info sidecar: %v\n", werr)
@@ -315,7 +331,6 @@ func downloadOne(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 			env.info("warning: could not update download archive: %v\n", aerr)
 		}
 	}
-	return res, "", nil
 }
 
 // buildRequest assembles a Download request for url delivering to outPath.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/colespringer/waxtap"
 	"github.com/colespringer/waxtap/sponsorblock"
@@ -130,6 +131,44 @@ func ExampleClient_Enumerate() {
 		// The video ID is the stable key WaxTap uses for deduplication.
 		fmt.Printf("%d. %s (%s)\n", entry.Index, entry.Title, entry.VideoID)
 	}
+}
+
+// ExampleClient_DownloadPlaylist downloads up to ten playlist entries one at a
+// time, waiting between downloads. Resolve builds each request and may skip an
+// entry; OnItem receives each completed outcome.
+func ExampleClient_DownloadPlaylist() {
+	client, err := waxtap.New(waxtap.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	res, err := client.DownloadPlaylist(context.Background(),
+		"https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+		waxtap.PlaylistDownloadOptions{
+			Concurrency:   1,               // serialize downloads
+			SleepInterval: 5 * time.Second, // pause between them
+			MaxDownloads:  10,              // stop after 10 attempts
+			Resolve: func(_ context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
+				return waxtap.Request{
+					URL:         e.VideoID,
+					ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(e.VideoID + ".opus")},
+				}, "", nil
+			},
+			OnItem: func(o waxtap.PlaylistItemOutcome) {
+				switch {
+				case o.Err != nil:
+					log.Printf("%s: %v", o.Entry.VideoID, o.Err)
+				case o.SkipReason != "":
+					log.Printf("%s: skipped (%s)", o.Entry.VideoID, o.SkipReason)
+				}
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%d downloaded, %d remaining (cap reached: %v)\n",
+		res.Downloaded, res.Remaining, res.CapReached)
 }
 
 // ExampleClient_MeasureAlbum measures several files as one album, useful for

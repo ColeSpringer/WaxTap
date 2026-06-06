@@ -151,6 +151,9 @@ waxtap normalize song.wav --apply --target -14 --transcode flac -o song.flac
 # Download a whole playlist into a directory, skipping already-fetched IDs
 waxtap download <playlist-url> -d ./music --download-archive seen.txt
 
+# Download serially, waiting 5 seconds between downloads, up to 10 attempts
+waxtap download <playlist-url> -d ./music --concurrency 1 --sleep-interval 5s --max-downloads 10
+
 # Check extraction health
 waxtap doctor
 ```
@@ -197,7 +200,9 @@ func main() {
 
 The default `Download` does no re-encode; all processing is opt-in. See
 [`example_test.go`](example_test.go) for `Stream`, `Process` (local files),
-`Enumerate` (playlists), `MeasureAlbum`, and `Info`.
+`Enumerate` and `DownloadPlaylist` (playlists), `MeasureAlbum`, and `Info`.
+`DownloadPlaylist` downloads playlist entries with bounded concurrency, optional
+pacing, and an optional limit on download attempts.
 
 ## Configuration
 
@@ -216,8 +221,16 @@ Useful operational knobs:
   `chromeMajor` in config JSON to override the emulated Chrome major without a
   rebuild. This cannot be combined with `--profile-override`, which supplies its
   own user agents.
-- Network posture: `--proxy`, `--qps`, `--hl`, `--gl`, and their documented
-  `WAXTAP_*` equivalents.
+- Network posture: `--proxy`, `--qps`, `--cooldown`, `--hl`, `--gl`, and their
+  documented `WAXTAP_*` equivalents. `--cooldown` (or `WAXTAP_COOLDOWN`, seconds)
+  pauses requests to a host after HTTP 429, or after HTTP 503/403 with a
+  `Retry-After` header. A longer `Retry-After` value takes precedence, up to the
+  retry-wait limit.
+- Playlist pacing (download command): `--sleep-interval` sets the minimum delay
+  before each download after the first. `--max-sleep-interval` adds a randomized
+  upper bound, and `--max-downloads` limits download attempts; skipped entries
+  and resolution failures do not count. With `--concurrency 1`, the interval
+  falls between completed downloads.
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
   extraction failures.
 

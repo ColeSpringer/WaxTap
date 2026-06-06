@@ -49,6 +49,7 @@ type appConfig struct {
 	insecure bool
 
 	perHostQPS float64
+	cooldown   time.Duration
 	hl, gl     string
 
 	ffmpegProcs     int
@@ -73,6 +74,7 @@ type fileConfig struct {
 	Proxy               *string  `json:"proxy"`
 	Insecure            *bool    `json:"insecure"`
 	PerHostQPS          *float64 `json:"perHostQPS"`
+	CooldownSec         *float64 `json:"cooldownSeconds"`
 	HL                  *string  `json:"hl"`
 	GL                  *string  `json:"gl"`
 	FFmpegProcs         *int     `json:"ffmpegProcs"`
@@ -122,6 +124,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		insecure: boolean("insecure", rootFlagsValue.insecure, fc.Insecure, ec.Insecure, false),
 
 		perHostQPS: coalesceFloat(0, fc.PerHostQPS, ec.PerHostQPS, flagFloatPtr(flags, "qps", rootFlagsValue.qps)),
+		cooldown:   coalesceDuration(0, fc.CooldownSec, ec.CooldownSec, flagDurationPtr(flags, "cooldown", rootFlagsValue.cooldown)),
 		hl:         str("hl", rootFlagsValue.hl, fc.HL, ec.HL, ""),
 		gl:         str("gl", rootFlagsValue.gl, fc.GL, ec.GL, ""),
 
@@ -225,6 +228,7 @@ func envOverlay() (fileConfig, error) {
 	ec.Proxy = getStr("WAXTAP_PROXY")
 	ec.Insecure = getBool("WAXTAP_INSECURE")
 	ec.PerHostQPS = getFloat("WAXTAP_QPS")
+	ec.CooldownSec = getFloat("WAXTAP_COOLDOWN")
 	ec.HL = getStr("WAXTAP_HL")
 	ec.GL = getStr("WAXTAP_GL")
 	ec.FFmpegProcs = getInt("WAXTAP_FFMPEG_PROCS")
@@ -290,7 +294,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 			MaxBackoff:   10 * time.Second,
 			MaxRetryWait: 60 * time.Second,
 		},
-		Politeness:   waxtap.Politeness{PerHostQPS: a.perHostQPS},
+		Politeness:   waxtap.Politeness{PerHostQPS: a.perHostQPS, Cooldown: a.cooldown},
 		SponsorBlock: waxtap.SponsorBlockOptions{BaseURL: a.sbBaseURL},
 	}, nil
 }
@@ -402,6 +406,15 @@ func flagFloatPtr(flags *pflag.FlagSet, name string, val float64) *float64 {
 func flagIntPtr(flags *pflag.FlagSet, name string, val int) *int {
 	if flags.Changed(name) {
 		return &val
+	}
+	return nil
+}
+
+// flagDurationPtr returns an explicitly set duration as seconds.
+func flagDurationPtr(flags *pflag.FlagSet, name string, val time.Duration) *float64 {
+	if flags.Changed(name) {
+		s := val.Seconds()
+		return &s
 	}
 	return nil
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +20,7 @@ type rootFlags struct {
 	proxy           string
 	insecure        bool
 	qps             float64
+	cooldown        time.Duration
 	hl              string
 	gl              string
 	sponsorblockURL string
@@ -58,6 +61,7 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.proxy, "proxy", "", "proxy URL for all HTTP requests (e.g. http://host:port)")
 	pf.BoolVar(&rootFlagsValue.insecure, "insecure", false, "skip TLS certificate verification (diagnostics only)")
 	pf.Float64Var(&rootFlagsValue.qps, "qps", 0, "per-host request rate cap (0 = unlimited)")
+	pf.DurationVar(&rootFlagsValue.cooldown, "cooldown", 0, "base host cooldown after a rate-limit response (0 = none)")
 	pf.StringVar(&rootFlagsValue.hl, "hl", "", "InnerTube host language, e.g. en, de, ja (default: en)")
 	pf.StringVar(&rootFlagsValue.gl, "gl", "", "content region hint, e.g. US, DE, JP (default: US)")
 	pf.StringVar(&rootFlagsValue.sponsorblockURL, "sponsorblock-url", "", "override the SponsorBlock API base URL (default: public server)")

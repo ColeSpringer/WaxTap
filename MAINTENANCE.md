@@ -265,3 +265,15 @@ release for final review before publishing. For a local dry run, use
 `go install github.com/colespringer/waxtap/cmd/waxtap@vX.Y.Z` should also work
 because the version subcommand reads module build info when no ldflags are
 injected.
+
+### API stability
+
+The project may ship a breaking change in a minor release instead of moving to a
+`/v2` module path when the affected API has no known consumers, as it did for
+v1.1.0. Document these changes in the GitHub release notes.
+
+- **v1.3.0** removed the unused `Politeness.MaxDownloadsPerRun` field. Per-run
+  limits now use `PlaylistDownloadOptions.MaxDownloads`, which is enforced by
+  `Client.DownloadPlaylist` and exposed by the download command's
+  `--max-downloads` flag. This release also added `Politeness.Cooldown` and its
+  `--cooldown`, `WAXTAP_COOLDOWN`, and `cooldownSeconds` settings.

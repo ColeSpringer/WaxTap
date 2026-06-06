@@ -61,6 +61,9 @@ func New(opts Options) (*Client, error) {
 	if opts.ChromeMajor != 0 && opts.ProfileOverridePath != "" {
 		return nil, fmt.Errorf("ChromeMajor and ProfileOverridePath are mutually exclusive: an override file supplies its own user agents")
 	}
+	if opts.Politeness.Cooldown < 0 {
+		return nil, fmt.Errorf("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
+	}
 
 	var profiles []youtube.ClientProfile
 	if opts.ProfileOverridePath != "" {
@@ -79,8 +82,9 @@ func New(opts Options) (*Client, error) {
 		base = &http.Client{Jar: jar}
 	}
 
+	// Cooldown-only configurations still need a limiter.
 	var limiter httpx.Limiter
-	if opts.Politeness.PerHostQPS > 0 {
+	if opts.Politeness.PerHostQPS > 0 || opts.Politeness.Cooldown > 0 {
 		limiter = httpx.NewHostLimiter(opts.Politeness.PerHostQPS)
 	}
 
@@ -92,6 +96,7 @@ func New(opts Options) (*Client, error) {
 		BaseBackoff:  opts.Retry.BaseBackoff,
 		MaxBackoff:   opts.Retry.MaxBackoff,
 		MaxRetryWait: opts.Retry.MaxRetryWait,
+		Cooldown:     opts.Politeness.Cooldown,
 	})
 
 	c := &Client{

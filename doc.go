@@ -6,7 +6,12 @@
 // loudness normalization are opt-in. By default, downloads keep the selected
 // source stream and do not re-encode it.
 //
-// This top-level package is the stable pre-1.0 surface. The youtube package and
+// [Client.Download] and [Client.Stream] handle one video.
+// [Client.DownloadPlaylist] downloads playlist entries with bounded concurrency,
+// optional pacing, and an optional limit on download attempts. [Options]
+// configures per-host request rates and post-rate-limit cooldowns.
+//
+// This top-level package is the stable public surface. The youtube package and
 // packages below it are YouTube-specific implementation surfaces; they are
 // exported where the facade needs them, but external callers should prefer this
 // package.

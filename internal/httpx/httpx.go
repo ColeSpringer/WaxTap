@@ -34,10 +34,11 @@ const (
 	defaultMaxRetryWait = 30 * time.Second
 )
 
-// Limiter gates outbound requests, typically a per-host token bucket. Wait
-// blocks until a request may proceed or ctx is done.
+// Limiter gates outbound requests. Wait blocks until a request may proceed or
+// ctx is done. Penalize pauses requests to one host for at least d.
 type Limiter interface {
 	Wait(ctx context.Context, host string) error
+	Penalize(host string, d time.Duration)
 }
 
 // NopLimiter performs no rate limiting.
@@ -45,6 +46,54 @@ type NopLimiter struct{}
 
 // Wait implements Limiter.
 func (NopLimiter) Wait(context.Context, string) error { return nil }
+
+// Penalize implements Limiter.
+func (NopLimiter) Penalize(string, time.Duration) {}
+
+// ThrottlePhase identifies when a throttle event occurred.
+type ThrottlePhase int
+
+const (
+	// ThrottleDetected is reported after a rate-limit response is received and
+	// the host is penalized.
+	ThrottleDetected ThrottlePhase = iota
+	// ThrottleRetryStarted is reported when a retry begins after backoff.
+	ThrottleRetryStarted
+)
+
+// ThrottleEvent describes rate limiting by one host.
+type ThrottleEvent struct {
+	Host       string        // request host
+	StatusCode int           // rate-limit response status
+	RetryAfter time.Duration // parsed Retry-After; zero if missing or invalid
+	Penalty    time.Duration // duration passed to Limiter.Penalize
+	Phase      ThrottlePhase // point in the throttle lifecycle
+}
+
+// ThrottleHook receives throttle events. It may be called from parallel request
+// workers, so it must be safe for concurrent use.
+type ThrottleHook func(ThrottleEvent)
+
+type throttleHookKey struct{}
+
+// WithThrottleHook returns a context that reports throttle events to h. A nil
+// hook clears an inherited hook.
+func WithThrottleHook(ctx context.Context, h ThrottleHook) context.Context {
+	return context.WithValue(ctx, throttleHookKey{}, h)
+}
+
+// throttleHookFrom returns the throttle hook on ctx.
+func throttleHookFrom(ctx context.Context) ThrottleHook {
+	h, _ := ctx.Value(throttleHookKey{}).(ThrottleHook)
+	return h
+}
+
+// fireThrottle sends ev to the context's hook, if any.
+func fireThrottle(ctx context.Context, ev ThrottleEvent) {
+	if h := throttleHookFrom(ctx); h != nil {
+		h(ev)
+	}
+}
 
 // Config configures a Client. The zero value is usable; New fills sane defaults.
 type Config struct {
@@ -66,6 +115,11 @@ type Config struct {
 	// MaxRetryWait caps an honored Retry-After. Beyond it, Do fails fast with
 	// *waxerr.RateLimitError rather than sleeping.
 	MaxRetryWait time.Duration
+
+	// Cooldown is the minimum host penalty after a rate-limit response. A longer
+	// Retry-After value takes precedence, up to MaxRetryWait. Zero disables the
+	// base cooldown.
+	Cooldown time.Duration
 }
 
 // Client performs HTTP requests with retry, backoff, and rate-limit handling.
@@ -125,7 +179,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	var lastErr error
+	var rlRetryStatus int // status of a pending rate-limit retry, 0 if none
 	for attempt := 0; attempt < attempts; attempt++ {
+		if rlRetryStatus != 0 {
+			// Reaching the next iteration means backoff completed without
+			// cancellation and the retry is starting.
+			fireThrottle(ctx, ThrottleEvent{Host: host, StatusCode: rlRetryStatus, Phase: ThrottleRetryStarted})
+			rlRetryStatus = 0
+		}
 		if attempt > 0 && req.GetBody != nil {
 			body, err := req.GetBody()
 			if err != nil {
@@ -163,8 +224,20 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			(retryAfterPresent && (resp.StatusCode == http.StatusServiceUnavailable ||
 				resp.StatusCode == http.StatusForbidden)) {
 			wait, ok := parseRetryAfter(resp)
+			status := resp.StatusCode
 			drain(resp)
-			rlErr := &waxerr.RateLimitError{Host: host, RetryAfter: wait, StatusCode: resp.StatusCode}
+			rlErr := &waxerr.RateLimitError{Host: host, RetryAfter: wait, StatusCode: status}
+
+			// Retry-After can extend the base cooldown, but not beyond the maximum
+			// retry wait.
+			penalty := c.cfg.Cooldown
+			if ok {
+				penalty = max(penalty, min(wait, c.cfg.MaxRetryWait))
+			}
+			c.lim.Penalize(host, penalty)
+			fireThrottle(ctx, ThrottleEvent{
+				Host: host, StatusCode: status, RetryAfter: wait, Penalty: penalty, Phase: ThrottleDetected,
+			})
 
 			if ok && wait > c.cfg.MaxRetryWait {
 				return nil, rlErr // fail fast rather than sleep for a ban
@@ -175,6 +248,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				if !ok {
 					sleepFor = c.backoffDuration(attempt)
 				}
+				rlRetryStatus = status
 				c.log.DebugContext(ctx, "httpx: rate limited, backing off", "host", host, "wait", sleepFor)
 				if werr := sleep(ctx, sleepFor); werr != nil {
 					return nil, werr

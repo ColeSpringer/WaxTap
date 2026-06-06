@@ -109,6 +109,91 @@ func TestHostLimiterRollsBackCanceledWait(t *testing.T) {
 	}
 }
 
+func TestHostLimiterPenalizeClampsForwardNotAdditive(t *testing.T) {
+	l := NewHostLimiter(0) // cooldown-only (QPS disabled)
+	// Penalties extend the deadline; they do not add their durations.
+	l.Penalize("a.example", 200*time.Millisecond)
+	l.Penalize("a.example", 200*time.Millisecond)
+
+	start := time.Now()
+	if err := l.Wait(context.Background(), "a.example"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("Wait took %v; cooldown not honored with QPS disabled (want ~200ms)", elapsed)
+	}
+	if elapsed > 350*time.Millisecond {
+		t.Errorf("Wait took %v; penalties stacked instead of clamping forward (want ~200ms)", elapsed)
+	}
+}
+
+func TestHostLimiterCooldownAppliedMidWait(t *testing.T) {
+	l := NewHostLimiter(2) // 500ms spacing
+	// Consume the immediate slot.
+	if err := l.Wait(context.Background(), "a.example"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_ = l.Wait(context.Background(), "a.example")
+		done <- time.Since(start)
+	}()
+	// Apply a longer cooldown after the waiter reserves its slot.
+	time.Sleep(50 * time.Millisecond)
+	l.Penalize("a.example", 700*time.Millisecond)
+
+	elapsed := <-done
+	if elapsed < 650*time.Millisecond {
+		t.Errorf("waiter admitted after %v; it ignored a cooldown applied mid-wait (want >= ~750ms)", elapsed)
+	}
+}
+
+func TestHostLimiterMultipleWaitersHonorExtendedCooldown(t *testing.T) {
+	l := NewHostLimiter(0) // cooldown-only, so all waiters share one schedule
+	l.Penalize("a.example", 200*time.Millisecond)
+
+	const n = 5
+	results := make(chan time.Duration, n)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			_ = l.Wait(context.Background(), "a.example")
+			results <- time.Since(start)
+		})
+	}
+	// Extend the cooldown while waiters are blocked.
+	time.Sleep(50 * time.Millisecond)
+	l.Penalize("a.example", 400*time.Millisecond) // extends to ~start+450ms
+	wg.Wait()
+	close(results)
+
+	for elapsed := range results {
+		if elapsed < 350*time.Millisecond {
+			t.Errorf("a waiter admitted after %v; it ignored the extended cooldown (want >= ~450ms)", elapsed)
+		}
+	}
+}
+
+func TestHostLimiterSpacingResumesAfterCooldown(t *testing.T) {
+	l := NewHostLimiter(20) // 50ms spacing
+	l.Penalize("a.example", 100*time.Millisecond)
+
+	start := time.Now()
+	for range 3 {
+		if err := l.Wait(context.Background(), "a.example"); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	}
+	elapsed := time.Since(start)
+	// The cooldown and two spacing intervals should take about 200ms.
+	if elapsed < 170*time.Millisecond {
+		t.Errorf("3 requests after cooldown took %v; QPS spacing did not resume (want ~200ms)", elapsed)
+	}
+}
+
 func TestHostLimiterConcurrent(t *testing.T) {
 	// The limiter must be safe under concurrent Wait calls for the same and
 	// different hosts; run with -race.

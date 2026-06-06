@@ -70,10 +70,24 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 	}
 }
 
-// emitSummary writes the aggregate result and returns an error when any item
-// failed or playlist enumeration was incomplete.
-func (s *syncWriter) emitSummary(total, ok, skipped, failed, enumErrors int) error {
+// playlistSummary contains the counts printed at the end of a playlist run.
+type playlistSummary struct {
+	total          int
+	ok             int
+	skipped        int
+	resolveFailed  int
+	downloadFailed int
+	remaining      int // never attempted (cap reached or canceled mid-run)
+	enumErrors     int
+	capReached     bool
+}
+
+// emitSummary writes the aggregate result. Item failures and incomplete
+// enumeration fail the command; reaching --max-downloads does not.
+func (s *syncWriter) emitSummary(sum playlistSummary) error {
+	failed := sum.resolveFailed + sum.downloadFailed
 	if s.env.jsonMode() {
+		// These fields are additive, so the schema version remains unchanged.
 		rec := struct {
 			SchemaVersion     int    `json:"schemaVersion"`
 			Type              string `json:"type"`
@@ -81,24 +95,40 @@ func (s *syncWriter) emitSummary(total, ok, skipped, failed, enumErrors int) err
 			OK                int    `json:"ok"`
 			Skipped           int    `json:"skipped"`
 			Failed            int    `json:"failed"`
+			ResolveFailed     int    `json:"resolveFailed,omitempty"`
+			DownloadFailed    int    `json:"downloadFailed,omitempty"`
+			Remaining         int    `json:"remaining,omitempty"`
+			CapReached        bool   `json:"capReached,omitempty"`
 			EnumerationErrors int    `json:"enumerationErrors,omitempty"`
-		}{schemaVersion, "summary", total, ok, skipped, failed, enumErrors}
+		}{
+			SchemaVersion: schemaVersion, Type: "summary",
+			Total: sum.total, OK: sum.ok, Skipped: sum.skipped, Failed: failed,
+			ResolveFailed: sum.resolveFailed, DownloadFailed: sum.downloadFailed,
+			Remaining: sum.remaining, CapReached: sum.capReached, EnumerationErrors: sum.enumErrors,
+		}
 		if b, err := json.Marshal(rec); err == nil {
 			fmt.Fprintf(s.env.out, "%s\n", b)
 		}
 	} else {
-		fmt.Fprintf(s.env.out, "done: %d ok, %d skipped, %d failed (of %d)\n", ok, skipped, failed, total)
-		if enumErrors > 0 {
-			fmt.Fprintf(s.env.out, "warning: %d playlist enumeration error(s); some entries may be missing\n", enumErrors)
+		line := fmt.Sprintf("done: %d ok, %d skipped, %d failed (of %d)", sum.ok, sum.skipped, failed, sum.total)
+		if sum.remaining > 0 {
+			line += fmt.Sprintf("; %d remaining", sum.remaining)
+			if sum.capReached {
+				line += " (max-downloads reached)"
+			}
+		}
+		fmt.Fprintf(s.env.out, "%s\n", line)
+		if sum.enumErrors > 0 {
+			fmt.Fprintf(s.env.out, "warning: %d playlist enumeration error(s); some entries may be missing\n", sum.enumErrors)
 		}
 	}
 	switch {
-	case failed > 0 && enumErrors > 0:
-		return fmt.Errorf("%d of %d items failed and enumeration was incomplete (%d error(s))", failed, total, enumErrors)
+	case failed > 0 && sum.enumErrors > 0:
+		return fmt.Errorf("%d of %d items failed and enumeration was incomplete (%d error(s))", failed, sum.total, sum.enumErrors)
 	case failed > 0:
-		return fmt.Errorf("%d of %d playlist items failed", failed, total)
-	case enumErrors > 0:
-		return fmt.Errorf("playlist enumeration incomplete: %d error(s); some entries may be missing", enumErrors)
+		return fmt.Errorf("%d of %d playlist items failed", failed, sum.total)
+	case sum.enumErrors > 0:
+		return fmt.Errorf("playlist enumeration incomplete: %d error(s); some entries may be missing", sum.enumErrors)
 	default:
 		return nil
 	}

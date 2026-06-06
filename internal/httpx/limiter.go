@@ -6,16 +6,10 @@ import (
 	"time"
 )
 
-// HostLimiter is a per-host request-spacing Limiter. Each host gets an
-// independent schedule that admits at most one request every 1/qps seconds, so a
-// burst of parallel chunk downloads to one origin is paced without affecting
-// requests to other hosts. It is the politeness limiter the facade builds from
-// Options.Politeness.PerHostQPS and shares across the youtube, googlevideo, and
-// SponsorBlock hosts.
+// HostLimiter spaces requests and applies cooldowns independently per host.
 //
-// The limiter does not allow token bursts; it spaces admissions. That keeps
-// playlist and chunk fan-out from hitting one origin at once while leaving other
-// hosts independent. A non-positive qps disables limiting.
+// Requests are admitted at most once every 1/qps seconds; bursts are not allowed.
+// [HostLimiter.Penalize] pauses a host even when qps is non-positive.
 type HostLimiter struct {
 	interval time.Duration
 
@@ -23,8 +17,8 @@ type HostLimiter struct {
 	buckets map[string]*hostBucket
 }
 
-// NewHostLimiter returns a per-host limiter admitting qps requests per second per
-// host. A qps <= 0 yields a limiter that never waits.
+// NewHostLimiter returns a per-host limiter that admits qps requests per second.
+// A non-positive qps disables spacing but still permits cooldowns.
 func NewHostLimiter(qps float64) *HostLimiter {
 	var interval time.Duration
 	if qps > 0 {
@@ -33,33 +27,50 @@ func NewHostLimiter(qps float64) *HostLimiter {
 	return &HostLimiter{interval: interval, buckets: make(map[string]*hostBucket)}
 }
 
-// Wait blocks until a request to host may proceed, or ctx is done. It returns
-// ctx.Err() on cancellation.
+// Wait blocks until a request to host may proceed or ctx is done.
 //
-// An already-canceled context returns without reserving a slot, and a slot
-// reserved for a wait that is then canceled is rolled back when it is still the
-// tail of the host's schedule, so an abandoned request does not delay the next
-// real one.
+// Wait rechecks the host cooldown after each timer wakeup. On cancellation, it
+// rolls back the request's spacing reservation when no later request depends on
+// it.
 func (l *HostLimiter) Wait(ctx context.Context, host string) error {
-	if l.interval <= 0 {
-		return nil
-	}
 	if err := ctx.Err(); err != nil {
-		return err // don't charge a slot to an already-canceled request
+		return err // do not reserve a slot for an already-canceled request
 	}
 	b := l.bucket(host)
-	wait, reserved := b.reserve(l.interval)
-	if wait <= 0 {
-		return nil
+	slot, reserved := b.reserve(l.interval)
+	for {
+		wait := b.admitDelay(slot)
+		if wait <= 0 {
+			return nil
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			b.rollback(reserved, l.interval)
+			return ctx.Err()
+		case <-t.C:
+			// A cooldown may have changed while the timer was running.
+		}
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		b.rollback(reserved, l.interval)
-		return ctx.Err()
-	case <-t.C:
-		return nil
+}
+
+// Penalize pauses requests to host for at least d. It also moves the spacing
+// schedule forward so requests remain spaced after the cooldown. A non-positive
+// duration has no effect.
+func (l *HostLimiter) Penalize(host string, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	b := l.bucket(host)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	until := time.Now().Add(d)
+	if until.After(b.cooldownUntil) {
+		b.cooldownUntil = until
+	}
+	if until.After(b.next) {
+		b.next = until
 	}
 }
 
@@ -74,26 +85,37 @@ func (l *HostLimiter) bucket(host string) *hostBucket {
 	return b
 }
 
-// hostBucket tracks the earliest time the next request to one host may proceed.
+// hostBucket stores one host's spacing schedule and cooldown.
 type hostBucket struct {
-	mu   sync.Mutex
-	next time.Time
+	mu            sync.Mutex
+	next          time.Time // earliest time the next QPS-spaced request may proceed
+	cooldownUntil time.Time // host paused until this time (Penalize)
 }
 
-// reserve claims the next admission slot and returns how long the caller must
-// wait before using it, plus the reserved schedule time (for a later rollback).
-// Each reservation advances the schedule by interval, so concurrent callers are
-// spaced even though they wait without holding the lock.
-func (b *hostBucket) reserve(interval time.Duration) (wait time.Duration, reserved time.Time) {
+// reserve returns the next admission time and the new schedule tail.
+func (b *hostBucket) reserve(interval time.Duration) (slot, reserved time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := time.Now()
-	if b.next.Before(now) {
-		b.next = now
+	base := time.Now()
+	if b.next.After(base) {
+		base = b.next
 	}
-	wait = b.next.Sub(now)
-	b.next = b.next.Add(interval)
-	return wait, b.next
+	if b.cooldownUntil.After(base) {
+		base = b.cooldownUntil
+	}
+	b.next = base.Add(interval)
+	return base, b.next
+}
+
+// admitDelay returns the remaining wait for a slot and the current cooldown.
+func (b *hostBucket) admitDelay(slot time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	admit := slot
+	if b.cooldownUntil.After(admit) {
+		admit = b.cooldownUntil
+	}
+	return time.Until(admit)
 }
 
 // rollback gives back a reservation whose wait was canceled, but only when it is

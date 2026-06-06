@@ -12,6 +12,7 @@ import (
 
 	"github.com/colespringer/waxtap/cut"
 	"github.com/colespringer/waxtap/download"
+	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/sponsorblock"
@@ -124,6 +125,8 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 		return nil, err
 	}
 	em.videoID = id
+	// Report HTTP throttling as job warnings.
+	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
 	if req.Output.kind == outputNone {
 		return nil, fmt.Errorf("waxtap.Download: an Output is required (use Stream for reader delivery)")
@@ -352,6 +355,8 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 		return nil, StreamInfo{}, err
 	}
 	em.videoID = id
+	// Report HTTP throttling as job warnings.
+	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
 	a, err := c.acquire(ctx, req, id, em)
 	if err != nil {

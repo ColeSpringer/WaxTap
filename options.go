@@ -119,10 +119,10 @@ type Politeness struct {
 	// PerHostQPS throttles requests per host (0 = unlimited). youtube.com and
 	// googlevideo.com are limited independently.
 	PerHostQPS float64
-	// Cooldown pauses a host's queue after a 429/403 burst.
+	// Cooldown pauses requests to a host after HTTP 429, or after HTTP 503/403
+	// with a Retry-After header. A longer Retry-After value takes precedence, up
+	// to RetryPolicy.MaxRetryWait. Zero disables the cooldown.
 	Cooldown time.Duration
-	// MaxDownloadsPerRun caps a single playlist run (0 = unlimited).
-	MaxDownloadsPerRun int
 }
 
 // SponsorBlockOptions configures the SponsorBlock client.
