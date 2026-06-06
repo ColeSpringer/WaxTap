@@ -18,8 +18,6 @@ import (
 	"github.com/colespringer/waxtap/waxerr"
 )
 
-// --- test helpers -----------------------------------------------------------
-
 // newTestDownloader builds a Downloader with fast backoffs for tests.
 func newTestDownloader(chunkSize int64, parallelism int) *Downloader {
 	return New(Config{
@@ -110,8 +108,6 @@ func (s *progressSink) max() Progress {
 	return m
 }
 
-// --- New / defaults ---------------------------------------------------------
-
 func TestNew_Defaults(t *testing.T) {
 	d := New(Config{HTTPClient: httpx.New(httpx.Config{})})
 	if d.chunkSize != defaultChunkSize {
@@ -137,8 +133,6 @@ func TestNew_PanicsWithoutHTTPClient(t *testing.T) {
 	New(Config{})
 }
 
-// --- chunk planning ---------------------------------------------------------
-
 func TestPlanChunks(t *testing.T) {
 	tests := []struct {
 		total, size int64
@@ -163,8 +157,6 @@ func TestPlanChunks(t *testing.T) {
 		}
 	}
 }
-
-// --- sharedSource refresh coordination --------------------------------------
 
 func TestSharedSource_RefreshOncePerGeneration(t *testing.T) {
 	var calls atomic.Int32
@@ -220,8 +212,6 @@ func TestSharedSource_NilRefresh(t *testing.T) {
 		t.Fatalf("err = %v, want ErrURLExpired", err)
 	}
 }
-
-// --- fetch classification ---------------------------------------------------
 
 func TestFetch_403ClassifiedAsNeedRefresh(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

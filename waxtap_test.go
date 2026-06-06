@@ -23,8 +23,6 @@ import (
 	"github.com/colespringer/waxtap/youtube"
 )
 
-// --- pure mapping tests (offline) ---
-
 func TestTranscodeCodecMapping(t *testing.T) {
 	cases := []struct {
 		f    TranscodeFormat
@@ -215,8 +213,6 @@ func TestSponsorBlockContributed(t *testing.T) {
 	}
 }
 
-// --- emitter tests (offline) ---
-
 func TestEmitterAccumulatesAndDelivers(t *testing.T) {
 	var got []Event
 	em := newEmitter(func(e Event) { got = append(got, e) }, "vid123")
@@ -340,8 +336,6 @@ func TestMapPipelineStage(t *testing.T) {
 	}
 }
 
-// --- facade routing/validation (offline; returns before any network/ffmpeg) ---
-
 func newOfflineClient(t *testing.T) *Client {
 	t.Helper()
 	c, err := New(Options{})
@@ -434,8 +428,6 @@ func TestProcessSkipIfExists(t *testing.T) {
 		t.Errorf("skipped result = %+v", res)
 	}
 }
-
-// --- ffmpeg-gated Process integration ---
 
 func ffmpegOrSkip(t *testing.T) {
 	t.Helper()

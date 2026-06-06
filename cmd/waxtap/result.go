@@ -92,10 +92,6 @@ func formatLabel(f waxtap.Format) string {
 	return codec
 }
 
-// ---------------------------------------------------------------------------
-// JSON view
-// ---------------------------------------------------------------------------
-
 type loudnessInfoJSON struct {
 	IntegratedLUFS jsonFloat `json:"integratedLufs"`
 	TruePeakDBTP   jsonFloat `json:"truePeakDbtp"`

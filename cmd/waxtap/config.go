@@ -320,10 +320,6 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 	return &http.Client{Transport: tr, Jar: jar}, nil
 }
 
-// ---------------------------------------------------------------------------
-// Precedence helpers: later (higher-priority) non-nil layers win.
-// ---------------------------------------------------------------------------
-
 func coalesceString(def string, layers ...*string) string {
 	v := def
 	for _, l := range layers {

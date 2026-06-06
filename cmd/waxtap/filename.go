@@ -127,10 +127,6 @@ func truncateBytes(s string, max int) string {
 	return t
 }
 
-// ---------------------------------------------------------------------------
-// Collision handling
-// ---------------------------------------------------------------------------
-
 type collisionMode int
 
 const (

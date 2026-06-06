@@ -34,6 +34,36 @@ func (t Tri) String() string {
 	}
 }
 
+// AudioQualityTier identifies the quality tier reported in YouTube's player
+// response. Higher values represent higher tiers. QualityUnknown means the
+// response omitted the tier or supplied an unrecognized value.
+//
+// A tier is a selection hint, not an objective comparison of lossy encodings.
+type AudioQualityTier uint8
+
+const (
+	QualityUnknown  AudioQualityTier = iota
+	QualityUltraLow                  // AUDIO_QUALITY_ULTRALOW, distinct from QualityLow
+	QualityLow
+	QualityMedium
+	QualityHigh
+)
+
+func (q AudioQualityTier) String() string {
+	switch q {
+	case QualityUltraLow:
+		return "ultralow"
+	case QualityLow:
+		return "low"
+	case QualityMedium:
+		return "medium"
+	case QualityHigh:
+		return "high"
+	default:
+		return "unknown"
+	}
+}
+
 // Format describes a playable stream candidate. Most WaxTap callers deal with
 // audio, but video formats can appear in unfiltered player responses and are
 // excluded by audio selectors.
@@ -50,6 +80,10 @@ type Format struct {
 	AverageBitrate int // average bits per second (preferred for comparison)
 	SampleRate     int // Hz
 	Channels       int
+
+	// AudioQuality is the tier reported by YouTube. QualityUnknown means no
+	// usable tier was reported.
+	AudioQuality AudioQualityTier
 
 	// Multi-language / dubbed audio metadata.
 	Language   string      // audioTrack language tag, "" if single-track
@@ -72,8 +106,7 @@ type AudioTrack struct {
 	IsOriginal  Tri
 }
 
-// EffectiveBitrate returns AverageBitrate when known, else the declared
-// Bitrate. It is the value selectors compare on.
+// EffectiveBitrate returns AverageBitrate when known, otherwise Bitrate.
 func (f Format) EffectiveBitrate() int {
 	if f.AverageBitrate > 0 {
 		return f.AverageBitrate
@@ -109,8 +142,9 @@ type AudioSelector struct {
 	codec string
 }
 
-// BestAudio selects the best audio stream, preferring the original track,
-// non-DRC audio, then higher effective bitrate.
+// BestAudio selects the best audio stream. It prefers the original track,
+// non-DRC audio, higher reported quality tiers, Opus within a tier, and finally
+// higher effective bitrate.
 func BestAudio() AudioSelector { return AudioSelector{kind: selBestAudio} }
 
 // Itag selects the stream with the exact itag.

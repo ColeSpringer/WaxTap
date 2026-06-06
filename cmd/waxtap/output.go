@@ -15,8 +15,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// schemaVersion tags JSON output so callers can branch on future shape changes.
-const schemaVersion = 1
+// schemaVersion tags JSON output so callers can handle shape changes. Version 2
+// adds audioQuality to format objects.
+const schemaVersion = 2
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -94,12 +95,8 @@ func (e *appEnv) info(format string, args ...any) {
 	fmt.Fprintf(e.errOut, format, args...)
 }
 
-// ---------------------------------------------------------------------------
-// JSON-safe floating point (loudness can be non-finite for silent audio, which
-// encoding/json refuses to marshal).
-// ---------------------------------------------------------------------------
-
-// jsonFloat marshals a non-finite value as null instead of failing the encode.
+// jsonFloat marshals non-finite loudness values as null because encoding/json
+// rejects them.
 type jsonFloat float64
 
 func (f jsonFloat) MarshalJSON() ([]byte, error) {
@@ -109,10 +106,6 @@ func (f jsonFloat) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(v)
 }
-
-// ---------------------------------------------------------------------------
-// Human formatting
-// ---------------------------------------------------------------------------
 
 // humanBytes formats a byte count with a binary-magnitude unit.
 func humanBytes(n int64) string {
@@ -152,10 +145,6 @@ func humanLUFS(v float64) string {
 	}
 	return fmt.Sprintf("%.1f", v)
 }
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
 
 // usageError marks a bad-arguments failure, which maps to exit code 2.
 type usageError struct{ msg string }

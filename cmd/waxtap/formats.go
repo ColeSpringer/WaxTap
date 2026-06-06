@@ -63,13 +63,14 @@ func audioFormats(all []waxtap.Format) []waxtap.Format {
 // renderFormatsTable writes an aligned table of formats to stdout.
 func renderFormatsTable(env *appEnv, formats []waxtap.Format) {
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ITAG\tCODEC\tEXT\tKBPS\tHZ\tCH\tLANG\tORIG\tDRC\tSIZE")
+	fmt.Fprintln(tw, "ITAG\tCODEC\tEXT\tKBPS\tTIER\tHZ\tCH\tLANG\tORIG\tDRC\tSIZE")
 	for _, f := range formats {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			f.Itag,
 			dash(f.Codec),
 			dash(f.Extension),
 			f.EffectiveBitrate()/1000,
+			f.AudioQuality.String(),
 			intOrDash(f.SampleRate),
 			intOrDash(f.Channels),
 			dash(f.Language),
@@ -91,6 +92,7 @@ type formatJSON struct {
 	AverageBitrate  int     `json:"averageBitrate"`
 	SampleRate      int     `json:"sampleRate"`
 	Channels        int     `json:"channels"`
+	AudioQuality    string  `json:"audioQuality"`
 	Language        string  `json:"language,omitempty"`
 	IsOriginal      string  `json:"isOriginal"`
 	IsDRC           string  `json:"isDrc"`
@@ -108,6 +110,7 @@ func formatToJSON(f waxtap.Format) formatJSON {
 		AverageBitrate:  f.AverageBitrate,
 		SampleRate:      f.SampleRate,
 		Channels:        f.Channels,
+		AudioQuality:    f.AudioQuality.String(),
 		Language:        f.Language,
 		IsOriginal:      f.IsOriginal.String(),
 		IsDRC:           f.IsDRC.String(),

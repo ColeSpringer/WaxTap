@@ -10,17 +10,14 @@ import (
 	"github.com/colespringer/waxtap/youtube"
 )
 
-// ---------------------------------------------------------------------------
-// Re-exported contracts (canonical definitions live in the owning packages).
-// ---------------------------------------------------------------------------
-
 // Audio format model and selectors (package format).
 type (
-	Format        = format.Format
-	AudioTrack    = format.AudioTrack
-	Tri           = format.Tri
-	AudioSelector = format.AudioSelector
-	SourcePolicy  = format.SourcePolicy
+	Format           = format.Format
+	AudioTrack       = format.AudioTrack
+	Tri              = format.Tri
+	AudioQualityTier = format.AudioQualityTier
+	AudioSelector    = format.AudioSelector
+	SourcePolicy     = format.SourcePolicy
 	// Target describes a transcode output for source selection. The facade maps
 	// a TranscodeSpec onto it; most callers do not construct one directly.
 	Target = format.Target
@@ -45,8 +42,18 @@ const (
 	No      = format.No
 )
 
-// BestAudio selects the best audio stream, preferring the original track,
-// non-DRC audio, then higher effective bitrate.
+// Audio quality tiers reported by YouTube.
+const (
+	QualityUnknown  = format.QualityUnknown
+	QualityUltraLow = format.QualityUltraLow
+	QualityLow      = format.QualityLow
+	QualityMedium   = format.QualityMedium
+	QualityHigh     = format.QualityHigh
+)
+
+// BestAudio selects the best audio stream. It prefers the original track,
+// non-DRC audio, higher reported quality tiers, Opus within a tier, and finally
+// higher effective bitrate.
 func BestAudio() AudioSelector { return format.BestAudio() }
 
 // Itag selects the stream with the exact itag.
@@ -83,10 +90,6 @@ type (
 	POTokenResponse = potoken.Response
 	POTokenScope    = potoken.Scope
 )
-
-// ---------------------------------------------------------------------------
-// Requests
-// ---------------------------------------------------------------------------
 
 // ProcessSpec is the processing pipeline shared by YouTube and local-file
 // requests. Each stage is opt-in: a nil pointer means that stage is skipped, so
@@ -131,10 +134,6 @@ type ProcessRequest struct {
 
 	ProcessSpec
 }
-
-// ---------------------------------------------------------------------------
-// Processing specs
-// ---------------------------------------------------------------------------
 
 // TranscodeFormat names an output preset. FormatCopy is the only no-re-encode
 // path. FLAC, ALAC, and WAV preserve the decoded samples, but they are still
@@ -250,10 +249,6 @@ type TimeRange struct {
 	End   time.Duration
 }
 
-// ---------------------------------------------------------------------------
-// Output sink
-// ---------------------------------------------------------------------------
-
 type outputKind uint8
 
 const (
@@ -280,10 +275,6 @@ func ToFile(path string) Output { return Output{kind: outputFile, path: path} }
 // ToWriter delivers to a caller-provided writer (bounded memory, no atomicity
 // guarantee).
 func ToWriter(w io.Writer) Output { return Output{kind: outputWriter, writer: w} }
-
-// ---------------------------------------------------------------------------
-// Results
-// ---------------------------------------------------------------------------
 
 // SourceKind distinguishes a YouTube download from local-file processing.
 type SourceKind uint8
@@ -338,10 +329,6 @@ type StreamInfo struct {
 	ContentLength int64 // 0 if unknown
 }
 
-// ---------------------------------------------------------------------------
-// Enumeration
-// ---------------------------------------------------------------------------
-
 // EnumerateOptions tunes playlist enumeration. Enumeration never downloads.
 type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
@@ -350,10 +337,6 @@ type EnumerateOptions struct {
 	// returns lightweight entries regardless of this value.
 	Enrich bool
 }
-
-// ---------------------------------------------------------------------------
-// Events & warnings
-// ---------------------------------------------------------------------------
 
 // Stage identifies a pipeline stage in an Event.
 type Stage uint8

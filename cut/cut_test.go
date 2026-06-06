@@ -118,8 +118,6 @@ func TestConcatEscape(t *testing.T) {
 	}
 }
 
-// --- ffmpeg-gated integration ---
-
 func newTestRunner(t *testing.T) *transcode.Runner {
 	t.Helper()
 	r, err := transcode.NewRunner(transcode.RunnerConfig{ShutdownGrace: 2 * time.Second})

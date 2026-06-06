@@ -221,6 +221,7 @@ func (rf rawFormat) toFormat() format.Format {
 		AverageBitrate: rf.AverageBitrate,
 		SampleRate:     atoi(rf.AudioSampleRate),
 		Channels:       rf.AudioChannels,
+		AudioQuality:   parseAudioQualityTier(rf.AudioQuality),
 		ContentLength:  atoi64(rf.ContentLength),
 		Duration:       parseMillis(rf.ApproxDurationMs),
 		IsDRC:          triFromPtr(rf.IsDrc),
@@ -260,6 +261,23 @@ func extForSubtype(sub string) string {
 		return "m4a" // audio in an mp4 container
 	default:
 		return sub
+	}
+}
+
+// parseAudioQualityTier maps YouTube's audioQuality value to the public tier
+// model.
+func parseAudioQualityTier(s string) format.AudioQualityTier {
+	switch s {
+	case "AUDIO_QUALITY_HIGH":
+		return format.QualityHigh
+	case "AUDIO_QUALITY_MEDIUM":
+		return format.QualityMedium
+	case "AUDIO_QUALITY_LOW":
+		return format.QualityLow
+	case "AUDIO_QUALITY_ULTRALOW":
+		return format.QualityUltraLow
+	default:
+		return format.QualityUnknown
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/format"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -61,12 +62,34 @@ func TestParsePlayerResponse_OK(t *testing.T) {
 	if f0.SampleRate != 48000 || f0.Channels != 2 || f0.AverageBitrate != 130000 {
 		t.Errorf("format0 audio attrs = %+v", f0)
 	}
+	if f0.AudioQuality != format.QualityMedium {
+		t.Errorf("format0 audioQuality = %v, want medium", f0.AudioQuality)
+	}
 	f1 := v.Formats[1]
 	if f1.Itag != 140 || f1.Codec != "mp4a.40.2" || f1.Extension != "m4a" {
 		t.Errorf("format1 = %+v, want itag 140 mp4a m4a", f1)
 	}
 	if f1.ContentLength != 3400000 {
 		t.Errorf("format1 contentLength = %d", f1.ContentLength)
+	}
+	if f1.AudioQuality != format.QualityMedium {
+		t.Errorf("format1 audioQuality = %v, want medium", f1.AudioQuality)
+	}
+}
+
+func TestParseAudioQualityTier(t *testing.T) {
+	cases := map[string]format.AudioQualityTier{
+		"AUDIO_QUALITY_HIGH":     format.QualityHigh,
+		"AUDIO_QUALITY_MEDIUM":   format.QualityMedium,
+		"AUDIO_QUALITY_LOW":      format.QualityLow,
+		"AUDIO_QUALITY_ULTRALOW": format.QualityUltraLow,
+		"":                       format.QualityUnknown,
+		"AUDIO_QUALITY_FUTURE":   format.QualityUnknown,
+	}
+	for in, want := range cases {
+		if got := parseAudioQualityTier(in); got != want {
+			t.Errorf("parseAudioQualityTier(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 

@@ -40,12 +40,12 @@ func (s AudioSelector) Select(candidates []Format, policy SourcePolicy, target T
 	eligible := eligibleAudio(candidates)
 	switch s.kind {
 	case selItag:
-		if i, ok := bestAmong(candidates, func(f Format) bool { return eligible(f) && f.Itag == s.itag }, betterThan("")); ok {
+		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && f.Itag == s.itag }, ""); ok {
 			return i, nil
 		}
 		return -1, fmt.Errorf("%w: itag %d", ErrNoMatch, s.itag)
 	case selCodec:
-		if i, ok := bestAmong(candidates, func(f Format) bool { return eligible(f) && codecMatches(s.codec, f.Codec) }, betterThan("")); ok {
+		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && codecMatches(s.codec, f.Codec) }, ""); ok {
 			return i, nil
 		}
 		return -1, fmt.Errorf("%w: codec %q", ErrNoMatch, s.codec)
@@ -72,25 +72,31 @@ func BestForTarget(candidates []Format, policy SourcePolicy, target Target) (int
 	// Copying the source or writing a lossless target gains nothing from a
 	// codec-matched source.
 	if target.none() || target.Lossless {
-		return pick(candidates, eligible, betterThan(""))
+		return pick(candidates, eligible, "")
 	}
 
 	switch policy.kind {
 	case polBestNative:
-		return pick(candidates, eligible, betterThan(""))
+		return pick(candidates, eligible, "")
 	case polPreferCodec:
-		return pick(candidates, eligible, betterThan(policy.codec))
+		return pick(candidates, eligible, policy.codec)
 	default: // polMinimizeLoss
-		return pick(candidates, eligible, betterThan(target.Codec))
+		return pick(candidates, eligible, target.Codec)
 	}
 }
 
 // pick returns the best eligible index, or ErrNoMatch when none are eligible.
-func pick(candidates []Format, eligible func(Format) bool, better func(a, b Format) bool) (int, error) {
-	if i, ok := bestAmong(candidates, eligible, better); ok {
+func pick(candidates []Format, eligible func(Format) bool, prefCodec string) (int, error) {
+	if i, ok := bestWith(candidates, eligible, prefCodec); ok {
 		return i, nil
 	}
 	return -1, ErrNoMatch
+}
+
+// bestWith returns the highest-ranked eligible candidate. It decides whether to
+// use quality tiers once so the comparator remains consistent.
+func bestWith(c []Format, keep func(Format) bool, prefCodec string) (int, bool) {
+	return bestAmong(c, keep, betterThan(prefCodec, tierUsable(c, keep, prefCodec)))
 }
 
 // bestAmong returns the highest-ranked candidate kept by keep. Ties resolve to
@@ -108,16 +114,19 @@ func bestAmong(candidates []Format, keep func(Format) bool, better func(a, b For
 	return best, best >= 0
 }
 
-// betterThan builds the audio-ranking comparator. The order is deliberately
-// coarse:
+// betterThan builds the audio-ranking comparator. Candidates are ranked by:
 //
 //  1. original track, because the wrong language is a content error
 //  2. preferred codec family, when one was requested
 //  3. non-DRC audio
-//  4. highest effective bitrate
+//  4. higher reported quality tier, when useTier is true
+//  5. Opus over other codecs, when useTier is true
+//  6. higher effective bitrate
 //
-// Equal on all criteria returns false, so the earlier candidate wins ties.
-func betterThan(prefCodec string) func(a, b Format) bool {
+// If tier metadata is incomplete, tier and Opus preference are skipped and
+// bitrate decides between candidates otherwise tied on the first three rules.
+// Equal candidates retain their original order.
+func betterThan(prefCodec string, useTier bool) func(a, b Format) bool {
 	return func(a, b Format) bool {
 		if ra, rb := originalRank(a.IsOriginal), originalRank(b.IsOriginal); ra != rb {
 			return ra > rb
@@ -130,8 +139,66 @@ func betterThan(prefCodec string) func(a, b Format) bool {
 		if ra, rb := nonDRCRank(a.IsDRC), nonDRCRank(b.IsDRC); ra != rb {
 			return ra > rb
 		}
+		if useTier {
+			if ra, rb := int(a.AudioQuality), int(b.AudioQuality); ra != rb {
+				return ra > rb
+			}
+			if ra, rb := codecPreferenceRank(a.Codec), codecPreferenceRank(b.Codec); ra != rb {
+				return ra > rb
+			}
+		}
 		return a.EffectiveBitrate() > b.EffectiveBitrate()
 	}
+}
+
+// codecPreferenceRank prefers Opus when candidates share a reported tier.
+func codecPreferenceRank(codec string) int {
+	if codecFamily(codec) == "opus" {
+		return 1
+	}
+	return 0
+}
+
+// tierUsable reports whether every eligible candidate tied on original track,
+// requested codec, and DRC status has a known quality tier. Lower-ranked
+// candidates do not affect the decision.
+func tierUsable(c []Format, keep func(Format) bool, prefCodec string) bool {
+	key := func(f Format) [3]int {
+		m := 0
+		if prefCodec != "" && codecMatches(prefCodec, f.Codec) {
+			m = 1
+		}
+		return [3]int{originalRank(f.IsOriginal), m, nonDRCRank(f.IsDRC)}
+	}
+	var best [3]int
+	have := false
+	for i := range c {
+		if !keep(c[i]) {
+			continue
+		}
+		if k := key(c[i]); !have || lessKey(best, k) {
+			best, have = k, true
+		}
+	}
+	if !have {
+		return false
+	}
+	for i := range c {
+		if keep(c[i]) && key(c[i]) == best && c[i].AudioQuality == QualityUnknown {
+			return false
+		}
+	}
+	return true
+}
+
+// lessKey compares ranking keys lexicographically.
+func lessKey(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
 
 // originalRank sorts known-original tracks first and known dubs last. Unknown

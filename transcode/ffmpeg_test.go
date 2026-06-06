@@ -255,8 +255,6 @@ func TestTailWriterZeroMax(t *testing.T) {
 	}
 }
 
-// --- helpers ---
-
 func mustWrite(t *testing.T, w *tailWriter, s string) {
 	t.Helper()
 	n, err := w.Write([]byte(s))

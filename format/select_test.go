@@ -2,6 +2,7 @@ package format
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -9,6 +10,18 @@ import (
 // other fields default to their zero (Unknown) values.
 func aud(itag int, codec string, avgBitrate int) Format {
 	return Format{Itag: itag, MIMEType: "audio/x", Codec: codec, AverageBitrate: avgBitrate}
+}
+
+// audq builds an audio format with a reported quality tier.
+func audq(itag int, codec, ext string, avgBitrate int, tier AudioQualityTier) Format {
+	return Format{
+		Itag:           itag,
+		MIMEType:       "audio/" + ext,
+		Codec:          codec,
+		Extension:      ext,
+		AverageBitrate: avgBitrate,
+		AudioQuality:   tier,
+	}
 }
 
 func TestIsAudio(t *testing.T) {
@@ -385,4 +398,290 @@ func TestCodecMatches(t *testing.T) {
 			t.Errorf("codecMatches(%q, %q) = %v, want %v", c.want, c.have, got, c.match)
 		}
 	}
+}
+
+func TestBestAudio_TierThenOpusBeatsHigherBitrate(t *testing.T) {
+	cands := []Format{
+		audq(251, "opus", "webm", 105000, QualityMedium),
+		audq(140, "mp4a.40.2", "m4a", 129000, QualityMedium),
+		audq(139, "mp4a.40.5", "m4a", 49000, QualityLow),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("idx=%d itag=%d, want 251 (Opus MEDIUM over 129k AAC MEDIUM)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_SameTierOpusWinsRegardlessOfBitrate(t *testing.T) {
+	cands := []Format{
+		audq(251, "opus", "webm", 110000, QualityMedium),
+		audq(140, "mp4a.40.2", "m4a", 160000, QualityMedium),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("idx=%d itag=%d, want 251 (Opus over higher-bitrate AAC in same tier)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_HigherTierBeatsLowerTier(t *testing.T) {
+	cands := []Format{
+		audq(251, "opus", "webm", 50000, QualityLow),
+		audq(140, "mp4a.40.2", "m4a", 128000, QualityMedium),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("idx=%d itag=%d, want 140 (MEDIUM beats LOW)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_UltraLowBelowLow(t *testing.T) {
+	cands := []Format{
+		audq(600, "opus", "webm", 60000, QualityUltraLow),
+		audq(139, "mp4a.40.5", "m4a", 55000, QualityLow),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 139 {
+		t.Fatalf("idx=%d itag=%d, want 139 (LOW AAC beats ULTRALOW Opus)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_HighTierBeatsOpusPreference(t *testing.T) {
+	cands := []Format{
+		audq(140, "mp4a.40.2", "m4a", 128000, QualityHigh),
+		audq(251, "opus", "webm", 160000, QualityMedium),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("idx=%d itag=%d, want 140 (HIGH tier beats MEDIUM Opus)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_WithinTierSameCodecHigherBitrate(t *testing.T) {
+	cands := []Format{
+		audq(250, "opus", "webm", 120000, QualityMedium),
+		audq(251, "opus", "webm", 160000, QualityMedium),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("idx=%d itag=%d, want 251 (higher bitrate within same codec/tier)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestAudio_MixedTierMetadataFallsBackToBitrate(t *testing.T) {
+	cands := []Format{
+		audq(251, "opus", "webm", 105000, QualityMedium),
+		audq(140, "mp4a.40.2", "m4a", 129000, QualityUnknown),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("idx=%d itag=%d, want 140 (bitrate fallback when a candidate lacks a tier)", idx, cands[idx].Itag)
+	}
+}
+
+func TestTierUsable_OnlyHighestPriorityCandidates(t *testing.T) {
+	t.Run("dub without tier", func(t *testing.T) {
+		cands := []Format{
+			{Itag: 251, MIMEType: "audio/webm", Codec: "opus", Extension: "webm", AverageBitrate: 105000, AudioQuality: QualityMedium, IsOriginal: Yes},
+			{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", Extension: "m4a", AverageBitrate: 129000, AudioQuality: QualityMedium, IsOriginal: Yes},
+			{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", Extension: "m4a", AverageBitrate: 200000, AudioQuality: QualityUnknown, IsOriginal: No},
+		}
+		idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cands[idx].Itag != 251 || cands[idx].Codec != "opus" {
+			t.Fatalf("idx=%d itag=%d codec=%s, want 251 opus", idx, cands[idx].Itag, cands[idx].Codec)
+		}
+	})
+
+	t.Run("excluded video without tier", func(t *testing.T) {
+		cands := []Format{
+			audq(251, "opus", "webm", 105000, QualityMedium),
+			audq(140, "mp4a.40.2", "m4a", 129000, QualityMedium),
+			{Itag: 137, MIMEType: "video/mp4", Codec: "avc1.640028", AverageBitrate: 4000000},
+		}
+		idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cands[idx].Itag != 251 {
+			t.Fatalf("idx=%d itag=%d, want 251 (video-only exclusion must not disable tier)", idx, cands[idx].Itag)
+		}
+	})
+}
+
+func TestBestForTarget_PreferredCodecDominatesTier(t *testing.T) {
+	cands := []Format{
+		audq(140, "mp4a.40.2", "m4a", 100000, QualityLow),
+		audq(251, "opus", "webm", 200000, QualityHigh),
+	}
+	idx, err := BestForTarget(cands, PreferCodec("aac"), Target{Codec: "mp3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("idx=%d itag=%d, want 140 (preferred codec dominates tier)", idx, cands[idx].Itag)
+	}
+}
+
+func TestBestForTarget_TierFallbackAmongNonPreferred(t *testing.T) {
+	cands := []Format{
+		audq(251, "opus", "webm", 105000, QualityMedium),
+		audq(140, "mp4a.40.2", "m4a", 129000, QualityLow),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{Codec: "vorbis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("idx=%d itag=%d, want 251 (MEDIUM Opus over LOW AAC when no codec match)", idx, cands[idx].Itag)
+	}
+}
+
+func TestCodecPreferenceRank(t *testing.T) {
+	cases := []struct {
+		codec string
+		want  int
+	}{
+		{"opus", 1},
+		{"aac", 0},
+		{"mp4a.40.2", 0},
+		{"vorbis", 0},
+		{"mp3", 0},
+		{"", 0},
+		{"weirdcodec", 0},
+	}
+	for _, c := range cases {
+		if got := codecPreferenceRank(c.codec); got != c.want {
+			t.Errorf("codecPreferenceRank(%q) = %d, want %d", c.codec, got, c.want)
+		}
+	}
+}
+
+func TestBestAudio_PicksWebmOpusOverM4aAAC(t *testing.T) {
+	cands := []Format{
+		audq(140, "mp4a.40.2", "m4a", 129000, QualityMedium),
+		audq(251, "opus", "webm", 105000, QualityMedium),
+	}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[idx]; got.Codec != "opus" || got.Extension != "webm" {
+		t.Fatalf("chose %+v, want an opus/webm format", got)
+	}
+}
+
+func TestBetterThan_StrictWeakOrdering(t *testing.T) {
+	set := []Format{
+		{Itag: 1, Codec: "opus", AverageBitrate: 160000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No},
+		{Itag: 2, Codec: "mp4a.40.2", AverageBitrate: 128000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No},
+		{Itag: 3, Codec: "opus", AverageBitrate: 105000, AudioQuality: QualityMedium, IsOriginal: Yes, IsDRC: Yes},
+		{Itag: 4, Codec: "vorbis", AverageBitrate: 128000, AudioQuality: QualityMedium, IsOriginal: Unknown, IsDRC: No},
+		{Itag: 5, Codec: "mp4a.40.2", AverageBitrate: 200000, AudioQuality: QualityUnknown, IsOriginal: No, IsDRC: No},
+		{Itag: 6, Codec: "opus", AverageBitrate: 60000, AudioQuality: QualityUltraLow, IsOriginal: Yes, IsDRC: No},
+		{Itag: 7, Codec: "mp3", AverageBitrate: 128000, AudioQuality: QualityLow, IsOriginal: Yes, IsDRC: No},
+	}
+	for _, prefCodec := range []string{"", "aac"} {
+		for _, useTier := range []bool{false, true} {
+			name := fmt.Sprintf("prefCodec=%q/useTier=%v", prefCodec, useTier)
+			checkStrictWeakOrdering(t, name, set, betterThan(prefCodec, useTier))
+		}
+	}
+}
+
+// checkStrictWeakOrdering verifies the properties of a strict weak order.
+func checkStrictWeakOrdering(t *testing.T, name string, set []Format, lt func(a, b Format) bool) {
+	t.Helper()
+	eq := func(a, b Format) bool { return !lt(a, b) && !lt(b, a) }
+	for i := range set {
+		if lt(set[i], set[i]) {
+			t.Errorf("%s: not irreflexive at itag %d", name, set[i].Itag)
+		}
+	}
+	for i := range set {
+		for j := range set {
+			if lt(set[i], set[j]) && lt(set[j], set[i]) {
+				t.Errorf("%s: not asymmetric for itags %d,%d", name, set[i].Itag, set[j].Itag)
+			}
+		}
+	}
+	for i := range set {
+		for j := range set {
+			for k := range set {
+				if lt(set[i], set[j]) && lt(set[j], set[k]) && !lt(set[i], set[k]) {
+					t.Errorf("%s: < not transitive for itags %d,%d,%d", name, set[i].Itag, set[j].Itag, set[k].Itag)
+				}
+				if eq(set[i], set[j]) && eq(set[j], set[k]) && !eq(set[i], set[k]) {
+					t.Errorf("%s: equivalence not transitive for itags %d,%d,%d", name, set[i].Itag, set[j].Itag, set[k].Itag)
+				}
+			}
+		}
+	}
+}
+
+func TestSelect_OrderIndependentNoTies(t *testing.T) {
+	base := []Format{
+		audq(251, "opus", "webm", 105000, QualityMedium),
+		audq(140, "mp4a.40.2", "m4a", 129000, QualityMedium),
+		audq(139, "mp4a.40.5", "m4a", 49000, QualityLow),
+		audq(171, "vorbis", "webm", 128000, QualityLow),
+	}
+	const wantItag = 251
+	permuteFormats(base, func(p []Format) {
+		idx, err := BestForTarget(p, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p[idx].Itag != wantItag {
+			t.Fatalf("permutation %v: winner itag=%d, want %d", itagsOf(p), p[idx].Itag, wantItag)
+		}
+	})
+}
+
+// permuteFormats invokes fn with every permutation of fs (each a fresh copy).
+func permuteFormats(fs []Format, fn func([]Format)) {
+	a := append([]Format(nil), fs...)
+	var rec func(int)
+	rec = func(i int) {
+		if i == len(a) {
+			fn(append([]Format(nil), a...))
+			return
+		}
+		for j := i; j < len(a); j++ {
+			a[i], a[j] = a[j], a[i]
+			rec(i + 1)
+			a[i], a[j] = a[j], a[i]
+		}
+	}
+	rec(0)
+}
+
+func itagsOf(fs []Format) []int {
+	out := make([]int, len(fs))
+	for i := range fs {
+		out[i] = fs[i].Itag
+	}
+	return out
 }

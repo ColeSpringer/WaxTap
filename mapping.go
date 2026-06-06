@@ -22,10 +22,6 @@ import (
 	"github.com/colespringer/waxtap/youtube"
 )
 
-// ---------------------------------------------------------------------------
-// Spec mapping (public waxtap specs -> internal package specs)
-// ---------------------------------------------------------------------------
-
 // transcodeCodec maps a public TranscodeFormat to a transcode.Codec.
 func transcodeCodec(f TranscodeFormat) transcode.Codec {
 	switch f {
@@ -138,10 +134,6 @@ func sponsorBlockContributed(explicit, sbRanges []cut.Range, pres pipeline.Resul
 	return combinedKept < explicitKept
 }
 
-// ---------------------------------------------------------------------------
-// Work classification
-// ---------------------------------------------------------------------------
-
 // cutRequested reports whether the spec asks for any cut (explicit ranges or a
 // SponsorBlock fetch). A nil SponsorBlock slice disables the fetch.
 func cutRequested(c *CutSpec) bool {
@@ -155,10 +147,6 @@ func cutRequested(c *CutSpec) bool {
 func needsProcessing(s ProcessSpec) bool {
 	return cutRequested(s.Cut) || s.Transcode != nil || s.Loudness != nil
 }
-
-// ---------------------------------------------------------------------------
-// Source mapping (youtube.ResolvedStream -> download.Source)
-// ---------------------------------------------------------------------------
 
 // toSource maps a resolved stream to a download Source, selecting the query-range
 // strategy for googlevideo media hosts (which answer &range= with a 200) and the
@@ -184,10 +172,6 @@ func isGoogleVideoHost(rawURL string) bool {
 	}
 	return strings.HasSuffix(strings.ToLower(u.Hostname()), "googlevideo.com")
 }
-
-// ---------------------------------------------------------------------------
-// Result construction
-// ---------------------------------------------------------------------------
 
 // newProcessResult builds a Result from a pipeline outcome and the source format.
 // target is the loudness target (used only when loudness was measured/applied).
@@ -266,10 +250,6 @@ func loudnessInfo(l normalize.Loudness) LoudnessInfo {
 		Threshold:      l.Threshold,
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
 
 // withTimeout derives a child context bounded by d. A non-positive d returns the
 // parent with a no-op cancel, so callers can always defer cancel.

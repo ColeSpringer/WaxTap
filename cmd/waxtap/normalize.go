@@ -130,10 +130,6 @@ func runMeasure(cmd *cobra.Command, env *appEnv, source string, target float64, 
 	return emitResult(env, res)
 }
 
-// ---------------------------------------------------------------------------
-// Album
-// ---------------------------------------------------------------------------
-
 type albumParams struct {
 	apply        bool
 	target       float64
