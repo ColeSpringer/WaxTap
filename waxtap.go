@@ -13,6 +13,7 @@ import (
 
 	"github.com/colespringer/waxtap/download"
 	"github.com/colespringer/waxtap/format"
+	"github.com/colespringer/waxtap/internal/clientident"
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/sponsorblock"
 	"github.com/colespringer/waxtap/transcode"
@@ -50,6 +51,15 @@ func New(opts Options) (*Client, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+
+	// youtube.New cannot report invalid configuration, so validate the override
+	// here.
+	if !clientident.ValidChromeMajor(opts.ChromeMajor) {
+		return nil, fmt.Errorf("invalid ChromeMajor %d: must be 0 (default) or 1..999", opts.ChromeMajor)
+	}
+	if opts.ChromeMajor != 0 && opts.ProfileOverridePath != "" {
+		return nil, fmt.Errorf("ChromeMajor and ProfileOverridePath are mutually exclusive: an override file supplies its own user agents")
 	}
 
 	var profiles []youtube.ClientProfile
@@ -92,6 +102,7 @@ func New(opts Options) (*Client, error) {
 			HTTP:             hc,
 			Logger:           log,
 			Profiles:         profiles, // nil => youtube.DefaultProfiles()
+			ChromeMajor:      opts.ChromeMajor,
 			ResolveTimeout:   opts.Timeouts.Resolve,
 			CacheDir:         resolveCacheDir(opts, log),
 			DisableDiskCache: opts.DisableDiskCache,

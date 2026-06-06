@@ -4,6 +4,7 @@ import (
 	"maps"
 	"strconv"
 
+	"github.com/colespringer/waxtap/internal/clientident"
 	"github.com/colespringer/waxtap/potoken"
 )
 
@@ -147,16 +148,16 @@ var (
 		Name:              "WEB_EMBEDDED_PLAYER",
 		InnerTubeName:     "WEB_EMBEDDED_PLAYER",
 		InnerTubeID:       56,
-		Version:           "1.20250310.01.00",
-		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		Version:           clientident.WebEmbeddedVersion,
+		UserAgent:         clientident.UserAgent(0),
 		SupportsPlaylists: false,
 	}
 	profileWeb = ClientProfile{
 		Name:          "WEB",
 		InnerTubeName: "WEB",
 		InnerTubeID:   1,
-		Version:       "2.20250310.01.00",
-		UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		Version:       clientident.WebVersion,
+		UserAgent:     clientident.UserAgent(0),
 		// WEB requires both PO-token scopes: player for the /player body and GVS
 		// for the stream URL.
 		RequiresPOTokens:  []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS},
@@ -183,18 +184,24 @@ func BuildProfile(base ClientProfile) ClientProfile {
 
 func makeProfile(base ClientProfile) ClientProfile { return BuildProfile(base) }
 
-// DefaultProfiles returns the ordered client strategy chain. ANDROID_VR leads
-// because it usually returns direct URLs without a PO token; the embedded and WEB
-// clients cover fallback cases.
+// DefaultProfiles returns the ordered client strategy chain using the default
+// built-in Chrome identity. ANDROID_VR leads because it usually returns direct
+// URLs without a PO token; the embedded and WEB clients cover fallback cases.
 func DefaultProfiles() []ClientProfile {
+	return buildDefaultProfiles(clientident.UserAgent(0))
+}
+
+// buildDefaultProfiles returns the default strategy chain after applying webUA
+// to the WEB-family profiles.
+func buildDefaultProfiles(webUA string) []ClientProfile {
+	web := profileWeb
+	web.UserAgent = webUA
+	embedded := profileWebEmbedded
+	embedded.UserAgent = webUA
 	return []ClientProfile{
 		makeProfile(profileAndroidVR),
 		makeProfile(profileIOS),
-		makeProfile(profileWebEmbedded),
-		makeProfile(profileWeb),
+		makeProfile(embedded),
+		makeProfile(web),
 	}
 }
-
-// webProfile returns the built-in WEB profile for watch-page fallback and as a
-// last-resort playlist profile.
-func webProfile() ClientProfile { return makeProfile(profileWeb) }

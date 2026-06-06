@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/internal/cache"
+	"github.com/colespringer/waxtap/internal/clientident"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -29,10 +30,6 @@ const (
 	playerURLCacheKey = "current"
 	// maxPlayerBytes bounds how much of base.js / a discovery page we buffer.
 	maxPlayerBytes = 16 << 20
-	// discoveryUserAgent is sent on base.js / discovery fetches. These pages are
-	// client-agnostic, so a stable desktop UA is used rather than the winning
-	// extraction profile's UA.
-	discoveryUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 // baseJSPathRe matches the base.js path embedded in an embed/watch page.
@@ -62,6 +59,9 @@ type Config struct {
 	// SourceCache persists base.js source across process runs. Nil keeps the
 	// resolver memory-only.
 	SourceCache SourceCache
+	// DiscoveryUserAgent is sent when fetching discovery pages and base.js. Empty
+	// uses the default built-in WEB User-Agent.
+	DiscoveryUserAgent string
 }
 
 // Player resolves candidate formats into playable, signed stream URLs by locating
@@ -69,9 +69,10 @@ type Config struct {
 // discovered base.js URL are cached (with singleflight) so concurrent resolutions
 // sharing a player do not stampede. It is safe for concurrent use.
 type Player struct {
-	http    HTTPDoer
-	log     *slog.Logger
-	timeout time.Duration
+	http        HTTPDoer
+	log         *slog.Logger
+	timeout     time.Duration
+	discoveryUA string // User-Agent for base.js / discovery fetches
 
 	programs *cache.Store[*playerProgram] // in-memory, keyed by base.js URL
 	urls     *cache.Store[string]         // discovered base.js URL (global)
@@ -81,16 +82,20 @@ type Player struct {
 // New returns a Player with defaults applied.
 func New(cfg Config) *Player {
 	p := &Player{
-		http:    cfg.HTTP,
-		log:     cfg.Logger,
-		timeout: cfg.CipherTimeout,
-		source:  cfg.SourceCache,
+		http:        cfg.HTTP,
+		log:         cfg.Logger,
+		timeout:     cfg.CipherTimeout,
+		discoveryUA: cfg.DiscoveryUserAgent,
+		source:      cfg.SourceCache,
 	}
 	if p.log == nil {
 		p.log = slog.New(slog.DiscardHandler)
 	}
 	if p.timeout <= 0 {
 		p.timeout = defaultCipherTimeout
+	}
+	if p.discoveryUA == "" {
+		p.discoveryUA = clientident.UserAgent(0)
 	}
 	p.programs = cache.NewStore[*playerProgram](cache.Options{
 		MaxEntries:    cfg.CacheSize,
@@ -277,13 +282,13 @@ func (p *Player) program(ctx context.Context, playerURL string) (*playerProgram,
 	})
 }
 
-// get performs a bounded GET with a stable discovery user agent.
+// get performs a bounded GET with the configured discovery user agent.
 func (p *Player) get(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", discoveryUserAgent)
+	req.Header.Set("User-Agent", p.discoveryUA)
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := p.http.Do(req)

@@ -56,6 +56,7 @@ type appConfig struct {
 	downloads       int
 	sbBaseURL       string
 	profileOverride string
+	chromeMajor     int
 
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
@@ -79,6 +80,7 @@ type fileConfig struct {
 	Downloads           *int     `json:"downloadConcurrency"`
 	SponsorBlockBaseURL *string  `json:"sponsorBlockBaseURL"`
 	ProfileOverridePath *string  `json:"profileOverridePath"`
+	ChromeMajor         *int     `json:"chromeMajor"`
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
@@ -128,6 +130,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		downloads:       coalesceInt(0, fc.Downloads, ec.Downloads, nil),
 		sbBaseURL:       str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
 		profileOverride: str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
+		chromeMajor:     coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
 
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
@@ -229,6 +232,7 @@ func envOverlay() (fileConfig, error) {
 	ec.Downloads = getInt("WAXTAP_DOWNLOAD_CONCURRENCY")
 	ec.SponsorBlockBaseURL = getStr("WAXTAP_SPONSORBLOCK_BASE_URL")
 	ec.ProfileOverridePath = getStr("WAXTAP_PROFILE_OVERRIDE")
+	ec.ChromeMajor = getInt("WAXTAP_CHROME_MAJOR")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
@@ -267,6 +271,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		DisableDiskCache:    a.noCache,
 		TempDir:             a.tempDir,
 		ProfileOverridePath: a.profileOverride,
+		ChromeMajor:         a.chromeMajor,
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,
@@ -388,6 +393,13 @@ func flagBoolPtr(flags *pflag.FlagSet, name string, val bool) *bool {
 }
 
 func flagFloatPtr(flags *pflag.FlagSet, name string, val float64) *float64 {
+	if flags.Changed(name) {
+		return &val
+	}
+	return nil
+}
+
+func flagIntPtr(flags *pflag.FlagSet, name string, val int) *int {
 	if flags.Changed(name) {
 		return &val
 	}

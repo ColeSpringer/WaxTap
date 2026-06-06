@@ -115,6 +115,61 @@ func TestFlagPtrOnlyWhenChanged(t *testing.T) {
 	}
 }
 
+func TestCoalesceIntPrecedence(t *testing.T) {
+	file, env, flag := 10, 20, 30
+	if got := coalesceInt(0); got != 0 {
+		t.Errorf("no layers = %d, want 0", got)
+	}
+	if got := coalesceInt(0, &file); got != 10 {
+		t.Errorf("file layer = %d", got)
+	}
+	if got := coalesceInt(0, &file, &env); got != 20 {
+		t.Errorf("env over file = %d", got)
+	}
+	if got := coalesceInt(0, &file, &env, &flag); got != 30 {
+		t.Errorf("flag over env = %d", got)
+	}
+	// An explicit 0 still overrides environment and file values, selecting the
+	// built-in default. waxtap.New validates the resolved value.
+	zero := 0
+	if got := coalesceInt(0, &file, &env, &zero); got != 0 {
+		t.Errorf("explicit flag 0 = %d, want 0 (overrides lower layers)", got)
+	}
+}
+
+func TestEnvOverlayChromeMajor(t *testing.T) {
+	t.Setenv("WAXTAP_CHROME_MAJOR", "151")
+	ec, err := envOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ec.ChromeMajor == nil || *ec.ChromeMajor != 151 {
+		t.Errorf("chrome-major overlay = %v, want 151", ec.ChromeMajor)
+	}
+}
+
+func TestEnvOverlayChromeMajorMalformed(t *testing.T) {
+	t.Setenv("WAXTAP_CHROME_MAJOR", "abc")
+	if _, err := envOverlay(); err == nil {
+		t.Error("malformed WAXTAP_CHROME_MAJOR should error")
+	}
+}
+
+func TestFlagIntPtrOnlyWhenChanged(t *testing.T) {
+	fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+	var v int
+	fs.IntVar(&v, "chrome-major", 0, "")
+	if flagIntPtr(fs, "chrome-major", v) != nil {
+		t.Error("unset flag should yield nil pointer")
+	}
+	if err := fs.Set("chrome-major", "151"); err != nil {
+		t.Fatal(err)
+	}
+	if p := flagIntPtr(fs, "chrome-major", v); p == nil || *p != 151 {
+		t.Errorf("set flag pointer = %v", p)
+	}
+}
+
 // newConfigTestCmd builds a command exposing just the --config flag bound to the
 // global rootFlagsValue, as readConfigFile expects.
 func newConfigTestCmd() *cobra.Command {

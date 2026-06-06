@@ -212,6 +212,10 @@ Useful operational knobs:
   `WAXTAP_CACHE_DIR`, `--no-cache`, `WAXTAP_NO_CACHE`.
 - Runtime client refresh: `--profile-override`, `WAXTAP_PROFILE_OVERRIDE`, or
   `profileOverridePath` in config JSON.
+- Built-in Chrome identity: use `--chrome-major`, `WAXTAP_CHROME_MAJOR`, or
+  `chromeMajor` in config JSON to override the emulated Chrome major without a
+  rebuild. This cannot be combined with `--profile-override`, which supplies its
+  own user agents.
 - Network posture: `--proxy`, `--qps`, `--hl`, `--gl`, and their documented
   `WAXTAP_*` equivalents.
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on

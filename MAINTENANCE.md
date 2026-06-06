@@ -40,7 +40,7 @@ reference for the knobs that let you respond without rebuilding.
 4. **Fix the smallest surface.** Breakage usually lands in one of three files:
    | Symptom | File |
    |---|---|
-   | Bot wall / playability `ERROR` / stale client version | `youtube/profile.go` (client versions, user agents, device fingerprints, `RequiresPOTokens`) |
+   | Bot wall / playability `ERROR` / stale client version | `internal/clientident` (WEB-family Chrome and InnerTube versions); `youtube/profile.go` (other client versions, device fingerprints, and PO-token requirements) |
    | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators) |
    | Player response shape changed (parse/format extraction) | `youtube/playerresponse.go` |
 
@@ -65,13 +65,40 @@ job on an extraction/cipher failure (exit 4). Availability and rate-limit
 failures warn and keep the job green because GitHub runner IPs are frequently
 throttled by YouTube.
 
+## Bumping the emulated Chrome version
+
+Some player PO tokens are bound to the Chrome version in the browser identity. A
+stale major can cause YouTube to reject the token at the `/player` endpoint,
+leaving formats without stream URLs. The emulated version only needs to be
+reasonably current; it does not need to match the latest release.
+
+`internal/clientident` centralizes the built-in WEB-family identity: the Chrome
+major (`DefaultChromeMajor`), the reduced desktop User-Agent, and the InnerTube
+`WEB` and `WEB_EMBEDDED` versions. Update those values when rebuilding. To find
+the current stable Chrome major without authentication, query
+`versionhistory.googleapis.com/v1/chrome/platforms/win/channels/stable/versions`.
+
+To update the emulated major without rebuilding, use a runtime override:
+
+```sh
+waxtap --chrome-major 151 info <url>
+# or: WAXTAP_CHROME_MAJOR=151, or "chromeMajor": 151 in config.json
+```
+
+`--chrome-major` updates only the built-in WEB-family identities. These identities
+are used by the default client chain, player discovery, visitor-data bootstrap,
+watch-page fallback, and playlist fallback. The valid range is `0..999`; `0`
+selects the built-in default. Values outside that range are rejected at startup.
+The option cannot be combined with `--profile-override`, which supplies its own
+user agents.
+
 ## Client-profile override files
 
 When YouTube only needs a **client version or user-agent bump**, you do not need a
 rebuild. Point WaxTap at a JSON file that replaces the built-in client strategy
 chain:
 
-```
+```sh
 waxtap --profile-override ./profiles.json info <url>
 # or: WAXTAP_PROFILE_OVERRIDE=./profiles.json, or "profileOverridePath" in config.json
 ```
@@ -111,8 +138,8 @@ template mirrors the current defaults in `youtube/profile.go`:
       "name": "WEB_EMBEDDED_PLAYER",
       "innerTubeName": "WEB_EMBEDDED_PLAYER",
       "innerTubeId": 56,
-      "version": "1.20250310.01.00",
-      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "version": "1.20260115.01.00",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       "requiresPoTokens": [],
       "supportsPlaylists": false
     },
@@ -120,8 +147,8 @@ template mirrors the current defaults in `youtube/profile.go`:
       "name": "WEB",
       "innerTubeName": "WEB",
       "innerTubeId": 1,
-      "version": "2.20250310.01.00",
-      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "version": "2.20260603.05.00",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       "requiresPoTokens": ["player", "gvs"],
       "supportsPlaylists": true
     }
@@ -136,6 +163,13 @@ Notes:
   alone, and unsupported scopes such as `subtitles` are rejected.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
+- An override replaces only the primary extraction chain. Player discovery, the
+  watch-page scrape, and playlist fallback still use the built-in WEB identity,
+  so an override may use a different WEB User-Agent than those requests. The
+  player, PO-token, and stream requests for an extraction still use its winning
+  profile consistently, and discovery never requests a PO token. Use
+  `--chrome-major` instead when only the built-in Chrome identity needs to change;
+  the two options cannot be combined.
 - The loader is strict: unknown keys, trailing data after the JSON document, an
   empty list, or a profile missing `name`/`innerTubeName`/`version`/a positive
   `innerTubeId` is a hard error. (`innerTubeId` drives `X-Youtube-Client-Name`;

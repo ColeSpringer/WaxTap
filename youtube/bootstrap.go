@@ -63,7 +63,7 @@ func (c *Client) bootstrapVisitorData(ctx context.Context) (string, error) {
 // fetchVisitorData loads the YouTube homepage and parses the visitorData embedded
 // in its configuration.
 func (c *Client) fetchVisitorData(ctx context.Context) (string, error) {
-	body, err := c.httpGet(ctx, webProfile(), newSession(c.gl), "https://www.youtube.com/?hl="+url.QueryEscape(c.hl))
+	body, err := c.httpGet(ctx, c.webFallback, newSession(c.gl), "https://www.youtube.com/?hl="+url.QueryEscape(c.hl))
 	if err != nil {
 		return "", err
 	}

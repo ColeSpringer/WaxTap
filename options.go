@@ -46,6 +46,15 @@ type Options struct {
 	// user agents, or device fingerprints without rebuilding.
 	ProfileOverridePath string
 
+	// ChromeMajor overrides the emulated Chrome major for the built-in WEB-family
+	// client identities. Zero selects the built-in default.
+	//
+	// The value applies to the default profile chain and to built-in WEB requests
+	// used for discovery and fallbacks. It does not modify profiles loaded from
+	// ProfileOverridePath, so the two options cannot be combined. New rejects
+	// values outside 0..999.
+	ChromeMajor int
+
 	SponsorBlock SponsorBlockOptions
 
 	// POTokenProvider supplies PO tokens for profiles that require them. WaxTap may

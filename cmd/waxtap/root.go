@@ -22,6 +22,7 @@ type rootFlags struct {
 	gl              string
 	sponsorblockURL string
 	profileOverride string
+	chromeMajor     int
 }
 
 var rootFlagsValue rootFlags
@@ -61,6 +62,7 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.gl, "gl", "", "content region hint, e.g. US, DE, JP (default: US)")
 	pf.StringVar(&rootFlagsValue.sponsorblockURL, "sponsorblock-url", "", "override the SponsorBlock API base URL (default: public server)")
 	pf.StringVar(&rootFlagsValue.profileOverride, "profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
+	pf.IntVar(&rootFlagsValue.chromeMajor, "chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
 
 	root.AddCommand(
 		newInfoCmd(),

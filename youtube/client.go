@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/internal/cache"
+	"github.com/colespringer/waxtap/internal/clientident"
 	"github.com/colespringer/waxtap/internal/diskcache"
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/potoken"
@@ -21,13 +22,14 @@ import (
 // dependencies, while mutable per-attempt identity lives in session. It is safe
 // for concurrent use after construction.
 type Client struct {
-	http     *httpx.Client
-	log      *slog.Logger
-	profiles []ClientProfile
-	resolver resolver.Resolver    // stream-URL resolution
-	potoken  potoken.Provider     // PO-token provider, when configured
-	visitors *cache.Store[string] // bootstrapped guest visitorData, singleflighted
-	hl, gl   string               // InnerTube host language / content region
+	http        *httpx.Client
+	log         *slog.Logger
+	profiles    []ClientProfile
+	webFallback ClientProfile        // built-in WEB profile for ancillary requests
+	resolver    resolver.Resolver    // stream-URL resolution
+	potoken     potoken.Provider     // PO-token provider, when configured
+	visitors    *cache.Store[string] // bootstrapped guest visitorData, singleflighted
+	hl, gl      string               // InnerTube host language / content region
 }
 
 // Config configures a Client.
@@ -38,6 +40,11 @@ type Config struct {
 	Logger *slog.Logger
 	// Profiles overrides the client strategy chain. If empty, DefaultProfiles().
 	Profiles []ClientProfile
+	// ChromeMajor overrides the emulated Chrome major for built-in WEB-family
+	// identities. It applies to the default profile chain and to built-in WEB
+	// requests used for discovery and fallbacks. Zero selects the built-in
+	// default. Caller-supplied Profiles are unchanged.
+	ChromeMajor int
 	// Resolver resolves candidate formats into playable URLs. If nil, New builds
 	// a default base.js/goja resolver over the same HTTP client. Metadata
 	// extraction does not need one; stream resolution (Resolve) does.
@@ -79,6 +86,12 @@ func New(cfg Config) *Client {
 		hl:       cfg.HL,
 		gl:       cfg.GL,
 	}
+	// Use one built-in WEB User-Agent for default profiles and ancillary WEB
+	// requests. Caller-supplied profiles retain their own user agents.
+	webUA := clientident.UserAgent(cfg.ChromeMajor)
+	web := profileWeb
+	web.UserAgent = webUA
+	c.webFallback = makeProfile(web)
 	if c.http == nil {
 		// The default client owns a cookie jar so guest-session cookies survive
 		// the visitor bootstrap and later player requests. Per-request contexts,
@@ -90,7 +103,7 @@ func New(cfg Config) *Client {
 		c.log = slog.New(slog.DiscardHandler)
 	}
 	if len(c.profiles) == 0 {
-		c.profiles = DefaultProfiles()
+		c.profiles = buildDefaultProfiles(webUA)
 	}
 	if c.resolver == nil {
 		var source resolver.SourceCache
@@ -102,10 +115,11 @@ func New(cfg Config) *Client {
 			})
 		}
 		c.resolver = resolver.New(resolver.Config{
-			HTTP:          c.http,
-			Logger:        c.log,
-			CipherTimeout: cfg.ResolveTimeout,
-			SourceCache:   source,
+			HTTP:               c.http,
+			Logger:             c.log,
+			CipherTimeout:      cfg.ResolveTimeout,
+			SourceCache:        source,
+			DiscoveryUserAgent: webUA,
 		})
 	}
 	if c.hl == "" {
@@ -216,7 +230,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 // extractFromWatchPage fetches the watch page and parses the embedded
 // ytInitialPlayerResponse, as a fallback when the InnerTube clients fail.
 func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Extraction, error) {
-	profile := webProfile()
+	profile := c.webFallback
 	sess := c.newBootstrappedSession(ctx)
 
 	body, err := c.httpGet(ctx, profile, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
@@ -306,7 +320,7 @@ func (c *Client) playlistProfile() ClientProfile {
 			return p
 		}
 	}
-	return webProfile()
+	return c.webFallback
 }
 
 // appendPlaylistItems adds entries up to maxItems. It returns true when the
