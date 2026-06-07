@@ -187,6 +187,31 @@ func (p *Player) Resolve(ctx context.Context, rc Context, cand Candidate) (Strea
 	}, nil
 }
 
+// SignatureTimestamp returns the signature timestamp embedded in base.js.
+// rc.PlayerURL selects the player directly; otherwise discovery starts from
+// rc.VideoID. If the compiled player has no recognized timestamp, it returns
+// zero without an error.
+func (p *Player) SignatureTimestamp(ctx context.Context, rc Context) (int, error) {
+	prog, err := p.inspectProgram(ctx, rc)
+	if err != nil {
+		return 0, err
+	}
+	if !prog.stsOK {
+		return 0, nil
+	}
+	return prog.sts, nil
+}
+
+// inspectProgram loads the compiled player selected by rc without resolving a
+// stream candidate.
+func (p *Player) inspectProgram(ctx context.Context, rc Context) (*playerProgram, error) {
+	resolved, err := p.playerURL(ctx, rc)
+	if err != nil {
+		return nil, err
+	}
+	return p.program(ctx, resolved)
+}
+
 // decipherCipher resolves a signatureCipher bundle into a base stream URL plus
 // the signature query-parameter name and deciphered value to attach. The player
 // program is required: it deciphers the signature.

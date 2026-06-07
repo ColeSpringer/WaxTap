@@ -1,7 +1,6 @@
-// Package resolver isolates YouTube's most volatile surface: discovering the
-// player JS (base.js), solving the signature and n-parameter transforms, and
-// building a playable, signed stream URL. Everything that breaks when YouTube
-// changes its cipher lives behind the Resolver interface here.
+// Package resolver isolates YouTube's volatile player JavaScript. It discovers
+// base.js, reads player metadata, solves the signature and n-parameter
+// transforms, and builds playable stream URLs.
 //
 // It is an internal package: by Go's internal rule it is importable only under
 // youtube/. It owns its own input/output value types and never imports the
@@ -57,12 +56,21 @@ type Stream struct {
 	Headers       http.Header
 }
 
-// Resolver turns a Candidate into a playable Stream, isolating all cipher and
-// base.js volatility. Implementations must locate and cache the player program,
-// solve the signature and n-parameter, attach any PO token, and return the
-// signed URL.
+// Resolver turns a Candidate into a playable Stream. Implementations must locate
+// and cache the player program, solve the signature and n-parameter, attach any
+// PO token, and return the signed URL.
 type Resolver interface {
 	Resolve(ctx context.Context, rc Context, candidate Candidate) (Stream, error)
+}
+
+// PlayerInspector exposes base.js metadata needed before stream resolution. It
+// is separate from Resolver so injected resolvers do not need to support player
+// inspection.
+type PlayerInspector interface {
+	// SignatureTimestamp returns the signature timestamp embedded in base.js.
+	// rc.PlayerURL selects the player directly; otherwise discovery starts from
+	// rc.VideoID. A compiled player without a recognized timestamp returns zero.
+	SignatureTimestamp(ctx context.Context, rc Context) (int, error)
 }
 
 // SourceCache stores base.js source between process runs. Player uses it behind

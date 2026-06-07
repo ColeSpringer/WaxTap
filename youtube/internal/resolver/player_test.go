@@ -216,6 +216,71 @@ func TestPlayerResolve_PlayerURLOverride(t *testing.T) {
 	}
 }
 
+func TestPlayerSignatureTimestamp(t *testing.T) {
+	srv := newFixtureServer(t)
+	p := New(Config{HTTP: srv.doer()})
+
+	sts, err := p.SignatureTimestamp(context.Background(), Context{PlayerURL: testBaseJSPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sts != 19834 {
+		t.Errorf("signature timestamp = %d, want 19834", sts)
+	}
+}
+
+func TestPlayerSignatureTimestamp_NoPattern(t *testing.T) {
+	noSTS := `var Xq={sp:function(a,b){a.splice(0,b)}};` +
+		`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
+		`;s&&(s=dcr(decodeURIComponent(s)));`
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == testBaseJSPath {
+			return okResp(noSTS), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return notFoundResp(), nil
+	})
+	p := New(Config{HTTP: doer})
+
+	sts, err := p.SignatureTimestamp(context.Background(), Context{PlayerURL: testBaseJSPath})
+	if err != nil {
+		t.Fatalf("unexpected error for missing signature timestamp: %v", err)
+	}
+	if sts != 0 {
+		t.Errorf("signature timestamp = %d, want 0 (no pattern)", sts)
+	}
+}
+
+func TestPlayerSignatureTimestamp_DiscoversFromVideoID(t *testing.T) {
+	var embedPath string
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/embed/"):
+			embedPath = r.URL.Path
+			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
+		case r.URL.Path == testBaseJSPath:
+			return okResp(`var cfg={signatureTimestamp:19834};` +
+				`var Xq={sp:function(a,b){a.splice(0,b)}};` +
+				`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
+				`;s&&(s=dcr(decodeURIComponent(s)));`), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return notFoundResp(), nil
+	})
+	p := New(Config{HTTP: doer})
+
+	sts, err := p.SignatureTimestamp(context.Background(), Context{VideoID: "testVideo01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sts != 19834 {
+		t.Errorf("signature timestamp = %d, want 19834", sts)
+	}
+	if embedPath != "/embed/testVideo01" {
+		t.Errorf("discovery embed path = %q, want /embed/testVideo01", embedPath)
+	}
+}
+
 func mustQuery(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {

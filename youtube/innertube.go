@@ -70,6 +70,9 @@ type playbackContext struct {
 
 type contentPlaybackContext struct {
 	HTML5Preference string `json:"html5Preference"`
+	// SignatureTimestamp is the base.js value required by WEB-family clients.
+	// A zero value omits the field.
+	SignatureTimestamp int `json:"signatureTimestamp,omitempty"`
 }
 
 func (c *Client) newInnertubeContext(p ClientProfile, s *session) innertubeContext {
@@ -92,18 +95,28 @@ func (c *Client) newInnertubeContext(p ClientProfile, s *session) innertubeConte
 	}
 }
 
-func (c *Client) newPlayerRequest(p ClientProfile, s *session, videoID, poToken string) innertubeRequest {
+// playerRequestOpts contains the fields that vary between /player requests.
+type playerRequestOpts struct {
+	VideoID string
+	POToken string
+	STS     int // base.js signature timestamp; zero omits the field
+}
+
+func (c *Client) newPlayerRequest(p ClientProfile, s *session, opts playerRequestOpts) innertubeRequest {
 	req := innertubeRequest{
-		VideoID:        videoID,
+		VideoID:        opts.VideoID,
 		Context:        c.newInnertubeContext(p, s),
 		ContentCheckOK: true,
 		RacyCheckOK:    true,
 		PlaybackContext: &playbackContext{
-			ContentPlaybackContext: contentPlaybackContext{HTML5Preference: "HTML5_PREF_WANTS"},
+			ContentPlaybackContext: contentPlaybackContext{
+				HTML5Preference:    "HTML5_PREF_WANTS",
+				SignatureTimestamp: opts.STS,
+			},
 		},
 	}
-	if poToken != "" {
-		req.ServiceIntegrityDimensions = &serviceIntegrityDimensions{POToken: poToken}
+	if opts.POToken != "" {
+		req.ServiceIntegrityDimensions = &serviceIntegrityDimensions{POToken: opts.POToken}
 	}
 	return req
 }

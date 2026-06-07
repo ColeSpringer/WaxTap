@@ -34,6 +34,11 @@ type playerProgram struct {
 	nProgram *goja.Program
 	nName    string
 	nErr     error
+
+	// sts is the signature timestamp parsed from base.js. stsOK is false when no
+	// recognized pattern matched.
+	sts   int
+	stsOK bool
 }
 
 // compilePlayerProgram extracts and compiles the signature and n transforms from
@@ -58,6 +63,9 @@ func compilePlayerProgram(playerURL, js string) *playerProgram {
 	} else {
 		p.nProgram, p.nName = prog, name
 	}
+
+	// A missing timestamp does not affect transform validity.
+	p.sts, p.stsOK = extractSignatureTimestamp(js)
 
 	return p
 }

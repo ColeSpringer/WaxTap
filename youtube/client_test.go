@@ -61,7 +61,10 @@ func TestExtract_InjectsPlayerPOToken(t *testing.T) {
 	fp := &fakeProvider{resp: potoken.Response{Token: "PLAYER-TOK"}}
 	var playerBody []byte
 	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if strings.Contains(r.URL.Path, "/player") {
+		if resp, ok := discoveryResp(r); ok {
+			return resp, nil // WEB loads base.js before the player request
+		}
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
 			playerBody, _ = io.ReadAll(r.Body)
 			return fixtureResp(http.StatusOK, ok), nil
 		}
@@ -120,6 +123,76 @@ func TestExtract_NoProviderForPlayerToken(t *testing.T) {
 	}
 }
 
+// stsBaseJS is the smallest valid player program needed for signature timestamp
+// lookup. The cipher transform allows the resolver to cache the program.
+const stsBaseJS = `var cfg={signatureTimestamp:19834};` +
+	`var Xq={sp:function(a,b){a.splice(0,b)}};` +
+	`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
+	`;s&&(s=dcr(decodeURIComponent(s)));`
+
+// discoveryResp serves the embed page and base.js used for signature timestamp
+// lookup. It returns false for requests the calling test should handle.
+func discoveryResp(r *http.Request) (*http.Response, bool) {
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/embed/"):
+		return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), true
+	case strings.HasSuffix(r.URL.Path, "/base.js"):
+		return fixtureResp(http.StatusOK, []byte(stsBaseJS)), true
+	}
+	return nil, false
+}
+
+func TestExtract_WEBSendsSignatureTimestamp(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var playerBody []byte
+	var embedPath string
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/embed/"):
+			embedPath = r.URL.Path
+			return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			playerBody, _ = io.ReadAll(r.Body)
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileWeb)}, &fakeProvider{resp: potoken.Response{Token: "TOK"}})
+
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(playerBody), `"signatureTimestamp":19834`) {
+		t.Errorf("WEB /player body missing signatureTimestamp: %s", playerBody)
+	}
+	// Discovery must use the requested video rather than an empty embed URL.
+	if embedPath != "/embed/testVideo01" {
+		t.Errorf("signature timestamp discovery path = %q, want /embed/testVideo01", embedPath)
+	}
+}
+
+func TestExtract_AndroidVROmitsSignatureTimestamp(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var playerBody []byte
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/player") {
+			playerBody, _ = io.ReadAll(r.Body)
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		t.Errorf("unexpected signature timestamp lookup for ANDROID_VR: %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}))
+
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(playerBody), "signatureTimestamp") {
+		t.Errorf("ANDROID_VR body must omit signatureTimestamp: %s", playerBody)
+	}
+}
+
 func TestExtract_FirstClientSucceeds(t *testing.T) {
 	ok := readFixture(t, "player_ok.json")
 	var playerCalls int
@@ -158,7 +231,10 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 	login := readFixture(t, "player_login_required.json")
 	var names []string
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if !strings.Contains(r.URL.Path, "/player") {
+		if resp, ok := discoveryResp(r); ok {
+			return resp, nil // WEB_EMBEDDED loads base.js before the player request
+		}
+		if !strings.HasSuffix(r.URL.Path, "/v1/player") {
 			t.Errorf("unexpected request: %s", r.URL)
 			return fixtureResp(http.StatusNotFound, nil), nil
 		}
@@ -210,8 +286,11 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	html := readFixture(t, "watch_page.html")
 	var watchCalls int
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if resp, ok := discoveryResp(r); ok {
+			return resp, nil // signature timestamp lookup uses the embed page, not /watch
+		}
 		switch {
-		case strings.Contains(r.URL.Path, "/player"):
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
 			return fixtureResp(http.StatusOK, login), nil // every client age-gated
 		case strings.Contains(r.URL.Path, "/watch"):
 			watchCalls++

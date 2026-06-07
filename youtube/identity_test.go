@@ -136,8 +136,11 @@ func TestExtract_WatchPageFallbackUsesChromeMajor(t *testing.T) {
 	c := New(Config{
 		ChromeMajor: major,
 		HTTP: fastTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if resp, ok := discoveryResp(r); ok {
+				return resp, nil // signature timestamp lookup uses the embed page
+			}
 			switch {
-			case strings.Contains(r.URL.Path, "/player"):
+			case strings.HasSuffix(r.URL.Path, "/v1/player"):
 				return fixtureResp(http.StatusOK, login), nil // every InnerTube client age-gated
 			case strings.Contains(r.URL.Path, "/watch"):
 				watchUA = r.Header.Get("User-Agent")

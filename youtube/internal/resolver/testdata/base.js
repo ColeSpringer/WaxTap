@@ -1,10 +1,13 @@
-// Authored, minimal stand-in for YouTube's base.js. This is NOT real YouTube
-// code: it reproduces only the *shape* WaxTap's locators target so the cipher
-// extraction can be tested offline. A real base.js is never committed (licensing).
+// Minimal stand-in for YouTube's base.js. It contains only the shapes WaxTap's
+// locators target so cipher extraction can be tested offline. The real player
+// source is not committed for licensing reasons.
 //
 // dcr is the signature transform: it splits its argument, applies a few helper
 // operations, and re-joins. nfn is the n-parameter (throttling) transform.
 // dcr("ABCDEFGH") === "GFEDH"; nfn("12345") === "54321".
+//
+// The player config also carries the signature timestamp sent to /player.
+var cfg = { signatureTimestamp: 19834, foo: "bar" };
 var Xq = {
     rv: function(a) { a.reverse() },
     sp: function(a, b) { a.splice(0, b) },

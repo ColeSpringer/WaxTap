@@ -115,3 +115,41 @@ func TestExtractSignatureSource_NotFound(t *testing.T) {
 		t.Fatal("expected error when no signature function is present")
 	}
 }
+
+func TestExtractSignatureTimestamp(t *testing.T) {
+	sts, ok := extractSignatureTimestamp(readBaseJS(t))
+	if !ok {
+		t.Fatal("signature timestamp not found in base.js fixture")
+	}
+	if sts != 19834 {
+		t.Errorf("signature timestamp = %d, want 19834", sts)
+	}
+}
+
+func TestExtractSignatureTimestamp_Variants(t *testing.T) {
+	cases := []struct {
+		name string
+		js   string
+		want int
+		ok   bool
+	}{
+		{"signatureTimestamp colon", `a={signatureTimestamp:18000,b:1}`, 18000, true},
+		{"sts short key", `{sts:17999}`, 17999, true},
+		{"sts after comma", `{a:1,sts:16000}`, 16000, true},
+		{"sts quoted key", `{"sts":17777}`, 17777, true},
+		{"assignment form", `var x; signatureTimestamp = 20001;`, 20001, true},
+		{"absent", `var x = 1; function f(){}`, 0, false},
+		{"zero rejected", `{signatureTimestamp:0}`, 0, false},
+		// The short-key pattern must ignore member access and variable assignments.
+		{"stray member access", `a.sts=12345;b()`, 0, false},
+		{"stray sts variable", `var sts = 99;`, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := extractSignatureTimestamp(tc.js)
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("extractSignatureTimestamp = (%d, %v), want (%d, %v)", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}

@@ -41,6 +41,15 @@ var nNamePatterns = []*regexp.Regexp{
 // join("").
 var helperCallRe = regexp.MustCompile(`([a-zA-Z0-9$_]+)\.[a-zA-Z0-9$_]+\(\s*[a-zA-Z0-9$_]+\s*,`)
 
+// stsPatterns locate the signature timestamp in base.js. Current players use
+// signatureTimestamp:<int>; older players may use sts:<int>. The short-key
+// pattern requires an object key so it does not match member assignments such
+// as foo.sts=1.
+var stsPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`signatureTimestamp\s*[:=]\s*(\d+)`),
+	regexp.MustCompile(`[{,]\s*"?sts"?\s*:\s*(\d+)`),
+}
+
 var identifierRe = regexp.MustCompile(`^[a-zA-Z_$][a-zA-Z0-9_$]*$`)
 
 // extractSignatureSource returns a self-contained JavaScript snippet that defines
@@ -86,6 +95,19 @@ func extractNSource(js string) (src, name string, err error) {
 		return "", "", fmt.Errorf("%w: n-function %q body not found", waxerr.ErrCipherSolve, name)
 	}
 	return fnDef + ";\n", name, nil
+}
+
+// extractSignatureTimestamp returns the signature timestamp embedded in base.js.
+// It reports false when no recognized pattern matches.
+func extractSignatureTimestamp(js string) (int, bool) {
+	for _, re := range stsPatterns {
+		if m := re.FindStringSubmatch(js); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // locateName returns the first non-empty capture group produced by any pattern,

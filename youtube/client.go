@@ -25,11 +25,12 @@ type Client struct {
 	http        *httpx.Client
 	log         *slog.Logger
 	profiles    []ClientProfile
-	webFallback ClientProfile        // built-in WEB profile for ancillary requests
-	resolver    resolver.Resolver    // stream-URL resolution
-	potoken     potoken.Provider     // PO-token provider, when configured
-	visitors    *cache.Store[string] // bootstrapped guest visitorData, singleflighted
-	hl, gl      string               // InnerTube host language / content region
+	webFallback ClientProfile            // built-in WEB profile for ancillary requests
+	resolver    resolver.Resolver        // stream-URL resolution
+	inspector   resolver.PlayerInspector // signature timestamp lookup; nil if unsupported
+	potoken     potoken.Provider         // PO-token provider, when configured
+	visitors    *cache.Store[string]     // bootstrapped guest visitorData, singleflighted
+	hl, gl      string                   // InnerTube host language / content region
 }
 
 // Config configures a Client.
@@ -122,6 +123,11 @@ func New(cfg Config) *Client {
 			DiscoveryUserAgent: webUA,
 		})
 	}
+	// The default resolver supports player inspection. Injected resolvers may
+	// implement only Resolver.
+	if pi, ok := c.resolver.(resolver.PlayerInspector); ok {
+		c.inspector = pi
+	}
 	if c.hl == "" {
 		c.hl = "en"
 	}
@@ -162,7 +168,11 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 			playerTok = playerResp.Token
 		}
 
-		body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, videoID, playerTok))
+		// WEB-family clients require the base.js signature timestamp in the
+		// /player body. If lookup fails, this attempt proceeds without it.
+		sts := c.signatureTimestamp(ctx, profile, videoID)
+
+		body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, playerRequestOpts{VideoID: videoID, POToken: playerTok, STS: sts}))
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
@@ -225,6 +235,21 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		lastErr = waxerr.ErrExtractionFailed
 	}
 	return nil, lastErr
+}
+
+// signatureTimestamp returns the base.js signature timestamp required by
+// profile. It returns zero when the profile does not require one, the resolver
+// cannot inspect players, or lookup fails. Player discovery starts from videoID.
+func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, videoID string) int {
+	if !profile.NeedsSignatureTimestamp || c.inspector == nil {
+		return 0
+	}
+	sts, err := c.inspector.SignatureTimestamp(ctx, resolver.Context{VideoID: videoID})
+	if err != nil {
+		c.log.DebugContext(ctx, "signature timestamp lookup failed; omitting field", "client", profile.Name, "err", err)
+		return 0
+	}
+	return sts
 }
 
 // extractFromWatchPage fetches the watch page and parses the embedded

@@ -36,6 +36,11 @@ type ClientProfile struct {
 	SupportsCookies   bool
 	SupportsPlaylists bool
 
+	// NeedsSignatureTimestamp indicates that /player requests for this profile
+	// must include the signature timestamp from base.js. Profiles that return
+	// direct URLs should leave it false to avoid loading base.js during extraction.
+	NeedsSignatureTimestamp bool
+
 	headers map[string]string // owned; cloned on construct and on read
 }
 
@@ -145,12 +150,13 @@ var (
 		SupportsPlaylists: false,
 	}
 	profileWebEmbedded = ClientProfile{
-		Name:              "WEB_EMBEDDED_PLAYER",
-		InnerTubeName:     "WEB_EMBEDDED_PLAYER",
-		InnerTubeID:       56,
-		Version:           clientident.WebEmbeddedVersion,
-		UserAgent:         clientident.UserAgent(0),
-		SupportsPlaylists: false,
+		Name:                    "WEB_EMBEDDED_PLAYER",
+		InnerTubeName:           "WEB_EMBEDDED_PLAYER",
+		InnerTubeID:             56,
+		Version:                 clientident.WebEmbeddedVersion,
+		UserAgent:               clientident.UserAgent(0),
+		SupportsPlaylists:       false,
+		NeedsSignatureTimestamp: true,
 	}
 	profileWeb = ClientProfile{
 		Name:          "WEB",
@@ -160,8 +166,9 @@ var (
 		UserAgent:     clientident.UserAgent(0),
 		// WEB requires both PO-token scopes: player for the /player body and GVS
 		// for the stream URL.
-		RequiresPOTokens:  []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS},
-		SupportsPlaylists: true,
+		RequiresPOTokens:        []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS},
+		SupportsPlaylists:       true,
+		NeedsSignatureTimestamp: true,
 	}
 )
 
