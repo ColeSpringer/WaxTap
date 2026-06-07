@@ -75,6 +75,26 @@ func (d *Downloader) ToFile(ctx context.Context, src Source, path string, refres
 	return Result{BytesWritten: total}, nil
 }
 
+// ReaderToFile writes r to path using the same atomic staging as ToFile. It
+// commits the temporary file only after reaching EOF, so a failed copy does not
+// leave a partial destination. The reader is responsible for cancellation and
+// progress reporting.
+func (d *Downloader) ReaderToFile(r io.Reader, path string) (Result, error) {
+	f, err := tempfile.New(path)
+	if err != nil {
+		return Result{}, err
+	}
+	defer f.Discard() // no-op after a successful Commit
+	n, err := io.Copy(f, r)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := f.Commit(); err != nil {
+		return Result{}, err
+	}
+	return Result{BytesWritten: n}, nil
+}
+
 // streamToFile copies a single resumable stream into f starting at offset 0.
 func (d *Downloader) streamToFile(ctx context.Context, shared *sharedSource, f *tempfile.File, rep *progressReporter) (int64, error) {
 	r := d.newResumableReader(ctx, shared, rep)

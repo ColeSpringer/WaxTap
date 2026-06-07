@@ -55,11 +55,38 @@ func (e *Extraction) rawFormatByIndex(i int) (rawFormat, bool) {
 	return e.rawAudio[i], true
 }
 
-// ResolvedStream contains a playable stream URL and the metadata needed to
-// fetch it.
+// ResolvedStream contains the metadata available after resolution. Direct
+// streams include a URL and request headers; SABR streams set IsSABR and leave
+// URL empty.
 type ResolvedStream struct {
 	URL           string
 	ExpiresAt     time.Time
 	ContentLength int64
 	Headers       http.Header
+	// IsSABR reports whether the stream must be fetched through SABR.
+	IsSABR bool
+}
+
+// Probeable reports whether the stream has a direct URL suitable for ffprobe.
+func (rs ResolvedStream) Probeable() bool {
+	return rs.URL != "" && !rs.IsSABR
+}
+
+// MediaPlan describes how to fetch a selected format. Exactly one of Direct or
+// SABR is non-nil.
+type MediaPlan struct {
+	Direct *ResolvedStream
+	SABR   *SABRStream
+}
+
+// Diagnostic returns the metadata available without opening the stream.
+func (m MediaPlan) Diagnostic() ResolvedStream {
+	switch {
+	case m.SABR != nil:
+		return ResolvedStream{IsSABR: true, ContentLength: m.SABR.contentLength, ExpiresAt: m.SABR.expiresAt}
+	case m.Direct != nil:
+		return *m.Direct
+	default:
+		return ResolvedStream{}
+	}
 }

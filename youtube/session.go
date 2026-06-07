@@ -11,7 +11,8 @@ import (
 type session struct {
 	visitorData string
 	consentID   string
-	// Reserved for cookies and per-scope PO tokens keyed by potoken.Scope.
+	// potBound prevents visitorData from changing after a PO token is minted.
+	potBound bool
 }
 
 // newSession starts a per-attempt session for the given content region. It
@@ -30,10 +31,20 @@ func (s *session) consentCookieValue() string {
 	return "YES+cb.20210328-17-p0.en+FX+" + s.consentID
 }
 
-// learnVisitorData records the visitorData YouTube returned, so continuation and
-// follow-up requests in the same attempt present a consistent identity.
+// learnVisitorData adopts a server-issued visitorData unless a PO token has
+// already bound the session to its current value.
 func (s *session) learnVisitorData(visitorData string) {
-	if visitorData != "" {
+	if visitorData != "" && !s.potBound {
 		s.visitorData = visitorData
 	}
+}
+
+// bindPOToken prevents later responses from replacing visitorData.
+func (s *session) bindPOToken() {
+	s.potBound = true
+}
+
+// resetPOBinding allows the next extraction attempt to adopt a new visitorData.
+func (s *session) resetPOBinding() {
+	s.potBound = false
 }

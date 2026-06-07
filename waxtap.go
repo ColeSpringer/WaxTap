@@ -209,15 +209,17 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 	}
 	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
 	defer rcancel()
-	rs, rerr := c.yt.Resolve(rctx, ext, idx)
+	plan, rerr := c.yt.Resolve(rctx, ext, idx)
 	if rerr != nil {
 		return nil, rerr
 	}
+	rs := plan.Diagnostic()
 	if rs.ContentLength > 0 {
 		video.Formats[idx].ContentLength = rs.ContentLength
 	}
 
-	if depth >= InfoProbe {
+	// ffprobe cannot inspect SABR streams because they have no direct URL.
+	if depth >= InfoProbe && rs.Probeable() {
 		runner, ferr := c.ffmpeg()
 		if ferr != nil {
 			return nil, ferr
@@ -292,8 +294,8 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 }
 
 // Resolve selects and resolves an audio stream without downloading it. The zero
-// AudioSelector means best audio. The returned ResolvedStream contains a
-// temporary googlevideo URL, its expiry, content length, and request headers.
+// AudioSelector means best audio. Direct streams include a temporary googlevideo
+// URL and its request metadata. SABR streams set IsSABR and leave URL empty.
 //
 // It is exposed for diagnostics: the CLI's info --show-urls and doctor. Most
 // callers use Download or Stream, which never expose the raw URL.
@@ -314,7 +316,11 @@ func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector) (Re
 	}
 	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
 	defer rcancel()
-	return c.yt.Resolve(rctx, ext, idx)
+	plan, err := c.yt.Resolve(rctx, ext, idx)
+	if err != nil {
+		return ResolvedStream{}, err
+	}
+	return plan.Diagnostic(), nil
 }
 
 // InfoDepth selects how much work Info does. Callers do not pay for what they do

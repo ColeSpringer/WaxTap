@@ -71,6 +71,10 @@ type PlayerInspector interface {
 	// rc.PlayerURL selects the player directly; otherwise discovery starts from
 	// rc.VideoID. A compiled player without a recognized timestamp returns zero.
 	SignatureTimestamp(ctx context.Context, rc Context) (int, error)
+	// DescrambleN rewrites a stream URL's throttling n parameter using base.js.
+	// rc identifies the player to use. URLs without an n parameter are returned
+	// unchanged.
+	DescrambleN(ctx context.Context, rc Context, rawURL string) (string, error)
 }
 
 // SourceCache stores base.js source between process runs. Player uses it behind

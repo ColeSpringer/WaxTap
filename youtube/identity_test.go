@@ -113,16 +113,16 @@ func TestExtractResolve_IdentityContract(t *testing.T) {
 		t.Errorf("stream-header UA = %q, want %q", got, wantUA)
 	}
 
-	// The player token is requested before the /player response is available. The
-	// GVS token uses the visitor data learned from that response.
+	// The player token pins visitorData, so the GVS token must use the same value
+	// even when /player returns a different one.
 	if player.VisitorData == "" {
-		t.Error("player VisitorData should carry the synthetic value")
+		t.Error("player VisitorData should carry the value the token was minted under")
 	}
-	if gvs.VisitorData != "CgtleGFtcGxlVmlz" {
-		t.Errorf("gvs VisitorData = %q, want the value learned from the player response", gvs.VisitorData)
+	if gvs.VisitorData != player.VisitorData {
+		t.Errorf("gvs VisitorData = %q, want it pinned to the player value %q", gvs.VisitorData, player.VisitorData)
 	}
-	if player.VisitorData == gvs.VisitorData {
-		t.Error("player and gvs VisitorData should differ (synthetic vs learned)")
+	if gvs.VisitorData == "CgtleGFtcGxlVmlz" {
+		t.Error("gvs VisitorData adopted the /player value after the player token was minted")
 	}
 }
 

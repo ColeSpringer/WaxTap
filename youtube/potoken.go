@@ -55,6 +55,9 @@ func (c *Client) fetchPOToken(ctx context.Context, profile ClientProfile, sess *
 		return nil, fmt.Errorf("%w: PO token provider returned nothing usable for client %q (scope %s)",
 			waxerr.ErrNeedsPOToken, profile.Name, scope)
 	}
+	// Keep subsequent player, GVS, and SABR requests on the identity used to mint
+	// this token.
+	sess.bindPOToken()
 	return &resp, nil
 }
 

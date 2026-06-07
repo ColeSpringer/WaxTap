@@ -36,18 +36,15 @@ func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, cate
 	return c.sb.FetchSegments(sbCtx, id, categories)
 }
 
-// acquired holds the result of extract -> select -> resolve for one video: the
-// chosen source plus a refresh callback for expiry re-resolution.
+// acquired contains the selected format and the backend that delivers it.
 type acquired struct {
-	video   *youtube.Video
-	fmtSel  Format
-	src     download.Source
-	refresh download.RefreshFunc
+	video    *youtube.Video
+	fmtSel   Format
+	transfer mediaTransfer
 }
 
-// acquire extracts the video, selects the requested audio format, and resolves it
-// to a signed source. The returned refresh gets a fresh extraction before
-// resolving an expired source URL.
+// acquire extracts, selects, and resolves one video, then builds the appropriate
+// transfer backend.
 func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitter) (*acquired, error) {
 	target := transcodeTarget(req.Transcode)
 
@@ -69,9 +66,14 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	em.stage(StageResolving)
 	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
 	defer rcancel()
-	rs, err := c.yt.Resolve(rctx, ext, idx)
+	plan, err := c.yt.Resolve(rctx, ext, idx)
 	if err != nil {
 		return nil, err
+	}
+
+	// SABR streams handle their own refresh and retry behavior.
+	if plan.SABR != nil {
+		return &acquired{video: video, fmtSel: selFmt, transfer: sabrTransfer{dl: c.dl, handle: plan.SABR}}, nil
 	}
 
 	// Signed URL expiry lives in the player response. Refreshing after a 403/410
@@ -98,15 +100,89 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 		}
 		rrctx, cancel := withTimeout(fctx, c.opts.Timeouts.Resolve)
 		defer cancel()
-		nrs, rerr := c.yt.ResolveWithFailure(rrctx, rext, ridx, failure)
+		nplan, rerr := c.yt.ResolveWithFailure(rrctx, rext, ridx, failure)
 		if rerr != nil {
 			return download.Source{}, rerr
 		}
+		if nplan.Direct == nil {
+			return download.Source{}, fmt.Errorf("waxtap: stream refresh resolved itag %d to SABR", pinnedItag)
+		}
 		em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
-		return toSource(nrs), nil
+		return toSource(*nplan.Direct), nil
 	}
 
-	return &acquired{video: video, fmtSel: selFmt, src: toSource(rs), refresh: refresh}, nil
+	return &acquired{video: video, fmtSel: selFmt, transfer: urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: refresh}}, nil
+}
+
+// mediaTransfer delivers media from either a direct URL or a SABR stream.
+type mediaTransfer interface {
+	toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error)
+	toWriter(ctx context.Context, w io.Writer, progress download.ProgressFunc) (download.Result, error)
+	stream(ctx context.Context, progress download.ProgressFunc) (io.ReadCloser, download.StreamInfo, error)
+}
+
+// urlTransfer delivers a signed URL through the chunked downloader.
+type urlTransfer struct {
+	dl      *download.Downloader
+	src     download.Source
+	refresh download.RefreshFunc
+}
+
+func (t urlTransfer) toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error) {
+	return t.dl.ToFile(ctx, t.src, path, t.refresh, progress)
+}
+
+func (t urlTransfer) toWriter(ctx context.Context, w io.Writer, progress download.ProgressFunc) (download.Result, error) {
+	return t.dl.ToWriter(ctx, t.src, w, t.refresh, progress)
+}
+
+func (t urlTransfer) stream(ctx context.Context, progress download.ProgressFunc) (io.ReadCloser, download.StreamInfo, error) {
+	return t.dl.Stream(ctx, t.src, t.refresh, progress)
+}
+
+// sabrTransfer delivers a sequential SABR stream. The SABR layer reports its own
+// progress.
+type sabrTransfer struct {
+	dl     *download.Downloader
+	handle *youtube.SABRStream
+}
+
+func (t sabrTransfer) toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error) {
+	rc, _, err := t.handle.Open(ctx, sabrProgress(progress))
+	if err != nil {
+		return download.Result{}, err
+	}
+	defer rc.Close()
+	return t.dl.ReaderToFile(rc, path)
+}
+
+func (t sabrTransfer) toWriter(ctx context.Context, w io.Writer, progress download.ProgressFunc) (download.Result, error) {
+	rc, _, err := t.handle.Open(ctx, sabrProgress(progress))
+	if err != nil {
+		return download.Result{}, err
+	}
+	defer rc.Close()
+	n, err := io.Copy(w, rc)
+	if err != nil {
+		return download.Result{}, err
+	}
+	return download.Result{BytesWritten: n}, nil
+}
+
+func (t sabrTransfer) stream(ctx context.Context, progress download.ProgressFunc) (io.ReadCloser, download.StreamInfo, error) {
+	rc, info, err := t.handle.Open(ctx, sabrProgress(progress))
+	if err != nil {
+		return nil, download.StreamInfo{}, err
+	}
+	return rc, download.StreamInfo{ContentLength: info.ContentLength, ContentType: info.ContentType}, nil
+}
+
+// sabrProgress adapts a download progress callback to SABR's byte counts.
+func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
+	if p == nil {
+		return nil
+	}
+	return func(bw, total int64) { p(download.Progress{BytesWritten: bw, Total: total}) }
 }
 
 // Download acquires and processes a single YouTube video to the configured sink.
@@ -162,14 +238,14 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, a *a
 	em.stage(StageDownloading)
 	switch req.Output.kind {
 	case outputFile:
-		r, err := c.dl.ToFile(ctx, a.src, req.Output.path, a.refresh, progress)
+		r, err := a.transfer.toFile(ctx, req.Output.path, progress)
 		if err != nil {
 			return nil, err
 		}
 		res.OutputPath = req.Output.path
 		res.SourceBytes, res.OutputBytes = r.BytesWritten, r.BytesWritten
 	case outputWriter:
-		r, err := c.dl.ToWriter(ctx, a.src, req.Output.writer, a.refresh, progress)
+		r, err := a.transfer.toWriter(ctx, req.Output.writer, progress)
 		if err != nil {
 			return nil, err
 		}
@@ -230,7 +306,7 @@ func (c *Client) produce(ctx context.Context, req Request, a *acquired, jobDir, 
 	srcPath := filepath.Join(jobDir, "source"+srcExt)
 
 	em.stage(StageDownloading)
-	dlRes, err := c.dl.ToFile(ctx, a.src, srcPath, a.refresh, func(p download.Progress) {
+	dlRes, err := a.transfer.toFile(ctx, srcPath, func(p download.Progress) {
 		em.progress(p.BytesWritten, p.Total)
 	})
 	if err != nil {
@@ -365,7 +441,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 
 	if !needsProcessing(req.ProcessSpec) {
 		em.stage(StageDownloading)
-		body, sinfo, derr := c.dl.Stream(ctx, a.src, a.refresh, func(p download.Progress) {
+		body, sinfo, derr := a.transfer.stream(ctx, func(p download.Progress) {
 			em.progress(p.BytesWritten, p.Total)
 		})
 		if derr != nil {

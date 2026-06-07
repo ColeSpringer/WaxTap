@@ -86,7 +86,11 @@ func renderInfoHuman(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, r
 	}
 	if rs != nil {
 		if showURLs {
-			env.printf("  url:     %s\n", rs.URL)
+			if rs.IsSABR {
+				env.printf("  url:     SABR (no direct URL)\n")
+			} else {
+				env.printf("  url:     %s\n", rs.URL)
+			}
 		}
 		if !rs.ExpiresAt.IsZero() {
 			env.printf("  expires: %s\n", rs.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
@@ -135,6 +139,7 @@ func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *
 	if rs != nil {
 		out.Resolved = &resolvedJSON{
 			URL:           rs.URL,
+			IsSABR:        rs.IsSABR,
 			ContentLength: rs.ContentLength,
 		}
 		if !rs.ExpiresAt.IsZero() {
@@ -146,6 +151,7 @@ func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *
 
 type resolvedJSON struct {
 	URL           string `json:"url"`
+	IsSABR        bool   `json:"isSabr,omitempty"`
 	ExpiresAt     string `json:"expiresAt,omitempty"`
 	ContentLength int64  `json:"contentLength"`
 }

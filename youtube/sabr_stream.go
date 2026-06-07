@@ -1,0 +1,261 @@
+package youtube
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/youtube/internal/sabr"
+)
+
+// Limit retries so a bad endpoint or token provider cannot loop indefinitely.
+const (
+	maxSABRReloads      = 2
+	maxSABRPOTRefreshes = 1
+)
+
+// SABRStream represents a SABR-backed audio stream. SABR formats have no direct
+// media URL; Open fetches their bytes from serverAbrStreamingUrl.
+type SABRStream struct {
+	client        *Client
+	ext           *Extraction
+	formatIdx     int
+	pinnedItag    int
+	contentLength int64
+	expiresAt     time.Time
+}
+
+// SABRStreamInfo describes an open SABR stream.
+type SABRStreamInfo struct {
+	ContentLength int64
+	ContentType   string
+}
+
+func (c *Client) newSABRStream(ext *Extraction, formatIndex int, rf rawFormat) *SABRStream {
+	return &SABRStream{
+		client:        c,
+		ext:           ext,
+		formatIdx:     formatIndex,
+		pinnedItag:    rf.Itag,
+		contentLength: atoi64(rf.ContentLength),
+		expiresAt:     ext.expiresAt,
+	}
+}
+
+// Open starts the SABR stream and returns a reader over the reassembled audio.
+// It sends the first request before returning, so initial protocol and
+// authentication failures are returned by Open. Later failures are returned by
+// Read.
+//
+// Open retries a bounded number of player reloads and GVS PO-token rejections.
+// progress receives byte counts and may be nil.
+func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total int64)) (io.ReadCloser, SABRStreamInfo, error) {
+	var pf sabr.ProgressFunc
+	if progress != nil {
+		pf = func(p sabr.Progress) { progress(p.BytesWritten, p.Total) }
+	}
+
+	ext := s.ext
+	var failure *potoken.HTTPFailure
+	reloads, potRefreshes := 0, 0
+	for {
+		cfg, err := s.client.buildSABRConfig(ctx, ext, s.formatIdx, failure)
+		if err != nil {
+			return nil, SABRStreamInfo{}, err
+		}
+		rc, info, err := sabr.Open(ctx, cfg, pf)
+		if err == nil {
+			return &sabrReader{ReadCloser: rc}, SABRStreamInfo{ContentLength: info.ContentLength, ContentType: info.ContentType}, nil
+		}
+		switch {
+		case errors.Is(err, sabr.ErrReloadPlayer):
+			if reloads >= maxSABRReloads {
+				return nil, SABRStreamInfo{}, fmt.Errorf("%w: SABR reload limit (%d) reached", waxerr.ErrExtractionFailed, maxSABRReloads)
+			}
+			reloads++
+			next, rerr := s.reextract(ctx)
+			if rerr != nil {
+				return nil, SABRStreamInfo{}, rerr
+			}
+			ext, failure = next, nil
+		case errors.Is(err, waxerr.ErrNeedsPOToken) || isSABRAuthFailure(err):
+			// Both statuses indicate that the GVS token was rejected.
+			if potRefreshes >= maxSABRPOTRefreshes {
+				return nil, SABRStreamInfo{}, err
+			}
+			potRefreshes++
+			failure = sabrRefreshFailure(cfg.ServerAbrURL, err)
+		default:
+			return nil, SABRStreamInfo{}, err
+		}
+	}
+}
+
+// reextract refreshes the player response and finds the originally selected
+// itag, whose index may have changed.
+func (s *SABRStream) reextract(ctx context.Context) (*Extraction, error) {
+	ext, err := s.client.Extract(ctx, s.ext.video.ID)
+	if err != nil {
+		return nil, err
+	}
+	for i, rf := range ext.rawAudio {
+		if rf.Itag == s.pinnedItag {
+			s.formatIdx = i
+			return ext, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: selected itag %d is unavailable after SABR reload", waxerr.ErrExtractionFailed, s.pinnedItag)
+}
+
+// buildSABRConfig assembles a sabr.Config for ext's format at formatIndex.
+// failure describes the token rejection that triggered a refresh, if any.
+func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (sabr.Config, error) {
+	rf, ok := ext.rawFormatByIndex(formatIndex)
+	if !ok {
+		return sabr.Config{}, fmt.Errorf("%w: format index %d out of range", waxerr.ErrExtractionFailed, formatIndex)
+	}
+	if ext.serverAbrURL == "" {
+		return sabr.Config{}, fmt.Errorf("%w: SABR format has no serverAbrStreamingUrl", waxerr.ErrExtractionFailed)
+	}
+
+	// The SABR streamerContext carries the raw GVS PO token bytes.
+	token, err := c.fetchPOToken(ctx, ext.profile, ext.session, ext.video.ID, potoken.ScopeGVS, failure)
+	if err != nil {
+		return sabr.Config{}, err
+	}
+	var potBytes []byte
+	if token != nil {
+		if potBytes, err = decodeBase64Tolerant(token.Token); err != nil {
+			return sabr.Config{}, fmt.Errorf("%w: decode GVS PO token: %v", waxerr.ErrExtractionFailed, err)
+		}
+	}
+
+	ustreamer, err := decodeBase64Tolerant(ext.ustreamerConfig)
+	if err != nil {
+		return sabr.Config{}, fmt.Errorf("%w: decode ustreamer config: %v", waxerr.ErrExtractionFailed, err)
+	}
+
+	// Failure to solve n may throttle the stream but does not make the URL
+	// unusable. Cancellation still stops the request.
+	descramble := c.sabrDescrambleHook(ext.video.ID)
+	serverURL := ext.serverAbrURL
+	if descramble != nil {
+		if descrambled, derr := descramble(ctx, serverURL); derr != nil {
+			if ctx.Err() != nil {
+				return sabr.Config{}, ctx.Err()
+			}
+			c.log.WarnContext(ctx, "could not descramble the n parameter in SABR serverAbrStreamingUrl; stream may be throttled", "err", derr)
+		} else {
+			serverURL = descrambled
+		}
+	}
+
+	return sabr.Config{
+		HTTP:            c.http,
+		Logger:          c.log,
+		ServerAbrURL:    serverURL,
+		UstreamerConfig: ustreamer,
+		Format:          sabrFormatID(rf),
+		ClientInfo:      sabrClientInfo(ext.profile, c.hl),
+		UserAgent:       ext.profile.UserAgent,
+		POToken:         potBytes,
+		ContentLength:   atoi64(rf.ContentLength),
+		DescrambleN:     descramble,
+	}, nil
+}
+
+// sabrDescrambleHook returns an n-parameter solver bound to videoID. It returns
+// nil when the configured resolver does not support player inspection.
+func (c *Client) sabrDescrambleHook(videoID string) func(context.Context, string) (string, error) {
+	if c.inspector == nil {
+		return nil
+	}
+	return func(ctx context.Context, rawURL string) (string, error) {
+		return c.inspector.DescrambleN(ctx, resolver.Context{VideoID: videoID}, rawURL)
+	}
+}
+
+// sabrFormatID maps a raw player format to the SABR format selector. LastModified
+// and XTags distinguish encodings that share an itag.
+func sabrFormatID(rf rawFormat) sabr.FormatId {
+	return sabr.FormatId{
+		Itag:         int32(rf.Itag),
+		LastModified: uint64(atoi64(rf.LastModified)),
+		XTags:        rf.XTags,
+	}
+}
+
+// sabrClientInfo maps the winning profile to the SABR streamerContext identity.
+// ClientName is the numeric InnerTube id, not the string name.
+func sabrClientInfo(p ClientProfile, hl string) sabr.ClientInfo {
+	return sabr.ClientInfo{
+		ClientName:     int32(p.InnerTubeID),
+		ClientVersion:  p.Version,
+		OSName:         p.OSName,
+		OSVersion:      p.OSVersion,
+		DeviceMake:     p.DeviceMake,
+		DeviceModel:    p.DeviceModel,
+		AcceptLanguage: acceptLanguage(hl),
+	}
+}
+
+// isSABRAuthFailure reports whether the SABR endpoint returned HTTP 401 or 403.
+func isSABRAuthFailure(err error) bool {
+	httpErr, ok := errors.AsType[*waxerr.HTTPStatusError](err)
+	return ok && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
+}
+
+// sabrRefreshFailure describes a SABR token rejection for the PO-token provider.
+// In-protocol attestation has no HTTP status, so it is represented as 401.
+func sabrRefreshFailure(serverURL string, err error) *potoken.HTTPFailure {
+	if httpErr, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok {
+		return &potoken.HTTPFailure{StatusCode: httpErr.StatusCode, Status: httpErr.Status, URL: serverURL}
+	}
+	return &potoken.HTTPFailure{
+		StatusCode: http.StatusUnauthorized,
+		Status:     "SABR stream protection: attestation required",
+		URL:        serverURL,
+	}
+}
+
+// sabrReader converts a mid-stream reload signal into a public extraction error.
+// Retrying after bytes have been delivered would corrupt the output.
+type sabrReader struct {
+	io.ReadCloser
+}
+
+func (r *sabrReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if errors.Is(err, sabr.ErrReloadPlayer) {
+		return n, fmt.Errorf("%w: SABR reload signaled mid-stream", waxerr.ErrExtractionFailed)
+	}
+	return n, err
+}
+
+// decodeBase64Tolerant accepts standard or URL base64, with or without padding.
+// An empty string decodes to nil.
+func decodeBase64Tolerant(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("not valid base64 (%d chars)", len(s))
+}

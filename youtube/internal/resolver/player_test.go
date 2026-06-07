@@ -281,6 +281,56 @@ func TestPlayerSignatureTimestamp_DiscoversFromVideoID(t *testing.T) {
 	}
 }
 
+func TestPlayerDescrambleN(t *testing.T) {
+	srv := newFixtureServer(t)
+	p := New(Config{HTTP: srv.doer()})
+
+	raw := "https://r1---example.googlevideo.com/videoplayback?itag=251&n=12345&expire=2000000000"
+	got, err := p.DescrambleN(context.Background(), Context{VideoID: "vid123"}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := url.ParseQuery(mustQuery(got))
+	if q.Get("n") != "54321" {
+		t.Errorf("n = %q, want 54321 (descrambled)", q.Get("n"))
+	}
+	if q.Get("itag") != "251" || q.Get("expire") != "2000000000" {
+		t.Errorf("descrambled URL dropped parameters: %s", got)
+	}
+	// Discovery must use the supplied video id, not an empty embed URL.
+	if got := srv.hitCount("/embed/vid123"); got != 1 {
+		t.Errorf("discovery embed hits for /embed/vid123 = %d, want 1", got)
+	}
+}
+
+func TestPlayerDescrambleN_NoN(t *testing.T) {
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected request for a URL with no n: %s", r.URL)
+		return notFoundResp(), nil
+	})
+	p := New(Config{HTTP: doer})
+
+	raw := "https://r1---example.googlevideo.com/videoplayback?itag=140&expire=2000000000"
+	got, err := p.DescrambleN(context.Background(), Context{VideoID: "vid123"}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != raw {
+		t.Errorf("DescrambleN(%q) = %q, want it unchanged", raw, got)
+	}
+}
+
+func TestPlayerDescrambleN_PlayerUnavailable(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		return notFoundResp(), nil // discovery fails
+	})
+	p := New(Config{HTTP: doer})
+
+	if _, err := p.DescrambleN(context.Background(), Context{VideoID: "vid123"}, "https://r1.googlevideo.com/videoplayback?n=12345"); err == nil {
+		t.Fatal("DescrambleN must return an error when the player is unavailable")
+	}
+}
+
 func mustQuery(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {

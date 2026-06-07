@@ -80,7 +80,7 @@ func marshalMediaHeader(h MediaHeader) []byte {
 		b = appendVarint(b, fMediaHdrDurationMs, uint64(h.DurationMs))
 	}
 	if h.FormatId != (FormatId{}) {
-		b = appendMessage(b, fMediaHdrFormatID, h.FormatId.marshal())
+		b = appendBytes(b, fMediaHdrFormatID, h.FormatId.marshal())
 	}
 	if h.ContentLength != 0 {
 		b = appendVarint(b, fMediaHdrContentLength, uint64(h.ContentLength))
@@ -98,7 +98,7 @@ func marshalByteRange(r ByteRange) []byte {
 func marshalFormatInit(m FormatInitializationMetadata) []byte {
 	var b []byte
 	if m.FormatId != (FormatId{}) {
-		b = appendMessage(b, fFmtInitFormatID, m.FormatId.marshal())
+		b = appendBytes(b, fFmtInitFormatID, m.FormatId.marshal())
 	}
 	if m.EndSegmentNumber != 0 {
 		b = appendVarint(b, fFmtInitEndSegment, uint64(m.EndSegmentNumber))
@@ -107,10 +107,10 @@ func marshalFormatInit(m FormatInitializationMetadata) []byte {
 		b = appendString(b, fFmtInitMimeType, m.MimeType)
 	}
 	if m.InitRange != (ByteRange{}) {
-		b = appendMessage(b, fFmtInitInitRange, marshalByteRange(m.InitRange))
+		b = appendBytes(b, fFmtInitInitRange, marshalByteRange(m.InitRange))
 	}
 	if m.IndexRange != (ByteRange{}) {
-		b = appendMessage(b, fFmtInitIndexRange, marshalByteRange(m.IndexRange))
+		b = appendBytes(b, fFmtInitIndexRange, marshalByteRange(m.IndexRange))
 	}
 	if m.DurationUnits != 0 {
 		b = appendVarint(b, fFmtInitDurationUnits, uint64(m.DurationUnits))

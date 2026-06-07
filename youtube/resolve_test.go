@@ -64,6 +64,12 @@ func TestResolve_NoTokenNeeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got.Direct == nil {
+		t.Fatalf("MediaPlan.Direct = nil, want a direct stream")
+	}
+	if got.SABR != nil {
+		t.Errorf("MediaPlan.SABR = %+v, want nil for a ciphered format", got.SABR)
+	}
 	if fr.calls != 1 {
 		t.Fatalf("resolver calls = %d, want 1", fr.calls)
 	}
@@ -80,11 +86,56 @@ func TestResolve_NoTokenNeeded(t *testing.T) {
 		t.Errorf("candidate signatureCipher = %q", fr.gotCand.SignatureCipher)
 	}
 	// The player response fills content length and expiry the resolver left zero.
-	if got.ContentLength != 3400000 {
-		t.Errorf("ContentLength = %d, want 3400000 (from raw format)", got.ContentLength)
+	if got.Direct.ContentLength != 3400000 {
+		t.Errorf("ContentLength = %d, want 3400000 (from raw format)", got.Direct.ContentLength)
 	}
-	if !got.ExpiresAt.Equal(time.Unix(2000000000, 0).UTC()) {
-		t.Errorf("ExpiresAt = %v, want extraction fallback", got.ExpiresAt)
+	if !got.Direct.ExpiresAt.Equal(time.Unix(2000000000, 0).UTC()) {
+		t.Errorf("ExpiresAt = %v, want extraction fallback", got.Direct.ExpiresAt)
+	}
+}
+
+func TestResolve_RoutesSABRWhenURLless(t *testing.T) {
+	fr := &fakeResolver{}
+	c := New(Config{Resolver: fr})
+
+	ext := newExtraction(makeProfile(profileAndroidVR))
+	ext.rawAudio = []rawFormat{{Itag: 251, ContentLength: "3500000"}} // no URL, no cipher
+	ext.serverAbrURL = "https://r1---example.googlevideo.com/videoplayback?n=ABC"
+
+	got, err := c.Resolve(context.Background(), ext, 0)
+	if err != nil {
+		t.Fatalf("Resolve = %v, want a SABR plan", err)
+	}
+	if got.SABR == nil {
+		t.Fatalf("MediaPlan.SABR = nil, want a SABR stream")
+	}
+	if got.Direct != nil {
+		t.Errorf("MediaPlan.Direct = %+v, want nil for a SABR format", got.Direct)
+	}
+	if fr.calls != 0 {
+		t.Errorf("resolver calls = %d, want 0 (SABR bypasses the URL resolver)", fr.calls)
+	}
+	diag := got.Diagnostic()
+	if !diag.IsSABR || diag.URL != "" || diag.ContentLength != 3500000 {
+		t.Errorf("Diagnostic() = %+v, want IsSABR with empty URL and contentLength 3500000", diag)
+	}
+	if !diag.ExpiresAt.Equal(ext.expiresAt) {
+		t.Errorf("Diagnostic().ExpiresAt = %v, want the extraction expiry %v", diag.ExpiresAt, ext.expiresAt)
+	}
+	if diag.Probeable() {
+		t.Error("Diagnostic().Probeable() = true, want false for a URL-less SABR stream")
+	}
+}
+
+func TestResolve_URLlessWithoutSABREndpointFails(t *testing.T) {
+	c := New(Config{Resolver: &fakeResolver{}})
+
+	ext := newExtraction(makeProfile(profileAndroidVR))
+	ext.rawAudio = []rawFormat{{Itag: 251}} // no URL, no cipher, no SABR endpoint
+
+	_, err := c.Resolve(context.Background(), ext, 0)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed", err)
 	}
 }
 

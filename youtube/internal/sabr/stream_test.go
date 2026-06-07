@@ -264,6 +264,101 @@ func TestOpenStallBeforeFinalSegmentIsError(t *testing.T) {
 	}
 }
 
+// policyFrame is a NextRequestPolicy-only round (server pacing, no media).
+func policyFrame(backoffMs int64) []byte {
+	return umpFrame(partNextRequestPolicy, marshalNextRequestPolicy(NextRequestPolicy{BackoffTimeMs: backoffMs}))
+}
+
+func TestOpenTruncationWithKnownLengthIsError(t *testing.T) {
+	// No formatInitFrame is sent, so only the content length reveals that the
+	// seven-byte response is incomplete.
+	resp1 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, nil, nil}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if _, err := io.ReadAll(rc); !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (truncated below content length)", err)
+	}
+}
+
+func TestOpenUnknownLengthCleanEOF(t *testing.T) {
+	resp1 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, nil, nil}}
+
+	cfg := baseConfig(d)
+	cfg.ContentLength = 0 // unknown: nothing to compare against
+	rc, _, err := Open(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read = %v, want clean EOF when length is unknown", err)
+	}
+	if string(got) != "INITAAA" {
+		t.Errorf("stream = %q, want INITAAA", got)
+	}
+}
+
+func TestOpenMissingInitSegmentIsError(t *testing.T) {
+	resp1 := concat(segFrames(1, 1, []byte("AAA")), formatInitFrame(1)) // seq 1, end 1, no init
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, nil, nil}}
+
+	_, _, err := Open(context.Background(), baseConfig(d), nil)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (missing init segment)", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "init segment") {
+		t.Errorf("err = %q, want it to mention the missing init segment", err)
+	}
+}
+
+func TestOpenInitAfterMediaKeepsOrder(t *testing.T) {
+	resp1 := segFrames(2, 1, []byte("AAA"))                            // media first, no init yet
+	resp2 := concat(initFrames(0, []byte("INIT")), formatInitFrame(1)) // init arrives later
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "INITAAA" {
+		t.Errorf("stream = %q, want INITAAA (init must precede media)", got)
+	}
+}
+
+func TestOpenBackoffRoundsDoNotStall(t *testing.T) {
+	resp1 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(2), policyFrame(1))
+	// Policy-only rounds exceed maxEmptyRounds but should not count as stalls.
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, policyFrame(1), policyFrame(1), segFrames(2, 2, []byte("BBB"))}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read = %v, want success across backoff rounds", err)
+	}
+	if string(got) != "INITAAABBB" {
+		t.Errorf("stream = %q, want INITAAABBB", got)
+	}
+	if d.calls != 4 {
+		t.Errorf("calls = %d, want 4 (initial + 2 backoff + final)", d.calls)
+	}
+}
+
 func TestOpenHTTPErrorStatus(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: [][]byte{nil}, statuses: []int{403}}
 

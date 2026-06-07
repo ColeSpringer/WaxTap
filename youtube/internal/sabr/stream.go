@@ -123,7 +123,7 @@ func Open(ctx context.Context, cfg Config, progress ProgressFunc) (io.ReadCloser
 		ctx:        sctx,
 		cancel:     cancel,
 		serverURL:  cfg.ServerAbrURL,
-		segments:   make(map[uint64][]byte),
+		segments:   make(map[uint64]mediaSegment),
 		contentLen: cfg.ContentLength,
 	}
 	if err := s.prime(); err != nil {
@@ -148,12 +148,11 @@ type stream struct {
 	redirects      int
 	emptyRounds    int
 
-	// Reassembly state. The init segment is emitted once, then media segments in
-	// contiguous sequence order; segments holds received-but-not-yet-contiguous
-	// media keyed by sequence number.
+	// Reassembly state. The init segment is emitted first, followed by contiguous
+	// media segments. segments buffers media received ahead of a gap.
 	initBytes    []byte
 	initWritten  bool
-	segments     map[uint64][]byte
+	segments     map[uint64]mediaSegment
 	firstSeq     uint64
 	nextSeq      uint64
 	seqInit      bool
@@ -167,6 +166,13 @@ type stream struct {
 
 	done bool
 	err  error
+}
+
+// mediaSegment holds a segment's bytes and duration. The duration contributes to
+// downloadedMs only after the segment is emitted.
+type mediaSegment struct {
+	data     []byte
+	duration int64
 }
 
 func (s *stream) Read(p []byte) (int, error) {
@@ -240,20 +246,26 @@ func (s *stream) round() error {
 		return nil // re-POST to the new endpoint without advancing state
 	}
 
-	emitted := s.integrate(res)
+	emitted, advanced := s.integrate(res)
 	if s.complete() {
 		s.done = true
 		return nil
 	}
-	if emitted == 0 {
+	// Backoff means the server is pacing the stream, not that it has stalled.
+	// Buffering a segment ahead of a gap also counts as progress.
+	waiting := res.policy != nil && res.policy.BackoffTimeMs > 0
+	switch {
+	case emitted > 0 || advanced:
+		s.emptyRounds = 0
+	case waiting:
+		// Honor the backoff without counting an empty round.
+	default:
 		s.emptyRounds++
 		if s.emptyRounds >= maxEmptyRounds {
 			return s.stallResult()
 		}
-	} else {
-		s.emptyRounds = 0
 	}
-	if res.policy != nil && res.policy.BackoffTimeMs > 0 {
+	if waiting {
 		return s.sleep(clampBackoff(res.policy.BackoffTimeMs, s.maxBackoff()))
 	}
 	return nil
@@ -364,9 +376,9 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 	}
 }
 
-// integrate adds one response's segments to the reassembly buffer and moves any
-// newly contiguous bytes into pending. It returns the number of bytes emitted.
-func (s *stream) integrate(res roundResult) int {
+// integrate buffers one response's segments and moves contiguous bytes into
+// pending. advanced reports whether the response supplied any new segment.
+func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 	if res.endSegment > 0 {
 		s.endSegment = res.endSegment
 	}
@@ -383,46 +395,55 @@ func (s *stream) integrate(res roundResult) int {
 		if h.IsInitSeg {
 			if s.initBytes == nil {
 				s.initBytes = data
+				advanced = true
 			}
 			continue
 		}
 		seq := h.SequenceNumber
+		if s.seqInit && seq < s.firstSeq {
+			// The server sent a segment before the sequence where this stream began.
+			s.log.WarnContext(s.ctx, "sabr: segment below the stream start; dropping", "seq", seq, "first_seq", s.firstSeq)
+			continue
+		}
 		if s.seqInit && seq < s.nextSeq {
 			continue // already emitted (e.g. a redirect/reload re-sent it)
 		}
 		if _, exists := s.segments[seq]; exists {
 			continue // duplicate within the buffer; do not double-count duration
 		}
-		s.segments[seq] = data
-		s.downloadedMs += h.DurationMs
+		s.segments[seq] = mediaSegment{data: data, duration: h.DurationMs}
+		advanced = true
 	}
 	if !s.seqInit && len(s.segments) > 0 {
-		// The first request carries no buffered range, so the server streams from
-		// the start: the lowest sequence number in the first delivered batch is the
-		// stream's first segment.
+		// The first request has no buffered range, so its lowest sequence number
+		// anchors the stream.
 		s.nextSeq = minKey(s.segments)
 		s.firstSeq = s.nextSeq
 		s.seqInit = true
 	}
-	return s.drain()
+	return s.drain(), advanced
 }
 
-// drain appends the init segment (once) and all contiguous media segments to
-// pending, reporting progress for the bytes emitted.
+// drain moves the init segment and contiguous media into pending. It holds media
+// until the init segment arrives so the output remains a valid container.
 func (s *stream) drain() int {
 	emitted := 0
-	if !s.initWritten && s.initBytes != nil {
+	if !s.initWritten {
+		if s.initBytes == nil {
+			return 0 // the init segment must lead; hold media until it arrives
+		}
 		s.pending = append(s.pending, s.initBytes...)
 		emitted += len(s.initBytes)
 		s.initWritten = true
 	}
 	for {
-		data, ok := s.segments[s.nextSeq]
+		seg, ok := s.segments[s.nextSeq]
 		if !ok {
 			break
 		}
-		s.pending = append(s.pending, data...)
-		emitted += len(data)
+		s.pending = append(s.pending, seg.data...)
+		emitted += len(seg.data)
+		s.downloadedMs += seg.duration
 		delete(s.segments, s.nextSeq)
 		s.nextSeq++
 	}
@@ -435,26 +456,29 @@ func (s *stream) drain() int {
 	return emitted
 }
 
-// complete reports whether every media segment up to the known end has been
-// emitted contiguously.
+// complete reports whether the init segment and every segment through the
+// declared end have been emitted. Content length is not a completion signal
+// because the player may under-report it.
 func (s *stream) complete() bool {
-	return s.endSegment > 0 && s.seqInit && s.nextSeq > s.endSegment
+	return s.initWritten && s.endSegment > 0 && s.seqInit && s.nextSeq > s.endSegment
 }
 
-// stallResult returns an error when the stream is known to be incomplete.
-// Without a known end segment, prior media followed by no progress is treated as
-// EOF.
+// stallResult returns an error when the stream is detectably incomplete. Without
+// an end segment or content length, an exhausted stream is treated as complete.
 func (s *stream) stallResult() error {
-	if s.endSegment > 0 && s.nextSeq <= s.endSegment {
+	switch {
+	case !s.initWritten:
+		return fmt.Errorf("%w: SABR stream stalled before delivering an init segment", waxerr.ErrExtractionFailed)
+	case s.endSegment > 0 && s.nextSeq <= s.endSegment:
 		return fmt.Errorf("%w: SABR stream stalled at segment %d of %d", waxerr.ErrExtractionFailed, s.nextSeq, s.endSegment)
-	}
-	if len(s.segments) > 0 {
+	case len(s.segments) > 0:
 		return fmt.Errorf("%w: SABR stream stalled with %d undelivered segments", waxerr.ErrExtractionFailed, len(s.segments))
-	}
-	if s.bytesWritten == 0 {
+	case s.contentLen > 0 && s.bytesWritten < s.contentLen:
+		return fmt.Errorf("%w: SABR stream stalled after %d of %d bytes", waxerr.ErrExtractionFailed, s.bytesWritten, s.contentLen)
+	case s.bytesWritten == 0:
 		return fmt.Errorf("%w: SABR stream stalled before delivering any media", waxerr.ErrExtractionFailed)
 	}
-	// No end segment is known, and all received media has been emitted.
+	// No available metadata proves that more data is expected.
 	s.done = true
 	return nil
 }
@@ -579,15 +603,18 @@ func clampBackoff(ms int64, max time.Duration) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-func minKey(m map[uint64][]byte) uint64 {
-	var min uint64
+// minKey returns the smallest key in m, which must be non-empty.
+func minKey(m map[uint64]mediaSegment) uint64 {
+	var lowest uint64
 	first := true
 	for k := range m {
-		if first || k < min {
-			min, first = k, false
+		if first {
+			lowest, first = k, false
+			continue
 		}
+		lowest = min(lowest, k)
 	}
-	return min
+	return lowest
 }
 
 // wrapExtraction marks a SABR decode failure as an extraction error and includes

@@ -151,6 +151,10 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 	var lastErr error
 
 	for i, profile := range c.profiles {
+		// A failed profile must not carry its PO-token binding into the next
+		// attempt. The winning attempt returns with its binding intact.
+		sess.resetPOBinding()
+
 		// WEB-family profiles need a player-scope PO token in the /player body
 		// before YouTube returns usable stream URLs. Profiles that do not list
 		// ScopePlayer skip the provider lookup.

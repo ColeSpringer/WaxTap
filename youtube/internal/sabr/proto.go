@@ -181,7 +181,7 @@ type BufferedRange struct {
 
 func (br BufferedRange) marshal() []byte {
 	var b []byte
-	b = appendMessage(b, fBufRangeFormatID, br.FormatId.marshal())
+	b = appendBytes(b, fBufRangeFormatID, br.FormatId.marshal())
 	b = appendVarint(b, fBufRangeStartTimeMs, uint64(br.StartTimeMs))
 	b = appendVarint(b, fBufRangeDurationMs, uint64(br.DurationMs))
 	b = appendVarint(b, fBufRangeStartSegment, uint64(br.StartSegmentIndex))
@@ -250,7 +250,7 @@ type streamerContext struct {
 
 func (s streamerContext) marshal() []byte {
 	var b []byte
-	b = appendMessage(b, fStreamerCtxClientInfo, s.ClientInfo.marshal())
+	b = appendBytes(b, fStreamerCtxClientInfo, s.ClientInfo.marshal())
 	if len(s.POToken) > 0 {
 		b = appendBytes(b, fStreamerCtxPOToken, s.POToken)
 	}
@@ -272,12 +272,12 @@ type videoPlaybackAbrRequest struct {
 
 func (req videoPlaybackAbrRequest) marshal() []byte {
 	var b []byte
-	b = appendMessage(b, fAbrClientState, req.ClientAbrState.marshal())
+	b = appendBytes(b, fAbrClientState, req.ClientAbrState.marshal())
 	for _, f := range req.SelectedFormatIds {
-		b = appendMessage(b, fAbrSelectedFormats, f.marshal())
+		b = appendBytes(b, fAbrSelectedFormats, f.marshal())
 	}
 	for _, br := range req.BufferedRanges {
-		b = appendMessage(b, fAbrBufferedRanges, br.marshal())
+		b = appendBytes(b, fAbrBufferedRanges, br.marshal())
 	}
 	if req.PlayerTimeMs != 0 {
 		b = appendVarint(b, fAbrPlayerTimeMs, uint64(req.PlayerTimeMs))
@@ -285,7 +285,7 @@ func (req videoPlaybackAbrRequest) marshal() []byte {
 	if len(req.UstreamerConfig) > 0 {
 		b = appendBytes(b, fAbrUstreamerConfig, req.UstreamerConfig)
 	}
-	b = appendMessage(b, fAbrStreamerContext, req.StreamerContext.marshal())
+	b = appendBytes(b, fAbrStreamerContext, req.StreamerContext.marshal())
 	return b
 }
 
@@ -520,10 +520,6 @@ func appendBytes(b []byte, num protowire.Number, v []byte) []byte {
 func appendString(b []byte, num protowire.Number, v string) []byte {
 	b = protowire.AppendTag(b, num, protowire.BytesType)
 	return protowire.AppendString(b, v)
-}
-
-func appendMessage(b []byte, num protowire.Number, msg []byte) []byte {
-	return appendBytes(b, num, msg)
 }
 
 // fieldReader walks protobuf fields in a buffer. The value accessors and skip

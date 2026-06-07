@@ -10,15 +10,14 @@ import (
 	"github.com/colespringer/waxtap/youtube/internal/resolver"
 )
 
-// Resolve turns the candidate at formatIndex, an index into
-// Extraction.Video().Formats, into a playable signed stream. It reuses the client
-// profile and session that won extraction so the media URL is resolved under the
-// same YouTube identity.
+// Resolve builds a direct or SABR MediaPlan for the candidate at formatIndex.
+// It reuses the client profile and session that won extraction so the media is
+// fetched under the same YouTube identity.
 //
 // Resolution is index-based rather than itag-based because itags can repeat
 // across languages and DRC variants. rawAudio[i] is kept parallel to
 // Video.Formats[i] so the selected public format maps to the right raw format.
-func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) (ResolvedStream, error) {
+func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) (MediaPlan, error) {
 	return c.ResolveWithFailure(ctx, ext, formatIndex, nil)
 }
 
@@ -26,21 +25,30 @@ func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) 
 // HTTP failure that caused a refresh to the PO-token provider. Initial resolution
 // passes nil. When refreshing an expired signed URL, call this with a fresh
 // Extraction; the old player response still contains the old URL.
-func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (ResolvedStream, error) {
+func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (MediaPlan, error) {
 	if ext == nil {
-		return ResolvedStream{}, fmt.Errorf("%w: nil extraction", waxerr.ErrExtractionFailed)
+		return MediaPlan{}, fmt.Errorf("%w: nil extraction", waxerr.ErrExtractionFailed)
 	}
 	if c.resolver == nil {
-		return ResolvedStream{}, fmt.Errorf("%w: no resolver configured", waxerr.ErrExtractionFailed)
+		return MediaPlan{}, fmt.Errorf("%w: no resolver configured", waxerr.ErrExtractionFailed)
 	}
 	rf, ok := ext.rawFormatByIndex(formatIndex)
 	if !ok {
-		return ResolvedStream{}, fmt.Errorf("%w: format index %d out of range", waxerr.ErrExtractionFailed, formatIndex)
+		return MediaPlan{}, fmt.Errorf("%w: format index %d out of range", waxerr.ErrExtractionFailed, formatIndex)
+	}
+
+	// A format without a URL or cipher is served through the response's SABR
+	// endpoint.
+	if rf.URL == "" && rf.SignatureCipher == "" {
+		if ext.serverAbrURL == "" {
+			return MediaPlan{}, fmt.Errorf("%w: candidate has neither URL nor signatureCipher", waxerr.ErrExtractionFailed)
+		}
+		return MediaPlan{SABR: c.newSABRStream(ext, formatIndex, rf)}, nil
 	}
 
 	token, err := c.resolveToken(ctx, ext, failure)
 	if err != nil {
-		return ResolvedStream{}, err
+		return MediaPlan{}, err
 	}
 
 	stream, err := c.resolver.Resolve(ctx, resolver.Context{
@@ -52,7 +60,7 @@ func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, format
 		SignatureCipher: rf.SignatureCipher,
 	})
 	if err != nil {
-		return ResolvedStream{}, err
+		return MediaPlan{}, err
 	}
 
 	out := ResolvedStream{
@@ -69,7 +77,7 @@ func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, format
 	if out.ExpiresAt.IsZero() {
 		out.ExpiresAt = ext.expiresAt
 	}
-	return out, nil
+	return MediaPlan{Direct: &out}, nil
 }
 
 // streamHeaders derives the request headers a media (googlevideo) request should

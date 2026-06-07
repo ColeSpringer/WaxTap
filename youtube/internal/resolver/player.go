@@ -202,6 +202,35 @@ func (p *Player) SignatureTimestamp(ctx context.Context, rc Context) (int, error
 	return prog.sts, nil
 }
 
+// DescrambleN rewrites rawURL's throttling n parameter using the current base.js.
+// It returns URLs without an n parameter unchanged.
+//
+// Player selection uses rc.PlayerURL when present and otherwise discovers the
+// player from rc.VideoID. The compiled program is shared with SignatureTimestamp
+// and Resolve.
+func (p *Player) DescrambleN(ctx context.Context, rc Context, rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("%w: parse URL before descrambling n: %v", waxerr.ErrExtractionFailed, err)
+	}
+	q := u.Query()
+	n := q.Get("n")
+	if n == "" {
+		return rawURL, nil // nothing to solve
+	}
+	prog, err := p.inspectProgram(ctx, rc)
+	if err != nil {
+		return "", err
+	}
+	decoded, err := prog.decodeN(ctx, n, p.timeout)
+	if err != nil {
+		return "", err
+	}
+	q.Set("n", decoded)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 // inspectProgram loads the compiled player selected by rc without resolving a
 // stream candidate.
 func (p *Player) inspectProgram(ctx context.Context, rc Context) (*playerProgram, error) {
