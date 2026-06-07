@@ -216,7 +216,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 		if i > 0 {
 			c.log.DebugContext(ctx, "extracted via fallback client", "client", profile.Name)
 		}
-		return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw, expiresAt: pr.expiresAt(time.Now())}, nil
+		return buildExtraction(video, profile, sess, raw, pr), nil
 	}
 
 	// Final fallback: scrape the watch page for ytInitialPlayerResponse. This
@@ -239,7 +239,9 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 
 // signatureTimestamp returns the base.js signature timestamp required by
 // profile. It returns zero when the profile does not require one, the resolver
-// cannot inspect players, or lookup fails. Player discovery starts from videoID.
+// cannot inspect players, or lookup fails. Player discovery starts with videoID,
+// and the resolver caches fetched player JavaScript for reuse by later profiles
+// and extractions.
 func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, videoID string) int {
 	if !profile.NeedsSignatureTimestamp || c.inspector == nil {
 		return 0
@@ -275,7 +277,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	if err != nil {
 		return nil, err
 	}
-	return &Extraction{video: video, profile: profile, session: sess, rawAudio: raw, expiresAt: pr.expiresAt(time.Now())}, nil
+	return buildExtraction(video, profile, sess, raw, pr), nil
 }
 
 // Info returns just the video metadata and candidate formats.

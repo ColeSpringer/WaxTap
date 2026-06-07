@@ -77,6 +77,42 @@ func TestParsePlayerResponse_OK(t *testing.T) {
 	}
 }
 
+func TestParsePlayerResponse_SABRConfig(t *testing.T) {
+	pr, err := parsePlayerResponse(readFixture(t, "player_sabr.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perr := pr.playabilityError(); perr != nil {
+		t.Fatalf("playabilityError = %v, want nil", perr)
+	}
+
+	if got := pr.serverAbrURL(); got == "" {
+		t.Error("serverAbrURL() = empty, want the SABR endpoint")
+	}
+	if got := pr.ustreamerConfig(); got != "Q0FFU0FnZ0I=" {
+		t.Errorf("ustreamerConfig() = %q, want the base64 blob", got)
+	}
+
+	// SABR formats do not carry URLs or signature ciphers. Preserve the fields
+	// needed to identify the selected encoding in later requests.
+	raw := pr.audioFormats()
+	if len(raw) != 2 {
+		t.Fatalf("audio formats = %d, want 2", len(raw))
+	}
+	for _, rf := range raw {
+		if rf.URL != "" || rf.SignatureCipher != "" {
+			t.Errorf("itag %d has a direct URL or cipher: url=%q cipher=%q", rf.Itag, rf.URL, rf.SignatureCipher)
+		}
+	}
+	opus := raw[0]
+	if opus.Itag != 251 || opus.LastModified != "1700000000000001" || opus.XTags != "acont=original:lang=en" {
+		t.Errorf("opus format identity = %+v", opus)
+	}
+	if atoi64(opus.ContentLength) != 3500000 {
+		t.Errorf("opus contentLength = %q, want 3500000", opus.ContentLength)
+	}
+}
+
 func TestParseAudioQualityTier(t *testing.T) {
 	cases := map[string]format.AudioQualityTier{
 		"AUDIO_QUALITY_HIGH":     format.QualityHigh,

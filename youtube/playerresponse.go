@@ -25,10 +25,24 @@ type playerResponse struct {
 	} `json:"playabilityStatus"`
 
 	StreamingData struct {
-		ExpiresInSeconds string      `json:"expiresInSeconds"`
-		Formats          []rawFormat `json:"formats"`
-		AdaptiveFormats  []rawFormat `json:"adaptiveFormats"`
+		ExpiresInSeconds string `json:"expiresInSeconds"`
+		// ServerAbrStreamingURL is the POST endpoint for SABR-backed formats,
+		// which do not include per-format URLs or signature ciphers.
+		ServerAbrStreamingURL string      `json:"serverAbrStreamingUrl"`
+		Formats               []rawFormat `json:"formats"`
+		AdaptiveFormats       []rawFormat `json:"adaptiveFormats"`
 	} `json:"streamingData"`
+
+	// PlayerConfig contains configuration required by SABR requests.
+	PlayerConfig struct {
+		MediaCommonConfig struct {
+			MediaUstreamerRequestConfig struct {
+				// VideoPlaybackUstreamerConfig is base64-encoded here and sent as
+				// decoded bytes in each VideoPlaybackAbrRequest.
+				VideoPlaybackUstreamerConfig string `json:"videoPlaybackUstreamerConfig"`
+			} `json:"mediaUstreamerRequestConfig"`
+		} `json:"mediaCommonConfig"`
+	} `json:"playerConfig"`
 
 	VideoDetails struct {
 		VideoID          string `json:"videoId"`
@@ -68,13 +82,17 @@ type rawThumbnail struct {
 // rawFormat is a streaming format as encoded in the player response. Numeric
 // fields YouTube sends as strings are decoded as strings and converted here.
 type rawFormat struct {
-	Itag             int    `json:"itag"`
-	URL              string `json:"url"`
-	SignatureCipher  string `json:"signatureCipher"`
-	MimeType         string `json:"mimeType"`
-	Bitrate          int    `json:"bitrate"`
-	AverageBitrate   int    `json:"averageBitrate"`
-	ContentLength    string `json:"contentLength"`
+	Itag            int    `json:"itag"`
+	URL             string `json:"url"`
+	SignatureCipher string `json:"signatureCipher"`
+	MimeType        string `json:"mimeType"`
+	Bitrate         int    `json:"bitrate"`
+	AverageBitrate  int    `json:"averageBitrate"`
+	ContentLength   string `json:"contentLength"`
+	// LastModified and XTags distinguish encodings that share an itag. SABR
+	// sends them back as part of FormatId.
+	LastModified     string `json:"lastModified"`
+	XTags            string `json:"xtags"`
 	AudioSampleRate  string `json:"audioSampleRate"`
 	AudioChannels    int    `json:"audioChannels"`
 	AudioQuality     string `json:"audioQuality"`
@@ -96,8 +114,8 @@ func parsePlayerResponse(body []byte) (*playerResponse, error) {
 	return &pr, nil
 }
 
-// parseWatchPage extracts ytInitialPlayerResponse from a watch-page HTML body
-// using brace-aware scanning (robust to nested/string braces, unlike a regex).
+// parseWatchPage extracts ytInitialPlayerResponse from watch-page HTML. The
+// scanner handles nested braces and braces inside strings.
 func parseWatchPage(body []byte) (*playerResponse, error) {
 	obj, ok := extractJSONObject(string(body), "ytInitialPlayerResponse")
 	if !ok {
@@ -108,6 +126,16 @@ func parseWatchPage(body []byte) (*playerResponse, error) {
 
 func (pr *playerResponse) isLiveNow() bool {
 	return pr.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
+}
+
+// serverAbrURL returns the SABR streaming endpoint, if present.
+func (pr *playerResponse) serverAbrURL() string {
+	return pr.StreamingData.ServerAbrStreamingURL
+}
+
+// ustreamerConfig returns the base64-encoded SABR request configuration.
+func (pr *playerResponse) ustreamerConfig() string {
+	return pr.PlayerConfig.MediaCommonConfig.MediaUstreamerRequestConfig.VideoPlaybackUstreamerConfig
 }
 
 // expiresAt converts streamingData.expiresInSeconds to an absolute time. The
@@ -151,9 +179,8 @@ func (pr *playerResponse) playabilityError() error {
 	}
 }
 
-// toVideo builds the public Video model and the matching raw audio formats used
-// for stream resolution. It returns ErrNoAudioFormats when no audio
-// rendition is present.
+// toVideo builds the public Video model and matching raw formats for resolution.
+// It returns ErrNoAudioFormats when no audio rendition is present.
 func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 	v := &Video{
 		ID:          videoID,

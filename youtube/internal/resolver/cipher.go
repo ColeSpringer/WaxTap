@@ -42,11 +42,11 @@ var nNamePatterns = []*regexp.Regexp{
 var helperCallRe = regexp.MustCompile(`([a-zA-Z0-9$_]+)\.[a-zA-Z0-9$_]+\(\s*[a-zA-Z0-9$_]+\s*,`)
 
 // stsPatterns locate the signature timestamp in base.js. Current players use
-// signatureTimestamp:<int>; older players may use sts:<int>. The short-key
-// pattern requires an object key so it does not match member assignments such
-// as foo.sts=1.
+// signatureTimestamp:<int>; older players may use sts:<int>. Only object-literal
+// fields match. Assignments such as foo.signatureTimestamp=1 or foo.sts=1 are
+// ignored because a false timestamp causes YouTube to reject the request.
 var stsPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`signatureTimestamp\s*[:=]\s*(\d+)`),
+	regexp.MustCompile(`signatureTimestamp\s*:\s*(\d+)`),
 	regexp.MustCompile(`[{,]\s*"?sts"?\s*:\s*(\d+)`),
 }
 

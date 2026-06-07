@@ -1,0 +1,60 @@
+{
+  "responseContext": { "visitorData": "CgtleGFtcGxlVmlz" },
+  "playabilityStatus": { "status": "OK" },
+  "streamingData": {
+    "expiresInSeconds": "21540",
+    "serverAbrStreamingUrl": "https://r1---example.googlevideo.com/videoplayback?expire=9999999999&n=SABRNPARAM",
+    "adaptiveFormats": [
+      {
+        "itag": 251,
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 160000,
+        "averageBitrate": 130000,
+        "contentLength": "3500000",
+        "audioSampleRate": "48000",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
+        "lastModified": "1700000000000001",
+        "xtags": "acont=original:lang=en"
+      },
+      {
+        "itag": 140,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 130000,
+        "averageBitrate": 128000,
+        "contentLength": "3400000",
+        "audioSampleRate": "44100",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
+        "lastModified": "1700000000000002"
+      }
+    ]
+  },
+  "playerConfig": {
+    "mediaCommonConfig": {
+      "mediaUstreamerRequestConfig": {
+        "videoPlaybackUstreamerConfig": "Q0FFU0FnZ0I="
+      }
+    }
+  },
+  "videoDetails": {
+    "videoId": "dummyVideo0",
+    "title": "Synthetic SABR Track",
+    "lengthSeconds": "212",
+    "channelId": "UCabcdefghijklmnopqrstuv",
+    "author": "Test Channel",
+    "shortDescription": "A SABR-only test track.",
+    "viewCount": "1000",
+    "isLiveContent": false,
+    "thumbnail": { "thumbnails": [] }
+  },
+  "microformat": {
+    "playerMicroformatRenderer": {
+      "lengthSeconds": "212",
+      "publishDate": "2009-10-25T00:00:00-07:00",
+      "ownerChannelName": "Test Channel"
+    }
+  }
+}

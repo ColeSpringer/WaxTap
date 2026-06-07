@@ -8,6 +8,7 @@ require (
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
+	google.golang.org/protobuf v1.36.11
 )
 
 require (

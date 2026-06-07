@@ -137,10 +137,12 @@ func TestExtractSignatureTimestamp_Variants(t *testing.T) {
 		{"sts short key", `{sts:17999}`, 17999, true},
 		{"sts after comma", `{a:1,sts:16000}`, 16000, true},
 		{"sts quoted key", `{"sts":17777}`, 17777, true},
-		{"assignment form", `var x; signatureTimestamp = 20001;`, 20001, true},
 		{"absent", `var x = 1; function f(){}`, 0, false},
 		{"zero rejected", `{signatureTimestamp:0}`, 0, false},
-		// The short-key pattern must ignore member access and variable assignments.
+		// Ignore assignments and member access, which may contain unrelated
+		// timestamp values.
+		{"assignment form ignored", `var x; signatureTimestamp = 20001;`, 0, false},
+		{"stray signatureTimestamp member", `a.signatureTimestamp=20002;b()`, 0, false},
 		{"stray member access", `a.sts=12345;b()`, 0, false},
 		{"stray sts variable", `var sts = 99;`, 0, false},
 	}

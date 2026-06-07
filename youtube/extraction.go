@@ -5,10 +5,8 @@ import (
 	"time"
 )
 
-// Extraction is the result of a successful extract: the video plus the opaque
-// context (which client profile and session won) needed to resolve and download
-// in the same identity. Its internals are unexported, so the facade holds it as
-// an opaque handle and passes it back into resolve/download without reaching in.
+// Extraction contains video metadata plus the client profile and session needed
+// to resolve and download its formats with the same identity.
 type Extraction struct {
 	video   *Video
 	profile ClientProfile
@@ -17,10 +15,28 @@ type Extraction struct {
 	// the same order as Video.Formats because itag is not unique on videos with
 	// multiple languages or DRC variants.
 	rawAudio []rawFormat
-	// expiresAt is when the player response's stream URLs are expected to expire
-	// (now + streamingData.expiresInSeconds at extraction time). It is a fallback
-	// for resolution when the signed URL itself carries no expire parameter.
+	// expiresAt is the fallback expiry derived from
+	// streamingData.expiresInSeconds. A signed URL's expire parameter takes
+	// precedence during resolution.
 	expiresAt time.Time
+	// serverAbrURL and ustreamerConfig are retained for SABR-backed formats. They
+	// are empty for direct streams and are not used until the SABR download path
+	// is connected.
+	serverAbrURL    string
+	ustreamerConfig string
+}
+
+// buildExtraction keeps the InnerTube and watch-page extraction paths in sync.
+func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []rawFormat, pr *playerResponse) *Extraction {
+	return &Extraction{
+		video:           video,
+		profile:         profile,
+		session:         sess,
+		rawAudio:        raw,
+		expiresAt:       pr.expiresAt(time.Now()),
+		serverAbrURL:    pr.serverAbrURL(),
+		ustreamerConfig: pr.ustreamerConfig(),
+	}
 }
 
 // Video returns the extracted metadata and candidate formats.
@@ -39,9 +55,8 @@ func (e *Extraction) rawFormatByIndex(i int) (rawFormat, bool) {
 	return e.rawAudio[i], true
 }
 
-// ResolvedStream is a resolved, playable stream URL with the metadata needed to
-// fetch it. youtube owns this type: resolver.Stream is mapped into it by the
-// youtube package, and download.Source is mapped from it by the facade.
+// ResolvedStream contains a playable stream URL and the metadata needed to
+// fetch it.
 type ResolvedStream struct {
 	URL           string
 	ExpiresAt     time.Time
