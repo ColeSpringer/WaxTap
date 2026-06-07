@@ -37,12 +37,14 @@ reference for the knobs that let you respond without rebuilding.
    them locally to derive an **authored, minimized** fixture, never commit the raw
    file.
 
-4. **Fix the smallest surface.** Breakage usually lands in one of three files:
+4. **Fix the smallest surface.** Breakage usually lands in one of a few files:
    | Symptom | File |
    |---|---|
    | Bot wall / playability `ERROR` / stale client version | `internal/clientident` (WEB-family Chrome and InnerTube versions); `youtube/profile.go` (other client versions, device fingerprints, and PO-token requirements) |
    | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators) |
+   | WEB/WEB_EMBEDDED `/player` returns `UNPLAYABLE` while mobile clients work | `youtube/internal/resolver/cipher.go` (`stsPatterns`, the signature-timestamp locators); see [SABR audio streaming](#sabr-audio-streaming) |
    | Player response shape changed (parse/format extraction) | `youtube/playerresponse.go` |
+   | WEB audio stalls, truncates, or fails to decode | `youtube/internal/sabr` (UMP part ids, protobuf field numbers); see [SABR audio streaming](#sabr-audio-streaming) |
 
    Reproduce against your captured fixture, adjust, and run the checks below.
    If the recovery path or runtime knobs changed, update this file in the same
@@ -141,7 +143,8 @@ template mirrors the current defaults in `youtube/profile.go`:
       "version": "1.20260115.01.00",
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       "requiresPoTokens": [],
-      "supportsPlaylists": false
+      "supportsPlaylists": false,
+      "needsSignatureTimestamp": true
     },
     {
       "name": "WEB",
@@ -150,7 +153,8 @@ template mirrors the current defaults in `youtube/profile.go`:
       "version": "2.20260603.05.00",
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       "requiresPoTokens": ["player", "gvs"],
-      "supportsPlaylists": true
+      "supportsPlaylists": true,
+      "needsSignatureTimestamp": true
     }
   ]
 }
@@ -161,6 +165,10 @@ Notes:
 - `requiresPoTokens` is a list of scope names. WaxTap currently applies `player`
   and `gvs`; omit the field or use `[]` for none. The `none` sentinel must appear
   alone, and unsupported scopes such as `subtitles` are rejected.
+- `needsSignatureTimestamp` must be `true` for WEB-family clients that decipher
+  signatures (`WEB`, `WEB_EMBEDDED_PLAYER`); without it the `/player` request omits
+  the timestamp and YouTube returns `UNPLAYABLE`, so a forced-WEB override never
+  reaches SABR. Mobile clients on direct URLs (`ANDROID_VR`, `IOS`) leave it unset.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - An override replaces only the primary extraction chain. Player discovery, the
@@ -239,6 +247,73 @@ When integrating a provider:
 Cache by scope and binding. Player and GVS tokens are requested separately so a
 provider can mint or reuse the right token for each scope.
 
+## SABR audio streaming
+
+The default client chain leads with ANDROID_VR, which returns direct signed
+stream URLs, so ordinary downloads do not use SABR. The WEB and WEB_EMBEDDED
+clients are different: their adaptive audio formats carry no `url` and no
+`signatureCipher`, and are served only through YouTube's SABR protocol over the
+UMP wire format (`streamingData.serverAbrStreamingUrl`). WaxTap reassembles those
+segments into a single audio stream in `youtube/internal/sabr`. SABR activates
+whenever a winning client returns URL-less audio. That is the WEB case, whether
+WEB is forced (see [Client-profile override files](#client-profile-override-files))
+or reached by fallback.
+
+The WEB path has two requirements. Missing either one fails with a typed error
+rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
+
+- A `signatureTimestamp` (sts) in the `/player` request. WaxTap reads it from
+  `base.js` (`youtube/internal/resolver/cipher.go`, `stsPatterns`). A missing or
+  stale sts makes `/player` return `UNPLAYABLE` before any formats are seen, so if
+  WEB returns `UNPLAYABLE` while mobile clients work, suspect a zero sts before the
+  PO token.
+- A GVS-scope `potoken.Provider`. The `gvs` token used on direct stream URLs is
+  base64-decoded to raw bytes and carried in the SABR `streamerContext`.
+  Attestation-required (`STREAM_PROTECTION_STATUS`) surfaces as `ErrNeedsPOToken`.
+
+### When SABR breaks
+
+The wire surface is volatile and lives in two files, both verified against a
+pinned upstream revision recorded as `upstreamCommit` in `proto.go` (currently
+`d2fa40d761034a286cf60ee033653307a1295b0c`, LuanRT/googlevideo, 2025-11-03).
+
+- `youtube/internal/sabr/proto.go` holds the protobuf field numbers for the SABR
+  request and response messages, hand-encoded with
+  `google.golang.org/protobuf/encoding/protowire` (no generated code; CGO stays
+  off). YouTube can rotate these numbers, and a stale one corrupts decoding
+  silently instead of failing cleanly. When SABR decoding breaks after a protocol
+  change, recheck the field numbers against that revision's `protos/` directory
+  before changing parser logic, then bump `upstreamCommit` in the same patch.
+  Decoders skip unknown fields, so additive changes stay compatible.
+- `youtube/internal/sabr/ump.go` holds the UMP part ids and UMP's custom
+  variable-length integer, which is not protobuf LEB128: the first byte's leading
+  1-bits set the total length (1 to 5 bytes). The part-id constants run from
+  `MEDIA_HEADER=20` to `STREAM_PROTECTION_STATUS=58` and come from the same
+  revision (`protos/video_streaming/ump_part_id.proto`). Unknown part ids are
+  skipped by their encoded size, so new parts stay compatible.
+
+Two limitations matter if a specific video stalls or truncates:
+
+- SABR is sequential (POST, consume segments, POST again until the format is
+  complete), so it cannot use the parallel-chunk download path. A SABR download is
+  single-stream.
+- `SABR_CONTEXT_UPDATE` (57) and `SABR_CONTEXT_SENDING_POLICY` (59) are not
+  implemented. That is fine for short audio, but it is the first thing to add if a
+  video stalls before completing.
+
+The CLI detects SABR without a provider, since routing to a SABR stream happens
+before any token is minted: `info --show-urls` prints `SABR (no direct URL)` and
+the JSON sets `resolved.isSabr`.
+
+```sh
+waxtap --profile-override ./profiles.json info <url> --show-urls
+```
+
+Reading the bytes (`download`, or `doctor`'s byte read) needs the GVS token. The
+CLI ships no PO-token generator, so only a library consumer that supplies a
+`potoken.Provider` can drive the WEB byte path (see [PO tokens](#po-tokens));
+without one it fails with `ErrNeedsPOToken`.
+
 ## Fixtures policy
 
 - **Committed:** authored / minimized fixtures under `youtube/testdata/` and
@@ -272,6 +347,15 @@ The project may ship a breaking change in a minor release instead of moving to a
 `/v2` module path when the affected API has no known consumers, as it did for
 v1.1.0. Document these changes in the GitHub release notes.
 
+- **v1.4.0** added SABR/UMP audio streaming for the WEB and WEB_EMBEDDED clients
+  (`youtube/internal/sabr`) and the `signatureTimestamp` the WEB `/player` request
+  needs. `youtube.Client.Resolve` and `ResolveWithFailure` now return
+  `(MediaPlan, error)` instead of `(*ResolvedStream, error)`, since a SABR stream
+  has no direct URL; the `waxtap` facade is unchanged, with `Client.Resolve` still
+  returning a `ResolvedStream` via `MediaPlan.Diagnostic()`. The breaking change is
+  confined to the exported-but-volatile `youtube` package. Profile override files
+  gain a `needsSignatureTimestamp` key for WEB-family clients, and the release adds
+  `google.golang.org/protobuf` (used via `encoding/protowire` only; CGO stays off).
 - **v1.3.0** removed the unused `Politeness.MaxDownloadsPerRun` field. Per-run
   limits now use `PlaylistDownloadOptions.MaxDownloads`, which is enforced by
   `Client.DownloadPlaylist` and exposed by the download command's

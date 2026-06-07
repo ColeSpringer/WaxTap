@@ -39,7 +39,8 @@ const validOverride = `{
       "version": "2.99.0",
       "userAgent": "Mozilla/5.0 web",
       "requiresPoTokens": ["player", "gvs"],
-      "supportsPlaylists": true
+      "supportsPlaylists": true,
+      "needsSignatureTimestamp": true
     }
   ]
 }`
@@ -59,6 +60,14 @@ func TestLoadProfileOverrides_Valid(t *testing.T) {
 	// Scope names are decoded into the set the client needs.
 	if got := profiles[1].RequiresPOTokens; len(got) != 2 || got[0] != potoken.ScopePlayer || got[1] != potoken.ScopeGVS {
 		t.Errorf("WEB RequiresPOTokens = %v, want [player gvs]", got)
+	}
+	// WEB-family clients carry the signature-timestamp flag; a profile that
+	// omits it (ANDROID_VR) defaults to false.
+	if !profiles[1].NeedsSignatureTimestamp {
+		t.Error("WEB NeedsSignatureTimestamp = false, want true")
+	}
+	if profiles[0].NeedsSignatureTimestamp {
+		t.Error("ANDROID_VR NeedsSignatureTimestamp = true, want false (omitted)")
 	}
 	// Headers are derived (not left to the caller to assemble by hand).
 	if got := profiles[0].Header("X-Youtube-Client-Name"); got != "28" {

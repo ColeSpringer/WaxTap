@@ -18,7 +18,9 @@ keeps the selected source stream and does not re-encode.
 
 - **Library and CLI over one core.** `github.com/colespringer/waxtap` is the stable
   facade; `cmd/waxtap` is a real CLI built on the same packages.
-- **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`.
+- **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
+  default client returns direct stream URLs; WEB-family clients stream audio over
+  SABR/UMP and require a caller-supplied `potoken.Provider`.
 - **Volatile surfaces are isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so a YouTube change touches few, marked files.
 - **Server-friendly:** concurrency-safe, context-cancelable, bounded memory,
@@ -42,6 +44,7 @@ keeps the selected source stream and does not re-encode.
 | `waxerr` | The domain error taxonomy (one `errors.Is` source of truth). |
 | `youtube` | YouTube extraction (volatile; exported for the facade, may churn). |
 | `youtube/internal/resolver` | Cipher / base.js / stream-URL resolution. |
+| `youtube/internal/sabr` | SABR/UMP streaming for URL-less WEB-family audio. |
 | `internal/pipeline` | Fused probe → cut → loudness → encode pipeline. |
 | `internal/httpx` | HTTP client: retry, backoff, Retry-After, per-host limiter. |
 | `internal/cache` | In-memory LRU+TTL+singleflight cache. |

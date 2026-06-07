@@ -26,21 +26,25 @@ type profileOverrideFile struct {
 
 // profileSpec is the JSON form of the client-profile fields WaxTap allows at
 // runtime. requiresPoTokens is a list of scope names; omit it or use [] for none.
+// needsSignatureTimestamp must be set for WEB-family clients that decipher
+// signatures (WEB, WEB_EMBEDDED_PLAYER); without it their /player requests fail
+// with UNPLAYABLE.
 type profileSpec struct {
-	Name              string   `json:"name"`
-	InnerTubeName     string   `json:"innerTubeName"`
-	InnerTubeID       int      `json:"innerTubeId"`
-	Version           string   `json:"version"`
-	APIKey            string   `json:"apiKey"`
-	UserAgent         string   `json:"userAgent"`
-	DeviceMake        string   `json:"deviceMake"`
-	DeviceModel       string   `json:"deviceModel"`
-	OSName            string   `json:"osName"`
-	OSVersion         string   `json:"osVersion"`
-	AndroidSDKVersion int      `json:"androidSdkVersion"`
-	RequiresPOTokens  []string `json:"requiresPoTokens"`
-	SupportsCookies   bool     `json:"supportsCookies"`
-	SupportsPlaylists bool     `json:"supportsPlaylists"`
+	Name                    string   `json:"name"`
+	InnerTubeName           string   `json:"innerTubeName"`
+	InnerTubeID             int      `json:"innerTubeId"`
+	Version                 string   `json:"version"`
+	APIKey                  string   `json:"apiKey"`
+	UserAgent               string   `json:"userAgent"`
+	DeviceMake              string   `json:"deviceMake"`
+	DeviceModel             string   `json:"deviceModel"`
+	OSName                  string   `json:"osName"`
+	OSVersion               string   `json:"osVersion"`
+	AndroidSDKVersion       int      `json:"androidSdkVersion"`
+	RequiresPOTokens        []string `json:"requiresPoTokens"`
+	SupportsCookies         bool     `json:"supportsCookies"`
+	SupportsPlaylists       bool     `json:"supportsPlaylists"`
+	NeedsSignatureTimestamp bool     `json:"needsSignatureTimestamp"`
 }
 
 // loadProfileOverrides reads a client-profile override file and returns the
@@ -80,20 +84,21 @@ func loadProfileOverrides(path string) ([]youtube.ClientProfile, error) {
 			return nil, err
 		}
 		profiles = append(profiles, youtube.BuildProfile(youtube.ClientProfile{
-			Name:              sp.Name,
-			InnerTubeName:     sp.InnerTubeName,
-			InnerTubeID:       sp.InnerTubeID,
-			Version:           sp.Version,
-			APIKey:            sp.APIKey,
-			UserAgent:         sp.UserAgent,
-			DeviceMake:        sp.DeviceMake,
-			DeviceModel:       sp.DeviceModel,
-			OSName:            sp.OSName,
-			OSVersion:         sp.OSVersion,
-			AndroidSDKVersion: sp.AndroidSDKVersion,
-			RequiresPOTokens:  scopes,
-			SupportsCookies:   sp.SupportsCookies,
-			SupportsPlaylists: sp.SupportsPlaylists,
+			Name:                    sp.Name,
+			InnerTubeName:           sp.InnerTubeName,
+			InnerTubeID:             sp.InnerTubeID,
+			Version:                 sp.Version,
+			APIKey:                  sp.APIKey,
+			UserAgent:               sp.UserAgent,
+			DeviceMake:              sp.DeviceMake,
+			DeviceModel:             sp.DeviceModel,
+			OSName:                  sp.OSName,
+			OSVersion:               sp.OSVersion,
+			AndroidSDKVersion:       sp.AndroidSDKVersion,
+			RequiresPOTokens:        scopes,
+			SupportsCookies:         sp.SupportsCookies,
+			SupportsPlaylists:       sp.SupportsPlaylists,
+			NeedsSignatureTimestamp: sp.NeedsSignatureTimestamp,
 		}))
 	}
 	return profiles, nil
