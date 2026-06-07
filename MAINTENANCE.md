@@ -130,10 +130,13 @@ template mirrors the current defaults in `youtube/profile.go`:
       "name": "IOS",
       "innerTubeName": "IOS",
       "innerTubeId": 5,
-      "version": "19.45.4",
-      "userAgent": "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
+      "version": "21.02.3",
+      "userAgent": "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+      "deviceMake": "Apple",
       "deviceModel": "iPhone16,2",
-      "requiresPoTokens": [],
+      "osName": "iPhone",
+      "osVersion": "18.3.2.22D82",
+      "requiresPoTokens": ["gvs"],
       "supportsPlaylists": false
     },
     {
@@ -144,7 +147,8 @@ template mirrors the current defaults in `youtube/profile.go`:
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       "requiresPoTokens": [],
       "supportsPlaylists": false,
-      "needsSignatureTimestamp": true
+      "needsSignatureTimestamp": true,
+      "embedUrl": "https://www.reddit.com/"
     },
     {
       "name": "WEB",
@@ -169,6 +173,11 @@ Notes:
   signatures (`WEB`, `WEB_EMBEDDED_PLAYER`); without it the `/player` request omits
   the timestamp and YouTube returns `UNPLAYABLE`, so a forced-WEB override never
   reaches SABR. Mobile clients on direct URLs (`ANDROID_VR`, `IOS`) leave it unset.
+- `embedUrl` sets `context.thirdParty.embedUrl`, which `WEB_EMBEDDED_PLAYER`
+  requires (a third-party embed origin, not youtube.com). Caveat: even with it,
+  YouTube currently returns `This video is unavailable` (error 152) for the embedded
+  client on many public videos — a selective/region restriction tracked upstream as
+  yt-dlp #16077, not a WaxTap bug — so embedded is an unreliable fallback right now.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - An override replaces only the primary extraction chain. Player discovery, the

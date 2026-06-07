@@ -28,7 +28,8 @@ type profileOverrideFile struct {
 // runtime. requiresPoTokens is a list of scope names; omit it or use [] for none.
 // needsSignatureTimestamp must be set for WEB-family clients that decipher
 // signatures (WEB, WEB_EMBEDDED_PLAYER); without it their /player requests fail
-// with UNPLAYABLE.
+// with UNPLAYABLE. embedUrl sets context.thirdParty.embedUrl, which
+// WEB_EMBEDDED_PLAYER requires (a third-party embed origin, not youtube.com).
 type profileSpec struct {
 	Name                    string   `json:"name"`
 	InnerTubeName           string   `json:"innerTubeName"`
@@ -45,6 +46,7 @@ type profileSpec struct {
 	SupportsCookies         bool     `json:"supportsCookies"`
 	SupportsPlaylists       bool     `json:"supportsPlaylists"`
 	NeedsSignatureTimestamp bool     `json:"needsSignatureTimestamp"`
+	EmbedURL                string   `json:"embedUrl"`
 }
 
 // loadProfileOverrides reads a client-profile override file and returns the
@@ -99,6 +101,7 @@ func loadProfileOverrides(path string) ([]youtube.ClientProfile, error) {
 			SupportsCookies:         sp.SupportsCookies,
 			SupportsPlaylists:       sp.SupportsPlaylists,
 			NeedsSignatureTimestamp: sp.NeedsSignatureTimestamp,
+			EmbedURL:                sp.EmbedURL,
 		}))
 	}
 	return profiles, nil

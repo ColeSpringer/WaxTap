@@ -41,6 +41,11 @@ type ClientProfile struct {
 	// direct URLs should leave it false to avoid loading base.js during extraction.
 	NeedsSignatureTimestamp bool
 
+	// EmbedURL is sent as context.thirdParty.embedUrl on /player requests, where
+	// WEB_EMBEDDED_PLAYER needs a third-party embed origin (not youtube.com) or it
+	// returns a playability ERROR.
+	EmbedURL string
+
 	headers map[string]string // owned; cloned on construct and on read
 }
 
@@ -140,21 +145,37 @@ var (
 		AndroidSDKVersion: 32,
 		SupportsPlaylists: false,
 	}
+	// IOS identity verified against yt-dlp INNERTUBE_CLIENTS on 2026-06-07. Bump
+	// Version and UserAgent together: a stale iOS app version draws a 400 from
+	// /player, and a sparse device context hits the bot-check path.
 	profileIOS = ClientProfile{
-		Name:              "IOS",
-		InnerTubeName:     "IOS",
-		InnerTubeID:       5,
-		Version:           "19.45.4",
-		UserAgent:         "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
-		DeviceModel:       "iPhone16,2",
+		Name:          "IOS",
+		InnerTubeName: "IOS",
+		InnerTubeID:   5,
+		Version:       "21.02.3",
+		UserAgent:     "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+		DeviceMake:    "Apple",
+		DeviceModel:   "iPhone16,2",
+		OSName:        "iPhone",
+		OSVersion:     "18.3.2.22D82",
+		// GVS only, never ScopePlayer: Extract fetches the player token up front,
+		// so requiring it would break iOS extraction when no provider is set.
+		// (yt-dlp marks the iOS player token recommended, not required, and GVS
+		// not_required_with_player_token, so a player token could substitute.)
+		RequiresPOTokens:  []potoken.Scope{potoken.ScopeGVS},
 		SupportsPlaylists: false,
+		// Native client: no base.js signature timestamp, so NeedsSignatureTimestamp
+		// stays unset (yt-dlp REQUIRE_JS_PLAYER false).
 	}
 	profileWebEmbedded = ClientProfile{
-		Name:                    "WEB_EMBEDDED_PLAYER",
-		InnerTubeName:           "WEB_EMBEDDED_PLAYER",
-		InnerTubeID:             56,
-		Version:                 clientident.WebEmbeddedVersion,
-		UserAgent:               clientident.UserAgent(0),
+		Name:          "WEB_EMBEDDED_PLAYER",
+		InnerTubeName: "WEB_EMBEDDED_PLAYER",
+		InnerTubeID:   56,
+		Version:       clientident.WebEmbeddedVersion,
+		UserAgent:     clientident.UserAgent(0),
+		// Embed origin matches yt-dlp's choice (reddit.com). The embedded client
+		// needs no PO token (yt-dlp defines none for web_embedded).
+		EmbedURL:                "https://www.reddit.com/",
 		SupportsPlaylists:       false,
 		NeedsSignatureTimestamp: true,
 	}

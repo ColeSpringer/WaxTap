@@ -19,8 +19,9 @@ keeps the selected source stream and does not re-encode.
 - **Library and CLI over one core.** `github.com/colespringer/waxtap` is the stable
   facade; `cmd/waxtap` is a real CLI built on the same packages.
 - **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
-  default client returns direct stream URLs; WEB-family clients stream audio over
-  SABR/UMP and require a caller-supplied `potoken.Provider`.
+  default client returns direct stream URLs and needs no PO token; the iOS and
+  WEB-family fallback clients require a caller-supplied `potoken.Provider` - iOS
+  for the media fetch, WEB-family to stream audio over SABR/UMP.
 - **Volatile surfaces are isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so a YouTube change touches few, marked files.
 - **Server-friendly:** concurrency-safe, context-cancelable, bounded memory,

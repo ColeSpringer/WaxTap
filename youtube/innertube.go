@@ -43,6 +43,14 @@ type serviceIntegrityDimensions struct {
 
 type innertubeContext struct {
 	Client innertubeClient `json:"client"`
+	// ThirdParty is a sibling of client in the wire JSON, not nested within it.
+	ThirdParty *thirdParty `json:"thirdParty,omitempty"`
+}
+
+// thirdParty is the embed origin carried on a /player request; see
+// ClientProfile.EmbedURL.
+type thirdParty struct {
+	EmbedURL string `json:"embedUrl,omitempty"`
 }
 
 // innertubeClient mirrors the profile into the request context. The headers are
@@ -114,6 +122,11 @@ func (c *Client) newPlayerRequest(p ClientProfile, s *session, opts playerReques
 				SignatureTimestamp: opts.STS,
 			},
 		},
+	}
+	// thirdParty.embedUrl belongs only on /player, so set it here, not in the
+	// shared context constructor (which also serves browse).
+	if p.EmbedURL != "" {
+		req.Context.ThirdParty = &thirdParty{EmbedURL: p.EmbedURL}
 	}
 	if opts.POToken != "" {
 		req.ServiceIntegrityDimensions = &serviceIntegrityDimensions{POToken: opts.POToken}

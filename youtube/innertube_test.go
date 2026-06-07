@@ -29,6 +29,31 @@ func TestNewPlayerRequest_POTokenBody(t *testing.T) {
 	}
 }
 
+// TestNewPlayerRequest_ThirdPartyEmbedURL checks that a profile with an EmbedURL
+// emits context.thirdParty.embedUrl and that profiles without one omit thirdParty.
+func TestNewPlayerRequest_ThirdPartyEmbedURL(t *testing.T) {
+	c := New(Config{})
+	sess := newSession("US")
+
+	emb, err := json.Marshal(c.newPlayerRequest(makeProfile(profileWebEmbedded), sess, playerRequestOpts{VideoID: "vid123"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(emb), `"thirdParty":{"embedUrl":"https://www.reddit.com/"}`) {
+		t.Errorf("embedded player body missing thirdParty.embedUrl: %s", emb)
+	}
+
+	for _, p := range []ClientProfile{profileAndroidVR, profileIOS, profileWeb} {
+		body, err := json.Marshal(c.newPlayerRequest(makeProfile(p), sess, playerRequestOpts{VideoID: "vid123"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "thirdParty") {
+			t.Errorf("%s must omit thirdParty: %s", p.Name, body)
+		}
+	}
+}
+
 func TestNewPlayerRequest_SignatureTimestamp(t *testing.T) {
 	c := New(Config{})
 	sess := newSession("US")

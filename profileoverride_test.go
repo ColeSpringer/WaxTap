@@ -78,6 +78,31 @@ func TestLoadProfileOverrides_Valid(t *testing.T) {
 	}
 }
 
+// TestLoadProfileOverrides_EmbedURL checks that embedUrl reaches the built
+// profile so an overridden embedded client can still send thirdParty.embedUrl.
+func TestLoadProfileOverrides_EmbedURL(t *testing.T) {
+	const override = `{
+	  "profiles": [
+	    {
+	      "name": "WEB_EMBEDDED_PLAYER",
+	      "innerTubeName": "WEB_EMBEDDED_PLAYER",
+	      "innerTubeId": 56,
+	      "version": "1.99.0",
+	      "userAgent": "Mozilla/5.0 web",
+	      "embedUrl": "https://example.com/",
+	      "needsSignatureTimestamp": true
+	    }
+	  ]
+	}`
+	profiles, err := loadProfileOverrides(writeOverride(t, override))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profiles[0].EmbedURL; got != "https://example.com/" {
+		t.Errorf("EmbedURL = %q, want https://example.com/", got)
+	}
+}
+
 func TestNew_WithProfileOverride(t *testing.T) {
 	c, err := New(Options{ProfileOverridePath: writeOverride(t, validOverride)})
 	if err != nil {

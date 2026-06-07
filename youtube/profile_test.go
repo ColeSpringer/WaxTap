@@ -2,10 +2,23 @@ package youtube
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/potoken"
 )
+
+// profileByName returns the named profile from the default strategy chain.
+func profileByName(t *testing.T, name string) ClientProfile {
+	t.Helper()
+	for _, p := range DefaultProfiles() {
+		if p.Name == name {
+			return p
+		}
+	}
+	t.Fatalf("%s profile not present in the default chain", name)
+	return ClientProfile{}
+}
 
 // TestAndroidVRFingerprint checks the android_vr request shape. The device and
 // OS fields must stay populated and must reach the InnerTube body context.
@@ -26,6 +39,59 @@ func TestAndroidVRFingerprint(t *testing.T) {
 		ictx.Client.OSName != "Android" ||
 		ictx.Client.OSVersion != "12L" {
 		t.Errorf("android_vr InnerTube context missing fingerprint: %+v", ictx.Client)
+	}
+}
+
+// TestIOSFingerprint checks the iOS request shape. A stale version or a sparse
+// device context draws a 400 from /player, so the identity fields must stay
+// populated and reach the InnerTube body context.
+func TestIOSFingerprint(t *testing.T) {
+	ios := profileByName(t, "IOS")
+	if ios.DeviceMake == "" || ios.DeviceModel == "" || ios.OSName == "" || ios.OSVersion == "" {
+		t.Fatalf("IOS profile missing device fingerprint: %+v", ios)
+	}
+	// The version must stay embedded in the user agent; they are bumped together.
+	if !strings.Contains(ios.UserAgent, ios.Version) {
+		t.Errorf("IOS UserAgent %q does not embed version %q", ios.UserAgent, ios.Version)
+	}
+
+	// The stable identity must reach the request body context, and the volatile
+	// version/osVersion must carry through unchanged.
+	ictx := New(Config{}).newInnertubeContext(makeProfile(profileIOS), newSession("US"))
+	if ictx.Client.DeviceMake != "Apple" ||
+		ictx.Client.DeviceModel != "iPhone16,2" ||
+		ictx.Client.OSName != "iPhone" {
+		t.Errorf("iOS InnerTube context missing fingerprint: %+v", ictx.Client)
+	}
+	if ictx.Client.ClientVersion != profileIOS.Version || ictx.Client.OSVersion != profileIOS.OSVersion {
+		t.Errorf("iOS context version/osVersion did not carry through: %+v", ictx.Client)
+	}
+}
+
+// TestIOSRequiresGVSOnly checks that iOS requires a GVS token for its media fetch
+// but not a player token. A player-scope requirement would gate extraction itself
+// (Extract fetches player tokens), re-breaking iOS when no provider is configured.
+func TestIOSRequiresGVSOnly(t *testing.T) {
+	ios := profileByName(t, "IOS")
+	if !ios.requiresPOToken(potoken.ScopeGVS) {
+		t.Error("IOS must require a GVS PO token for its media fetch")
+	}
+	if ios.requiresPOToken(potoken.ScopePlayer) {
+		t.Error("IOS must not require a player PO token (that would break extraction)")
+	}
+}
+
+// TestWebEmbeddedRequiresNoPOTokens locks the embedded client to needing no PO
+// tokens (matching yt-dlp). If YouTube starts requiring one, this fails and forces
+// an explicit decision instead of a silent breakage.
+func TestWebEmbeddedRequiresNoPOTokens(t *testing.T) {
+	emb := profileByName(t, "WEB_EMBEDDED_PLAYER")
+	if emb.requiresPOToken(potoken.ScopePlayer) || emb.requiresPOToken(potoken.ScopeGVS) {
+		t.Errorf("WEB_EMBEDDED_PLAYER should require no PO tokens, got %v", emb.RequiresPOTokens)
+	}
+	// The embed origin must be present, or /player returns a playability ERROR.
+	if emb.EmbedURL == "" {
+		t.Error("WEB_EMBEDDED_PLAYER must carry an EmbedURL")
 	}
 }
 
