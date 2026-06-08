@@ -41,8 +41,8 @@ reference for the knobs that let you respond without rebuilding.
    | Symptom | File |
    |---|---|
    | Bot wall / playability `ERROR` / stale client version | `internal/clientident` (WEB-family Chrome and InnerTube versions); `youtube/profile.go` (other client versions, device fingerprints, and PO-token requirements) |
-   | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators, plus the dependency-closure walker and its caps) |
-   | WEB/WEB_EMBEDDED `/player` returns `UNPLAYABLE` while mobile clients work | `youtube/internal/resolver/cipher.go` (`stsPatterns`); discovery loads the regular `player_es6` build (watch-first, `player.go:discoverPlayerURL`) so the patterns target it; see [SABR audio streaming](#sabr-audio-streaming) |
+   | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/solver.go` (whole-player parse/unwrap, descrambler fingerprint, consensus) + `env.js` (browser-global stub) |
+   | WEB/WEB_EMBEDDED `/player` returns `UNPLAYABLE` while mobile clients work | `youtube/internal/resolver/cipher.go` (`stsPatterns`); discovery loads the regular `player_es6` build (watch-first + `bpctr`, `player.go:discoverPlayerURL`); see [SABR audio streaming](#sabr-audio-streaming) |
    | Player response shape changed (parse/format extraction) | `youtube/playerresponse.go` |
    | WEB audio stalls, truncates, or fails to decode | `youtube/internal/sabr` (UMP part ids, protobuf field numbers); see [SABR audio streaming](#sabr-audio-streaming) |
 
@@ -50,19 +50,22 @@ reference for the knobs that let you respond without rebuilding.
    If the recovery path or runtime knobs changed, update this file in the same
    patch.
 
-   **How the cipher is extracted.** A locator pattern finds the transform
-   function's name, then `extractClosure` bundles the transitive closure of every
-   top-level definition it references - globals, helper functions, helper objects -
-   not just the function body. An AST scope walk over each isolated snippet
-   (parsed with `goja/parser` + `goja/ast`) separates free identifiers from local
-   bindings, then the closure is compiled in goja. Only those small snippets are
-   parsed, never the whole multi-megabyte base.js (goja's parser can choke on
-   unrelated modern JS in the full file). Two failure modes:
-   - a runtime `ReferenceError` (e.g. "wK is not defined") means the closure missed
-     a dependency - the AST scope walk or a definition locator (`extractVarInit` /
-     `extractFunctionDef`) needs attention;
-   - a `parse`/`compile` error surfacing as `nErr` means goja cannot handle a
-     construct in a pulled-in snippet - a goja ES-floor ceiling, not a walker bug.
+   **How the cipher is solved.** The transforms are not carved out of base.js;
+   the **whole player runs in goja** and its own descrambler does the work
+   (`solver.go`). The flow: parse base.js once, AST-unwrap the player IIFE to
+   global scope, fingerprint the descrambler by a direct `obj.method("alr","yes")`
+   body statement, drive `n`/signature through the player's URL object, and accept
+   a result only by consensus (every non-throwing candidate must agree on one
+   value, else `ErrCipherSolve`). Running the whole player needs the browser-global
+   stub in `env.js`. Failure modes:
+   - a runtime `X is not defined` (shown in the `ErrCipherSolve` wrap and the
+     resolver's warn logs) means a rotated player references a global the stub
+     lacks - add one line to `env.js`'s explicit, fail-loud list;
+   - sts=0 / `UNPLAYABLE` is usually discovery fetching a consent/HTML page, not a
+     `stsPatterns` miss - the warn log prints the discovered URL, body length, and
+     first bytes to tell the two apart;
+   - a `parse`/`compile` error means goja cannot handle a construct in the current
+     player - a goja ES-floor ceiling (`TestGojaES6Floor`), not a solver bug.
 
 ## Verifying a fix
 
@@ -343,8 +346,8 @@ without one it fails with `ErrNeedsPOToken`.
 ## Fixtures policy
 
 - **Committed:** authored / minimized fixtures under `youtube/testdata/` and
-  `youtube/internal/resolver/testdata/` (a hand-written `base.js` exercising the
-  cipher locators, trimmed player-response JSON, etc.).
+  `youtube/internal/resolver/testdata/` (a synthetic IIFE-wrapped `player_synth.js`
+  exercising the whole-player solver, trimmed player-response JSON, etc.).
 - **Never committed:** real YouTube `base.js` / player-response captures
   (licensing). `.gitignore` excludes `testdata/real/`, `*.real.js`, and
   `*.real.json`. Use real captures locally to author a minimal fixture, then

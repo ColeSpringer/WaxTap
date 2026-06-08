@@ -38,9 +38,9 @@ func newFixtureServer(t *testing.T) *fixtureServer {
 	if err != nil {
 		t.Fatalf("read embed.html: %v", err)
 	}
-	base, err := os.ReadFile("testdata/base.js")
+	base, err := os.ReadFile("testdata/player_synth.js")
 	if err != nil {
-		t.Fatalf("read base.js: %v", err)
+		t.Fatalf("read player_synth.js: %v", err)
 	}
 	return &fixtureServer{t: t, hits: map[string]int{}, embed: embed, baseJS: base}
 }
@@ -101,8 +101,8 @@ func TestPlayerResolve_SignatureCipher(t *testing.T) {
 
 	u, _ := url.Parse(got.URL)
 	q := u.Query()
-	if q.Get("sig") != "GFEDH" {
-		t.Errorf("sig = %q, want GFEDH (deciphered)", q.Get("sig"))
+	if q.Get("sig") != "HGFEDCBA" {
+		t.Errorf("sig = %q, want HGFEDCBA (deciphered)", q.Get("sig"))
 	}
 	if q.Get("n") != "54321" {
 		t.Errorf("n = %q, want 54321 (decoded)", q.Get("n"))
@@ -461,7 +461,7 @@ func TestPlayerResolve_NDecodeNonFatal(t *testing.T) {
 // TestPlayerResolve_DiscoveryEmbedFallback covers the embed-page fallback when
 // the watch page does not carry a base.js URL.
 func TestPlayerResolve_DiscoveryEmbedFallback(t *testing.T) {
-	base, err := os.ReadFile("testdata/base.js")
+	base, err := os.ReadFile("testdata/player_synth.js")
 	if err != nil {
 		t.Fatal(err)
 	}

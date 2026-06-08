@@ -135,8 +135,8 @@ func TestSourceCache_PoisonedEntryFallsBackToNetwork(t *testing.T) {
 		t.Fatalf("a poisoned cache entry should fall back to the network, got: %v", err)
 	}
 	q, _ := url.ParseQuery(mustQuery(got.URL))
-	if q.Get("sig") != "GFEDH" {
-		t.Errorf("sig = %q, want GFEDH (deciphered from the refetched player)", q.Get("sig"))
+	if q.Get("sig") != "HGFEDCBA" {
+		t.Errorf("sig = %q, want HGFEDCBA (deciphered from the refetched player)", q.Get("sig"))
 	}
 	if n := srv.hitCount(testBaseJSPath); n != 1 {
 		t.Errorf("base.js fetched %d times, want 1 (poisoned entry forced a refetch)", n)

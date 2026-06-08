@@ -19,8 +19,8 @@ import (
 
 // schemaVersion namespaces cached player programs and discovered player URLs.
 // Bump it when the extraction or program shape changes so stale entries from an
-// older build are treated as misses.
-const schemaVersion = 1
+// older build are treated as misses. v2: whole-player solver (solver.go).
+const schemaVersion = 2
 
 const (
 	// defaultCipherTimeout bounds a single goja transform execution.
@@ -30,6 +30,11 @@ const (
 	playerURLCacheKey = "current"
 	// maxPlayerBytes bounds how much of base.js / a discovery page we buffer.
 	maxPlayerBytes = 16 << 20
+	// defaultPlayerCacheEntries caps retained compiled players when CacheSize is
+	// unset. A compiled whole-player is large (tens of MB), and only a few are
+	// ever live (regular + embed across a rotation), so the general cache default
+	// (256) would be a multi-GB ceiling. Six is ample headroom at a modest cap.
+	defaultPlayerCacheEntries = 6
 )
 
 // baseJSPathRe matches the base.js path embedded in an embed/watch page.
@@ -97,8 +102,12 @@ func New(cfg Config) *Player {
 	if p.discoveryUA == "" {
 		p.discoveryUA = clientident.UserAgent(0)
 	}
+	programCacheEntries := cfg.CacheSize
+	if programCacheEntries <= 0 {
+		programCacheEntries = defaultPlayerCacheEntries
+	}
 	p.programs = cache.NewStore[*playerProgram](cache.Options{
-		MaxEntries:    cfg.CacheSize,
+		MaxEntries:    programCacheEntries,
 		SchemaVersion: schemaVersion,
 		TTL:           6 * time.Hour,
 	})
@@ -118,32 +127,42 @@ func (p *Player) Resolve(ctx context.Context, rc Context, cand Candidate) (Strea
 		return Stream{}, fmt.Errorf("%w: candidate has neither URL nor signatureCipher", waxerr.ErrExtractionFailed)
 	}
 
-	// Load base.js lazily. A ciphered URL cannot be used without it, but a direct
-	// URL only needs it to decode n; direct URLs should survive player discovery
-	// or base.js fetch failures and keep the original n value.
+	// Open one solving session lazily and share it between the signature and n
+	// transforms, so the (large) player executes once per resolution rather than
+	// once per transform. A ciphered URL cannot be resolved without it, but a
+	// direct URL only needs it to decode n and should survive player discovery or
+	// base.js fetch failures, keeping the original n value.
 	var (
-		prog       *playerProgram
-		progErr    error
-		progLoaded bool
+		sess       *solveSession
+		sessErr    error
+		sessLoaded bool
 	)
-	program := func() (*playerProgram, error) {
-		if !progLoaded {
-			progLoaded = true
+	session := func() (*solveSession, error) {
+		if !sessLoaded {
+			sessLoaded = true
 			var playerURL string
-			if playerURL, progErr = p.playerURL(ctx, rc); progErr == nil {
-				prog, progErr = p.program(ctx, playerURL)
+			if playerURL, sessErr = p.playerURL(ctx, rc); sessErr == nil {
+				var prog *playerProgram
+				if prog, sessErr = p.program(ctx, playerURL); sessErr == nil {
+					sess, sessErr = prog.openSession(ctx, p.timeout)
+				}
 			}
 		}
-		return prog, progErr
+		return sess, sessErr
 	}
+	defer func() {
+		if sess != nil {
+			sess.close()
+		}
+	}()
 
 	base, sigParam, sigValue := cand.URL, "", ""
 	if cand.SignatureCipher != "" {
-		pr, err := program()
+		s, err := session()
 		if err != nil {
 			return Stream{}, err // a ciphered URL is unusable without the player
 		}
-		if base, sigParam, sigValue, err = decipherCipher(ctx, pr, cand.SignatureCipher, p.timeout); err != nil {
+		if base, sigParam, sigValue, err = decipherCipher(s, cand.SignatureCipher); err != nil {
 			return Stream{}, err
 		}
 	}
@@ -160,12 +179,12 @@ func (p *Player) Resolve(ctx context.Context, rc Context, cand Candidate) (Strea
 	// Decode n when possible. If the player is unavailable or decode fails, keep
 	// the original throttled value; caller cancellation still aborts resolution.
 	if n := q.Get("n"); n != "" {
-		if pr, perr := program(); perr != nil {
+		if s, perr := session(); perr != nil {
 			if ctx.Err() != nil {
 				return Stream{}, ctx.Err()
 			}
 			p.log.WarnContext(ctx, "player unavailable; n not decoded, stream may be throttled", "err", perr)
-		} else if decoded, derr := pr.decodeN(ctx, n, p.timeout); derr != nil {
+		} else if decoded, derr := s.solve(kindN, n); derr != nil {
 			if ctx.Err() != nil {
 				return Stream{}, ctx.Err()
 			}
@@ -242,9 +261,9 @@ func (p *Player) inspectProgram(ctx context.Context, rc Context) (*playerProgram
 }
 
 // decipherCipher resolves a signatureCipher bundle into a base stream URL plus
-// the signature query-parameter name and deciphered value to attach. The player
-// program is required: it deciphers the signature.
-func decipherCipher(ctx context.Context, prog *playerProgram, cipher string, timeout time.Duration) (base, sigParam, sigValue string, err error) {
+// the signature query-parameter name and deciphered value to attach. The session
+// deciphers the signature against the already-loaded player.
+func decipherCipher(sess *solveSession, cipher string) (base, sigParam, sigValue string, err error) {
 	params, err := url.ParseQuery(cipher)
 	if err != nil {
 		return "", "", "", fmt.Errorf("%w: parse signatureCipher: %v", waxerr.ErrExtractionFailed, err)
@@ -257,7 +276,7 @@ func decipherCipher(ctx context.Context, prog *playerProgram, cipher string, tim
 	if s == "" {
 		return base, "", "", nil // already signed / no signature component
 	}
-	decoded, err := prog.decipherSignature(ctx, s, timeout)
+	decoded, err := sess.solve(kindSig, s)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -281,14 +300,18 @@ func (p *Player) playerURL(ctx context.Context, rc Context) (string, error) {
 
 // discoverPlayerURL finds the current base.js URL from the watch page, falling
 // back to the embed page. The watch page serves the regular player_es6 build
-// (matching yt-dlp), which the signature-timestamp and n-function locators are
-// tuned for. The embedded player_embed_es6 build (served from /embed) is minified
-// differently and is only a fallback for the rare video whose watch page omits
-// the player.
+// (matching yt-dlp), which the whole-player solver and signature-timestamp
+// patterns target. The embedded player_embed_es6 build (served from /embed) is
+// minified differently and is only a fallback for the rare video whose watch
+// page omits the player.
 func (p *Player) discoverPlayerURL(ctx context.Context, videoID string) (string, error) {
 	sources := []string{
-		"https://www.youtube.com/watch?v=" + url.QueryEscape(videoID), // regular player_es6 build (yt-dlp parity)
-		"https://www.youtube.com/embed/" + url.PathEscape(videoID),    // fallback (some videos disable embedding)
+		// Regular player_es6 build (yt-dlp parity). bpctr/has_verified clear the
+		// consent interstitial that otherwise returns a non-player page (parity
+		// with extractFromWatchPage), the most likely cause of a WEB-forced
+		// discovery missing base.js.
+		"https://www.youtube.com/watch?v=" + url.QueryEscape(videoID) + "&bpctr=9999999999&has_verified=1",
+		"https://www.youtube.com/embed/" + url.PathEscape(videoID), // fallback (some videos disable embedding)
 	}
 	var lastErr error
 	for _, src := range sources {
@@ -333,6 +356,13 @@ func (p *Player) program(ctx context.Context, playerURL string) (*playerProgram,
 			return nil, err
 		}
 		prog := compilePlayerProgram(playerURL, string(body))
+		if !prog.stsOK {
+			// Bug B observability: capture the body shape at the fetch site so a
+			// consent/HTML interstitial (discovery problem) is distinguishable
+			// from real base.js whose sts regex missed (extraction problem).
+			p.log.WarnContext(ctx, "signature timestamp not found in fetched player",
+				"player", playerURL, "bodyLen", len(body), "bodyPrefix", bodyPrefix(body, 120))
+		}
 		if p.source != nil && prog.extractedTransform() {
 			p.source.Put(playerURL, body)
 		}
@@ -395,6 +425,15 @@ func expiryFromURL(q url.Values, path string) time.Time {
 func parseInt64(s string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	return n
+}
+
+// bodyPrefix returns up to n bytes of body as a quoted, single-line string for
+// logging, so a fetched body's shape (markup vs base.js) is legible in one line.
+func bodyPrefix(body []byte, n int) string {
+	if len(body) > n {
+		body = body[:n]
+	}
+	return strconv.Quote(string(body))
 }
 
 func cloneHeader(h http.Header) http.Header {

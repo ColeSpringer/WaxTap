@@ -6,52 +6,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
-
 	"github.com/colespringer/waxtap/waxerr"
 )
 
-// compileSource compiles src in non-strict mode (so bare global assignments like
-// "f=function(){}" define a callable global), matching how cipher snippets run.
-func compileSource(t *testing.T, name, src string) (*goja.Program, error) {
-	t.Helper()
-	return goja.Compile(name, src, false)
-}
-
-func TestRunTransform_OK(t *testing.T) {
-	prog, err := compileSource(t, "t", `f=function(a){return a+"!"}`)
-	if err != nil {
-		t.Fatal(err)
+// TestSolve_CompileErrPropagates checks that a body the solver cannot prepare
+// surfaces its compile failure (not a generic empty result) on every solve.
+func TestSolve_CompileErrPropagates(t *testing.T) {
+	p := compilePlayerProgram("u", `var x = 1;`) // no player IIFE
+	if p.compileErr == nil {
+		t.Fatal("expected a compile error for a non-player body")
 	}
-	got, err := runTransform(context.Background(), prog, "f", "x", time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "x!" {
-		t.Errorf("got %q, want x!", got)
-	}
-}
-
-func TestRunTransform_NotCallable(t *testing.T) {
-	prog, err := compileSource(t, "t", `f=42`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = runTransform(context.Background(), prog, "f", "x", time.Second)
-	if !errors.Is(err, waxerr.ErrCipherSolve) {
+	if _, err := p.decodeN(context.Background(), "12345", time.Second); !errors.Is(err, waxerr.ErrCipherSolve) {
 		t.Fatalf("err = %v, want ErrCipherSolve", err)
 	}
 }
 
-// TestRunTransform_Timeout checks that a runaway transform is interrupted by the
-// configured timeout.
-func TestRunTransform_Timeout(t *testing.T) {
-	prog, err := compileSource(t, "loop", `f=function(a){for(;;){}return a}`)
-	if err != nil {
-		t.Fatal(err)
+// TestSolve_Timeout checks that a descrambler that spins is interrupted by the
+// configured timeout and reported as a cipher-solve failure.
+func TestSolve_Timeout(t *testing.T) {
+	p := compilePlayerProgram("u", wrapPlayer(descLoop))
+	if p.compileErr != nil {
+		t.Fatal(p.compileErr)
 	}
 	start := time.Now()
-	_, err = runTransform(context.Background(), prog, "f", "x", 50*time.Millisecond)
+	_, err := p.decodeN(context.Background(), "12345", 50*time.Millisecond)
 	if !errors.Is(err, waxerr.ErrCipherSolve) {
 		t.Fatalf("err = %v, want ErrCipherSolve (timeout)", err)
 	}
@@ -60,17 +38,17 @@ func TestRunTransform_Timeout(t *testing.T) {
 	}
 }
 
-// TestRunTransform_Cancel checks that caller cancellation interrupts execution
-// and is reported as the context error.
-func TestRunTransform_Cancel(t *testing.T) {
-	prog, err := compileSource(t, "loop", `f=function(a){for(;;){}return a}`)
-	if err != nil {
-		t.Fatal(err)
+// TestSolve_Cancel checks that caller cancellation interrupts the solve and is
+// reported as the context error, not a cipher failure.
+func TestSolve_Cancel(t *testing.T) {
+	p := compilePlayerProgram("u", wrapPlayer(descLoop))
+	if p.compileErr != nil {
+		t.Fatal(p.compileErr)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled: the AfterFunc fires immediately
+	cancel() // already cancelled: the AfterFunc fires and the spin is interrupted
 
-	_, err = runTransform(ctx, prog, "f", "x", 0)
+	_, err := p.decodeN(ctx, "12345", 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

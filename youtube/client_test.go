@@ -130,31 +130,30 @@ const stsBaseJS = `var cfg={signatureTimestamp:19834};` +
 	`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
 	`;s&&(s=dcr(decodeURIComponent(s)));`
 
-// isDiscoveryWatch reports whether r is a player-discovery fetch of the watch
-// page, which carries only ?v=. Watch-first discovery and the streamingData
-// scrape fallback share the /watch path; the scrape sets bpctr, so that query
-// parameter distinguishes the two.
-func isDiscoveryWatch(r *http.Request) bool {
-	return r.URL.Path == "/watch" && r.URL.Query().Get("bpctr") == ""
-}
-
-// isScrapeWatch reports whether r is the streamingData watch-page scrape fallback.
-func isScrapeWatch(r *http.Request) bool {
-	return r.URL.Path == "/watch" && r.URL.Query().Get("bpctr") != ""
-}
-
 // discoveryResp serves the watch/embed page and base.js used for signature
-// timestamp lookup. Discovery is watch-first, so the discovery watch fetch is
-// answered here; the scrape fallback (bpctr set) is left to the calling test. It
-// returns false for requests the caller should handle.
+// timestamp lookup, for tests where only player discovery (no streamingData
+// scrape) touches /watch. Watch-first discovery and the scrape fallback now both
+// carry bpctr (consent bypass), so they share the /watch URL; a test that needs
+// both serves a combined watch page instead (see watchPageWithBaseJS). It returns
+// false for requests the caller should handle.
 func discoveryResp(r *http.Request) (*http.Response, bool) {
 	switch {
-	case isDiscoveryWatch(r), strings.HasPrefix(r.URL.Path, "/embed/"):
+	case r.URL.Path == "/watch", strings.HasPrefix(r.URL.Path, "/embed/"):
 		return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), true
 	case strings.HasSuffix(r.URL.Path, "/base.js"):
 		return fixtureResp(http.StatusOK, []byte(stsBaseJS)), true
 	}
 	return nil, false
+}
+
+// watchPageWithBaseJS returns the watch-page HTML with a base.js <script> tag
+// appended. The real watch page carries both the player response (for the scrape
+// fallback) and the base.js URL (for signature-timestamp discovery); since
+// discovery gained bpctr, both consumers fetch the same /watch URL, so one body
+// serves both.
+func watchPageWithBaseJS(html []byte) []byte {
+	tag := []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)
+	return append(append(append([]byte{}, html...), '\n'), tag...)
 }
 
 func TestExtract_WEBSendsSignatureTimestamp(t *testing.T) {
@@ -301,15 +300,16 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	html := readFixture(t, "watch_page.html")
 	var watchCalls int
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if resp, ok := discoveryResp(r); ok {
-			return resp, nil // watch-first player discovery for the signature timestamp
-		}
 		switch {
+		case r.URL.Path == "/watch":
+			watchCalls++
+			// Discovery (base.js) and the scrape fallback (player response) both
+			// fetch /watch now, so one combined body serves both.
+			return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
 		case strings.HasSuffix(r.URL.Path, "/v1/player"):
 			return fixtureResp(http.StatusOK, login), nil // every client age-gated
-		case isScrapeWatch(r):
-			watchCalls++
-			return fixtureResp(http.StatusOK, html), nil
 		}
 		t.Errorf("unexpected request: %s", r.URL)
 		return fixtureResp(http.StatusNotFound, nil), nil
@@ -322,8 +322,10 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	if ext.Video().Title != "From Watch Page" {
 		t.Errorf("title = %q", ext.Video().Title)
 	}
-	if watchCalls != 1 {
-		t.Errorf("watchCalls = %d, want 1", watchCalls)
+	// The watch page is fetched twice: by signature-timestamp discovery and by the
+	// streamingData scrape fallback (the same URL now that discovery sends bpctr).
+	if watchCalls != 2 {
+		t.Errorf("watchCalls = %d, want 2 (discovery + scrape)", watchCalls)
 	}
 }
 

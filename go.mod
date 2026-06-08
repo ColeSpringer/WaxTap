@@ -2,7 +2,11 @@ module github.com/colespringer/waxtap
 
 go 1.26.3
 
-retract v1.0.0 // download throttling bug; use v1.0.1 or later
+retract (
+	v1.4.1 // WEB SABR audio path still non-functional; fixed in v1.4.2
+	v1.4.0 // WEB SABR audio path non-functional (n=undefined / sts=0); fixed in v1.4.2
+	v1.0.0 // download throttling bug; use v1.0.1 or later
+)
 
 require (
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c

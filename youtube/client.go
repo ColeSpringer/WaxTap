@@ -248,12 +248,18 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 // and extractions.
 func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, videoID string) int {
 	if !profile.NeedsSignatureTimestamp || c.inspector == nil {
-		return 0
+		return 0 // not needed for this profile (the zeros below are failures)
 	}
+	// A profile that needs the timestamp but gets zero produces an UNPLAYABLE
+	// /player response, so both a lookup error and a resolved-zero are warned (not
+	// silently swallowed) to separate "not needed" from "lookup failed".
 	sts, err := c.inspector.SignatureTimestamp(ctx, resolver.Context{VideoID: videoID})
 	if err != nil {
-		c.log.DebugContext(ctx, "signature timestamp lookup failed; omitting field", "client", profile.Name, "err", err)
+		c.log.WarnContext(ctx, "signature timestamp lookup failed; omitting field (expect UNPLAYABLE)", "client", profile.Name, "err", err)
 		return 0
+	}
+	if sts == 0 {
+		c.log.WarnContext(ctx, "signature timestamp resolved to zero; omitting field (expect UNPLAYABLE)", "client", profile.Name)
 	}
 	return sts
 }

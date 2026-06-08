@@ -81,10 +81,19 @@ func directURLExtraction() *Extraction {
 
 const stubBaseJSPath = "/s/player/test123/player_ias.vflset/en_US/base.js"
 
-// stubBaseJS is a minimal body that the resolver can extract a signature
-// transform from, so it counts as genuine player JS worth persisting. (A bare
-// comment would yield no transform and is intentionally not cached.)
-const stubBaseJS = `function abc(a){a=a.split("");a.reverse();return a.join("")};`
+// stubBaseJS is a minimal IIFE-wrapped player the whole-player solver can compile
+// and find a descrambler in, so it counts as genuine player JS worth persisting.
+// (A non-player body yields no descrambler and is intentionally not cached.)
+const stubBaseJS = `var P={};(function(g){` +
+	`var h={c:function(a,b){return a}};` +
+	`function U(raw,key,val){this.params={};if(key!==undefined&&val!==undefined)this.params[key]=val}` +
+	`U.prototype.set=function(k,v){this.params[k]=v};` +
+	`U.prototype.get=function(k){return this.params[k]};` +
+	`U.prototype.clone=function(){return this};` +
+	`U.prototype.t=function(){if(this.params.n!==undefined)this.params.n=String(this.params.n).split("").reverse().join("")};` +
+	`function desc(raw,key,val){h.c("alr","yes");return new U(raw,key,val)}` +
+	`g.desc=desc;` +
+	`})(P);`
 
 func newStubClient(t *testing.T, cacheDir string, st *stubTransport) *Client {
 	t.Helper()

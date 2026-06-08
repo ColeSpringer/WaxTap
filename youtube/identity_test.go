@@ -136,15 +136,16 @@ func TestExtract_WatchPageFallbackUsesChromeMajor(t *testing.T) {
 	c := New(Config{
 		ChromeMajor: major,
 		HTTP: fastTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if resp, ok := discoveryResp(r); ok {
-				return resp, nil // watch-first player discovery for the signature timestamp
-			}
 			switch {
+			case r.URL.Path == "/watch":
+				// Discovery and the scrape fallback share /watch; the scrape is the
+				// last /watch fetch, so its User-Agent is the one captured.
+				watchUA = r.Header.Get("User-Agent")
+				return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+			case strings.HasSuffix(r.URL.Path, "/base.js"):
+				return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
 			case strings.HasSuffix(r.URL.Path, "/v1/player"):
 				return fixtureResp(http.StatusOK, login), nil // every InnerTube client age-gated
-			case isScrapeWatch(r):
-				watchUA = r.Header.Get("User-Agent")
-				return fixtureResp(http.StatusOK, html), nil
 			}
 			t.Errorf("unexpected request: %s", r.URL)
 			return fixtureResp(http.StatusNotFound, nil), nil
