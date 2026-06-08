@@ -22,7 +22,7 @@ var errCipherTimeout = fmt.Errorf("%w: cipher JS execution timed out", waxerr.Er
 // compiled driver. A *goja.Program is safe to share across goroutines, but a
 // *goja.Runtime is not, so each solve builds a throwaway runtime.
 //
-// Only the compiled program and candidate metadata are retained — never the raw
+// Only the compiled program and candidate metadata are retained, never the raw
 // source or AST (a compiled player measures tens of MB on its own).
 type playerProgram struct {
 	playerURL    string
@@ -40,8 +40,8 @@ type playerProgram struct {
 // compilePlayerProgram parses base.js, hoists its IIFE body to global scope,
 // compiles the result, and fingerprints the descrambler candidates. Any failure
 // along the way is retained in compileErr (wrapping ErrCipherSolve) rather than
-// returned, so the signature timestamp — parsed up front and independent of the
-// descrambler — survives even when no candidate is found.
+// returned, so the signature timestamp, parsed up front and independent of the
+// descrambler, survives even when no candidate is found.
 func compilePlayerProgram(playerURL, js string) *playerProgram {
 	p := &playerProgram{playerURL: playerURL}
 

@@ -265,6 +265,115 @@ func TestUnmarshalSabrRedirect(t *testing.T) {
 	}
 }
 
+func TestUnmarshalSabrContextUpdate(t *testing.T) {
+	// type=1, scope=2, value=3, send_by_default=4, write_policy=5.
+	body := bytes.Join([][]byte{
+		pv(1, 7),
+		pv(2, 1), // PLAYBACK
+		pb(3, []byte("ctx-blob")),
+		pv(4, 1),
+		pv(5, 2), // KEEP_EXISTING
+	}, nil)
+
+	u, err := unmarshalSabrContextUpdate(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.HasType || u.Type != 7 {
+		t.Errorf("type = (%d, has=%v), want (7, true)", u.Type, u.HasType)
+	}
+	if u.Scope != 1 {
+		t.Errorf("scope = %d, want 1", u.Scope)
+	}
+	if string(u.Value) != "ctx-blob" {
+		t.Errorf("value = %q, want ctx-blob", u.Value)
+	}
+	if !u.SendByDefault {
+		t.Error("send_by_default = false, want true")
+	}
+	if u.WritePolicy != writePolicyKeepExisting {
+		t.Errorf("write_policy = %d, want %d (KEEP_EXISTING)", u.WritePolicy, writePolicyKeepExisting)
+	}
+}
+
+func TestUnmarshalSabrContextUpdateValueIsCopied(t *testing.T) {
+	// The value persists across rounds, so it must not alias the response buffer.
+	body := bytes.Join([][]byte{pv(1, 1), pb(3, []byte("orig"))}, nil)
+	u, err := unmarshalSabrContextUpdate(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range body { // scribble over the source bytes
+		body[i] = 0
+	}
+	if string(u.Value) != "orig" {
+		t.Errorf("value = %q after mutating the source, want orig (bytesCopy)", u.Value)
+	}
+}
+
+func TestUnmarshalSabrContextSendingPolicyBothForms(t *testing.T) {
+	// start_policy=1, stop_policy=2, discard_policy=3, all repeated int32.
+	unpacked := bytes.Join([][]byte{pv(1, 2), pv(1, 3), pv(2, 5), pv(3, 9)}, nil)
+
+	packedStart := protowire.AppendBytes(
+		protowire.AppendTag(nil, fSabrSendPolStart, protowire.BytesType),
+		bytes.Join([][]byte{protowire.AppendVarint(nil, 2), protowire.AppendVarint(nil, 3)}, nil),
+	)
+	packed := bytes.Join([][]byte{packedStart, pv(2, 5), pv(3, 9)}, nil)
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"unpacked", unpacked},
+		{"packed start", packed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := unmarshalSabrContextSendingPolicy(tc.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.StartPolicy) != 2 || p.StartPolicy[0] != 2 || p.StartPolicy[1] != 3 {
+				t.Errorf("start_policy = %v, want [2 3]", p.StartPolicy)
+			}
+			if len(p.StopPolicy) != 1 || p.StopPolicy[0] != 5 {
+				t.Errorf("stop_policy = %v, want [5]", p.StopPolicy)
+			}
+			if len(p.DiscardPolicy) != 1 || p.DiscardPolicy[0] != 9 {
+				t.Errorf("discard_policy = %v, want [9]", p.DiscardPolicy)
+			}
+		})
+	}
+}
+
+func TestStreamerContextMarshalsSabrContexts(t *testing.T) {
+	sc := streamerContext{
+		ClientInfo:         ClientInfo{ClientName: 1},
+		SabrContexts:       []SabrContext{{Type: 2, Value: []byte("V2")}},
+		UnsentSabrContexts: []int32{5, 7},
+	}
+	top := protoScan(t, sc.marshal())
+
+	// sabr_contexts=5 (repeated message), unsent_sabr_contexts=6 (repeated int32,
+	// emitted unpacked: one value per field occurrence).
+	if len(top[5]) != 1 {
+		t.Fatalf("sabr_contexts(5) = %d, want 1", len(top[5]))
+	}
+	ctx := protoScan(t, top[5][0].b)
+	if got := one(t, ctx, 1).v; got != 2 {
+		t.Errorf("SabrContext.type(1) = %d, want 2", got)
+	}
+	if got := one(t, ctx, 2).b; string(got) != "V2" {
+		t.Errorf("SabrContext.value(2) = %q, want V2", got)
+	}
+	if len(top[6]) != 2 {
+		t.Fatalf("unsent_sabr_contexts(6) = %d values, want 2 (unpacked)", len(top[6]))
+	}
+	if top[6][0].v != 5 || top[6][1].v != 7 {
+		t.Errorf("unsent_sabr_contexts = [%d %d], want [5 7]", top[6][0].v, top[6][1].v)
+	}
+}
+
 func TestUnmarshalSkipsUnknownFields(t *testing.T) {
 	// A MediaHeader with unknown varint (7777) and bytes (7778) fields must parse
 	// the known fields and ignore the rest.

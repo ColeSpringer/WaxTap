@@ -183,7 +183,7 @@ func TestFindDescramblers_Forms(t *testing.T) {
 }
 
 // TestFindDescramblers_Synth checks the committed fixture yields exactly the real
-// descrambler and the throwing decoy — not the nested or get("n") decoys.
+// descrambler and the throwing decoy, not the nested or get("n") decoys.
 func TestFindDescramblers_Synth(t *testing.T) {
 	iife, _, err := parsePlayer(readPlayerSynth(t))
 	if err != nil {

@@ -8,11 +8,11 @@
 //   decipherSignature("ABCDEFGH") === "HGFEDCBA"
 //
 // The decoys lock in discovery precision and consensus behavior:
-//   throwDesc   — matched by the alr/yes fingerprint but throws when driven, so
+//   throwDesc   - matched by the alr/yes fingerprint but throws when driven, so
 //                 the consensus solver must skip it rather than fail.
-//   nestedDecoy — its alr/yes call is nested in an if, not a direct body
+//   nestedDecoy - its alr/yes call is nested in an if, not a direct body
 //                 statement, so it must NOT be treated as a descrambler.
-//   getNDecoy   — contains the literal get("n") the old locators keyed on, but
+//   getNDecoy   - contains the literal get("n") the old locators keyed on, but
 //                 no alr/yes, so it is not a descrambler either.
 var SYNTH = {};
 (function (g) {

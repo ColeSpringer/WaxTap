@@ -291,19 +291,32 @@ func decipherCipher(sess *solveSession, cipher string) (base, sigParam, sigValue
 // discovered (and cached) current player URL.
 func (p *Player) playerURL(ctx context.Context, rc Context) (string, error) {
 	if rc.PlayerURL != "" {
-		return absolutePlayerURL(rc.PlayerURL), nil
+		return stripTCEVariant(absolutePlayerURL(rc.PlayerURL)), nil
 	}
 	return p.urls.GetOrLoad(ctx, playerURLCacheKey, func(ctx context.Context) (string, error) {
 		return p.discoverPlayerURL(ctx, rc.VideoID)
 	})
 }
 
+// stripTCEVariant rewrites a base.js URL that points at a "trusted client
+// experiment" (_tce) player build to the regular build of the same player. The
+// _tce build is interpreter-obfuscated: its signature/n transforms are encoded
+// as data rather than statically locatable functions, so the whole-player solver
+// cannot drive them. The regular build of the same player hash implements the
+// identical transforms (same signatureTimestamp, same output), and the solver
+// handles it, so this keeps WaxTap on the solvable variant now that YouTube
+// serves _tce from the watch page. A URL without the _tce marker is unchanged.
+func stripTCEVariant(playerURL string) string {
+	return strings.Replace(playerURL, "_tce.vflset", ".vflset", 1)
+}
+
 // discoverPlayerURL finds the current base.js URL from the watch page, falling
-// back to the embed page. The watch page serves the regular player_es6 build
-// (matching yt-dlp), which the whole-player solver and signature-timestamp
-// patterns target. The embedded player_embed_es6 build (served from /embed) is
-// minified differently and is only a fallback for the rare video whose watch
-// page omits the player.
+// back to the embed page. The watch page now serves the "trusted client
+// experiment" (_tce) build; stripTCEVariant rewrites it to the regular
+// player_es6 build of the same player, which the whole-player solver and
+// signature-timestamp patterns target. The embedded player_embed_es6 build
+// (served from /embed) is minified differently and is only a fallback for the
+// rare video whose watch page omits the player.
 func (p *Player) discoverPlayerURL(ctx context.Context, videoID string) (string, error) {
 	sources := []string{
 		// Regular player_es6 build (yt-dlp parity). bpctr/has_verified clear the
@@ -321,7 +334,7 @@ func (p *Player) discoverPlayerURL(ctx context.Context, videoID string) (string,
 			continue
 		}
 		if path := baseJSPathRe.Find(body); path != nil {
-			return "https://www.youtube.com" + string(path), nil
+			return stripTCEVariant("https://www.youtube.com" + string(path)), nil
 		}
 		lastErr = fmt.Errorf("%w: base.js URL not found at %s", waxerr.ErrExtractionFailed, src)
 	}

@@ -1,7 +1,7 @@
 // Browser-global stub for running YouTube's full base.js in goja.
 //
 // The whole player is executed (not carved up), so its load-time top-level code
-// — feature detection, telemetry setup, timers, observers — runs and references
+// (feature detection, telemetry setup, timers, observers) runs and references
 // browser globals goja does not provide. Each global below exists only to let
 // that code run far enough to define the descrambler; none of it is the cipher.
 //

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/colespringer/waxtap/waxerr"
@@ -28,6 +29,10 @@ const (
 	// maxEmptyRounds bounds consecutive rounds without new media before the
 	// stream is treated as stalled.
 	maxEmptyRounds = 2
+	// maxContextRounds bounds consecutive rounds whose only progress is a changed
+	// SABR context (no media), so a server that keeps mutating contexts without
+	// sending media still trips the stall guard. Media resets the count.
+	maxContextRounds = 8
 	// maxRedirects bounds SABR_REDIRECT hops in one Open.
 	maxRedirects = 5
 	// maxRoundBytes caps a single SABR response body. Audio rounds are normally
@@ -37,6 +42,12 @@ const (
 	// statusAttestationPending is the lowest StreamProtectionStatus.status that
 	// indicates the PO token has not been accepted (2=PENDING, 3=REQUIRED).
 	statusAttestationPending = 2
+
+	// maxSabrContexts caps the number of distinct context types stored so a
+	// misbehaving server cannot grow the maps without limit. activeContextTypes
+	// stays a subset of the stored types (see applyContextPolicy), so one cap
+	// bounds both. YouTube sends 1-3.
+	maxSabrContexts = 64
 )
 
 // ErrReloadPlayer signals a RELOAD_PLAYER_RESPONSE part. Callers should fetch a
@@ -117,14 +128,16 @@ func Open(ctx context.Context, cfg Config, progress ProgressFunc) (io.ReadCloser
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &stream{
-		cfg:        cfg,
-		log:        log,
-		progress:   progress,
-		ctx:        sctx,
-		cancel:     cancel,
-		serverURL:  cfg.ServerAbrURL,
-		segments:   make(map[uint64]mediaSegment),
-		contentLen: cfg.ContentLength,
+		cfg:                cfg,
+		log:                log,
+		progress:           progress,
+		ctx:                sctx,
+		cancel:             cancel,
+		serverURL:          cfg.ServerAbrURL,
+		segments:           make(map[uint64]mediaSegment),
+		contentLen:         cfg.ContentLength,
+		sabrContexts:       make(map[int32][]byte),
+		activeContextTypes: make(map[int32]bool),
 	}
 	if err := s.prime(); err != nil {
 		cancel()
@@ -147,6 +160,14 @@ type stream struct {
 	playbackCookie []byte
 	redirects      int
 	emptyRounds    int
+	contextRounds  int
+
+	// SABR context state. sabrContexts holds the value last received for each
+	// context type; activeContextTypes is the subset currently echoed back to the
+	// server. The server seeds and updates both via parts 57/59; see
+	// applyContextUpdates.
+	sabrContexts       map[int32][]byte
+	activeContextTypes map[int32]bool
 
 	// Reassembly state. The init segment is emitted first, followed by contiguous
 	// media segments. segments buffers media received ahead of a gap.
@@ -236,6 +257,9 @@ func (s *stream) round() error {
 	if res.policy != nil && len(res.policy.PlaybackCookie) > 0 {
 		s.playbackCookie = res.policy.PlaybackCookie
 	}
+	// Apply SABR context updates before the redirect/progress checks so an update
+	// is never dropped. changed reports whether the next request will differ.
+	changed := s.applyContextUpdates(res.contextUpdates, res.contextPolicy)
 	if res.redirect != "" {
 		s.redirects++
 		if s.redirects > maxRedirects {
@@ -252,11 +276,22 @@ func (s *stream) round() error {
 		return nil
 	}
 	// Backoff means the server is pacing the stream, not that it has stalled.
-	// Buffering a segment ahead of a gap also counts as progress.
+	// Buffering a segment ahead of a gap also counts as media progress.
 	waiting := res.policy != nil && res.policy.BackoffTimeMs > 0
 	switch {
 	case emitted > 0 || advanced:
+		// Media progress clears both stall guards.
 		s.emptyRounds = 0
+		s.contextRounds = 0
+	case changed:
+		// A changed context makes the next request differ (it now echoes the
+		// context), so the round isn't empty and we re-POST, but cap these so
+		// context churn without media still stalls instead of looping forever.
+		s.emptyRounds = 0
+		s.contextRounds++
+		if s.contextRounds >= maxContextRounds {
+			return s.stallResult()
+		}
 	case waiting:
 		// Honor the backoff without counting an empty round.
 	default:
@@ -283,6 +318,12 @@ type roundResult struct {
 	signal      error
 	endSegment  uint64
 	contentType string
+
+	// SABR context signals, applied once per round in round(). contextUpdates
+	// are part-57 blobs to store/echo; contextPolicy is the part-59 start/stop/
+	// discard directive.
+	contextUpdates []SabrContextUpdate
+	contextPolicy  *SabrContextSendingPolicy
 }
 
 // consume parses one UMP response body into a roundResult. A terminal signal
@@ -367,9 +408,18 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 		case partReloadPlayerResp:
 			res.signal = ErrReloadPlayer
 			return res, nil
-		case partSabrContextUpdate, partSabrContextSendPol:
-			// Context updates are not needed for the short audio streams
-			// currently supported.
+		case partSabrContextUpdate:
+			u, err := unmarshalSabrContextUpdate(part.Payload)
+			if err != nil {
+				return res, wrapExtraction(err)
+			}
+			res.contextUpdates = append(res.contextUpdates, u)
+		case partSabrContextSendPol:
+			p, err := unmarshalSabrContextSendingPolicy(part.Payload)
+			if err != nil {
+				return res, wrapExtraction(err)
+			}
+			res.contextPolicy = &p
 		default:
 			// Unknown part; the UMP reader already skipped its payload by size.
 		}
@@ -483,6 +533,119 @@ func (s *stream) stallResult() error {
 	return nil
 }
 
+// applyContextUpdates folds part-57 updates and a part-59 policy into the stored
+// and active context maps. It returns whether the outgoing request state changed:
+// a changed state means the next request carries a new/updated context, so the
+// caller treats it as progress and re-POSTs. An identical re-send returns false,
+// so the empty-round guard still bounds a stuck stream.
+func (s *stream) applyContextUpdates(updates []SabrContextUpdate, policy *SabrContextSendingPolicy) bool {
+	changed := false
+	for _, u := range updates {
+		if !u.HasType || len(u.Value) == 0 {
+			s.log.DebugContext(s.ctx, "sabr: ignoring context update without type/value",
+				"has_type", u.HasType, "value_len", len(u.Value))
+			continue
+		}
+		existing, stored := s.sabrContexts[u.Type]
+		if !stored && len(s.sabrContexts) >= maxSabrContexts {
+			s.log.WarnContext(s.ctx, "sabr: context type cap reached; dropping update",
+				"type", u.Type, "cap", maxSabrContexts)
+			continue
+		}
+		// KEEP_EXISTING governs only the value write; the send_by_default
+		// activation below still applies, so a server can start sending a context
+		// it asked us not to overwrite.
+		keepValue := u.WritePolicy == writePolicyKeepExisting && stored
+		if keepValue {
+			s.log.DebugContext(s.ctx, "sabr: keeping existing context value", "type", u.Type, "scope", u.Scope)
+		} else {
+			s.log.DebugContext(s.ctx, "sabr: context received",
+				"type", u.Type, "scope", u.Scope, "value_len", len(u.Value), "write_policy", u.WritePolicy)
+			if !stored || !bytes.Equal(existing, u.Value) {
+				s.sabrContexts[u.Type] = u.Value
+				changed = true
+			}
+		}
+		if u.SendByDefault && !s.activeContextTypes[u.Type] {
+			s.activeContextTypes[u.Type] = true
+			changed = true
+		}
+	}
+	if policy != nil {
+		changed = s.applyContextPolicy(policy) || changed
+	}
+	return changed
+}
+
+// applyContextPolicy applies a SABR_CONTEXT_SENDING_POLICY: start activates a
+// type so it is echoed, stop deactivates it, and discard drops the stored value
+// entirely. It returns whether any state changed.
+func (s *stream) applyContextPolicy(policy *SabrContextSendingPolicy) bool {
+	changed := false
+	for _, t := range policy.StartPolicy {
+		if _, held := s.sabrContexts[t]; !held {
+			// Nothing to echo for a type we hold no value for. Skipping it also
+			// keeps activeContextTypes a subset of the (capped) stored types, so a
+			// server can't grow it without bound.
+			s.log.DebugContext(s.ctx, "sabr: ignoring start for an unknown context type", "type", t)
+			continue
+		}
+		if !s.activeContextTypes[t] {
+			s.activeContextTypes[t] = true
+			changed = true
+			s.log.DebugContext(s.ctx, "sabr: context activated", "type", t)
+		}
+	}
+	for _, t := range policy.StopPolicy {
+		if s.activeContextTypes[t] {
+			delete(s.activeContextTypes, t)
+			changed = true
+			s.log.DebugContext(s.ctx, "sabr: context deactivated", "type", t)
+		}
+	}
+	for _, t := range policy.DiscardPolicy {
+		discarded := false
+		if _, ok := s.sabrContexts[t]; ok {
+			delete(s.sabrContexts, t)
+			discarded = true
+		}
+		if s.activeContextTypes[t] {
+			delete(s.activeContextTypes, t)
+			discarded = true
+		}
+		if discarded {
+			changed = true
+			s.log.DebugContext(s.ctx, "sabr: context discarded", "type", t)
+		}
+	}
+	return changed
+}
+
+// populateContexts fills streamerContext fields 5/6 from the stored context maps:
+// active types are echoed with their value in sabr_contexts; stored-but-inactive
+// types are listed in unsent_sabr_contexts. Types are sorted for deterministic
+// output. Active types are always a subset of the stored types (see
+// applyContextPolicy), so every active type has a value to echo.
+func (s *stream) populateContexts(sc *streamerContext) {
+	if len(s.sabrContexts) == 0 {
+		return
+	}
+	types := make([]int32, 0, len(s.sabrContexts))
+	for t := range s.sabrContexts {
+		types = append(types, t)
+	}
+	slices.Sort(types)
+	for _, t := range types {
+		if s.activeContextTypes[t] {
+			sc.SabrContexts = append(sc.SabrContexts, SabrContext{Type: t, Value: s.sabrContexts[t]})
+		} else {
+			sc.UnsentSabrContexts = append(sc.UnsentSabrContexts, t)
+		}
+	}
+	s.log.DebugContext(s.ctx, "sabr: outgoing context set",
+		"active", len(sc.SabrContexts), "unsent", len(sc.UnsentSabrContexts))
+}
+
 // post builds and sends one VideoPlaybackAbrRequest, returning the response body.
 func (s *stream) post() ([]byte, error) {
 	body := s.buildRequest().marshal()
@@ -534,6 +697,7 @@ func (s *stream) buildRequest() videoPlaybackAbrRequest {
 			PlaybackCookie: s.playbackCookie,
 		},
 	}
+	s.populateContexts(&req.StreamerContext)
 	// Report only the contiguous run already emitted ([firstSeq, nextSeq-1]).
 	// Reporting the highest received segment would hide any gap and prevent
 	// retransmission.

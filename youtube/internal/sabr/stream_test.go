@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
+
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -357,6 +359,229 @@ func TestOpenBackoffRoundsDoNotStall(t *testing.T) {
 	if d.calls != 4 {
 		t.Errorf("calls = %d, want 4 (initial + 2 backoff + final)", d.calls)
 	}
+}
+
+func TestOpenEchoesSabrContextUpdate(t *testing.T) {
+	// Mirrors the captured production sequence: part 57 (context update) + an
+	// ignored part 67 + part 35 (next-request policy), with no media. The next
+	// request must echo the context; then media completes the stream.
+	update := SabrContextUpdate{Type: 2, Scope: 1, Value: []byte("CTXBLOB"), SendByDefault: true}
+	resp1 := concat(
+		umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(update)),
+		umpFrame(67, []byte{0x08, 0x01}), // SNACKBAR_MESSAGE-ish; unknown, ignored
+		umpFrame(partNextRequestPolicy, marshalNextRequestPolicy(NextRequestPolicy{PlaybackCookie: []byte("c1")})),
+	)
+	resp2 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(1))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "INITAAA" {
+		t.Errorf("stream = %q, want INITAAA", got)
+	}
+	if d.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (context round then media round)", d.calls)
+	}
+
+	// Round 1 carried no context yet; round 2 echoes it in sabr_contexts (field 5).
+	sc1 := protoScan(t, one(t, protoScan(t, d.bodies[0]), 19).b)
+	if len(sc1[5]) != 0 {
+		t.Errorf("round 1 sabr_contexts = %d, want 0 (nothing to echo yet)", len(sc1[5]))
+	}
+	sc2 := protoScan(t, one(t, protoScan(t, d.bodies[1]), 19).b)
+	assertActiveContext(t, sc2, 2, "CTXBLOB")
+}
+
+func TestOpenDuplicateContextStalls(t *testing.T) {
+	// The server keeps re-sending the identical context and never any media. The
+	// first echo counts as progress, but identical re-sends must not, so the
+	// empty-round guard still terminates the stream instead of looping forever
+	// (the bug this fix targets: 9+ identical POSTs until timeout).
+	update := SabrContextUpdate{Type: 2, Value: []byte("CTXBLOB"), SendByDefault: true}
+	ctxResp := umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(update))
+	d := &scriptedDoer{t: t, responses: [][]byte{ctxResp, ctxResp, ctxResp}}
+
+	_, _, err := Open(context.Background(), baseConfig(d), nil)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (stalled, not an infinite loop)", err)
+	}
+}
+
+func TestOpenKeepExistingContextNotOverwritten(t *testing.T) {
+	first := SabrContextUpdate{Type: 2, Value: []byte("V1"), SendByDefault: true}
+	// Same type, new value, but KEEP_EXISTING: the stored value must stay V1.
+	keep := SabrContextUpdate{Type: 2, Value: []byte("V2"), WritePolicy: writePolicyKeepExisting, SendByDefault: true}
+	resp1 := umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(first))
+	resp2 := umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(keep))
+	resp3 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(1))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2, resp3}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatal(err)
+	}
+	// Both later requests must echo V1, never the KEEP_EXISTING V2.
+	for _, i := range []int{1, 2} {
+		sc := protoScan(t, one(t, protoScan(t, d.bodies[i]), 19).b)
+		assertActiveContext(t, sc, 2, "V1")
+	}
+}
+
+func TestOpenContextLifecycle(t *testing.T) {
+	// Round 1 stores two contexts: type 2 active (send_by_default), type 3 stored
+	// but inactive. A policy then starts 3 and stops 2; a later policy discards 2.
+	active := SabrContextUpdate{Type: 2, Value: []byte("V2"), SendByDefault: true}
+	stored := SabrContextUpdate{Type: 3, Value: []byte("V3")} // not send_by_default
+	resp1 := concat(
+		umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(active)),
+		umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(stored)),
+	)
+	resp2 := umpFrame(partSabrContextSendPol, marshalSabrContextSendingPolicy(
+		SabrContextSendingPolicy{StartPolicy: []int32{3}, StopPolicy: []int32{2}}))
+	resp3 := umpFrame(partSabrContextSendPol, marshalSabrContextSendingPolicy(
+		SabrContextSendingPolicy{DiscardPolicy: []int32{2}}))
+	resp4 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(1))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2, resp3, resp4}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round 2 request (after round 1): type 2 active, type 3 known-but-unsent.
+	sc2 := protoScan(t, one(t, protoScan(t, d.bodies[1]), 19).b)
+	assertActiveContext(t, sc2, 2, "V2")
+	assertUnsent(t, sc2, []uint64{3})
+
+	// Round 3 request (after start 3 / stop 2): type 3 active, type 2 now unsent.
+	sc3 := protoScan(t, one(t, protoScan(t, d.bodies[2]), 19).b)
+	assertActiveContext(t, sc3, 3, "V3")
+	assertUnsent(t, sc3, []uint64{2})
+
+	// Round 4 request (after discard 2): type 2 gone entirely, type 3 still active.
+	sc4 := protoScan(t, one(t, protoScan(t, d.bodies[3]), 19).b)
+	assertActiveContext(t, sc4, 3, "V3")
+	assertUnsent(t, sc4, nil)
+}
+
+// assertActiveContext checks that streamerContext sc carries exactly one active
+// SABR context (field 5) with the given type and value.
+func assertActiveContext(t *testing.T, sc map[protowire.Number][]pfield, typ uint64, value string) {
+	t.Helper()
+	if len(sc[5]) != 1 {
+		t.Fatalf("sabr_contexts(5) = %d, want 1", len(sc[5]))
+	}
+	ctx := protoScan(t, sc[5][0].b)
+	if got := one(t, ctx, 1).v; got != typ {
+		t.Errorf("active context type = %d, want %d", got, typ)
+	}
+	if got := one(t, ctx, 2).b; string(got) != value {
+		t.Errorf("active context value = %q, want %q", got, value)
+	}
+}
+
+// assertUnsent checks the unsent_sabr_contexts (field 6) types, in order. A nil
+// want asserts the field is absent.
+func assertUnsent(t *testing.T, sc map[protowire.Number][]pfield, want []uint64) {
+	t.Helper()
+	if len(sc[6]) != len(want) {
+		t.Fatalf("unsent_sabr_contexts(6) = %d values, want %d", len(sc[6]), len(want))
+	}
+	for i, w := range want {
+		if got := sc[6][i].v; got != w {
+			t.Errorf("unsent[%d] = %d, want %d", i, got, w)
+		}
+	}
+}
+
+func TestOpenContextChurnStalls(t *testing.T) {
+	// The value-churn cousin of TestOpenDuplicateContextStalls: a misbehaving
+	// server sends a new context value every round, with no media. Each change
+	// looks like progress, so the empty-round guard never fires, but
+	// maxContextRounds bounds context-only churn, so the stream still stalls
+	// instead of looping forever.
+	responses := make([][]byte, maxContextRounds)
+	for i := range responses {
+		u := SabrContextUpdate{Type: 2, Value: []byte{byte('A' + i)}, SendByDefault: true}
+		responses[i] = umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(u))
+	}
+	d := &scriptedDoer{t: t, responses: responses}
+
+	_, _, err := Open(context.Background(), baseConfig(d), nil)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (context churn must not loop forever)", err)
+	}
+	if d.calls != maxContextRounds {
+		t.Fatalf("calls = %d, want %d (one POST per context round, then stall)", d.calls, maxContextRounds)
+	}
+}
+
+func TestOpenStartPolicyForUnknownContextIsNotProgress(t *testing.T) {
+	// A SABR_CONTEXT_SENDING_POLICY that starts types the server never delivered
+	// has nothing to echo, so it must be ignored: not treated as progress, and
+	// not added to the active set (which a server could otherwise grow without
+	// bound). With nothing delivered and no media, these are empty rounds, so the
+	// stream stalls via the empty-round guard, not the looser context-round cap.
+	p := func(typ int32) []byte {
+		return umpFrame(partSabrContextSendPol, marshalSabrContextSendingPolicy(
+			SabrContextSendingPolicy{StartPolicy: []int32{typ}}))
+	}
+	d := &scriptedDoer{t: t, responses: [][]byte{p(901), p(902), p(903)}}
+
+	_, _, err := Open(context.Background(), baseConfig(d), nil)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed", err)
+	}
+	if d.calls != maxEmptyRounds {
+		t.Fatalf("calls = %d, want %d (unknown starts are empty rounds, not context progress)", d.calls, maxEmptyRounds)
+	}
+}
+
+func TestOpenKeepExistingActivatesStoredContext(t *testing.T) {
+	// A context first arrives stored-but-inactive (no send_by_default). A later
+	// KEEP_EXISTING update keeps the value but adds send_by_default: the value must
+	// stay V, and the type must now be echoed. Activation is independent of the
+	// value write policy.
+	stored := SabrContextUpdate{Type: 4, Value: []byte("V")} // inactive
+	activate := SabrContextUpdate{Type: 4, Value: []byte("IGNORED"), WritePolicy: writePolicyKeepExisting, SendByDefault: true}
+	resp1 := umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(stored))
+	resp2 := umpFrame(partSabrContextUpdate, marshalSabrContextUpdate(activate))
+	resp3 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(1))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2, resp3}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round 2 request (after the stored-inactive round 1): type 4 known but unsent.
+	sc2 := protoScan(t, one(t, protoScan(t, d.bodies[1]), 19).b)
+	assertUnsent(t, sc2, []uint64{4})
+	if len(sc2[5]) != 0 {
+		t.Errorf("round 2 sabr_contexts = %d, want 0 (type 4 not yet active)", len(sc2[5]))
+	}
+	// Round 3 request (after KEEP_EXISTING + send_by_default): now echoed, value kept.
+	sc3 := protoScan(t, one(t, protoScan(t, d.bodies[2]), 19).b)
+	assertActiveContext(t, sc3, 4, "V")
 }
 
 func TestOpenHTTPErrorStatus(t *testing.T) {

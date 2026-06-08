@@ -155,6 +155,42 @@ func marshalStreamProtectionStatus(s StreamProtectionStatus) []byte {
 	return b
 }
 
+func marshalSabrContextUpdate(u SabrContextUpdate) []byte {
+	var b []byte
+	if u.HasType || u.Type != 0 {
+		b = appendVarint(b, fSabrCtxUpdateType, uint64(u.Type))
+	}
+	if u.Scope != 0 {
+		b = appendVarint(b, fSabrCtxUpdateScope, uint64(u.Scope))
+	}
+	if len(u.Value) > 0 {
+		b = appendBytes(b, fSabrCtxUpdateValue, u.Value)
+	}
+	if u.SendByDefault {
+		b = appendVarint(b, fSabrCtxUpdateSendByDefault, 1)
+	}
+	if u.WritePolicy != 0 {
+		b = appendVarint(b, fSabrCtxUpdateWritePolicy, uint64(u.WritePolicy))
+	}
+	return b
+}
+
+// marshalSabrContextSendingPolicy encodes the policy in the unpacked form (one
+// varint per value). The decoder accepts both forms; proto_test covers packed.
+func marshalSabrContextSendingPolicy(p SabrContextSendingPolicy) []byte {
+	var b []byte
+	for _, v := range p.StartPolicy {
+		b = appendVarint(b, fSabrSendPolStart, uint64(v))
+	}
+	for _, v := range p.StopPolicy {
+		b = appendVarint(b, fSabrSendPolStop, uint64(v))
+	}
+	for _, v := range p.DiscardPolicy {
+		b = appendVarint(b, fSabrSendPolDiscard, uint64(v))
+	}
+	return b
+}
+
 // doerFunc adapts a function to the HTTPDoer interface.
 type doerFunc func(*http.Request) (*http.Response, error)
 

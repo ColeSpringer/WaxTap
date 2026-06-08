@@ -58,6 +58,7 @@ type appConfig struct {
 	sbBaseURL       string
 	profileOverride string
 	chromeMajor     int
+	potokenURL      string
 
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
@@ -83,6 +84,7 @@ type fileConfig struct {
 	SponsorBlockBaseURL *string  `json:"sponsorBlockBaseURL"`
 	ProfileOverridePath *string  `json:"profileOverridePath"`
 	ChromeMajor         *int     `json:"chromeMajor"`
+	POTokenURL          *string  `json:"poTokenURL"`
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
@@ -134,6 +136,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		sbBaseURL:       str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
 		profileOverride: str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
 		chromeMajor:     coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
+		potokenURL:      str("potoken-url", rootFlagsValue.potokenURL, fc.POTokenURL, ec.POTokenURL, ""),
 
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
@@ -237,6 +240,7 @@ func envOverlay() (fileConfig, error) {
 	ec.SponsorBlockBaseURL = getStr("WAXTAP_SPONSORBLOCK_BASE_URL")
 	ec.ProfileOverridePath = getStr("WAXTAP_PROFILE_OVERRIDE")
 	ec.ChromeMajor = getInt("WAXTAP_CHROME_MAJOR")
+	ec.POTokenURL = getStr("WAXTAP_POTOKEN_URL")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
@@ -267,6 +271,13 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	if err != nil {
 		return waxtap.Options{}, err
 	}
+	// A configured PO-token URL enables WEB/GVS tokens. The provider uses its own
+	// dedicated client (see bgutilProvider), not hc, so token traffic is never
+	// proxied through --proxy/--insecure.
+	var poProvider waxtap.POTokenProvider
+	if a.potokenURL != "" {
+		poProvider = newBgutilProvider(a.potokenURL)
+	}
 	return waxtap.Options{
 		HTTPClient:          hc,
 		Logger:              log,
@@ -276,6 +287,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		TempDir:             a.tempDir,
 		ProfileOverridePath: a.profileOverride,
 		ChromeMajor:         a.chromeMajor,
+		POTokenProvider:     poProvider,
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,

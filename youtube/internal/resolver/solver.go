@@ -21,10 +21,10 @@ import (
 //
 // The pipeline mirrors yt-dlp's current solver:
 //
-//  1. parsePlayer  — parse base.js once and locate the player IIFE.
-//  2. unwrapPlayer — hoist the IIFE body to global scope so its inner
+//  1. parsePlayer  - parse base.js once and locate the player IIFE.
+//  2. unwrapPlayer - hoist the IIFE body to global scope so its inner
 //     definitions (the descrambler among them) are reachable.
-//  3. findDescramblers — fingerprint the descrambler(s) by AST shape: a
+//  3. findDescramblers - fingerprint the descrambler(s) by AST shape: a
 //     top-level function whose direct body has an obj.method("alr","yes") call.
 //  4. a per-candidate driver constructs the player's URL object, sets n / the
 //     signature, invokes the lone transform method, and reads the result back.
@@ -93,8 +93,8 @@ func parsePlayer(js string) (*ast.FunctionLiteral, string, error) {
 // locateIIFE finds the player's wrapping IIFE among the program's top-level
 // statements, handling the two shapes YouTube emits:
 //
-//	var X={}; (function(g){…})(X);   — callee is the function literal
-//	(function(){…}).call(this);      — callee is (function).call
+//	var X={}; (function(g){…})(X);   - callee is the function literal
+//	(function(){…}).call(this);      - callee is (function).call
 func locateIIFE(prog *ast.Program) *ast.FunctionLiteral {
 	for _, st := range prog.Body {
 		es, ok := st.(*ast.ExpressionStatement)

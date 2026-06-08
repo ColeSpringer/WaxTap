@@ -7,7 +7,7 @@ name: doctor
 #
 # Tolerance: GitHub-hosted runner IPs are frequently throttled or bot-walled by
 # YouTube, so environmental failures (availability, rate limiting) only warn and
-# keep the job green. Only an extraction/cipher failure (doctor exit code 4 — the
+# keep the job green. Only an extraction/cipher failure (doctor exit code 4, the
 # class that means *our* code needs updating) fails the job so it surfaces loudly.
 
 on:
@@ -50,7 +50,7 @@ jobs:
               echo "healthy"
               ;;
             4)
-              echo "::error::doctor reports an extraction/cipher failure (exit 4) — YouTube likely changed something WaxTap must fix (see MAINTENANCE.md)"
+              echo "::error::doctor reports an extraction/cipher failure (exit 4): YouTube likely changed something WaxTap must fix (see MAINTENANCE.md)"
               exit 1
               ;;
             *)

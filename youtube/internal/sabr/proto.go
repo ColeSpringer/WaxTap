@@ -51,9 +51,15 @@ const (
 	fClientInfoAcceptLanguage protowire.Number = 21
 
 	// StreamerContext
-	fStreamerCtxClientInfo     protowire.Number = 1
-	fStreamerCtxPOToken        protowire.Number = 2
-	fStreamerCtxPlaybackCookie protowire.Number = 3
+	fStreamerCtxClientInfo         protowire.Number = 1
+	fStreamerCtxPOToken            protowire.Number = 2
+	fStreamerCtxPlaybackCookie     protowire.Number = 3
+	fStreamerCtxSabrContexts       protowire.Number = 5
+	fStreamerCtxUnsentSabrContexts protowire.Number = 6
+
+	// StreamerContext.SabrContext (nested in sabr_contexts)
+	fSabrContextType  protowire.Number = 1
+	fSabrContextValue protowire.Number = 2
 
 	// VideoPlaybackAbrRequest
 	fAbrClientState     protowire.Number = 1
@@ -99,7 +105,24 @@ const (
 	// StreamProtectionStatus (UMP part 58)
 	fProtStatusStatus     protowire.Number = 1
 	fProtStatusMaxRetries protowire.Number = 2
+
+	// SabrContextUpdate (UMP part 57)
+	fSabrCtxUpdateType          protowire.Number = 1
+	fSabrCtxUpdateScope         protowire.Number = 2
+	fSabrCtxUpdateValue         protowire.Number = 3
+	fSabrCtxUpdateSendByDefault protowire.Number = 4
+	fSabrCtxUpdateWritePolicy   protowire.Number = 5
+
+	// SabrContextSendingPolicy (UMP part 59)
+	fSabrSendPolStart   protowire.Number = 1
+	fSabrSendPolStop    protowire.Number = 2
+	fSabrSendPolDiscard protowire.Number = 3
 )
+
+// SabrContextUpdate.write_policy values. A KEEP_EXISTING update must not
+// overwrite a value already stored for its type. (0=UNSPECIFIED and 1=OVERWRITE
+// both store the new value, so only KEEP_EXISTING needs a named constant.)
+const writePolicyKeepExisting int32 = 2
 
 // FormatId identifies a specific encoding; re-encodes can share an itag. It
 // maps to misc.FormatId.
@@ -240,12 +263,18 @@ func (c ClientInfo) marshal() []byte {
 	return b
 }
 
-// streamerContext carries the client identity, GVS PO token, and playback
-// cookie returned by the previous response.
+// streamerContext carries the client identity, GVS PO token, the playback
+// cookie returned by the previous response, and any SABR contexts the server
+// asked the client to echo back (see SabrContextUpdate).
 type streamerContext struct {
 	ClientInfo     ClientInfo
 	POToken        []byte
 	PlaybackCookie []byte
+	// SabrContexts are the active contexts echoed to the server (field 5).
+	SabrContexts []SabrContext
+	// UnsentSabrContexts are the types the client holds but is not currently
+	// sending (field 6).
+	UnsentSabrContexts []int32
 }
 
 func (s streamerContext) marshal() []byte {
@@ -256,6 +285,32 @@ func (s streamerContext) marshal() []byte {
 	}
 	if len(s.PlaybackCookie) > 0 {
 		b = appendBytes(b, fStreamerCtxPlaybackCookie, s.PlaybackCookie)
+	}
+	// Fields 5 and 6 follow playback_cookie in field-number order. Per the proto2
+	// reference client, unsent_sabr_contexts is emitted unpacked (one varint per
+	// value); the server accepts both packed and unpacked forms.
+	for _, c := range s.SabrContexts {
+		b = appendBytes(b, fStreamerCtxSabrContexts, c.marshal())
+	}
+	for _, t := range s.UnsentSabrContexts {
+		b = appendVarint(b, fStreamerCtxUnsentSabrContexts, uint64(t))
+	}
+	return b
+}
+
+// SabrContext is one (type, value) pair echoed back to the server in
+// streamerContext.sabr_contexts. The value is the blob a SabrContextUpdate
+// delivered for that type.
+type SabrContext struct {
+	Type  int32
+	Value []byte
+}
+
+func (c SabrContext) marshal() []byte {
+	var b []byte
+	b = appendVarint(b, fSabrContextType, uint64(c.Type))
+	if len(c.Value) > 0 {
+		b = appendBytes(b, fSabrContextValue, c.Value)
 	}
 	return b
 }
@@ -505,6 +560,81 @@ func unmarshalStreamProtectionStatus(b []byte) (StreamProtectionStatus, error) {
 	return s, r.err
 }
 
+// SabrContextUpdate (UMP part 57) is a context blob the server tells the client
+// to echo back in subsequent requests' streamerContext. A later update with the
+// same Type replaces the earlier value unless WritePolicy is KEEP_EXISTING.
+// HasType distinguishes an absent type from a literal 0.
+type SabrContextUpdate struct {
+	Type          int32
+	HasType       bool
+	Scope         int32
+	Value         []byte
+	SendByDefault bool
+	WritePolicy   int32
+}
+
+func unmarshalSabrContextUpdate(b []byte) (SabrContextUpdate, error) {
+	var u SabrContextUpdate
+	r := fieldReader{b: b}
+	for {
+		num, typ, ok := r.next()
+		if !ok {
+			break
+		}
+		switch {
+		case num == fSabrCtxUpdateType && typ == protowire.VarintType:
+			u.Type = int32(r.varint())
+			u.HasType = true
+		case num == fSabrCtxUpdateScope && typ == protowire.VarintType:
+			u.Scope = int32(r.varint())
+		case num == fSabrCtxUpdateValue && typ == protowire.BytesType:
+			// The value is echoed in later requests, so it must not alias the
+			// round body (which is reused); copy it. Same reason PlaybackCookie
+			// uses bytesCopy.
+			u.Value = r.bytesCopy()
+		case num == fSabrCtxUpdateSendByDefault && typ == protowire.VarintType:
+			u.SendByDefault = r.varint() != 0
+		case num == fSabrCtxUpdateWritePolicy && typ == protowire.VarintType:
+			u.WritePolicy = int32(r.varint())
+		default:
+			r.skip(num, typ)
+		}
+	}
+	return u, r.err
+}
+
+// SabrContextSendingPolicy (UMP part 59) lists context types to start sending,
+// stop sending, or discard. Each field is a repeated int32 that may arrive
+// packed or unpacked.
+type SabrContextSendingPolicy struct {
+	StartPolicy   []int32
+	StopPolicy    []int32
+	DiscardPolicy []int32
+}
+
+func unmarshalSabrContextSendingPolicy(b []byte) (SabrContextSendingPolicy, error) {
+	var p SabrContextSendingPolicy
+	r := fieldReader{b: b}
+	for {
+		num, typ, ok := r.next()
+		if !ok {
+			break
+		}
+		packable := typ == protowire.VarintType || typ == protowire.BytesType
+		switch {
+		case num == fSabrSendPolStart && packable:
+			p.StartPolicy = r.readPackedInt32s(typ, p.StartPolicy)
+		case num == fSabrSendPolStop && packable:
+			p.StopPolicy = r.readPackedInt32s(typ, p.StopPolicy)
+		case num == fSabrSendPolDiscard && packable:
+			p.DiscardPolicy = r.readPackedInt32s(typ, p.DiscardPolicy)
+		default:
+			r.skip(num, typ)
+		}
+	}
+	return p, r.err
+}
+
 // Low-level wire helpers.
 
 func appendVarint(b []byte, num protowire.Number, v uint64) []byte {
@@ -570,6 +700,27 @@ func (r *fieldReader) bytesCopy() []byte {
 		return nil
 	}
 	return append([]byte(nil), v...)
+}
+
+// readPackedInt32s decodes a repeated int32 field in either form: unpacked
+// (VarintType, one value per occurrence) or packed (BytesType, a length-delimited
+// run of varints). Decoded values are appended to dst. The caller must only pass
+// VarintType or BytesType.
+func (r *fieldReader) readPackedInt32s(typ protowire.Type, dst []int32) []int32 {
+	if typ == protowire.VarintType {
+		return append(dst, int32(r.varint()))
+	}
+	packed := r.bytes()
+	for len(packed) > 0 {
+		v, n := protowire.ConsumeVarint(packed)
+		if n < 0 {
+			r.err = protowire.ParseError(n)
+			return dst
+		}
+		dst = append(dst, int32(v))
+		packed = packed[n:]
+	}
+	return dst
 }
 
 func (r *fieldReader) string() string {
