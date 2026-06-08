@@ -279,12 +279,16 @@ func (p *Player) playerURL(ctx context.Context, rc Context) (string, error) {
 	})
 }
 
-// discoverPlayerURL finds the current base.js URL from the embed page, falling
-// back to the watch page (some videos disable embedding).
+// discoverPlayerURL finds the current base.js URL from the watch page, falling
+// back to the embed page. The watch page serves the regular player_es6 build
+// (matching yt-dlp), which the signature-timestamp and n-function locators are
+// tuned for. The embedded player_embed_es6 build (served from /embed) is minified
+// differently and is only a fallback for the rare video whose watch page omits
+// the player.
 func (p *Player) discoverPlayerURL(ctx context.Context, videoID string) (string, error) {
 	sources := []string{
-		"https://www.youtube.com/embed/" + url.PathEscape(videoID),
-		"https://www.youtube.com/watch?v=" + url.QueryEscape(videoID),
+		"https://www.youtube.com/watch?v=" + url.QueryEscape(videoID), // regular player_es6 build (yt-dlp parity)
+		"https://www.youtube.com/embed/" + url.PathEscape(videoID),    // fallback (some videos disable embedding)
 	}
 	var lastErr error
 	for _, src := range sources {

@@ -96,7 +96,8 @@ func TestSourceCache_AvoidsNetworkOnHit(t *testing.T) {
 func TestSourceCache_DoesNotPersistNonPlayerBody(t *testing.T) {
 	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
+		// Discovery is watch-first with /embed as fallback; serve either.
+		case r.URL.Path == "/watch", strings.HasPrefix(r.URL.Path, "/embed/"):
 			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
 		case r.URL.Path == testBaseJSPath:
 			return okResp(nonPlayerBody), nil
@@ -123,7 +124,7 @@ func TestSourceCache_DoesNotPersistNonPlayerBody(t *testing.T) {
 func TestSourceCache_PoisonedEntryFallsBackToNetwork(t *testing.T) {
 	srv := newFixtureServer(t)
 	sc := newFakeSource()
-	// Seed a bad entry for the player URL the fixture discovers from /embed.
+	// Seed a bad entry for the player URL the fixture discovers from /watch.
 	sc.data["https://www.youtube.com"+testBaseJSPath] = []byte(nonPlayerBody)
 
 	p := New(Config{HTTP: srv.doer(), SourceCache: sc})

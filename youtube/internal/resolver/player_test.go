@@ -53,7 +53,9 @@ func (s *fixtureServer) doer() HTTPDoer {
 
 		var body []byte
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
+		// Discovery tries /watch first and /embed as fallback; both carry the same
+		// base.js <script> tag, so serve the embed fixture for either.
+		case r.URL.Path == "/watch", strings.HasPrefix(r.URL.Path, "/embed/"):
 			body = s.embed
 		case r.URL.Path == testBaseJSPath:
 			body = s.baseJS
@@ -155,8 +157,8 @@ func TestPlayerResolve_Caches(t *testing.T) {
 	if n := srv.hitCount(testBaseJSPath); n != 1 {
 		t.Errorf("base.js fetched %d times, want 1 (program cache)", n)
 	}
-	if n := srv.hitCount("/embed/vid123"); n != 1 {
-		t.Errorf("embed page fetched %d times, want 1 (URL cache)", n)
+	if n := srv.hitCount("/watch"); n != 1 {
+		t.Errorf("watch page fetched %d times, want 1 (URL cache)", n)
 	}
 }
 
@@ -196,7 +198,7 @@ func TestPlayerResolve_AppliesToken(t *testing.T) {
 }
 
 // TestPlayerResolve_PlayerURLOverride uses a caller-supplied player URL, skipping
-// embed-page discovery entirely.
+// page discovery entirely.
 func TestPlayerResolve_PlayerURLOverride(t *testing.T) {
 	srv := newFixtureServer(t)
 	p := New(Config{HTTP: srv.doer()})
@@ -208,8 +210,8 @@ func TestPlayerResolve_PlayerURLOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := srv.hitCount("/embed/vid123"); n != 0 {
-		t.Errorf("embed fetched %d times, want 0 (player URL was supplied)", n)
+	if n := srv.hitCount("/watch"); n != 0 {
+		t.Errorf("watch page fetched %d times, want 0 (player URL was supplied)", n)
 	}
 	if n := srv.hitCount(testBaseJSPath); n != 1 {
 		t.Errorf("base.js fetched %d times, want 1", n)
@@ -252,11 +254,11 @@ func TestPlayerSignatureTimestamp_NoPattern(t *testing.T) {
 }
 
 func TestPlayerSignatureTimestamp_DiscoversFromVideoID(t *testing.T) {
-	var embedPath string
+	var watchVideoID string
 	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
-			embedPath = r.URL.Path
+		case r.URL.Path == "/watch":
+			watchVideoID = r.URL.Query().Get("v")
 			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
 		case r.URL.Path == testBaseJSPath:
 			return okResp(`var cfg={signatureTimestamp:19834};` +
@@ -276,8 +278,9 @@ func TestPlayerSignatureTimestamp_DiscoversFromVideoID(t *testing.T) {
 	if sts != 19834 {
 		t.Errorf("signature timestamp = %d, want 19834", sts)
 	}
-	if embedPath != "/embed/testVideo01" {
-		t.Errorf("discovery embed path = %q, want /embed/testVideo01", embedPath)
+	// The video id is carried in the watch page's ?v= query, not the path.
+	if watchVideoID != "testVideo01" {
+		t.Errorf("discovery watch ?v= = %q, want testVideo01", watchVideoID)
 	}
 }
 
@@ -297,9 +300,9 @@ func TestPlayerDescrambleN(t *testing.T) {
 	if q.Get("itag") != "251" || q.Get("expire") != "2000000000" {
 		t.Errorf("descrambled URL dropped parameters: %s", got)
 	}
-	// Discovery must use the supplied video id, not an empty embed URL.
-	if got := srv.hitCount("/embed/vid123"); got != 1 {
-		t.Errorf("discovery embed hits for /embed/vid123 = %d, want 1", got)
+	// Discovery must use the supplied video id; it lands in the watch page ?v=.
+	if got := srv.hitCount("/watch"); got != 1 {
+		t.Errorf("discovery watch hits = %d, want 1", got)
 	}
 }
 
@@ -433,7 +436,7 @@ func TestPlayerResolve_NDecodeNonFatal(t *testing.T) {
 		`;s&&(s=dcr(decodeURIComponent(s)));`
 	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
+		case r.URL.Path == "/watch", strings.HasPrefix(r.URL.Path, "/embed/"):
 			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
 		case r.URL.Path == testBaseJSPath:
 			return okResp(noN), nil
@@ -455,20 +458,20 @@ func TestPlayerResolve_NDecodeNonFatal(t *testing.T) {
 	}
 }
 
-// TestPlayerResolve_DiscoveryWatchFallback covers the watch-page fallback when
-// the embed page does not carry a base.js URL.
-func TestPlayerResolve_DiscoveryWatchFallback(t *testing.T) {
+// TestPlayerResolve_DiscoveryEmbedFallback covers the embed-page fallback when
+// the watch page does not carry a base.js URL.
+func TestPlayerResolve_DiscoveryEmbedFallback(t *testing.T) {
 	base, err := os.ReadFile("testdata/base.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var watchHits int
+	var embedHits int
 	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
-			return okResp(`<html>no player here</html>`), nil
 		case r.URL.Path == "/watch":
-			watchHits++
+			return okResp(`<html>no player here</html>`), nil
+		case strings.HasPrefix(r.URL.Path, "/embed/"):
+			embedHits++
 			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
 		case r.URL.Path == testBaseJSPath:
 			return okResp(string(base)), nil
@@ -483,7 +486,7 @@ func TestPlayerResolve_DiscoveryWatchFallback(t *testing.T) {
 		Candidate{URL: "https://rr1.googlevideo.com/videoplayback?itag=251&n=12345"}); err != nil {
 		t.Fatal(err)
 	}
-	if watchHits != 1 {
-		t.Errorf("watch page hits = %d, want 1 (embed lacked base.js)", watchHits)
+	if embedHits != 1 {
+		t.Errorf("embed page hits = %d, want 1 (watch lacked base.js)", embedHits)
 	}
 }

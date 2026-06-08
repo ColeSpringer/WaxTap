@@ -41,14 +41,28 @@ reference for the knobs that let you respond without rebuilding.
    | Symptom | File |
    |---|---|
    | Bot wall / playability `ERROR` / stale client version | `internal/clientident` (WEB-family Chrome and InnerTube versions); `youtube/profile.go` (other client versions, device fingerprints, and PO-token requirements) |
-   | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators) |
-   | WEB/WEB_EMBEDDED `/player` returns `UNPLAYABLE` while mobile clients work | `youtube/internal/resolver/cipher.go` (`stsPatterns`, the signature-timestamp locators); see [SABR audio streaming](#sabr-audio-streaming) |
+   | Signature / `n`-parameter solve fails (exit 4, `ErrCipherSolve`) | `youtube/internal/resolver/cipher.go` (the cipher/`n` locators, plus the dependency-closure walker and its caps) |
+   | WEB/WEB_EMBEDDED `/player` returns `UNPLAYABLE` while mobile clients work | `youtube/internal/resolver/cipher.go` (`stsPatterns`); discovery loads the regular `player_es6` build (watch-first, `player.go:discoverPlayerURL`) so the patterns target it; see [SABR audio streaming](#sabr-audio-streaming) |
    | Player response shape changed (parse/format extraction) | `youtube/playerresponse.go` |
    | WEB audio stalls, truncates, or fails to decode | `youtube/internal/sabr` (UMP part ids, protobuf field numbers); see [SABR audio streaming](#sabr-audio-streaming) |
 
    Reproduce against your captured fixture, adjust, and run the checks below.
    If the recovery path or runtime knobs changed, update this file in the same
    patch.
+
+   **How the cipher is extracted.** A locator pattern finds the transform
+   function's name, then `extractClosure` bundles the transitive closure of every
+   top-level definition it references - globals, helper functions, helper objects -
+   not just the function body. An AST scope walk over each isolated snippet
+   (parsed with `goja/parser` + `goja/ast`) separates free identifiers from local
+   bindings, then the closure is compiled in goja. Only those small snippets are
+   parsed, never the whole multi-megabyte base.js (goja's parser can choke on
+   unrelated modern JS in the full file). Two failure modes:
+   - a runtime `ReferenceError` (e.g. "wK is not defined") means the closure missed
+     a dependency - the AST scope walk or a definition locator (`extractVarInit` /
+     `extractFunctionDef`) needs attention;
+   - a `parse`/`compile` error surfacing as `nErr` means goja cannot handle a
+     construct in a pulled-in snippet - a goja ES-floor ceiling, not a walker bug.
 
 ## Verifying a fix
 
@@ -176,8 +190,8 @@ Notes:
 - `embedUrl` sets `context.thirdParty.embedUrl`, which `WEB_EMBEDDED_PLAYER`
   requires (a third-party embed origin, not youtube.com). Caveat: even with it,
   YouTube currently returns `This video is unavailable` (error 152) for the embedded
-  client on many public videos — a selective/region restriction tracked upstream as
-  yt-dlp #16077, not a WaxTap bug — so embedded is an unreliable fallback right now.
+  client on many public videos - a selective/region restriction tracked upstream as
+  yt-dlp #16077, not a WaxTap bug - so embedded is an unreliable fallback right now.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - An override replaces only the primary extraction chain. Player discovery, the
@@ -275,7 +289,10 @@ rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
   `base.js` (`youtube/internal/resolver/cipher.go`, `stsPatterns`). A missing or
   stale sts makes `/player` return `UNPLAYABLE` before any formats are seen, so if
   WEB returns `UNPLAYABLE` while mobile clients work, suspect a zero sts before the
-  PO token.
+  PO token. The sts is read from the regular `player_es6` build, which player
+  discovery loads watch-first (`player.go:discoverPlayerURL`); the embedded
+  `player_embed_es6` build served from `/embed` returns sts=0 against `stsPatterns`,
+  so the watch-first order is what keeps the value extractable.
 - A GVS-scope `potoken.Provider`. The `gvs` token used on direct stream URLs is
   base64-decoded to raw bytes and carried in the SABR `streamerContext`.
   Attestation-required (`STREAM_PROTECTION_STATUS`) surfaces as `ErrNeedsPOToken`.

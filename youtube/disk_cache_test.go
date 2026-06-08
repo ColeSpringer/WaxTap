@@ -15,7 +15,7 @@ import (
 	"github.com/colespringer/waxtap/internal/httpx"
 )
 
-// stubTransport serves a synthetic embed page and base.js, counting base.js
+// stubTransport serves a synthetic watch/embed page and base.js, counting base.js
 // fetches so the disk cache's effect can be asserted. When failBaseJS is set, a
 // base.js request is recorded and answered 404, modeling a process that must rely
 // on the on-disk source cache.
@@ -39,7 +39,8 @@ func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/embed/"):
+	// Discovery is watch-first with /embed as fallback; serve the script for both.
+	case r.URL.Path == "/watch", strings.HasPrefix(r.URL.Path, "/embed/"):
 		return resp(http.StatusOK, s.embedScript), nil
 	case r.URL.Path == s.baseJSPath:
 		s.mu.Lock()

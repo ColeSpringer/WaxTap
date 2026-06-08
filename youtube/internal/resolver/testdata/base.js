@@ -6,6 +6,10 @@
 // operations, and re-joins. nfn is the n-parameter (throttling) transform.
 // dcr("ABCDEFGH") === "GFEDH"; nfn("12345") === "54321".
 //
+// Both transforms reference a top-level dependency (dcr the helper object Xq, nfn
+// the lookup global nDigits), so cipher extraction must bundle the full
+// dependency closure, not just the function body, to compile and run them.
+//
 // The player config also carries the signature timestamp sent to /player.
 var cfg = { signatureTimestamp: 19834, foo: "bar" };
 var Xq = {
@@ -21,8 +25,10 @@ function dcr(a) {
     Xq.sp(a, 1);
     return a.join("")
 }
+var nDigits = "0123456789";
 var nfn = function(a) {
     var b = a.split("");
+    for (var i = 0; i < b.length; i++) b[i] = nDigits.charAt(parseInt(b[i], 10));
     b.reverse();
     return b.join("")
 };

@@ -130,11 +130,26 @@ const stsBaseJS = `var cfg={signatureTimestamp:19834};` +
 	`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
 	`;s&&(s=dcr(decodeURIComponent(s)));`
 
-// discoveryResp serves the embed page and base.js used for signature timestamp
-// lookup. It returns false for requests the calling test should handle.
+// isDiscoveryWatch reports whether r is a player-discovery fetch of the watch
+// page, which carries only ?v=. Watch-first discovery and the streamingData
+// scrape fallback share the /watch path; the scrape sets bpctr, so that query
+// parameter distinguishes the two.
+func isDiscoveryWatch(r *http.Request) bool {
+	return r.URL.Path == "/watch" && r.URL.Query().Get("bpctr") == ""
+}
+
+// isScrapeWatch reports whether r is the streamingData watch-page scrape fallback.
+func isScrapeWatch(r *http.Request) bool {
+	return r.URL.Path == "/watch" && r.URL.Query().Get("bpctr") != ""
+}
+
+// discoveryResp serves the watch/embed page and base.js used for signature
+// timestamp lookup. Discovery is watch-first, so the discovery watch fetch is
+// answered here; the scrape fallback (bpctr set) is left to the calling test. It
+// returns false for requests the caller should handle.
 func discoveryResp(r *http.Request) (*http.Response, bool) {
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/embed/"):
+	case isDiscoveryWatch(r), strings.HasPrefix(r.URL.Path, "/embed/"):
 		return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), true
 	case strings.HasSuffix(r.URL.Path, "/base.js"):
 		return fixtureResp(http.StatusOK, []byte(stsBaseJS)), true
@@ -145,11 +160,11 @@ func discoveryResp(r *http.Request) (*http.Response, bool) {
 func TestExtract_WEBSendsSignatureTimestamp(t *testing.T) {
 	ok := readFixture(t, "player_ok.json")
 	var playerBody []byte
-	var embedPath string
+	var watchVideoID string
 	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/embed/"):
-			embedPath = r.URL.Path
+		case r.URL.Path == "/watch":
+			watchVideoID = r.URL.Query().Get("v")
 			return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), nil
 		case strings.HasSuffix(r.URL.Path, "/base.js"):
 			return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
@@ -167,9 +182,9 @@ func TestExtract_WEBSendsSignatureTimestamp(t *testing.T) {
 	if !strings.Contains(string(playerBody), `"signatureTimestamp":19834`) {
 		t.Errorf("WEB /player body missing signatureTimestamp: %s", playerBody)
 	}
-	// Discovery must use the requested video rather than an empty embed URL.
-	if embedPath != "/embed/testVideo01" {
-		t.Errorf("signature timestamp discovery path = %q, want /embed/testVideo01", embedPath)
+	// Discovery must use the requested video; it lands in the watch page ?v=.
+	if watchVideoID != "testVideo01" {
+		t.Errorf("signature timestamp discovery ?v= = %q, want testVideo01", watchVideoID)
 	}
 }
 
@@ -287,12 +302,12 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	var watchCalls int
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if resp, ok := discoveryResp(r); ok {
-			return resp, nil // signature timestamp lookup uses the embed page, not /watch
+			return resp, nil // watch-first player discovery for the signature timestamp
 		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/v1/player"):
 			return fixtureResp(http.StatusOK, login), nil // every client age-gated
-		case strings.Contains(r.URL.Path, "/watch"):
+		case isScrapeWatch(r):
 			watchCalls++
 			return fixtureResp(http.StatusOK, html), nil
 		}
