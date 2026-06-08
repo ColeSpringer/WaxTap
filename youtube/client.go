@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -204,7 +205,14 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 			// Keep the latest error, try the remaining clients, then fall back to
 			// the watch page before returning it.
 			lastErr = perr
-			c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", perr)
+			// sts==0 here means the timestamp lookup failed, so the resulting
+			// UNPLAYABLE is a maintenance problem, not an unavailable video.
+			// Reclassify it so the terminal error names that cause instead of a
+			// generic ErrVideoUnavailable.
+			if profile.NeedsSignatureTimestamp && sts == 0 {
+				lastErr = missingTimestampError(perr)
+			}
+			c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", lastErr)
 			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
 			continue
 		}
@@ -262,6 +270,21 @@ func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, 
 		c.log.WarnContext(ctx, "signature timestamp resolved to zero; omitting field (expect UNPLAYABLE)", "client", profile.Name)
 	}
 	return sts
+}
+
+// missingTimestampError turns an sts=0 UNPLAYABLE into an ExtractionError
+// (ErrExtractionFailed) that names the timestamp as the cause. perr's status is
+// copied into the message as text, not wrapped, so the result does not also
+// match errors.Is(err, ErrVideoUnavailable).
+func missingTimestampError(perr error) error {
+	status := "UNPLAYABLE"
+	if pe, ok := errors.AsType[*waxerr.PlayabilityError](perr); ok && pe.Status != "" {
+		status = pe.Status
+	}
+	return &waxerr.ExtractionError{
+		Stage: "signature-timestamp",
+		Cause: fmt.Errorf("WEB signature timestamp unavailable (sts=0): player returned %s", status),
+	}
 }
 
 // extractFromWatchPage fetches the watch page and parses the embedded

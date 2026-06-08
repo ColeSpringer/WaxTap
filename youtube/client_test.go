@@ -275,9 +275,14 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 func TestExtract_PlayabilityErrorTriesAllClients(t *testing.T) {
 	un := readFixture(t, "player_unavailable.json") // status ERROR
 	var playerCalls int
-	// The WEB profile needs a player-scope token before its /player POST; configure
-	// a provider so the test exercises every profile in the chain.
+	// The WEB profile needs a player-scope token before its /player POST, so
+	// configure a provider. Discovery serves a real base.js so the sts client
+	// resolves a non-zero timestamp: the ERROR is genuine across every client,
+	// not a missing-sts artifact, so it stays classified as ErrVideoUnavailable.
 	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if resp, ok := discoveryResp(r); ok {
+			return resp, nil
+		}
 		if strings.Contains(r.URL.Path, "/player") {
 			playerCalls++
 		}
@@ -292,6 +297,45 @@ func TestExtract_PlayabilityErrorTriesAllClients(t *testing.T) {
 	// before extraction gives up.
 	if want := len(DefaultProfiles()); playerCalls != want {
 		t.Errorf("player calls = %d, want %d (all clients tried past ERROR)", playerCalls, want)
+	}
+}
+
+// TestExtract_MissingTimestampAttributed verifies that when a signature-timestamp
+// profile resolves sts=0 and YouTube answers UNPLAYABLE, the terminal error names
+// the missing timestamp (ErrExtractionFailed) rather than classifying the video as
+// ErrVideoUnavailable.
+func TestExtract_MissingTimestampAttributed(t *testing.T) {
+	unplayable := readFixture(t, "player_unplayable.json") // status UNPLAYABLE
+	// A valid player program with no signatureTimestamp literal: discovery
+	// succeeds but the lookup resolves sts=0.
+	const noSTS = `var Xq={sp:function(a,b){a.splice(0,b)}};` +
+		`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
+		`;s&&(s=dcr(decodeURIComponent(s)));`
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/watch":
+			return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(noSTS)), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, unplayable), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileWeb)}, &fakeProvider{resp: potoken.Response{Token: "TOK"}})
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (missing sts attributed)", err)
+	}
+	if errors.Is(err, waxerr.ErrVideoUnavailable) {
+		t.Errorf("err = %v, must not classify as ErrVideoUnavailable (the masking is removed)", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "signature timestamp") || !strings.Contains(msg, "sts=0") {
+		t.Errorf("err = %q, want it to name the WEB signature timestamp cause", err)
+	}
+	if ee, ok := errors.AsType[*waxerr.ExtractionError](err); !ok || ee.Stage != "signature-timestamp" {
+		t.Errorf("err = %#v, want *waxerr.ExtractionError at stage %q", err, "signature-timestamp")
 	}
 }
 
