@@ -63,6 +63,34 @@ type Options struct {
 	// passes the failure details in the request. Nil means no provider is
 	// configured.
 	POTokenProvider POTokenProvider
+
+	// Client, when non-empty, forces a single built-in client as the whole
+	// strategy chain instead of the default multi-client fallback. Valid values
+	// are "web", "ios", "android_vr", and "web_embedded". It applies the built-in
+	// WEB-family User-Agent / ChromeMajor treatment. It is mutually exclusive with
+	// ProfileOverridePath.
+	Client string
+
+	// Session is an externally supplied guest identity (visitorData + cookies)
+	// WaxTap adopts verbatim instead of bootstrapping its own, for byte-exact
+	// session coherence with a PO-token minter. Session.VisitorData must be the
+	// browser's exact X-Goog-Visitor-Id literal (the URL-escaped form in
+	// ytcfg.VISITOR_DATA); it is re-sent with no escape/unescape.
+	//
+	// Adoption requires a uniform client chain (set Client, or a ProfileOverridePath
+	// whose profiles are all one InnerTube client); the default multi-client chain
+	// is rejected so an adopted session is never routed through a different client.
+	// If resolution fails, extraction aborts rather than falling back to a random
+	// synthetic visitorData. Adopted cookies need an HTTPClient with a cookie jar;
+	// login cookies are dropped (adoption assumes a guest session). The adopted
+	// session is resolved once per Client, so long-running services should recreate
+	// the Client per task. Mutually exclusive with SessionProvider.
+	Session *POTokenSession
+
+	// SessionProvider resolves the adopted guest identity lazily, at most once per
+	// Client (cached on success). It is the pull-based form of Session and shares
+	// its uniform-chain requirement. Mutually exclusive with Session.
+	SessionProvider POTokenSessionProvider
 }
 
 // Locale sets InnerTube localization hints. The zero value uses en / US.

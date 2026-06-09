@@ -89,6 +89,17 @@ type (
 	POTokenRequest  = potoken.Request
 	POTokenResponse = potoken.Response
 	POTokenScope    = potoken.Scope
+	// POTokenProviderFunc adapts a closure to POTokenProvider.
+	POTokenProviderFunc = potoken.ProviderFunc
+)
+
+// External guest-session adoption (package potoken). A POTokenSession lets WaxTap
+// adopt an externally supplied visitorData + cookies verbatim instead of
+// bootstrapping its own, for byte-exact session coherence with a PO-token minter.
+// POTokenSessionProvider is its pull-based form.
+type (
+	POTokenSession         = potoken.Session
+	POTokenSessionProvider = potoken.SessionProvider
 )
 
 // ProcessSpec is the processing pipeline shared by YouTube and local-file

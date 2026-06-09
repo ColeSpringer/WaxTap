@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/colespringer/waxtap/internal/cache"
@@ -32,6 +33,19 @@ type Client struct {
 	potoken     potoken.Provider         // PO-token provider, when configured
 	visitors    *cache.Store[string]     // bootstrapped guest visitorData, singleflighted
 	hl, gl      string                   // InnerTube host language / content region
+
+	// External session adoption. At most one of staticSession / sessionProvider
+	// is set (the facade rejects both). When either is set, Extract adopts that
+	// identity verbatim and skips the homepage bootstrap; a failed resolution is
+	// fatal. The provider is resolved at most once per Client under adoptMu,
+	// caching only on success so a transient failure retries on the next call.
+	staticSession   *potoken.Session
+	sessionProvider potoken.SessionProvider
+	adoptMu         sync.Mutex
+	adoptVD         string // resolved adopted visitorData
+	adoptResolved   bool   // adoptVD is valid
+	adoptErr        error  // construction-time adoption error, surfaced at resolve
+	adoptSeeded     bool   // adopted cookies have been seeded into the jar
 }
 
 // Config configures a Client.
@@ -55,6 +69,17 @@ type Config struct {
 	// call it during extraction for a player-scope token and during resolution for
 	// a GVS-scope stream token. Nil means no provider is configured.
 	POTokenProvider potoken.Provider
+	// Session is an externally supplied guest identity the Client adopts verbatim,
+	// skipping its own homepage bootstrap. It is pre-resolved: its cookies are
+	// seeded at New and its visitorData is used for every extraction. Use it for
+	// byte-exact session coherence with a PO-token minter. The caller must select
+	// a uniform client chain (the facade enforces this); nil leaves the built-in
+	// bootstrap in place.
+	Session *potoken.Session
+	// SessionProvider resolves an external guest identity lazily, at most once per
+	// Client (cached on success). It is the pull-based form of Session. At most one
+	// of Session / SessionProvider may be set.
+	SessionProvider potoken.SessionProvider
 	// ResolveTimeout bounds each cipher JS execution during resolution. Zero
 	// uses the resolver default.
 	ResolveTimeout time.Duration
@@ -80,13 +105,15 @@ const playerCacheSchema = 1
 // New returns a Client, applying defaults for unset Config fields.
 func New(cfg Config) *Client {
 	c := &Client{
-		http:     cfg.HTTP,
-		log:      cfg.Logger,
-		profiles: cfg.Profiles,
-		resolver: cfg.Resolver,
-		potoken:  cfg.POTokenProvider,
-		hl:       cfg.HL,
-		gl:       cfg.GL,
+		http:            cfg.HTTP,
+		log:             cfg.Logger,
+		profiles:        cfg.Profiles,
+		resolver:        cfg.Resolver,
+		potoken:         cfg.POTokenProvider,
+		hl:              cfg.HL,
+		gl:              cfg.GL,
+		staticSession:   cfg.Session,
+		sessionProvider: cfg.SessionProvider,
 	}
 	// Use one built-in WEB User-Agent for default profiles and ancillary WEB
 	// requests. Caller-supplied profiles retain their own user agents.
@@ -139,7 +166,89 @@ func New(cfg Config) *Client {
 	if jar := c.http.Jar(); jar != nil {
 		seedConsentCookie(jar)
 	}
+	// A static session is pre-resolved: seed its cookies now and store its
+	// visitorData so extraction needs no network for adoption. New returns no
+	// error, so an empty visitorData or a cookies/no-jar mismatch is held in
+	// adoptErr and surfaced when Extract resolves the session (the facade also
+	// rejects an empty visitorData up front). An empty visitorData must fail, not
+	// be silently adopted: it would break GVS content_binding coherence and, once
+	// the source is "adopted", block learnVisitorData from recovering.
+	if c.staticSession != nil {
+		switch {
+		case c.staticSession.VisitorData == "":
+			c.adoptErr = errors.New("adopted session has an empty visitorData")
+		default:
+			if err := c.seedAdoptedCookies(c.staticSession.Cookies); err != nil {
+				c.adoptErr = err
+			} else {
+				c.adoptVD = c.staticSession.VisitorData
+				c.adoptResolved = true
+			}
+		}
+	}
 	return c
+}
+
+// adoptionConfigured reports whether an external session must be adopted.
+func (c *Client) adoptionConfigured() bool {
+	return c.staticSession != nil || c.sessionProvider != nil
+}
+
+// resolveAdoptedSession returns the adopted visitorData, resolving a
+// SessionProvider at most once. The provider runs under the first caller's
+// context while adoptMu is held, so concurrent extractions share one resolution;
+// the result is cached only on success, so a transient provider failure is
+// retried on the next call. A static session is already resolved at New.
+func (c *Client) resolveAdoptedSession(ctx context.Context) (string, error) {
+	c.adoptMu.Lock()
+	defer c.adoptMu.Unlock()
+	if c.adoptErr != nil {
+		return "", c.adoptErr
+	}
+	if c.adoptResolved {
+		return c.adoptVD, nil
+	}
+	sess, err := c.sessionProvider.ProvideSession(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		return "", fmt.Errorf("adopted session provider failed: %w", err)
+	}
+	if sess.VisitorData == "" {
+		return "", errors.New("adopted session provider returned an empty visitorData")
+	}
+	if err := c.seedAdoptedCookies(sess.Cookies); err != nil {
+		// Cookies + no jar is a permanent configuration error, not a transient
+		// provider failure: cache it so later Extracts short-circuit instead of
+		// re-running the remote provider on every call.
+		c.adoptErr = err
+		return "", err
+	}
+	c.adoptVD = sess.VisitorData
+	c.adoptResolved = true
+	return c.adoptVD, nil
+}
+
+// seedAdoptedCookies installs an adopted session's cookies into the jar, once.
+// Login cookies are dropped with a warning (adoption assumes a guest session),
+// and supplying guest cookies without a jar is an error rather than a silent
+// drop. visitorData-only adoption needs no jar and is fine. The caller holds
+// adoptMu, or calls during New before any concurrency.
+func (c *Client) seedAdoptedCookies(cookies []*http.Cookie) error {
+	if c.adoptSeeded {
+		return nil
+	}
+	safe, dropped := filterLoginCookies(cookies)
+	for _, name := range dropped {
+		c.log.Warn("dropping login cookie from adopted session; adoption assumes a logged-out guest session", "cookie", name)
+	}
+	if len(safe) > 0 && c.http.Jar() == nil {
+		return errors.New("adopted session supplies cookies but the HTTP client has no cookie jar: pass an *http.Client with a jar, or supply visitorData only")
+	}
+	seedExternalCookies(c.http.Jar(), safe)
+	c.adoptSeeded = true
+	return nil
 }
 
 // Extract fetches metadata and candidate audio formats for videoID, trying the
@@ -148,7 +257,10 @@ func New(cfg Config) *Client {
 // session are carried in the returned Extraction so stream resolution uses the
 // same identity.
 func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, error) {
-	sess := c.newBootstrappedSession(ctx)
+	sess, err := c.newBootstrappedSession(ctx)
+	if err != nil {
+		return nil, err // fatal only under adoption; otherwise newBootstrappedSession never errors
+	}
 	var lastErr error
 
 	for i, profile := range c.profiles {
@@ -291,7 +403,10 @@ func missingTimestampError(perr error) error {
 // ytInitialPlayerResponse, as a fallback when the InnerTube clients fail.
 func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Extraction, error) {
 	profile := c.webFallback
-	sess := c.newBootstrappedSession(ctx)
+	sess, err := c.newBootstrappedSession(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	body, err := c.httpGet(ctx, profile, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
 	if err != nil {
@@ -328,7 +443,10 @@ func (c *Client) Info(ctx context.Context, videoID string) (*Video, error) {
 // rather than discarding the entries already gathered.
 func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int) (*Playlist, error) {
 	profile := c.playlistProfile()
-	sess := c.newBootstrappedSession(ctx)
+	sess, err := c.newBootstrappedSession(ctx)
+	if err != nil {
+		return nil, err
+	}
 	pl := &Playlist{ID: playlistID}
 
 	body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -32,26 +33,42 @@ const (
 // ytcfg exposes it as VISITOR_DATA; embedded InnerTube contexts use visitorData.
 var visitorDataRe = regexp.MustCompile(`"(?:visitorData|VISITOR_DATA)"\s*:\s*"([^"]+)"`)
 
-// newBootstrappedSession starts a session with bootstrapped visitorData when a
-// cookie-backed guest identity is available, otherwise with synthetic visitorData.
+// newBootstrappedSession starts a session for one extraction. When an external
+// session is configured it is adopted verbatim and the homepage bootstrap is
+// skipped; otherwise a cookie-backed guest identity is bootstrapped, falling back
+// to synthetic visitorData.
+//
+// The error is non-nil only under adoption: a failed adoption is fatal because
+// falling back to a random synthetic visitorData would send the wrong
+// content_binding to the PO-token minter and guarantee a GVS mismatch. Without
+// adoption a failed bootstrap is best-effort and never returns an error.
 //
 // Bootstrapping is skipped without a cookie jar because the matching cookies
 // cannot be preserved. That also keeps injected, jarless test clients on the
 // synthetic path.
-func (c *Client) newBootstrappedSession(ctx context.Context) *session {
+func (c *Client) newBootstrappedSession(ctx context.Context) (*session, error) {
 	sess := newSession(c.gl)
+
+	if c.adoptionConfigured() {
+		vd, err := c.resolveAdoptedSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+		sess.adoptVisitorData(vd)
+		c.log.DebugContext(ctx, "adopted external visitorData", "source", sess.source.String())
+		return sess, nil
+	}
+
 	if c.http.Jar() == nil {
-		return sess
+		return sess, nil
 	}
 	vd, err := c.bootstrapVisitorData(ctx)
 	if err != nil {
 		c.log.DebugContext(ctx, "visitor bootstrap failed; using synthetic visitorData", "err", err)
-		return sess
+		return sess, nil
 	}
-	if vd != "" {
-		sess.visitorData = vd
-	}
-	return sess
+	sess.learnVisitorData(vd) // no-op when empty; marks the session bootstrapped
+	return sess, nil
 }
 
 // bootstrapVisitorData returns server-issued visitorData, loading and caching it
@@ -96,4 +113,60 @@ func seedConsentCookie(jar http.CookieJar) {
 			Path:  "/",
 		}},
 	)
+}
+
+// loginCookieBaseNames are Google account-authentication cookies, keyed by their
+// base name after the __Secure-/__Host- and 1P/3P partition prefixes are stripped.
+// Matching on the base catches the whole family (SID, __Secure-1PSID,
+// __Secure-3PSID, APISID, SIDCC, SIDTS, and siblings), so a new 1P/3P variant
+// cannot slip through a flat denylist. These must never enter an adopted guest
+// session: a logged-in identity is account-bound (data_sync_id) and raises ban
+// risk, so adoption assumes a genuine guest session.
+var loginCookieBaseNames = map[string]bool{
+	"SID": true, "HSID": true, "SSID": true, "APISID": true, "SAPISID": true,
+	"SIDTS": true, "SIDCC": true, "LOGIN_INFO": true,
+}
+
+// isLoginCookie reports whether name is a Google account-auth cookie, regardless
+// of its __Secure-/__Host- or 1P/3P prefix.
+func isLoginCookie(name string) bool {
+	base := strings.TrimPrefix(name, "__Secure-")
+	base = strings.TrimPrefix(base, "__Host-")
+	base = strings.TrimPrefix(base, "1P")
+	base = strings.TrimPrefix(base, "3P")
+	return loginCookieBaseNames[base]
+}
+
+// filterLoginCookies splits adopted cookies into the guest-safe set and the names
+// of dropped login cookies, so the caller can warn about each drop.
+func filterLoginCookies(cookies []*http.Cookie) (safe []*http.Cookie, dropped []string) {
+	for _, ck := range cookies {
+		if isLoginCookie(ck.Name) {
+			dropped = append(dropped, ck.Name)
+			continue
+		}
+		safe = append(safe, ck)
+	}
+	return safe, dropped
+}
+
+// seedExternalCookies installs adopted cookies into jar, grouped by domain so each
+// SetCookies call has a single coherent origin. It is nil-jar safe (a no-op, since
+// visitorData-only adoption needs no jar) and skips domain-less cookies, which the
+// jar cannot place without an origin URL.
+func seedExternalCookies(jar http.CookieJar, cookies []*http.Cookie) {
+	if jar == nil || len(cookies) == 0 {
+		return
+	}
+	byHost := make(map[string][]*http.Cookie)
+	for _, ck := range cookies {
+		host := strings.TrimPrefix(ck.Domain, ".")
+		if host == "" {
+			continue
+		}
+		byHost[host] = append(byHost[host], ck)
+	}
+	for host, cks := range byHost {
+		jar.SetCookies(&url.URL{Scheme: "https", Host: host}, cks)
+	}
 }

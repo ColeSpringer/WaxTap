@@ -39,9 +39,12 @@ const (
 	// much smaller.
 	maxRoundBytes = 64 << 20
 
-	// statusAttestationPending is the lowest StreamProtectionStatus.status that
-	// indicates the PO token has not been accepted (2=PENDING, 3=REQUIRED).
-	statusAttestationPending = 2
+	// StreamProtectionStatus.status values. Only REQUIRED (3) is terminal: the PO
+	// token is rejected and a better one is needed. PENDING (2) is informational;
+	// the server still streams media while attestation settles, so WaxTap consumes
+	// it and continues, matching the googlevideo reference, which aborts only on 3.
+	statusAttestationPending  = 2
+	statusAttestationRequired = 3
 
 	// maxSabrContexts caps the number of distinct context types stored so a
 	// misbehaving server cannot grow the maps without limit. activeContextTypes
@@ -185,6 +188,12 @@ type stream struct {
 	bytesWritten int64
 	contentLen   int64
 
+	// attestationPending records that a STREAM_PROTECTION_STATUS=2 (PENDING) was
+	// seen. Status 2 still streams, but a status-2 stream that ends without an
+	// end-segment or content length may be a withheld partial, so stallResult must
+	// not treat it as complete.
+	attestationPending bool
+
 	done bool
 	err  error
 }
@@ -254,6 +263,9 @@ func (s *stream) round() error {
 	if res.signal != nil {
 		return res.signal
 	}
+	if res.attestationPending {
+		s.attestationPending = true
+	}
 	if res.policy != nil && len(res.policy.PlaybackCookie) > 0 {
 		s.playbackCookie = res.policy.PlaybackCookie
 	}
@@ -318,6 +330,8 @@ type roundResult struct {
 	signal      error
 	endSegment  uint64
 	contentType string
+	// attestationPending is set when this round carried STREAM_PROTECTION_STATUS=2.
+	attestationPending bool
 
 	// SABR context signals, applied once per round in round(). contextUpdates
 	// are part-57 blobs to store/echo; contextPolicy is the part-59 start/stop/
@@ -394,9 +408,16 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 			if err != nil {
 				return res, wrapExtraction(err)
 			}
-			if st.Status >= statusAttestationPending {
+			if st.Status >= statusAttestationRequired {
 				res.signal = fmt.Errorf("%w: SABR attestation required (status %d)", waxerr.ErrNeedsPOToken, st.Status)
 				return res, nil
+			}
+			if st.Status == statusAttestationPending {
+				// Non-terminal: the server still streams while attestation settles.
+				// Record it so stallResult won't treat a metadata-less partial as
+				// complete.
+				res.attestationPending = true
+				s.log.DebugContext(s.ctx, "sabr: attestation pending (status 2); consuming media and continuing")
 			}
 		case partSabrError:
 			se, err := unmarshalSabrError(part.Payload)
@@ -443,6 +464,13 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 			continue
 		}
 		if h.IsInitSeg {
+			if s.initWritten {
+				// Media was already emitted (it self-initialized, or no separate
+				// init preceded it). A late init segment cannot be prepended now;
+				// surface it instead of silently dropping it and corrupting output.
+				s.log.WarnContext(s.ctx, "sabr: init segment arrived after media was emitted; ignoring", "header_id", hid)
+				continue
+			}
 			if s.initBytes == nil {
 				s.initBytes = data
 				advanced = true
@@ -474,16 +502,42 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 	return s.drain(), advanced
 }
 
-// drain moves the init segment and contiguous media into pending. It holds media
-// until the init segment arrives so the output remains a valid container.
+// ebmlMagic is the four-byte EBML header that begins every Matroska/WebM file.
+var ebmlMagic = []byte{0x1A, 0x45, 0xDF, 0xA3}
+
+// mediaSelfInitializes reports whether the buffered leading media segment carries
+// its own container header, so the stream is a valid file without a separate init
+// segment. YouTube's WebM/Opus SABR audio is self-initializing: the first media
+// segment starts with the EBML header rather than a distinct init segment. A bare
+// fragment (a headerless WebM Cluster or an MP4 moof) is not, so it stays held
+// until a real init segment arrives.
+func (s *stream) mediaSelfInitializes() bool {
+	if !s.seqInit {
+		return false
+	}
+	seg, ok := s.segments[s.nextSeq]
+	if !ok {
+		return false
+	}
+	return bytes.HasPrefix(seg.data, ebmlMagic)
+}
+
+// drain moves the init segment and contiguous media into pending. A separate init
+// segment leads when present (e.g. fragmented MP4's moov); otherwise media that
+// carries its own container header (WebM/Opus) is emitted as-is. Bare fragments
+// stay held so the output is never a headerless container.
 func (s *stream) drain() int {
 	emitted := 0
 	if !s.initWritten {
-		if s.initBytes == nil {
-			return 0 // the init segment must lead; hold media until it arrives
+		switch {
+		case s.initBytes != nil:
+			s.pending = append(s.pending, s.initBytes...)
+			emitted += len(s.initBytes)
+		case s.mediaSelfInitializes():
+			// The leading media segment is self-initializing; nothing to prepend.
+		default:
+			return 0 // hold until an init segment or a self-initializing lead arrives
 		}
-		s.pending = append(s.pending, s.initBytes...)
-		emitted += len(s.initBytes)
 		s.initWritten = true
 	}
 	for {
@@ -527,6 +581,10 @@ func (s *stream) stallResult() error {
 		return fmt.Errorf("%w: SABR stream stalled after %d of %d bytes", waxerr.ErrExtractionFailed, s.bytesWritten, s.contentLen)
 	case s.bytesWritten == 0:
 		return fmt.Errorf("%w: SABR stream stalled before delivering any media", waxerr.ErrExtractionFailed)
+	case s.attestationPending:
+		// Status 2 with no end-segment or content length to prove completeness; it
+		// may be a withheld partial, so do not treat it as complete.
+		return fmt.Errorf("%w: SABR stream ended under attestation-pending (status 2) without completion metadata", waxerr.ErrExtractionFailed)
 	}
 	// No available metadata proves that more data is expected.
 	s.done = true
@@ -688,9 +746,9 @@ func (s *stream) buildRequest() videoPlaybackAbrRequest {
 			PlayerTimeMs:      s.downloadedMs,
 			EnabledTrackTypes: enabledTrackTypesAudioOnly,
 		},
-		SelectedFormatIds: []FormatId{s.cfg.Format},
-		PlayerTimeMs:      s.downloadedMs,
-		UstreamerConfig:   s.cfg.UstreamerConfig,
+		SelectedAudioFormatIds: []FormatId{s.cfg.Format},
+		PlayerTimeMs:           s.downloadedMs,
+		UstreamerConfig:        s.cfg.UstreamerConfig,
 		StreamerContext: streamerContext{
 			ClientInfo:     s.cfg.ClientInfo,
 			POToken:        s.cfg.POToken,

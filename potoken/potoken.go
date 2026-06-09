@@ -97,6 +97,44 @@ type Provider interface {
 	ProvidePOToken(ctx context.Context, req Request) (Response, error)
 }
 
+// ProviderFunc adapts an ordinary function to Provider, so a caller can supply PO
+// tokens from a closure (for example, one that fetches them from a URL) without
+// defining a named type. Like a single token, the closure is invoked once per
+// video per scope, so a closure that mints fresh each call should cache by
+// (scope, binding) if it is expensive.
+type ProviderFunc func(ctx context.Context, req Request) (Response, error)
+
+// ProvidePOToken calls f.
+func (f ProviderFunc) ProvidePOToken(ctx context.Context, req Request) (Response, error) {
+	return f(ctx, req)
+}
+
+// Session is an externally supplied, pre-resolved guest identity that WaxTap can
+// adopt instead of bootstrapping its own. It exists so the session that attested
+// a GVS PO token (e.g. a real browser driving a token minter) and the session
+// WaxTap streams under can be one byte-identical identity.
+//
+// VisitorData must be the exact X-Goog-Visitor-Id literal the supplying browser
+// uses: the value youtube.com puts in ytcfg.VISITOR_DATA, URL-escaped (the
+// "...%3D%3D" form). WaxTap re-sends it verbatim as the visitor-id header, the
+// InnerTube context visitorData, and the GVS token's content_binding, with no
+// escape or unescape, so coherence holds to the byte. Cookies are the Set-Cookie
+// values issued with that visitorData; they must be a logged-out guest session
+// (a logged-in visitorData is account-bound).
+type Session struct {
+	VisitorData string
+	Cookies     []*http.Cookie
+}
+
+// SessionProvider supplies a guest Session on demand. WaxTap resolves it once per
+// Client and reuses the result for that Client's lifetime, so the adopted
+// visitorData never changes mid-extraction; long-running services should recreate
+// the Client per task to pick up a fresh session. Implementations must honor ctx
+// cancellation and should be safe for concurrent use.
+type SessionProvider interface {
+	ProvideSession(ctx context.Context) (Session, error)
+}
+
 // HTTPFailure is a compact snapshot of the HTTP failure that triggered a token
 // refresh, for diagnosis by the provider.
 type HTTPFailure struct {

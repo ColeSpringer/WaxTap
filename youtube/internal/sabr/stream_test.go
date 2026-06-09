@@ -90,12 +90,13 @@ func TestOpenHappyPath(t *testing.T) {
 		t.Errorf("final progress = %+v, want {10 10}", last)
 	}
 
-	// The request carried the selected itag, ustreamer config, and GVS PO token.
+	// The request carried the selected itag in selected_audio_format_ids (16),
+	// the ustreamer config, and the GVS PO token.
 	req := protoScan(t, d.bodies[0])
 	if got := string(one(t, req, 5).b); got != "ustreamer" {
 		t.Errorf("request ustreamer config = %q", got)
 	}
-	fid := protoScan(t, req[2][0].b)
+	fid := protoScan(t, req[16][0].b)
 	if got := one(t, fid, 1).v; got != 251 {
 		t.Errorf("request selected itag = %d, want 251", got)
 	}
@@ -226,6 +227,60 @@ func TestOpenAttestationRequired(t *testing.T) {
 	}
 }
 
+// TestOpenAttestationPendingNoMetadataIsError covers a status-2 (PENDING) stream
+// that ends without an end-segment or a content length: it may be a withheld
+// partial, so it must error rather than be served as complete.
+func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
+	resp := concat(
+		umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2})),
+		initFrames(0, []byte("INIT")),
+		segFrames(1, 1, []byte("AAA")),
+		// no formatInitFrame -> endSegment stays 0
+	)
+	d := &scriptedDoer{t: t, responses: [][]byte{resp, nil, nil, nil, nil}}
+	cfg := baseConfig(d)
+	cfg.ContentLength = 0 // no length signal either
+
+	// The first round yields bytes, so the incompleteness surfaces on read-to-EOF.
+	rc, _, err := Open(context.Background(), cfg, nil)
+	if err == nil {
+		_, err = io.ReadAll(rc)
+		rc.Close()
+	}
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (status-2 partial, no completion metadata)", err)
+	}
+	if !strings.Contains(err.Error(), "attestation-pending") {
+		t.Errorf("err = %q, want it to name attestation-pending", err)
+	}
+}
+
+// TestOpenAttestationPendingStillStreams covers STREAM_PROTECTION_STATUS = 2
+// (PENDING): non-terminal, the server still streams media, so WaxTap must consume
+// it rather than abort. Only status 3 (REQUIRED) is terminal.
+func TestOpenAttestationPendingStillStreams(t *testing.T) {
+	resp := concat(
+		umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2})),
+		initFrames(0, []byte("INIT")),
+		segFrames(1, 1, []byte("AAA")),
+		formatInitFrame(1),
+	)
+	d := &scriptedDoer{t: t, responses: [][]byte{resp}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatalf("status 2 (pending) should stream, got: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "INITAAA" {
+		t.Errorf("stream = %q, want INITAAA (status-2 media consumed)", got)
+	}
+}
+
 func TestOpenSabrError(t *testing.T) {
 	resp := umpFrame(partSabrError, marshalSabrError(SabrError{Type: "sabr.test_error", Code: 17}))
 	d := &scriptedDoer{t: t, responses: [][]byte{resp}}
@@ -307,8 +362,11 @@ func TestOpenUnknownLengthCleanEOF(t *testing.T) {
 	}
 }
 
+// TestOpenMissingInitSegmentIsError covers a bare fragment (no init segment, no
+// embedded container header): it cannot form a valid file, so it must error
+// rather than emit a headerless stream.
 func TestOpenMissingInitSegmentIsError(t *testing.T) {
-	resp1 := concat(segFrames(1, 1, []byte("AAA")), formatInitFrame(1)) // seq 1, end 1, no init
+	resp1 := concat(segFrames(1, 1, []byte("AAA")), formatInitFrame(1)) // seq 1, end 1, no init, not self-initializing
 	d := &scriptedDoer{t: t, responses: [][]byte{resp1, nil, nil}}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
@@ -317,6 +375,32 @@ func TestOpenMissingInitSegmentIsError(t *testing.T) {
 	}
 	if err != nil && !strings.Contains(err.Error(), "init segment") {
 		t.Errorf("err = %q, want it to mention the missing init segment", err)
+	}
+}
+
+// TestOpenSelfInitializingMediaEmitsWithoutInitSegment covers WebM/Opus SABR
+// audio, whose first media segment carries the EBML header instead of a separate
+// init segment. The stream must emit it rather than stall waiting for an init
+// segment that never arrives (the bug behind the false "status 2" report).
+func TestOpenSelfInitializingMediaEmitsWithoutInitSegment(t *testing.T) {
+	webm := append([]byte{0x1A, 0x45, 0xDF, 0xA3}, []byte("webm-header+cluster")...)
+	resp1 := concat(segFrames(1, 1, webm), formatInitFrame(1)) // seq 1, end 1, no separate init
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read = %v, want the self-initializing media to stream", err)
+	}
+	if string(got) != string(webm) {
+		t.Errorf("stream = %q, want the self-initializing media verbatim", got)
+	}
+	if d.calls != 1 {
+		t.Errorf("calls = %d, want 1 (the whole stream fits one round)", d.calls)
 	}
 }
 

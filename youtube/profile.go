@@ -1,8 +1,10 @@
 package youtube
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
+	"strings"
 
 	"github.com/colespringer/waxtap/internal/clientident"
 	"github.com/colespringer/waxtap/potoken"
@@ -158,11 +160,14 @@ var (
 		DeviceModel:   "iPhone16,2",
 		OSName:        "iPhone",
 		OSVersion:     "18.3.2.22D82",
-		// GVS only, never ScopePlayer: Extract fetches the player token up front,
-		// so requiring it would break iOS extraction when no provider is set.
-		// (yt-dlp marks the iOS player token recommended, not required, and GVS
-		// not_required_with_player_token, so a player token could substitute.)
-		RequiresPOTokens:  []potoken.Scope{potoken.ScopeGVS},
+		// No PO-token scopes. The GVS token iOS wants is iOSGuard-attested, but the
+		// bgutil/WaxSeal-style providers WaxTap integrates mint a BotGuard/web token
+		// iOS GVS cannot use, so requiring GVS would only block iOS behind a token no
+		// web minter can supply. A live `--client ios` check (2026-06-09) confirmed
+		// iOS streams unrestricted public videos with no token; a restricted video
+		// returns a clear download-time 403. Not ScopePlayer either: Extract fetches
+		// player tokens up front, so that would gate extraction. (yt-dlp marks the iOS
+		// player token recommended-not-required, GVS not_required_with_player_token.)
 		SupportsPlaylists: false,
 		// Native client: no base.js signature timestamp, so NeedsSignatureTimestamp
 		// stays unset (yt-dlp REQUIRE_JS_PLAYER false).
@@ -217,6 +222,34 @@ func makeProfile(base ClientProfile) ClientProfile { return BuildProfile(base) }
 // URLs without a PO token; the embedded and WEB clients cover fallback cases.
 func DefaultProfiles() []ClientProfile {
 	return buildDefaultProfiles(clientident.UserAgent(0))
+}
+
+// BuildClientChain returns a one-element strategy chain for a single built-in
+// client, forcing it as the whole chain instead of the default multi-client
+// fallback. WEB-family clients receive the same User-Agent / Chrome-major
+// treatment buildDefaultProfiles applies; native clients keep their own
+// User-Agent (chromeMajor does not apply to them). An unknown name is an error.
+//
+// A single forced client is trivially a uniform chain, which is what external
+// session adoption requires.
+func BuildClientChain(name string, chromeMajor int) ([]ClientProfile, error) {
+	webUA := clientident.UserAgent(chromeMajor)
+	base := profileWeb
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "web":
+		base = profileWeb
+		base.UserAgent = webUA
+	case "web_embedded", "web_embedded_player":
+		base = profileWebEmbedded
+		base.UserAgent = webUA
+	case "ios":
+		base = profileIOS
+	case "android_vr":
+		base = profileAndroidVR
+	default:
+		return nil, fmt.Errorf("unknown client %q (want one of: web, ios, android_vr, web_embedded)", name)
+	}
+	return []ClientProfile{makeProfile(base)}, nil
 }
 
 // buildDefaultProfiles returns the default strategy chain after applying webUA

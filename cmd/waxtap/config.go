@@ -59,6 +59,10 @@ type appConfig struct {
 	profileOverride string
 	chromeMajor     int
 	potokenURL      string
+	client          string
+	sessionURL      string
+	visitorData     string
+	cookiesPath     string
 
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
@@ -85,6 +89,10 @@ type fileConfig struct {
 	ProfileOverridePath *string  `json:"profileOverridePath"`
 	ChromeMajor         *int     `json:"chromeMajor"`
 	POTokenURL          *string  `json:"poTokenURL"`
+	Client              *string  `json:"client"`
+	SessionURL          *string  `json:"sessionURL"`
+	VisitorData         *string  `json:"visitorData"`
+	CookiesPath         *string  `json:"cookies"`
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
@@ -137,6 +145,10 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		profileOverride: str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
 		chromeMajor:     coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
 		potokenURL:      str("potoken-url", rootFlagsValue.potokenURL, fc.POTokenURL, ec.POTokenURL, ""),
+		client:          str("client", rootFlagsValue.client, fc.Client, ec.Client, ""),
+		sessionURL:      str("session-url", rootFlagsValue.sessionURL, fc.SessionURL, ec.SessionURL, ""),
+		visitorData:     str("visitor-data", rootFlagsValue.visitorData, fc.VisitorData, ec.VisitorData, ""),
+		cookiesPath:     str("cookies", rootFlagsValue.cookies, fc.CookiesPath, ec.CookiesPath, ""),
 
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
@@ -241,6 +253,10 @@ func envOverlay() (fileConfig, error) {
 	ec.ProfileOverridePath = getStr("WAXTAP_PROFILE_OVERRIDE")
 	ec.ChromeMajor = getInt("WAXTAP_CHROME_MAJOR")
 	ec.POTokenURL = getStr("WAXTAP_POTOKEN_URL")
+	ec.Client = getStr("WAXTAP_CLIENT")
+	ec.SessionURL = getStr("WAXTAP_SESSION_URL")
+	ec.VisitorData = getStr("WAXTAP_VISITOR_DATA")
+	ec.CookiesPath = getStr("WAXTAP_COOKIES")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
@@ -278,6 +294,15 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	if a.potokenURL != "" {
 		poProvider = newBgutilProvider(a.potokenURL)
 	}
+
+	// External session adoption: a pull-based --session-url provider, or a static
+	// --visitor-data (+ optional --cookies) session. New enforces the uniform-chain
+	// requirement and the Session/SessionProvider exclusivity.
+	session, sessionProvider, err := a.externalSession()
+	if err != nil {
+		return waxtap.Options{}, err
+	}
+
 	return waxtap.Options{
 		HTTPClient:          hc,
 		Logger:              log,
@@ -288,6 +313,9 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		ProfileOverridePath: a.profileOverride,
 		ChromeMajor:         a.chromeMajor,
 		POTokenProvider:     poProvider,
+		Client:              a.client,
+		Session:             session,
+		SessionProvider:     sessionProvider,
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,
@@ -309,6 +337,35 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		Politeness:   waxtap.Politeness{PerHostQPS: a.perHostQPS, Cooldown: a.cooldown},
 		SponsorBlock: waxtap.SponsorBlockOptions{BaseURL: a.sbBaseURL},
 	}, nil
+}
+
+// externalSession builds the adopted-session inputs: a pull-based --session-url
+// provider, or a static --visitor-data (+ optional --cookies) session. The two
+// sources are mutually exclusive, and --cookies requires --visitor-data because
+// adoption skips the bootstrap that would otherwise supply visitorData.
+func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSessionProvider, error) {
+	switch {
+	case a.sessionURL != "":
+		if a.visitorData != "" || a.cookiesPath != "" {
+			return nil, nil, fmt.Errorf("--session-url cannot be combined with --visitor-data/--cookies")
+		}
+		return nil, newHTTPSessionProvider(a.sessionURL), nil
+	case a.visitorData != "" || a.cookiesPath != "":
+		if a.visitorData == "" {
+			return nil, nil, fmt.Errorf("--cookies requires --visitor-data: adoption needs the browser's exact visitorData")
+		}
+		var cookies []*http.Cookie
+		if a.cookiesPath != "" {
+			parsed, err := parseNetscapeCookies(a.cookiesPath)
+			if err != nil {
+				return nil, nil, err
+			}
+			cookies = parsed
+		}
+		return &waxtap.POTokenSession{VisitorData: a.visitorData, Cookies: cookies}, nil, nil
+	default:
+		return nil, nil, nil
+	}
 }
 
 // httpClient builds a custom base client only when transport settings require

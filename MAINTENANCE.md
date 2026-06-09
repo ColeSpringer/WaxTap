@@ -273,6 +273,66 @@ When integrating a provider:
 Cache by scope and binding. Player and GVS tokens are requested separately so a
 provider can mint or reuse the right token for each scope.
 
+### External session adoption
+
+For byte-exact session coherence with a token minter, WaxTap can adopt an external
+guest identity instead of bootstrapping its own. The `gvs` token's `content_binding`
+is the session `visitorData`, so when a minter attests in a real browser, WaxTap can
+stream under that browser's exact `visitorData`.
+
+- **Inputs.** Library: `Options.Session` (a static `potoken.Session{VisitorData,
+  Cookies}`) or `Options.SessionProvider` (pull-based, resolved once per `Client`).
+  CLI: `--visitor-data` (+ optional `--cookies`, a Netscape file) for a static
+  session, or `--session-url` for a provider that GETs
+  `{"visitorData","cookies":[...]}`. `--session-url` is contacted directly, never
+  via `--proxy`.
+- **`visitorData` is sent verbatim.** It must be the browser's exact
+  `X-Goog-Visitor-Id` literal (the URL-escaped `...%3D%3D` form `ytcfg.VISITOR_DATA`
+  uses); WaxTap applies no escape/unescape, so it stays the same value the minter
+  attests under, in the header, the InnerTube context, and the GVS `content_binding`.
+- **Uniform chain required.** Adoption needs a single-client chain (`Options.Client`
+  / `--client`, or a single-family `ProfileOverridePath`). The default multi-client
+  chain is rejected so an adopted session is never routed through a client it was
+  not minted for. `Client` and `ProfileOverridePath` are mutually exclusive, as are
+  `Session` and `SessionProvider`.
+- **Fatal on failure.** Under adoption a failed resolution aborts extraction rather
+  than falling back to a synthetic `visitorData` (which would send the wrong
+  `content_binding`). The session resolves **once per `Client`**, so long-running
+  services should recreate the `Client` per task to pick up a fresh session.
+- **Guest-only.** Login cookies (`SID`, `__Secure-3PSID`, `SAPISID`, and siblings)
+  are dropped with a warning; a logged-in `visitorData` is account-bound. Supplying
+  cookies without a jar is an error, not a silent drop; `visitorData`-only adoption
+  is jarless.
+- **Same egress IP.** The minter host and the WaxTap downloads must share an egress
+  IP (use `--proxy` to align them if the minter runs elsewhere).
+- **Two-pass ANDROID_VR then WEB.** Adoption forces a uniform chain, so there is no
+  single-pass "default chain but adopt a session for the WEB fallback". Run the
+  default chain first; only if it fails, run a second `Client` with `--client web
+  --session-url ...` (or `--visitor-data ...`).
+
+**WEB streams end to end with the full setup, but it is still not the everyday
+path.** A uniform WEB chain, an adopted coherent session, and a GVS provider on the
+same egress IP download a complete, playable Opus/WebM (ffprobe-verified). The
+pieces:
+
+- **`selected_audio_format_ids` (field 16), not `selected_format_ids` (field 2).**
+  Field 2 is the deprecated form; the server only emits the WebM init
+  (`FORMAT_INITIALIZATION_METADATA` + a `MEDIA_HEADER{is_init=1, seq=0}` whose bytes
+  begin with the EBML magic) when the audio format is selected via field 16. This is
+  what `buildRequest` sends; confirmed by diffing a browser SABR request.
+- **`STREAM_PROTECTION_STATUS = 2` (PENDING) is non-terminal.** WaxTap used to bail
+  on `status >= 2`; the googlevideo reference aborts only on `3` (REQUIRED). Status 2
+  still streams media, so `consume` consumes it and continues; only status 3 yields
+  `ErrNeedsPOToken`. A status-2 stream that ends with no end-segment or content
+  length still errors via `stallResult`, so a withheld partial is never served as
+  complete.
+- **Coherent session.** A working WEB run needs both `visitorData` and cookies from
+  the same browser that mints the token, on the same egress IP. `--session-url`
+  (a `/session` endpoint returning both) or `--visitor-data` + `--cookies` supplies
+  it; `visitorData` alone is not enough. The reassembler (`stream.go:drain`) writes
+  the `is_init` segment first, self-initializes only media that leads with the EBML
+  magic, and never emits a headerless file.
+
 ## SABR audio streaming
 
 The default client chain leads with ANDROID_VR, which returns direct signed
@@ -297,8 +357,12 @@ rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
   `player_embed_es6` build served from `/embed` returns sts=0 against `stsPatterns`,
   so the watch-first order is what keeps the value extractable.
 - A GVS-scope `potoken.Provider`. The `gvs` token used on direct stream URLs is
-  base64-decoded to raw bytes and carried in the SABR `streamerContext`.
-  Attestation-required (`STREAM_PROTECTION_STATUS`) surfaces as `ErrNeedsPOToken`.
+  base64-decoded to raw bytes and carried in the SABR `streamerContext`. Only
+  `STREAM_PROTECTION_STATUS = 3` (REQUIRED) surfaces as `ErrNeedsPOToken`; status 2
+  (PENDING) is consumed and streamed (see
+  [External session adoption](#external-session-adoption) for the full working
+  setup). A real-browser integrity token from a coherent session (visitorData +
+  cookies, same egress IP) streams a complete file.
 
 ### When SABR breaks
 
@@ -316,19 +380,31 @@ pinned upstream revision recorded as `upstreamCommit` in `proto.go` (currently
   Decoders skip unknown fields, so additive changes stay compatible.
 - `youtube/internal/sabr/ump.go` holds the UMP part ids and UMP's custom
   variable-length integer, which is not protobuf LEB128: the first byte's leading
-  1-bits set the total length (1 to 5 bytes). The part-id constants run from
-  `MEDIA_HEADER=20` to `STREAM_PROTECTION_STATUS=58` and come from the same
-  revision (`protos/video_streaming/ump_part_id.proto`). Unknown part ids are
-  skipped by their encoded size, so new parts stay compatible.
+  1-bits set the total length (1 to 5 bytes), and for the 1-to-4 byte forms the
+  prefix's trailing `(8-size)` low bits hold the value's low bits with each
+  following byte stacked above them (the inverse is `umpVarint` in the tests). This
+  byte order is easy to invert, so verify it against LuanRT/googlevideo
+  `src/core/UmpReader.ts` and `UmpWriter.ts` at the pinned `upstreamCommit`;
+  `ump_test.go`'s wire-vector cases assert literal bytes (e.g. `32769` is
+  `c1 00 04`), so an inversion fails fast. An earlier inversion decoded a 32 KB
+  `MEDIA` size as 66560 and mis-framed the rest of the stream, which looked like a
+  withheld-media attestation problem but was purely the decoder. The part-id
+  constants run from `MEDIA_HEADER=20` to
+  `SABR_CONTEXT_SENDING_POLICY=59` and come from the same revision
+  (`protos/video_streaming/ump_part_id.proto`). Unknown part ids are skipped by
+  their encoded size, so new parts stay compatible.
 
-Two limitations matter if a specific video stalls or truncates:
+One limitation matters if a specific video stalls or truncates:
 
 - SABR is sequential (POST, consume segments, POST again until the format is
   complete), so it cannot use the parallel-chunk download path. A SABR download is
   single-stream.
-- `SABR_CONTEXT_UPDATE` (57) and `SABR_CONTEXT_SENDING_POLICY` (59) are not
-  implemented. That is fine for short audio, but it is the first thing to add if a
-  video stalls before completing.
+
+`SABR_CONTEXT_UPDATE` (57) and `SABR_CONTEXT_SENDING_POLICY` (59) are handled
+(commit `5ced779`): `applyContextUpdates`/`applyContextPolicy` fold the update into
+the stored context and echo active types in subsequent requests. They are exercised
+only after attestation passes (status 1), so they stay covered by offline tests
+rather than the live WEB path, which currently stops at the GVS gate (below).
 
 The CLI detects SABR without a provider, since routing to a SABR stream happens
 before any token is minted: `info --show-urls` prints `SABR (no direct URL)` and

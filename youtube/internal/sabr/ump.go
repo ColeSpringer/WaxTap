@@ -67,10 +67,11 @@ func (u *umpReader) next() (part umpPart, ok bool, err error) {
 
 // readVarint reads a UMP variable-length integer. The first byte's leading 1
 // bits set the total length (1..5): 0xxxxxxx->1, 10xxxxxx->2, 110xxxxx->3,
-// 1110xxxx->4, 11110xxx->5. For the 1..4 byte forms the first byte's trailing
-// low bits are the value's high bits and the following bytes are little-endian
-// low bytes; the 5-byte form ignores the first byte's low bits and reads the
-// next 4 bytes as a little-endian uint32.
+// 1110xxxx->4, 11110xxx->5. For the 1..4 byte forms the prefix's trailing
+// (8-size) low bits hold the value's low bits and each following byte stacks
+// above them; the 5-byte form ignores the prefix's low bits and reads the next
+// 4 bytes as a little-endian uint32. Matches LuanRT/googlevideo UmpReader.ts at
+// the pinned upstreamCommit.
 func (u *umpReader) readVarint() (uint64, error) {
 	if u.pos >= len(u.b) {
 		return 0, errUMPTruncated
@@ -86,17 +87,15 @@ func (u *umpReader) readVarint() (uint64, error) {
 		u.pos += 4
 		return uint64(v), nil
 	}
-	var (
-		value uint64
-		shift uint
-	)
+	// Prefix's low (8-size) bits are the value's low bits; later bytes stack above.
+	mask := byte(1)<<(8-uint(size)) - 1
+	value := uint64(prefix & mask)
+	shift := uint(8 - size)
 	for i := 0; i < size-1; i++ {
 		value |= uint64(u.b[u.pos]) << shift
 		shift += 8
 		u.pos++
 	}
-	mask := byte(1)<<(8-uint(size)) - 1
-	value |= uint64(prefix&mask) << shift
 	return value, nil
 }
 

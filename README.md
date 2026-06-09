@@ -19,9 +19,10 @@ keeps the selected source stream and does not re-encode.
 - **Library and CLI over one core.** `github.com/colespringer/waxtap` is the stable
   facade; `cmd/waxtap` is a real CLI built on the same packages.
 - **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
-  default client returns direct stream URLs and needs no PO token; the iOS and
-  WEB-family fallback clients require a caller-supplied `potoken.Provider` - iOS
-  for the media fetch, WEB-family to stream audio over SABR/UMP.
+  default ANDROID_VR and iOS clients return playable audio for public videos with
+  no PO token; the WEB-family fallback clients require a caller-supplied
+  `potoken.Provider` to stream audio over SABR/UMP (and WEB remains experimental;
+  see [PO tokens & WEB](#po-tokens--web)).
 - **Volatile surfaces are isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so a YouTube change touches few, marked files.
 - **Server-friendly:** concurrency-safe, context-cancelable, bounded memory,
@@ -225,6 +226,11 @@ Useful operational knobs:
   `chromeMajor` in config JSON to override the emulated Chrome major without a
   rebuild. This cannot be combined with `--profile-override`, which supplies its
   own user agents.
+- Single client / session adoption: `--client web|ios|android_vr|web_embedded`
+  forces one built-in client as the whole chain (conflicts with `--profile-override`).
+  `--visitor-data` (+ optional `--cookies`) or `--session-url` adopt an external
+  guest session for byte-exact coherence with a token minter; see
+  [PO tokens & WEB](#po-tokens--web).
 - Network posture: `--proxy`, `--qps`, `--cooldown`, `--hl`, `--gl`, and their
   documented `WAXTAP_*` equivalents. `--cooldown` (or `WAXTAP_COOLDOWN`, seconds)
   pauses requests to a host after HTTP 429, or after HTTP 503/403 with a
@@ -240,6 +246,37 @@ Useful operational knobs:
 
 `ffmpeg` and `ffprobe` are required only for processing or probing. Plain
 metadata, stream resolution, and keep-source downloads do not need them.
+
+## PO tokens & WEB
+
+ANDROID_VR and iOS return playable audio for public videos with **no PO token**.
+The WEB-family clients serve URL-less audio over SABR/UMP and need a GVS-scope
+`potoken.Provider`; WaxTap ships no token generator (supply one via
+`Options.POTokenProvider`, or the CLI's `--potoken-url` for a bgutil server).
+
+For byte-exact session coherence with a minter, WaxTap can **adopt an external
+guest session** instead of bootstrapping its own. The GVS token binds to the
+session `visitorData`, so WaxTap streams under the exact identity a real browser
+attested. Adoption requires a uniform client chain:
+
+```sh
+# Force WEB and adopt a session from a /session endpoint (e.g. a token minter):
+waxtap download <url> --client web \
+  --session-url http://127.0.0.1:4417/session \
+  --potoken-url http://127.0.0.1:4417
+# Or a static session: the browser's exact X-Goog-Visitor-Id literal (+ cookies):
+waxtap download <url> --client web --visitor-data 'Cgt...%3D%3D' --cookies ./cookies.txt
+```
+
+Notes: the adopted `visitorData` must be the browser's exact `X-Goog-Visitor-Id`
+literal (sent verbatim); the session must be a logged-out **guest** (login cookies
+are dropped); the minter host and downloads must share an egress IP (use `--proxy`
+to align them). The session resolves once per client, so long-running services
+should construct a fresh client per task.
+
+With that setup, WEB audio streams end to end (verified against a complete,
+playable Opus/WebM). It carries more moving parts than the default path, so it is
+for callers who need it. The default ANDROID_VR/iOS chain needs none of this.
 
 ## Maintenance
 

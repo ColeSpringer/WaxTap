@@ -62,12 +62,15 @@ const (
 	fSabrContextValue protowire.Number = 2
 
 	// VideoPlaybackAbrRequest
-	fAbrClientState     protowire.Number = 1
-	fAbrSelectedFormats protowire.Number = 2
-	fAbrBufferedRanges  protowire.Number = 3
-	fAbrPlayerTimeMs    protowire.Number = 4
-	fAbrUstreamerConfig protowire.Number = 5
-	fAbrStreamerContext protowire.Number = 19
+	fAbrClientState protowire.Number = 1
+	// fAbrSelectedAudioFormats is selected_audio_format_ids (16), the form the
+	// browser/yt-dlp/googlevideo use. The older selected_format_ids (2) does not
+	// prompt the server to send the WebM init segment, so WEB SABR stalled.
+	fAbrSelectedAudioFormats protowire.Number = 16
+	fAbrBufferedRanges       protowire.Number = 3
+	fAbrPlayerTimeMs         protowire.Number = 4
+	fAbrUstreamerConfig      protowire.Number = 5
+	fAbrStreamerContext      protowire.Number = 19
 
 	// MediaHeader (UMP part 20)
 	fMediaHdrHeaderID      protowire.Number = 1
@@ -317,19 +320,19 @@ func (c SabrContext) marshal() []byte {
 
 // videoPlaybackAbrRequest is the protobuf body POSTed to serverAbrStreamingUrl.
 type videoPlaybackAbrRequest struct {
-	ClientAbrState    clientAbrState
-	SelectedFormatIds []FormatId
-	BufferedRanges    []BufferedRange
-	PlayerTimeMs      int64
-	UstreamerConfig   []byte
-	StreamerContext   streamerContext
+	ClientAbrState         clientAbrState
+	SelectedAudioFormatIds []FormatId
+	BufferedRanges         []BufferedRange
+	PlayerTimeMs           int64
+	UstreamerConfig        []byte
+	StreamerContext        streamerContext
 }
 
 func (req videoPlaybackAbrRequest) marshal() []byte {
 	var b []byte
 	b = appendBytes(b, fAbrClientState, req.ClientAbrState.marshal())
-	for _, f := range req.SelectedFormatIds {
-		b = appendBytes(b, fAbrSelectedFormats, f.marshal())
+	for _, f := range req.SelectedAudioFormatIds {
+		b = appendBytes(b, fAbrSelectedAudioFormats, f.marshal())
 	}
 	for _, br := range req.BufferedRanges {
 		b = appendBytes(b, fAbrBufferedRanges, br.marshal())

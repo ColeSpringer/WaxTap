@@ -76,11 +76,11 @@ func pb(num protowire.Number, raw []byte) []byte {
 
 func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	req := videoPlaybackAbrRequest{
-		ClientAbrState:    clientAbrState{PlayerTimeMs: 1234, EnabledTrackTypes: enabledTrackTypesAudioOnly},
-		SelectedFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "acont=original"}},
-		BufferedRanges:    []BufferedRange{{FormatId: FormatId{Itag: 251}, DurationMs: 5000, StartSegmentIndex: 1, EndSegmentIndex: 3}},
-		PlayerTimeMs:      1234,
-		UstreamerConfig:   []byte("ustreamer-bytes"),
+		ClientAbrState:         clientAbrState{PlayerTimeMs: 1234, EnabledTrackTypes: enabledTrackTypesAudioOnly},
+		SelectedAudioFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "acont=original"}},
+		BufferedRanges:         []BufferedRange{{FormatId: FormatId{Itag: 251}, DurationMs: 5000, StartSegmentIndex: 1, EndSegmentIndex: 3}},
+		PlayerTimeMs:           1234,
+		UstreamerConfig:        []byte("ustreamer-bytes"),
 		StreamerContext: streamerContext{
 			ClientInfo:     ClientInfo{ClientName: 1, ClientVersion: "2.x", OSName: "Windows", OSVersion: "10.0", AcceptLanguage: "en-US"},
 			POToken:        []byte("po-token-bytes"),
@@ -96,8 +96,8 @@ func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	if got := one(t, top, 5).b; string(got) != "ustreamer-bytes" {
 		t.Errorf("video_playback_ustreamer_config(5) = %q", got)
 	}
-	if len(top[2]) != 1 {
-		t.Fatalf("selected_format_ids(2): got %d, want 1", len(top[2]))
+	if len(top[16]) != 1 {
+		t.Fatalf("selected_audio_format_ids(16): got %d, want 1", len(top[16]))
 	}
 	if len(top[3]) != 1 {
 		t.Fatalf("buffered_ranges(3): got %d, want 1", len(top[3]))
@@ -112,8 +112,8 @@ func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 		t.Errorf("client_abr_state.enabled_track_types(40) = %d, want 1 (audio only)", got)
 	}
 
-	// selected_format_ids[0] (misc.FormatId): itag=1, last_modified=2, xtags=3.
-	fid := protoScan(t, top[2][0].b)
+	// selected_audio_format_ids[0] (misc.FormatId): itag=1, last_modified=2, xtags=3.
+	fid := protoScan(t, top[16][0].b)
 	if got := one(t, fid, 1).v; got != 251 {
 		t.Errorf("FormatId.itag(1) = %d, want 251", got)
 	}

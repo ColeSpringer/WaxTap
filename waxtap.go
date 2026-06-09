@@ -61,15 +61,44 @@ func New(opts Options) (*Client, error) {
 	if opts.ChromeMajor != 0 && opts.ProfileOverridePath != "" {
 		return nil, fmt.Errorf("ChromeMajor and ProfileOverridePath are mutually exclusive: an override file supplies its own user agents")
 	}
+	if opts.Client != "" && opts.ProfileOverridePath != "" {
+		return nil, fmt.Errorf("Client and ProfileOverridePath are mutually exclusive: choose a single built-in client or supply an override file")
+	}
 	if opts.Politeness.Cooldown < 0 {
 		return nil, fmt.Errorf("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
 	}
 
+	// Resolve the client strategy chain: a single forced Client, a file override,
+	// or (nil) the built-in default chain.
 	var profiles []youtube.ClientProfile
-	if opts.ProfileOverridePath != "" {
+	switch {
+	case opts.Client != "":
+		var err error
+		if profiles, err = youtube.BuildClientChain(opts.Client, opts.ChromeMajor); err != nil {
+			return nil, err
+		}
+	case opts.ProfileOverridePath != "":
 		var err error
 		if profiles, err = loadProfileOverrides(opts.ProfileOverridePath); err != nil {
 			return nil, err
+		}
+	}
+
+	// External session adoption (Session/SessionProvider) requires a uniform,
+	// explicitly-selected chain so the adopted identity is never routed through a
+	// different client, and the two session sources are mutually exclusive.
+	if opts.Session != nil && opts.SessionProvider != nil {
+		return nil, fmt.Errorf("Session and SessionProvider are mutually exclusive: supply at most one external session source")
+	}
+	if opts.Session != nil || opts.SessionProvider != nil {
+		if err := requireUniformChain(profiles); err != nil {
+			return nil, err
+		}
+		if opts.Session != nil && opts.Session.VisitorData == "" {
+			return nil, fmt.Errorf("adopted Session requires a non-empty VisitorData (the browser's exact X-Goog-Visitor-Id literal)")
+		}
+		if opts.Session != nil && len(opts.Session.Cookies) > 0 && !optsHasJar(opts) {
+			return nil, fmt.Errorf("adopted session cookies require an HTTPClient with a cookie jar; pass one or supply visitorData only")
 		}
 	}
 
@@ -112,6 +141,8 @@ func New(opts Options) (*Client, error) {
 			CacheDir:         resolveCacheDir(opts, log),
 			DisableDiskCache: opts.DisableDiskCache,
 			POTokenProvider:  opts.POTokenProvider,
+			Session:          opts.Session,
+			SessionProvider:  opts.SessionProvider,
 			HL:               opts.Locale.HL,
 			GL:               opts.Locale.GL,
 		}),
@@ -131,6 +162,29 @@ func New(opts Options) (*Client, error) {
 		}),
 	}
 	return c, nil
+}
+
+// requireUniformChain rejects a chain that an adopted session cannot coherently
+// drive. A single forced client passes; a multi-client chain (including the
+// nil/default chain, which expands to several clients) is rejected so the adopted
+// identity is never routed through a client it was not minted for.
+func requireUniformChain(profiles []youtube.ClientProfile) error {
+	if len(profiles) == 0 {
+		return fmt.Errorf("session adoption requires a uniform client chain: set Options.Client (e.g. \"web\") or a single-client ProfileOverridePath; the default multi-client chain is rejected")
+	}
+	first := profiles[0].InnerTubeName
+	for _, p := range profiles[1:] {
+		if p.InnerTubeName != first {
+			return fmt.Errorf("session adoption requires a uniform client chain, but it mixes %q and %q clients", first, p.InnerTubeName)
+		}
+	}
+	return nil
+}
+
+// optsHasJar reports whether the effective HTTP client will carry a cookie jar. A
+// nil HTTPClient means WaxTap installs its own jar-backed default.
+func optsHasJar(opts Options) bool {
+	return opts.HTTPClient == nil || opts.HTTPClient.Jar != nil
 }
 
 // resolveCacheDir returns the base directory for WaxTap's on-disk caches, or ""

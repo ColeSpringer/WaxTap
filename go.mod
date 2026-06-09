@@ -3,9 +3,10 @@ module github.com/colespringer/waxtap
 go 1.26.3
 
 retract (
-	v1.4.2 // nsig solve fails on YouTube's player_es6_tce build (n=undefined); fixed in v1.4.3
-	v1.4.1 // WEB SABR audio path still non-functional; fixed in v1.4.2
-	v1.4.0 // WEB SABR audio path non-functional (n=undefined / sts=0); fixed in v1.4.2
+	v1.4.3 // WEB SABR audio path non-functional (UMP varint decode bug); fixed in v1.5.0
+	v1.4.2 // nsig solve fails on player_es6_tce (n=undefined); WEB SABR still broken; fixed in v1.5.0
+	v1.4.1 // WEB SABR audio path non-functional; fixed in v1.5.0
+	v1.4.0 // WEB SABR audio path non-functional (n=undefined / sts=0); fixed in v1.5.0
 	v1.0.0 // download throttling bug; use v1.0.1 or later
 )
 

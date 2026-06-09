@@ -68,16 +68,22 @@ func TestIOSFingerprint(t *testing.T) {
 	}
 }
 
-// TestIOSRequiresGVSOnly checks that iOS requires a GVS token for its media fetch
-// but not a player token. A player-scope requirement would gate extraction itself
-// (Extract fetches player tokens), re-breaking iOS when no provider is configured.
-func TestIOSRequiresGVSOnly(t *testing.T) {
+// TestIOSRequiresNoPOTokens locks iOS to needing no PO tokens. A live --client ios
+// check confirmed unrestricted public videos stream tokenless, and the GVS token
+// iOS wants is iOSGuard-attested, not mintable by the BotGuard/web providers WaxTap
+// integrates, so requiring it would only block the token-free path behind a token
+// no web minter can supply. iOS must not require a player token either: Extract
+// fetches player tokens up front, so that would gate extraction itself.
+func TestIOSRequiresNoPOTokens(t *testing.T) {
 	ios := profileByName(t, "IOS")
-	if !ios.requiresPOToken(potoken.ScopeGVS) {
-		t.Error("IOS must require a GVS PO token for its media fetch")
+	if ios.requiresPOToken(potoken.ScopeGVS) {
+		t.Error("IOS must not require a GVS PO token: it streams public videos tokenless, and iOSGuard tokens are not mintable by WaxTap's web providers")
 	}
 	if ios.requiresPOToken(potoken.ScopePlayer) {
 		t.Error("IOS must not require a player PO token (that would break extraction)")
+	}
+	if len(ios.RequiresPOTokens) != 0 {
+		t.Errorf("IOS RequiresPOTokens = %v, want none", ios.RequiresPOTokens)
 	}
 }
 

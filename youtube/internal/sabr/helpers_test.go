@@ -13,18 +13,20 @@ import (
 // build fixtures.
 
 // umpVarint encodes v as a UMP variable-length integer, the inverse of
-// umpReader.readVarint. It does not use the production decoder, keeping the
-// round-trip test independent.
+// umpReader.readVarint and matching LuanRT/googlevideo UmpWriter.ts: the prefix
+// carries the value's low (8-size) bits and each following byte stacks above
+// them. It does not use the production decoder, keeping the round-trip test
+// independent.
 func umpVarint(v uint64) []byte {
 	switch {
 	case v < 1<<7:
 		return []byte{byte(v)}
 	case v < 1<<14:
-		return []byte{0x80 | byte(v>>8), byte(v)}
+		return []byte{0x80 | byte(v&0x3F), byte(v >> 6)}
 	case v < 1<<21:
-		return []byte{0xC0 | byte(v>>16), byte(v), byte(v >> 8)}
+		return []byte{0xC0 | byte(v&0x1F), byte(v >> 5), byte(v >> 13)}
 	case v < 1<<28:
-		return []byte{0xE0 | byte(v>>24), byte(v), byte(v >> 8), byte(v >> 16)}
+		return []byte{0xE0 | byte(v&0x0F), byte(v >> 4), byte(v >> 12), byte(v >> 20)}
 	default:
 		b := []byte{0xF0, 0, 0, 0, 0}
 		binary.LittleEndian.PutUint32(b[1:], uint32(v))

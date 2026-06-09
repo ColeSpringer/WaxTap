@@ -44,6 +44,47 @@ func TestUMPVarintRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUMPVarintWireVectors pins the UMP varint against YouTube's real wire bytes
+// using hand-written literals (independent of umpVarint), so the inverted layout
+// that produced the false "status 2" can never silently return. The round-trip
+// test alone could not catch the bug because encoder and decoder shared the
+// inversion. Vectors verified against LuanRT/googlevideo UmpReader.ts/UmpWriter.ts.
+func TestUMPVarintWireVectors(t *testing.T) {
+	cases := []struct {
+		v    uint64
+		wire []byte
+	}{
+		{127, []byte{0x7F}},
+		{128, []byte{0x80, 0x02}},
+		{259, []byte{0x83, 0x04}},
+		{16383, []byte{0xBF, 0xFF}},
+		{16384, []byte{0xC0, 0x00, 0x02}},
+		{32769, []byte{0xC1, 0x00, 0x04}}, // a 32 KB+1 MEDIA size, like the real capture
+		{65536, []byte{0xC0, 0x00, 0x08}},
+		{2097151, []byte{0xDF, 0xFF, 0xFF}},
+		{2097152, []byte{0xE0, 0x00, 0x00, 0x02}},
+		{268435456, []byte{0xF0, 0x00, 0x00, 0x00, 0x10}},
+		{4294967295, []byte{0xF0, 0xFF, 0xFF, 0xFF, 0xFF}},
+	}
+	for _, tc := range cases {
+		if got := umpVarint(tc.v); !bytes.Equal(got, tc.wire) {
+			t.Errorf("umpVarint(%d) = % x, want % x", tc.v, got, tc.wire)
+		}
+		r := newUMPReader(tc.wire)
+		got, err := r.readVarint()
+		if err != nil {
+			t.Errorf("readVarint(% x): %v", tc.wire, err)
+			continue
+		}
+		if got != tc.v {
+			t.Errorf("readVarint(% x) = %d, want %d", tc.wire, got, tc.v)
+		}
+		if r.pos != len(tc.wire) {
+			t.Errorf("readVarint(%d) consumed %d bytes, want %d", tc.v, r.pos, len(tc.wire))
+		}
+	}
+}
+
 func TestUMPReaderPartsSkipsUnknownBySize(t *testing.T) {
 	const unknownPart = 99
 	body := concat(

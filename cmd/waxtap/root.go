@@ -27,6 +27,10 @@ type rootFlags struct {
 	profileOverride string
 	chromeMajor     int
 	potokenURL      string
+	client          string
+	sessionURL      string
+	visitorData     string
+	cookies         string
 }
 
 var rootFlagsValue rootFlags
@@ -69,6 +73,10 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.profileOverride, "profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
 	pf.IntVar(&rootFlagsValue.chromeMajor, "chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
 	pf.StringVar(&rootFlagsValue.potokenURL, "potoken-url", "", "bgutil PO-token provider URL, e.g. http://127.0.0.1:4417 (enables WEB/GVS tokens; contacted directly, not via --proxy; mint host and downloads must share an egress IP for full WEB validation)")
+	pf.StringVar(&rootFlagsValue.client, "client", "", "force one built-in client as the whole chain: web|ios|android_vr|web_embedded (conflicts with --profile-override)")
+	pf.StringVar(&rootFlagsValue.sessionURL, "session-url", "", "URL of a /session endpoint returning {visitorData,cookies} to adopt verbatim (contacted directly, not via --proxy; needs a uniform --client)")
+	pf.StringVar(&rootFlagsValue.visitorData, "visitor-data", "", "adopt this exact X-Goog-Visitor-Id literal and skip WaxTap's bootstrap (needs a uniform --client)")
+	pf.StringVar(&rootFlagsValue.cookies, "cookies", "", "Netscape cookie file to adopt alongside --visitor-data")
 
 	root.AddCommand(
 		newInfoCmd(),
