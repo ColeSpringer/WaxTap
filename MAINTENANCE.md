@@ -193,8 +193,9 @@ Notes:
 - `embedUrl` sets `context.thirdParty.embedUrl`, which `WEB_EMBEDDED_PLAYER`
   requires (a third-party embed origin, not youtube.com). Caveat: even with it,
   YouTube currently returns `This video is unavailable` (error 152) for the embedded
-  client on many public videos - a selective/region restriction tracked upstream as
-  yt-dlp #16077, not a WaxTap bug - so embedded is an unreliable fallback right now.
+  client on many public videos. That is a selective/region restriction tracked
+  upstream as yt-dlp #16077, not a WaxTap bug, so embedded is an unreliable fallback
+  right now.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - An override replaces only the primary extraction chain. Player discovery, the
