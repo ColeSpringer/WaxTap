@@ -1,0 +1,38 @@
+{
+  "responseContext": { "visitorData": "CgtsX..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Future Shape Playlist" } },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "futureItemViewModel": {
+                            "contentId": "dummyVideo9",
+                            "title": { "content": "Song in a renderer WaxTap has never seen" }
+                          }
+                        },
+                        {
+                          "futureItemViewModel": {
+                            "contentId": "dummyVideo8",
+                            "title": { "content": "Another one" }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

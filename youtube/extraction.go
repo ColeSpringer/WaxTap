@@ -24,6 +24,16 @@ type Extraction struct {
 	// is connected.
 	serverAbrURL    string
 	ustreamerConfig string
+	// playerURL pins the base.js the SABR n-descramble must use. It is set on the
+	// WEB-context path (YouTube A/Bs base.js per visitor, so the context's n is
+	// only coherent with the player its /player referenced). Empty means discover
+	// the player independently, as the normal extraction chain does.
+	playerURL string
+	// webContext marks an Extraction built from an attested WEB /player context
+	// (see Client.ExtractWebContext) rather than the normal InnerTube chain. A
+	// mid-stream SABR reload must re-fetch the same kind of context to keep the
+	// URL, session, and GVS-token binding coherent.
+	webContext bool
 }
 
 // buildExtraction keeps the InnerTube and watch-page extraction paths in sync.

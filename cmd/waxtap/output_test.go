@@ -86,9 +86,11 @@ func TestExitCodeFor(t *testing.T) {
 		{context.Canceled, 130},
 		{waxtap.ErrVideoUnavailable, 3},
 		{waxtap.ErrExtractionFailed, 4},
+		{waxtap.ErrPlaylistParse, 4}, // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
 		{waxtap.ErrFFmpegNotFound, 6},
 		{&usageError{"bad"}, 2},
+		{waxtap.ErrInvalidPlaylistID, 1},
 		{errFake("other"), 1},
 	}
 	for _, tt := range cases {
@@ -104,6 +106,12 @@ func TestErrorCode(t *testing.T) {
 	}
 	if got := errorCode(&usageError{"x"}); got != "usage" {
 		t.Errorf("errorCode(usage) = %q", got)
+	}
+	if got := errorCode(waxtap.ErrPlaylistParse); got != "stale-parser" {
+		t.Errorf("errorCode(playlist parse) = %q, want stale-parser", got)
+	}
+	if got := errorCode(waxtap.ErrInvalidPlaylistID); got != "invalid-input" {
+		t.Errorf("errorCode(invalid playlist) = %q, want invalid-input", got)
 	}
 }
 

@@ -362,8 +362,11 @@ rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
   `STREAM_PROTECTION_STATUS = 3` (REQUIRED) surfaces as `ErrNeedsPOToken`; status 2
   (PENDING) is consumed and streamed (see
   [External session adoption](#external-session-adoption) for the full working
-  setup). A real-browser integrity token from a coherent session (visitorData +
-  cookies, same egress IP) streams a complete file.
+  setup). Status 2 still caps WEB SABR at a ~1-minute preview for automated
+  clients, and a better token does not lift it (see [Diagnosing a SABR
+  stall](#diagnosing-a-sabr-stall)); full WEB audio comes from an attested
+  `/player-context` handoff (status-1 URL), and ANDROID_VR (which does not use
+  WEB SABR) remains the zero-dependency default.
 
 ### When SABR breaks
 
@@ -419,6 +422,104 @@ Reading the bytes (`download`, or `doctor`'s byte read) needs the GVS token. The
 CLI ships no PO-token generator, so only a library consumer that supplies a
 `potoken.Provider` can drive the WEB byte path (see [PO tokens](#po-tokens));
 without one it fails with `ErrNeedsPOToken`.
+
+### Diagnosing a SABR stall
+
+The known WEB-SABR cap (root-caused by live capture + a joint investigation with
+the WaxSeal PO-token team, 2026-06): when `STREAM_PROTECTION_STATUS` stays 2
+(attestation pending), the server delivers roughly the first minute of audio
+(itag 258 ≈ 70s / 8 segments / 3.39 MB; itag 251 ≈ 60s / 6 segments) and then
+goes media-empty for the rest of the session, no matter how the request advances.
+
+It is **not** a PO-token problem and **not** a request-shape problem. Do not
+re-chase either. The evidence:
+
+- Token A/B (hold the request constant, vary only the GVS token): a real
+  INTEGRITY mint, a garbage token, and an empty token all deliver byte-identical
+  output and cap at the same segment. The server never consults the token.
+- A warmed, residential, genuine-Chromium (Playwright) session playing the same
+  video in YouTube's **own** web player hits the **identical** cap (itag 251:
+  `duration_ms = 60001`, 6 segments) and then errors "Something went wrong." Its
+  request is far richer than ours, so matching the shape would not help.
+- Also ruled out: video (a concurrent video track does not lift the audio cap),
+  anonymous cookies (googlevideo is a different eTLD+1; the browser sends none),
+  egress IP (residential, still capped), wall-clock pacing (capping reported
+  `player_time_ms` to real elapsed and waiting 115s does not resume), readahead,
+  audio format/bitrate, and client patience (polling 70+ rounds past the wall
+  with raised guards never resumes).
+
+The differentiator is client **genuineness**, scored upstream of the PO token:
+automation markers (e.g. `navigator.webdriver`), a live in-context BotGuard, and
+the transport (TLS/HTTP2) fingerprint. A client that fails this check is served
+the ~1-minute preview; one that passes streams the full file. This is not about
+"headless" per se: a *properly attested* browser passes even headless (WaxSeal's
+mint browser, with `webdriver=false` and an in-context BotGuard bundle, streams
+the whole video), while stock automation (Playwright with `webdriver=true`, no
+in-context BotGuard) fails and shows the cap plus a "Something went wrong" error,
+which is the failed-attestation signature, not a generic headless cap. A
+browserless Go client cannot itself pass the gate (no in-context BotGuard;
+real-Chrome TLS alone was insufficient in testing).
+
+But the entitlement is a **transferable artifact**: status 1 is baked into the
+signed `serverAbrStreamingUrl`'s grade, minted by an attested browser that has
+**begun playback**, and that URL streams the full file from a plain cold Go client,
+verified with the attesting daemon **stopped**, so it is not tethered to a live
+session. So full WEB audio is reachable via the **attested `/player-context`
+handoff** (see the README "PO tokens & WEB"): WaxTap consumes the context,
+descrambles `n` with its `player_url`, binds a GVS token to its `visitorData`, and
+streams through the normal SABR loop. Verified end to end on a fresh live mint:
+full `634.624s`, itag 258, `status 1` every round, cold start.
+
+The dead ends still hold: a WEB `/player` WaxTap calls itself (or any **bare**
+in-page `/player` fetch) earns only the status-2 preview, and no token or
+request-shape tweak lifts it. The lever is the attested-**playback** provenance of
+the URL: the minting browser must actually begin playback (establish the session)
+before its `serverAbrStreamingUrl` carries the status-1 grade; the load-time URL
+is status-2. WaxTap classifies an un-handed-off status-2 stall token-neutrally as
+`ErrExtractionFailed` ("...under attestation-pending (status 2); cause is upstream
+of the PO token").
+
+**ANDROID_VR remains the default** (no gate, no GVS pot, direct signed URLs):
+verified tokenless on `aqz-KE-bpKQ`: full file, `duration=634.624s`,
+30,767,611 bytes, itag 258. WEB is opt-in via `--player-context-url` and falls
+back to ANDROID_VR on failure, so the cap never blocks a download.
+
+For a stall that does not match that signature, reproduce with `-v` and
+capture stderr; optionally set `WAXTAP_SABR_DUMP_DIR` to keep each round's raw
+response body:
+
+```sh
+WAXTAP_SABR_DUMP_DIR=/tmp/sabr waxtap download -v --client web \
+  --potoken-url http://127.0.0.1:4416 --session-url http://127.0.0.1:4416/session \
+  --dir /tmp/out "https://www.youtube.com/watch?v=VIDEO_ID" 2> /tmp/sabr.log
+```
+
+Read off the debug lines (`sabr: segment received`, `sabr: request state`,
+`sabr: next request policy`, `sabr: round complete`):
+
+- `duration_ms` 0 with a non-zero `effective_duration_ms`: the server moved
+  the duration into `time_range` only. `downloadedMs` and the buffered-range
+  acks both consume `effectiveDurationMs` (and `effectiveStartMs` for the
+  range start), so this alone is informational, not a stall cause.
+- `player_time_ms` in `sabr: request state` stops advancing: a duration source
+  dried up; find which.
+- After a freeze: re-sent segments below `next_seq` versus `media_parts` 0 in
+  `sabr: round complete` separates re-serving from total silence.
+- A mid-stream init whose `format_*` fields differ from the pinned format
+  points to a server-side format switch.
+
+The dump files (`<dir>/<timestamp>-sabr-round-NNN.bin`) hold the exact
+UMP/protobuf bytes. Re-decode them offline with the integration-tagged helper,
+which prints every UMP part (including ids the consumer skips) and walks each
+protobuf payload field by field:
+
+```sh
+WAXTAP_SABR_DUMP_DECODE=/tmp/sabr go test -tags=integration \
+  -run TestDecodeSABRDumps ./youtube/internal/sabr/ -v
+```
+
+Like `WAXTAP_DUMP_DIR`, the dump is best-effort and never changes stream
+behavior.
 
 ## Fixtures policy
 

@@ -414,16 +414,17 @@ func absolutePlayerURL(playerURL string) string {
 // streamExpiry returns the earlier of the signed URL expiry and the PO-token
 // expiry. A URL with an expired PO token can 403 before its expire parameter.
 func streamExpiry(q url.Values, path string, tok *Token) time.Time {
-	exp := expiryFromURL(q, path)
+	exp := ExpiryFromURL(q, path)
 	if tok != nil && !tok.Expires.IsZero() && (exp.IsZero() || tok.Expires.Before(exp)) {
 		return tok.Expires
 	}
 	return exp
 }
 
-// expiryFromURL parses the signed URL's expiry, preferring the expire query
-// parameter and falling back to an /expire/<unix>/ path segment.
-func expiryFromURL(q url.Values, path string) time.Time {
+// ExpiryFromURL parses a signed googlevideo URL's expiry, preferring the
+// expire query parameter and falling back to an /expire/<unix>/ path segment.
+// The zero time means no expiry was found.
+func ExpiryFromURL(q url.Values, path string) time.Time {
 	if secs := parseInt64(q.Get("expire")); secs > 0 {
 		return time.Unix(secs, 0).UTC()
 	}

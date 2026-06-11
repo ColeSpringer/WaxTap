@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -100,9 +101,17 @@ func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total
 }
 
 // reextract refreshes the player response and finds the originally selected
-// itag, whose index may have changed.
+// itag, whose index may have changed. A WEB-context extraction re-fetches a
+// fresh attested context (not the InnerTube chain) so the new URL, session, and
+// GVS-token binding stay coherent after a mid-stream reload.
 func (s *SABRStream) reextract(ctx context.Context) (*Extraction, error) {
-	ext, err := s.client.Extract(ctx, s.ext.video.ID)
+	var ext *Extraction
+	var err error
+	if s.ext.webContext {
+		ext, err = s.client.ExtractWebContext(ctx, s.ext.video.ID)
+	} else {
+		ext, err = s.client.Extract(ctx, s.ext.video.ID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +154,7 @@ func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatInd
 
 	// Failure to solve n may throttle the stream but does not make the URL
 	// unusable. Cancellation still stops the request.
-	descramble := c.sabrDescrambleHook(ext.video.ID)
+	descramble := c.sabrDescrambleHook(ext.video.ID, ext.playerURL)
 	serverURL := ext.serverAbrURL
 	if descramble != nil {
 		if descrambled, derr := descramble(ctx, serverURL); derr != nil {
@@ -158,7 +167,7 @@ func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatInd
 		}
 	}
 
-	return sabr.Config{
+	cfg := sabr.Config{
 		HTTP:            c.http,
 		Logger:          c.log,
 		ServerAbrURL:    serverURL,
@@ -169,17 +178,27 @@ func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatInd
 		POToken:         potBytes,
 		ContentLength:   atoi64(rf.ContentLength),
 		DescrambleN:     descramble,
-	}, nil
+		DumpDir:         os.Getenv(sabrDumpEnvVar),
+		DRC:             rf.IsDrc != nil && *rf.IsDrc,
+	}
+	if rf.AudioTrack != nil {
+		cfg.AudioTrackID = rf.AudioTrack.ID
+	}
+	return cfg, nil
 }
 
-// sabrDescrambleHook returns an n-parameter solver bound to videoID. It returns
-// nil when the configured resolver does not support player inspection.
-func (c *Client) sabrDescrambleHook(videoID string) func(context.Context, string) (string, error) {
+// sabrDescrambleHook returns an n-parameter solver bound to videoID. When
+// playerURL is set (the WEB-context path), the solver descrambles against that
+// exact base.js instead of one discovered from the video, because YouTube
+// A/B-tests base.js per visitor and the context's n is only coherent with the
+// player its /player referenced. It returns nil when the configured resolver
+// does not support player inspection.
+func (c *Client) sabrDescrambleHook(videoID, playerURL string) func(context.Context, string) (string, error) {
 	if c.inspector == nil {
 		return nil
 	}
 	return func(ctx context.Context, rawURL string) (string, error) {
-		return c.inspector.DescrambleN(ctx, resolver.Context{VideoID: videoID}, rawURL)
+		return c.inspector.DescrambleN(ctx, resolver.Context{VideoID: videoID, PlayerURL: playerURL}, rawURL)
 	}
 }
 

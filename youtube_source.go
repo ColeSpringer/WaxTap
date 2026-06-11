@@ -12,6 +12,7 @@ import (
 
 	"github.com/colespringer/waxtap/cut"
 	"github.com/colespringer/waxtap/download"
+	"github.com/colespringer/waxtap/format"
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/potoken"
@@ -43,10 +44,33 @@ type acquired struct {
 	transfer mediaTransfer
 }
 
+// webContextCooldown is how long acquire skips the WEB player-context attempt
+// after a provider failure, so a dead or hanging sidecar taxes a batch once
+// per window instead of paying the full provider budget on every video.
+const webContextCooldown = 30 * time.Second
+
 // acquire extracts, selects, and resolves one video, then builds the appropriate
 // transfer backend.
 func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitter) (*acquired, error) {
 	target := transcodeTarget(req.Transcode)
+
+	// Opt-in WEB path: when an attested player-context provider is configured, try
+	// it first (full WEB audio, status 1), even over a forced Options.Client, whose
+	// chain stays the fallback. On any failure, warn and fall back to the default
+	// tokenless chain so the download still succeeds; the provider call is bounded
+	// by Timeouts.WebContext inside the youtube client, so a dead provider can't
+	// eat the fallback budget. Caller cancellation is propagated, never warned and
+	// never "recovered" by running the fallback chain on a dead context.
+	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() {
+		a, err := c.acquireWebContext(ctx, req, id, target, em)
+		if err == nil {
+			return a, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; falling back to the default client chain")
+	}
 
 	em.stage(StageExtracting)
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
@@ -55,18 +79,8 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	if err != nil {
 		return nil, err
 	}
-	video := ext.Video()
 
-	idx, err := selectIndex(req.Audio, req.SourcePolicy, target, video.Formats)
-	if err != nil {
-		return nil, err
-	}
-	selFmt := video.Formats[idx]
-
-	em.stage(StageResolving)
-	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
-	defer rcancel()
-	plan, err := c.yt.Resolve(rctx, ext, idx)
+	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +126,76 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	}
 
 	return &acquired{video: video, fmtSel: selFmt, transfer: urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: refresh}}, nil
+}
+
+// acquireWebContext builds the transfer from an attested WEB /player context.
+// It always yields a SABR stream (the context's formats carry no direct URL), so
+// there is no signed-URL refresh path here; a mid-stream reload re-fetches a
+// fresh context (see SABRStream.reextract). Any error is returned so acquire can
+// warn and fall back to the default chain. Only a context failure trips the
+// provider cooldown: a per-video selection or resolve failure says nothing
+// about the provider's health.
+func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, target format.Target, em *emitter) (*acquired, error) {
+	em.stage(StageExtracting)
+	ext, err := c.yt.ExtractWebContext(ctx, id)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.noteWebContextFailure()
+		}
+		return nil, err
+	}
+	c.noteWebContextSuccess()
+
+	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em)
+	if err != nil {
+		return nil, err
+	}
+	if plan.SABR == nil {
+		return nil, fmt.Errorf("WEB player-context did not resolve to a SABR stream")
+	}
+	return &acquired{video: video, fmtSel: selFmt, transfer: sabrTransfer{dl: c.dl, handle: plan.SABR}}, nil
+}
+
+// selectAndResolve picks the format for req and resolves its delivery plan,
+// emitting the standard stage event. It is the shared tail of acquire's
+// default chain and the WEB player-context path.
+func (c *Client) selectAndResolve(ctx context.Context, req Request, target format.Target, ext *youtube.Extraction, em *emitter) (*youtube.Video, Format, youtube.MediaPlan, error) {
+	video := ext.Video()
+	idx, err := selectIndex(req.Audio, req.SourcePolicy, target, video.Formats)
+	if err != nil {
+		return nil, Format{}, youtube.MediaPlan{}, err
+	}
+
+	em.stage(StageResolving)
+	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
+	defer rcancel()
+	plan, err := c.yt.Resolve(rctx, ext, idx)
+	if err != nil {
+		return nil, Format{}, youtube.MediaPlan{}, err
+	}
+	return video, video.Formats[idx], plan, nil
+}
+
+// webContextCoolingDown reports whether the WEB player-context attempt is
+// skipped because the provider recently failed.
+func (c *Client) webContextCoolingDown() bool {
+	c.webCtxMu.Lock()
+	defer c.webCtxMu.Unlock()
+	return time.Now().Before(c.webCtxDownUntil)
+}
+
+// noteWebContextFailure starts the provider cooldown window.
+func (c *Client) noteWebContextFailure() {
+	c.webCtxMu.Lock()
+	c.webCtxDownUntil = time.Now().Add(webContextCooldown)
+	c.webCtxMu.Unlock()
+}
+
+// noteWebContextSuccess clears any cooldown.
+func (c *Client) noteWebContextSuccess() {
+	c.webCtxMu.Lock()
+	c.webCtxDownUntil = time.Time{}
+	c.webCtxMu.Unlock()
 }
 
 // mediaTransfer delivers media from either a direct URL or a SABR stream.

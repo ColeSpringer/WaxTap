@@ -77,7 +77,7 @@ func TestLive_ResolveAndRangeRead(t *testing.T) {
 		t.Fatalf("extract: %v", err)
 	}
 
-	rs, err := c.Resolve(ctx, ext, 0)
+	plan, err := c.Resolve(ctx, ext, 0)
 	if errors.Is(err, waxerr.ErrNeedsPOToken) {
 		t.Skipf("skipping resolve/read: a PO token is required but no provider is configured "+
 			"(no-token clients were unavailable on this network): %v", err)
@@ -85,7 +85,11 @@ func TestLive_ResolveAndRangeRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if rs.URL == "" {
+	if plan.SABR != nil {
+		t.Skip("skipping range read: format resolved to a SABR stream (no direct URL)")
+	}
+	rs := plan.Direct
+	if rs == nil || rs.URL == "" {
 		t.Fatal("resolved URL is empty")
 	}
 	t.Logf("resolved itag %d (expires %s, clen %d)", ext.Video().Formats[0].Itag, rs.ExpiresAt, rs.ContentLength)

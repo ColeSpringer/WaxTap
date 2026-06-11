@@ -59,6 +59,11 @@ var (
 	ErrInvalidVideoID    = errors.New("waxtap: invalid characters in video id")
 	ErrVideoIDTooShort   = errors.New("waxtap: video id is too short")
 	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist id")
+	// ErrPlaylistParse indicates a playlist browse response that parsed as JSON
+	// but matched no known item shape. Unlike ErrInvalidPlaylistID it is a
+	// maintenance signal in the ErrExtractionFailed class: YouTube likely
+	// changed the playlist page and the parser needs updating.
+	ErrPlaylistParse = errors.New("waxtap: playlist response shape not recognized (parser may be stale)")
 )
 
 // Processing / local files.

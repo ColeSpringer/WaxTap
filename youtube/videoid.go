@@ -14,9 +14,14 @@ const idLen = 11
 var (
 	// idExact matches a bare, well-formed video ID.
 	idExact = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
-	// playlistID matches the common playlist-ID prefixes (PL, RD radios, mixes,
-	// uploads, likes, favorites, watch-later, ...).
-	playlistID = regexp.MustCompile(`^(?:PL|OL|RD|UU|UL|LL|FL|TL|WL)[A-Za-z0-9_-]{10,}$`)
+	// playlistID matches the known playlist-ID prefixes (PL, OL albums, RD
+	// radios/mixes, UU/UL/PU uploads, LL likes, FL favorites, TL, WL
+	// watch-later, EC courses). The {10,} tail keeps every accepted id
+	// structurally longer than an 11-character video ID, so a video id that
+	// happens to start with a prefix pair is rejected here instead of turning
+	// into a network round trip that ends in "playlist unavailable". More
+	// exotic ids still work via a list= URL, which bypasses this check.
+	playlistID = regexp.MustCompile(`^(?:PL|OL|RD|UU|UL|LL|FL|TL|WL|EC|PU)[A-Za-z0-9_-]{10,}$`)
 )
 
 // ExtractVideoID extracts an 11-character video ID from a bare ID or any common

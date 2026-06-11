@@ -87,6 +87,9 @@ func marshalMediaHeader(h MediaHeader) []byte {
 	if h.ContentLength != 0 {
 		b = appendVarint(b, fMediaHdrContentLength, uint64(h.ContentLength))
 	}
+	if h.TimeRange != (TimeRange{}) {
+		b = appendBytes(b, fMediaHdrTimeRange, h.TimeRange.marshal())
+	}
 	return b
 }
 
@@ -127,6 +130,9 @@ func marshalNextRequestPolicy(p NextRequestPolicy) []byte {
 	var b []byte
 	if p.TargetAudioReadaheadMs != 0 {
 		b = appendVarint(b, fNextPolicyReadaheadMs, uint64(p.TargetAudioReadaheadMs))
+	}
+	if p.MaxTimeSinceLastRequestMs != 0 {
+		b = appendVarint(b, fNextPolicyMaxSinceLastReqMs, uint64(p.MaxTimeSinceLastRequestMs))
 	}
 	if p.BackoffTimeMs != 0 {
 		b = appendVarint(b, fNextPolicyBackoffMs, uint64(p.BackoffTimeMs))

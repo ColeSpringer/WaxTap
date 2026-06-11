@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -99,26 +98,9 @@ func (p *httpSessionProvider) ProvideSession(ctx context.Context) (potoken.Sessi
 }
 
 func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.endpoint, nil)
-	if err != nil {
-		return potoken.Session{}, err
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return potoken.Session{}, fmt.Errorf("session request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return potoken.Session{}, fmt.Errorf("session endpoint returned %s: %s",
-			resp.Status, strings.TrimSpace(string(snippet)))
-	}
-
 	var doc sessionDoc
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return potoken.Session{}, fmt.Errorf("decode session response: %w", err)
+	if err := sidecarJSON(ctx, p.http, http.MethodGet, p.endpoint, "session endpoint", nil, &doc); err != nil {
+		return potoken.Session{}, err
 	}
 	vd := doc.visitorData()
 	if vd == "" {

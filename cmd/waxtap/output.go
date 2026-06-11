@@ -201,9 +201,11 @@ func friendlyError(err error) string {
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "that is a playlist URL, not a single video"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		return "YouTube requires a PO token for this video and none is configured"
+		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrRateLimited):
 		return "rate limited by YouTube; back off and retry later"
+	case errors.Is(err, waxtap.ErrPlaylistParse):
+		return "YouTube returned a playlist shape WaxTap doesn't recognize; the parser may need updating"
 	}
 	return err.Error()
 }
@@ -216,7 +218,11 @@ func errorHint(err error) string {
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "the download command expands playlist URLs automatically; info/formats take a single video"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		return "try a different video, or run `waxtap doctor` to check extraction health"
+		// This error means no provider is configured, the mint failed, or
+		// YouTube rejected the token (SABR attestation status 3). A status-2 cap
+		// is a different failure: it classifies token-neutrally and must not be
+		// blamed on the token (see MAINTENANCE.md).
+		return "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
 	}
 	return ""
 }
@@ -246,6 +252,8 @@ func errorCode(err error) string {
 		return "live-content"
 	case errors.Is(err, waxtap.ErrNoAudioFormats):
 		return "no-audio-formats"
+	case errors.Is(err, waxtap.ErrPlaylistParse):
+		return "stale-parser"
 	case errors.Is(err, waxtap.ErrExtractionFailed):
 		return "extraction-failed"
 	case errors.Is(err, waxtap.ErrCipherSolve):
@@ -257,8 +265,7 @@ func errorCode(err error) string {
 	case errors.Is(err, waxtap.ErrInvalidVideoID), errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid-input"
 	}
-	var ue *usageError
-	if errors.As(err, &ue) {
+	if _, ok := errors.AsType[*usageError](err); ok {
 		return "usage"
 	}
 	return "error"
@@ -278,15 +285,16 @@ func exitCodeFor(err error) int {
 		errors.Is(err, waxtap.ErrLiveContent),
 		errors.Is(err, waxtap.ErrNoAudioFormats):
 		return 3
-	case errors.Is(err, waxtap.ErrExtractionFailed), errors.Is(err, waxtap.ErrCipherSolve):
+	case errors.Is(err, waxtap.ErrExtractionFailed),
+		errors.Is(err, waxtap.ErrCipherSolve),
+		errors.Is(err, waxtap.ErrPlaylistParse):
 		return 4
 	case errors.Is(err, waxtap.ErrRateLimited):
 		return 5
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return 6
 	}
-	var ue *usageError
-	if errors.As(err, &ue) {
+	if _, ok := errors.AsType[*usageError](err); ok {
 		return 2
 	}
 	return 1

@@ -1,6 +1,10 @@
 package sabr
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"math"
+
+	"google.golang.org/protobuf/encoding/protowire"
+)
 
 // SABR uses a small set of protobuf messages. They are encoded and decoded
 // directly with protowire to avoid generated code. Decoders ignore unknown
@@ -15,8 +19,8 @@ import "google.golang.org/protobuf/encoding/protowire"
 // protos/misc/common.proto, and protos/video_streaming/ump_part_id.proto.
 const upstreamCommit = "d2fa40d761034a286cf60ee033653307a1295b0c" // LuanRT/googlevideo, 2025-11-03
 
-// enabledTrackTypesAudioOnly is EnabledTrackTypes.AUDIO_ONLY. Format IDs select
-// the stream; this bitfield limits requests to audio tracks.
+// EnabledTrackTypes values: 0 video+audio, 1 audio only, 2 video only. WaxTap
+// streams audio only.
 const enabledTrackTypesAudioOnly int32 = 1
 
 // Field numbers. Grouped per message; see upstreamCommit for provenance.
@@ -36,10 +40,13 @@ const (
 	fBufRangeDurationMs   protowire.Number = 3
 	fBufRangeStartSegment protowire.Number = 4
 	fBufRangeEndSegment   protowire.Number = 5
+	fBufRangeTimeRange    protowire.Number = 6
 
 	// ClientAbrState
 	fAbrStatePlayerTimeMs  protowire.Number = 28
 	fAbrStateEnabledTracks protowire.Number = 40
+	fAbrStateDrcEnabled    protowire.Number = 46
+	fAbrStateAudioTrackID  protowire.Number = 69
 
 	// ClientInfo (nested in StreamerContext)
 	fClientInfoDeviceMake     protowire.Number = 12
@@ -63,14 +70,19 @@ const (
 
 	// VideoPlaybackAbrRequest
 	fAbrClientState protowire.Number = 1
-	// fAbrSelectedAudioFormats is selected_audio_format_ids (16), the form the
-	// browser/yt-dlp/googlevideo use. The older selected_format_ids (2) does not
-	// prompt the server to send the WebM init segment, so WEB SABR stalled.
-	fAbrSelectedAudioFormats protowire.Number = 16
-	fAbrBufferedRanges       protowire.Number = 3
-	fAbrPlayerTimeMs         protowire.Number = 4
-	fAbrUstreamerConfig      protowire.Number = 5
-	fAbrStreamerContext      protowire.Number = 19
+	// fAbrSelectedFormats is selected_format_ids (2): the formats the client has
+	// committed to (received init metadata for, or declared discarded). Sending
+	// a format only here, without a preferred_*_format_ids entry, does not
+	// prompt the server to send its init segment.
+	fAbrSelectedFormats protowire.Number = 2
+	fAbrBufferedRanges  protowire.Number = 3
+	fAbrPlayerTimeMs    protowire.Number = 4
+	fAbrUstreamerConfig protowire.Number = 5
+	// preferred_audio_format_ids (16) carries the desired audio renditions; the
+	// browser-family clients drive selection here. Its video sibling is 17,
+	// unused by this audio-only client.
+	fAbrPreferredAudioFormats protowire.Number = 16
+	fAbrStreamerContext       protowire.Number = 19
 
 	// MediaHeader (UMP part 20)
 	fMediaHdrHeaderID      protowire.Number = 1
@@ -83,6 +95,12 @@ const (
 	fMediaHdrDurationMs    protowire.Number = 12
 	fMediaHdrFormatID      protowire.Number = 13
 	fMediaHdrContentLength protowire.Number = 14
+	fMediaHdrTimeRange     protowire.Number = 15
+
+	// misc.TimeRange (nested in MediaHeader.time_range)
+	fTimeRangeStartTicks    protowire.Number = 1
+	fTimeRangeDurationTicks protowire.Number = 2
+	fTimeRangeTimescale     protowire.Number = 3
 
 	// FormatInitializationMetadata (UMP part 42)
 	fFmtInitFormatID      protowire.Number = 2
@@ -94,9 +112,10 @@ const (
 	fFmtInitDurationScale protowire.Number = 10
 
 	// NextRequestPolicy (UMP part 35)
-	fNextPolicyReadaheadMs protowire.Number = 1
-	fNextPolicyBackoffMs   protowire.Number = 4
-	fNextPolicyCookie      protowire.Number = 7
+	fNextPolicyReadaheadMs       protowire.Number = 1
+	fNextPolicyMaxSinceLastReqMs protowire.Number = 3
+	fNextPolicyBackoffMs         protowire.Number = 4
+	fNextPolicyCookie            protowire.Number = 7
 
 	// SabrRedirect (UMP part 43)
 	fSabrRedirectURL protowire.Number = 1
@@ -203,6 +222,7 @@ type BufferedRange struct {
 	DurationMs        int64
 	StartSegmentIndex int32
 	EndSegmentIndex   int32
+	TimeRange         *TimeRange
 }
 
 func (br BufferedRange) marshal() []byte {
@@ -212,19 +232,32 @@ func (br BufferedRange) marshal() []byte {
 	b = appendVarint(b, fBufRangeDurationMs, uint64(br.DurationMs))
 	b = appendVarint(b, fBufRangeStartSegment, uint64(br.StartSegmentIndex))
 	b = appendVarint(b, fBufRangeEndSegment, uint64(br.EndSegmentIndex))
+	if br.TimeRange != nil {
+		b = appendBytes(b, fBufRangeTimeRange, br.TimeRange.marshal())
+	}
 	return b
 }
 
-// clientAbrState carries playback position and the enabled-track bitfield.
+// clientAbrState carries the playback state the server keys delivery on:
+// PlayerTimeMs + EnabledTrackTypes always, plus the DRC and audio-track
+// selection when the chosen rendition needs them.
 type clientAbrState struct {
 	PlayerTimeMs      int64
 	EnabledTrackTypes int32
+	DrcEnabled        bool
+	AudioTrackID      string
 }
 
 func (s clientAbrState) marshal() []byte {
 	var b []byte
 	b = appendVarint(b, fAbrStatePlayerTimeMs, uint64(s.PlayerTimeMs))
 	b = appendVarint(b, fAbrStateEnabledTracks, uint64(s.EnabledTrackTypes))
+	if s.DrcEnabled {
+		b = appendVarint(b, fAbrStateDrcEnabled, 1)
+	}
+	if s.AudioTrackID != "" {
+		b = appendString(b, fAbrStateAudioTrackID, s.AudioTrackID)
+	}
 	return b
 }
 
@@ -319,29 +352,32 @@ func (c SabrContext) marshal() []byte {
 }
 
 // videoPlaybackAbrRequest is the protobuf body POSTed to serverAbrStreamingUrl.
+// Top-level player_time_ms (field 4) is deliberately not sent: it is the Onesie
+// osts parameter, and the reference client omits it on regular SABR requests.
+// Playback position travels only in client_abr_state.player_time_ms (field 28).
 type videoPlaybackAbrRequest struct {
-	ClientAbrState         clientAbrState
-	SelectedAudioFormatIds []FormatId
-	BufferedRanges         []BufferedRange
-	PlayerTimeMs           int64
-	UstreamerConfig        []byte
-	StreamerContext        streamerContext
+	ClientAbrState          clientAbrState
+	SelectedFormatIds       []FormatId
+	BufferedRanges          []BufferedRange
+	UstreamerConfig         []byte
+	PreferredAudioFormatIds []FormatId
+	StreamerContext         streamerContext
 }
 
 func (req videoPlaybackAbrRequest) marshal() []byte {
 	var b []byte
 	b = appendBytes(b, fAbrClientState, req.ClientAbrState.marshal())
-	for _, f := range req.SelectedAudioFormatIds {
-		b = appendBytes(b, fAbrSelectedAudioFormats, f.marshal())
+	for _, f := range req.SelectedFormatIds {
+		b = appendBytes(b, fAbrSelectedFormats, f.marshal())
 	}
 	for _, br := range req.BufferedRanges {
 		b = appendBytes(b, fAbrBufferedRanges, br.marshal())
 	}
-	if req.PlayerTimeMs != 0 {
-		b = appendVarint(b, fAbrPlayerTimeMs, uint64(req.PlayerTimeMs))
-	}
 	if len(req.UstreamerConfig) > 0 {
 		b = appendBytes(b, fAbrUstreamerConfig, req.UstreamerConfig)
+	}
+	for _, f := range req.PreferredAudioFormatIds {
+		b = appendBytes(b, fAbrPreferredAudioFormats, f.marshal())
 	}
 	b = appendBytes(b, fAbrStreamerContext, req.StreamerContext.marshal())
 	return b
@@ -360,6 +396,67 @@ type MediaHeader struct {
 	DurationMs     int64
 	FormatId       FormatId
 	ContentLength  int64
+	TimeRange      TimeRange
+}
+
+// TimeRange is a position and duration in timescale ticks. It appears on
+// MediaHeader.time_range (current servers may populate it instead of the flat
+// duration_ms; see effectiveDurationMs) and on outgoing BufferedRanges.
+type TimeRange struct {
+	StartTicks    int64
+	DurationTicks int64
+	Timescale     int32
+}
+
+func (tr TimeRange) marshal() []byte {
+	var b []byte
+	b = appendVarint(b, fTimeRangeStartTicks, uint64(tr.StartTicks))
+	b = appendVarint(b, fTimeRangeDurationTicks, uint64(tr.DurationTicks))
+	b = appendVarint(b, fTimeRangeTimescale, uint64(tr.Timescale))
+	return b
+}
+
+// effectiveDurationMs returns the flat duration_ms when present, else the
+// duration derived from time_range (ceil(duration_ticks/timescale*1000)),
+// matching the reference client's `durationMs || ceil(...)`. Zero means the
+// header carried no usable duration. Tick counts large enough to overflow the
+// millisecond conversion are server garbage and also report zero.
+func (h MediaHeader) effectiveDurationMs() int64 {
+	if h.DurationMs > 0 {
+		return h.DurationMs
+	}
+	return ticksToMsCeil(h.TimeRange.DurationTicks, h.TimeRange.Timescale)
+}
+
+// effectiveStartMs returns the flat start_ms when present, else the start
+// derived from time_range. It is the start-position counterpart of
+// effectiveDurationMs, for servers that carry segment timing only in
+// time_range.
+func (h MediaHeader) effectiveStartMs() int64 {
+	if h.StartMs > 0 {
+		return h.StartMs
+	}
+	ts := int64(h.TimeRange.Timescale)
+	if h.TimeRange.StartTicks <= 0 || ts <= 0 {
+		return 0
+	}
+	if h.TimeRange.StartTicks > math.MaxInt64/1000 {
+		return 0
+	}
+	return h.TimeRange.StartTicks * 1000 / ts
+}
+
+// ticksToMsCeil converts a tick count to milliseconds, rounding up. Invalid or
+// overflow-prone inputs report zero ("no usable value").
+func ticksToMsCeil(ticks int64, timescale int32) int64 {
+	ts := int64(timescale)
+	if ticks <= 0 || ts <= 0 {
+		return 0
+	}
+	if ticks > (math.MaxInt64-ts+1)/1000 {
+		return 0
+	}
+	return (ticks*1000 + ts - 1) / ts
 }
 
 func unmarshalMediaHeader(b []byte) (MediaHeader, error) {
@@ -395,11 +492,39 @@ func unmarshalMediaHeader(b []byte) (MediaHeader, error) {
 			h.FormatId = fid
 		case num == fMediaHdrContentLength && typ == protowire.VarintType:
 			h.ContentLength = int64(r.varint())
+		case num == fMediaHdrTimeRange && typ == protowire.BytesType:
+			tr, err := unmarshalTimeRange(r.bytes())
+			if err != nil {
+				return h, err
+			}
+			h.TimeRange = tr
 		default:
 			r.skip(num, typ)
 		}
 	}
 	return h, r.err
+}
+
+func unmarshalTimeRange(b []byte) (TimeRange, error) {
+	var tr TimeRange
+	r := fieldReader{b: b}
+	for {
+		num, typ, ok := r.next()
+		if !ok {
+			break
+		}
+		switch {
+		case num == fTimeRangeStartTicks && typ == protowire.VarintType:
+			tr.StartTicks = int64(r.varint())
+		case num == fTimeRangeDurationTicks && typ == protowire.VarintType:
+			tr.DurationTicks = int64(r.varint())
+		case num == fTimeRangeTimescale && typ == protowire.VarintType:
+			tr.Timescale = int32(r.varint())
+		default:
+			r.skip(num, typ)
+		}
+	}
+	return tr, r.err
 }
 
 // FormatInitializationMetadata (UMP part 42) carries the total segment count and
@@ -456,12 +581,14 @@ func unmarshalFormatInitMetadata(b []byte) (FormatInitializationMetadata, error)
 	return m, r.err
 }
 
-// NextRequestPolicy (UMP part 35) carries the server-directed backoff and the
-// playback cookie to echo on the next request.
+// NextRequestPolicy (UMP part 35) carries the server-directed backoff, the
+// keepalive bound (max_time_since_last_request_ms), and the playback cookie to
+// echo on the next request.
 type NextRequestPolicy struct {
-	TargetAudioReadaheadMs int64
-	BackoffTimeMs          int64
-	PlaybackCookie         []byte
+	TargetAudioReadaheadMs    int64
+	MaxTimeSinceLastRequestMs int64
+	BackoffTimeMs             int64
+	PlaybackCookie            []byte
 }
 
 func unmarshalNextRequestPolicy(b []byte) (NextRequestPolicy, error) {
@@ -475,6 +602,8 @@ func unmarshalNextRequestPolicy(b []byte) (NextRequestPolicy, error) {
 		switch {
 		case num == fNextPolicyReadaheadMs && typ == protowire.VarintType:
 			p.TargetAudioReadaheadMs = int64(r.varint())
+		case num == fNextPolicyMaxSinceLastReqMs && typ == protowire.VarintType:
+			p.MaxTimeSinceLastRequestMs = int64(r.varint())
 		case num == fNextPolicyBackoffMs && typ == protowire.VarintType:
 			p.BackoffTimeMs = int64(r.varint())
 		case num == fNextPolicyCookie && typ == protowire.BytesType:

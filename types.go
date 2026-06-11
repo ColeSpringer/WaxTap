@@ -102,6 +102,17 @@ type (
 	POTokenSessionProvider = potoken.SessionProvider
 )
 
+// Attested WEB player-context handoff (package potoken). A PlayerContextProvider
+// supplies an attested /player streaming context (serverAbrStreamingUrl,
+// ustreamer config, visitorData, and audio formats) that WaxTap streams Go-side,
+// enabling the opt-in WEB SABR audio path.
+type (
+	PlayerContextProvider     = potoken.PlayerContextProvider
+	PlayerContext             = potoken.PlayerContext
+	PlayerContextFormat       = potoken.PlayerContextFormat
+	PlayerContextProviderFunc = potoken.PlayerContextProviderFunc
+)
+
 // ProcessSpec is the processing pipeline shared by YouTube and local-file
 // requests. Each stage is opt-in: a nil pointer means that stage is skipped, so
 // the default path keeps the selected source stream unchanged.
@@ -417,6 +428,7 @@ const (
 	WarnSponsorBlockEmpty                      // SponsorBlock matched no segments
 	WarnRangesEmpty                            // cut ranges were empty after clamp/merge
 	WarnThrottled                              // a limiter/cooldown is active
+	WarnWebContextFallback                     // WEB player-context failed; fell back to the default chain
 )
 
 func (w WarningCode) String() string {
@@ -437,6 +449,8 @@ func (w WarningCode) String() string {
 		return "ranges-empty"
 	case WarnThrottled:
 		return "throttled"
+	case WarnWebContextFallback:
+		return "web-context-fallback"
 	default:
 		return "unknown"
 	}

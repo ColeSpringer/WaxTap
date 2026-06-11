@@ -1,10 +1,14 @@
 package sabr
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +152,106 @@ func TestOpenMultiRoundThreadsCookieAndBufferedRange(t *testing.T) {
 	}
 }
 
+// TestOpenTimeRangeOnlyDurationAdvancesPlayerTime covers servers that carry
+// segment timing only in time_range (no flat duration_ms): the downloaded
+// duration, and therefore client_abr_state.player_time_ms, must still advance,
+// or the server (which streams ahead of player_time_ms) stops sending and a
+// healthy stream stalls.
+func TestOpenTimeRangeOnlyDurationAdvancesPlayerTime(t *testing.T) {
+	seg := func(headerID uint32, seq uint64, data []byte) []byte {
+		return concat(
+			umpFrame(partMediaHeader, marshalMediaHeader(MediaHeader{
+				HeaderID: headerID, Itag: 251, SequenceNumber: seq,
+				TimeRange: TimeRange{StartTicks: int64(seq-1) * 441000, DurationTicks: 441000, Timescale: 44100}, // 10s
+			})),
+			mediaFrame(headerID, data),
+		)
+	}
+	resp1 := concat(initFrames(0, []byte("INIT")), seg(1, 1, []byte("AAA")), formatInitFrame(2))
+	resp2 := seg(9, 2, []byte("BBB"))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if got, err := io.ReadAll(rc); err != nil || string(got) != "INITAAABBB" {
+		t.Fatalf("stream = %q, %v; want INITAAABBB", got, err)
+	}
+
+	// The second request must report the 10s already delivered, not 0.
+	cas := protoScan(t, one(t, protoScan(t, d.bodies[1]), 1).b)
+	if got := one(t, cas, 28).v; got != 10000 {
+		t.Errorf("request2 player_time_ms = %d, want 10000 (duration from time_range)", got)
+	}
+	// And ack the delivered segment with the time_range-derived duration.
+	br := protoScan(t, one(t, protoScan(t, d.bodies[1]), 3).b)
+	if got := one(t, br, 3).v; got != 10000 {
+		t.Errorf("request2 buffered_range duration_ms = %d, want 10000", got)
+	}
+}
+
+// TestOpenGapRoundAcksContiguousRunsOnly covers a round whose segments are not
+// contiguous (seq 1 and 3, never 2): the ack must report two runs, not one
+// span claiming the missing segment, so the server still retransmits it.
+func TestOpenGapRoundAcksContiguousRunsOnly(t *testing.T) {
+	resp1 := concat(
+		initFrames(0, []byte("INIT")),
+		segFrames(1, 1, []byte("AAA")),
+		segFrames(2, 3, []byte("CCC")), // seq 3 buffered ahead of the gap
+		formatInitFrame(3),
+	)
+	resp2 := segFrames(9, 2, []byte("BBB")) // the server re-serves the gap
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "INITAAABBBCCC" {
+		t.Errorf("stream = %q, want INITAAABBBCCC (gap filled in order)", got)
+	}
+
+	req2 := protoScan(t, d.bodies[1])
+	if len(req2[3]) != 2 {
+		t.Fatalf("request2 buffered_ranges = %d, want 2 (runs [1,1] and [3,3], never one span hiding the gap)", len(req2[3]))
+	}
+	for i, want := range []uint64{1, 3} {
+		br := protoScan(t, req2[3][i].b)
+		if start, end := one(t, br, 4).v, one(t, br, 5).v; start != want || end != want {
+			t.Errorf("request2 range[%d] = [%d,%d], want [%d,%d]", i, start, end, want, want)
+		}
+	}
+}
+
+// TestBufferedRangesFromHeaders pins the run-splitting: sorted by sequence,
+// one range per contiguous run, durations summed per run.
+func TestBufferedRangesFromHeaders(t *testing.T) {
+	mh := func(seq uint64) *MediaHeader {
+		return &MediaHeader{SequenceNumber: seq, StartMs: int64(seq) * 1000, DurationMs: 1000}
+	}
+	// Arrival order 5, 3, 2: out of order with a gap at 4.
+	got := bufferedRangesFromHeaders(FormatId{Itag: 251}, []*MediaHeader{mh(5), mh(3), mh(2)})
+	if len(got) != 2 {
+		t.Fatalf("ranges = %d, want 2", len(got))
+	}
+	if got[0].StartSegmentIndex != 2 || got[0].EndSegmentIndex != 3 || got[0].DurationMs != 2000 || got[0].StartTimeMs != 2000 {
+		t.Errorf("range[0] = %+v, want seq [2,3], 2000ms from 2000ms", got[0])
+	}
+	if got[1].StartSegmentIndex != 5 || got[1].EndSegmentIndex != 5 || got[1].DurationMs != 1000 {
+		t.Errorf("range[1] = %+v, want seq [5,5], 1000ms", got[1])
+	}
+	if bufferedRangesFromHeaders(FormatId{Itag: 251}, nil) != nil {
+		t.Error("no headers must yield no ranges")
+	}
+}
+
 func TestOpenFollowsRedirectWithDescramble(t *testing.T) {
 	const rawRedirect = "https://r2.example/videoplayback?n=RAWN"
 	const solved = "https://r2.example/videoplayback?n=SOLVED"
@@ -181,8 +285,9 @@ func TestOpenFollowsRedirectWithDescramble(t *testing.T) {
 	if d.calls != 2 {
 		t.Fatalf("calls = %d, want 2", d.calls)
 	}
-	if d.urls[1] != solved {
-		t.Errorf("redirect followed to %q, want %q", d.urls[1], solved)
+	// The request number keeps counting across redirects (0-based per request).
+	if want := solved + "&rn=1"; d.urls[1] != want {
+		t.Errorf("redirect followed to %q, want %q", d.urls[1], want)
 	}
 }
 
@@ -229,7 +334,9 @@ func TestOpenAttestationRequired(t *testing.T) {
 
 // TestOpenAttestationPendingNoMetadataIsError covers a status-2 (PENDING) stream
 // that ends without an end-segment or a content length: it may be a withheld
-// partial, so it must error rather than be served as complete.
+// partial, so it must error. The classification is token-neutral
+// (ErrExtractionFailed): a live A/B proved the status-2 cap is identical with a
+// real, garbage, or absent token, so the message must not blame the token.
 func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
 	resp := concat(
 		umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2})),
@@ -250,8 +357,49 @@ func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
 	if !errors.Is(err, waxerr.ErrExtractionFailed) {
 		t.Fatalf("err = %v, want ErrExtractionFailed (status-2 partial, no completion metadata)", err)
 	}
+	if errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Error("status-2 cap must not classify as a PO-token error (token is proven irrelevant)")
+	}
 	if !strings.Contains(err.Error(), "attestation-pending") {
 		t.Errorf("err = %q, want it to name attestation-pending", err)
+	}
+}
+
+// TestOpenAttestationPendingCapIsTokenNeutral mirrors the live capture of the
+// status-2 cap: status 2 every round, a burst of media, then rounds with nothing
+// new. The stall must classify token-neutrally (ErrExtractionFailed) and never as
+// a PO-token error: a request-constant, token-varied A/B proved the cap is
+// identical with a real, garbage, or absent token, so it is upstream of the token.
+func TestOpenAttestationPendingCapIsTokenNeutral(t *testing.T) {
+	status2 := umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2}))
+	resp1 := concat(
+		status2,
+		initFrames(0, []byte("INIT")),
+		segFrames(1, 1, []byte("AAA")),
+		segFrames(2, 2, []byte("BBB")),
+		formatInitFrame(4),
+	)
+	// The live pattern: subsequent rounds re-send only the init segment.
+	initOnly := concat(status2, initFrames(0, []byte("INIT")))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, initOnly, initOnly}}
+
+	rc, _, err := Open(context.Background(), baseConfig(d), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Fatalf("err = %v, want ErrExtractionFailed (capped delivery under status 2)", err)
+	}
+	if errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Error("capped delivery must not classify as a PO-token error (token is proven irrelevant)")
+	}
+	if !strings.Contains(err.Error(), "stalled at segment 3 of 4") {
+		t.Errorf("err = %q, want the stall position retained", err)
+	}
+	if string(got) != "INITAAABBB" {
+		t.Errorf("delivered prefix = %q, want INITAAABBB", got)
 	}
 }
 
@@ -666,6 +814,55 @@ func TestOpenKeepExistingActivatesStoredContext(t *testing.T) {
 	// Round 3 request (after KEEP_EXISTING + send_by_default): now echoed, value kept.
 	sc3 := protoScan(t, one(t, protoScan(t, d.bodies[2]), 19).b)
 	assertActiveContext(t, sc3, 4, "V")
+}
+
+// TestOpenDumpDirWritesRounds checks the diagnostic dump: one request and one
+// response file per round, the response byte-identical to the raw body, with no
+// effect on the stream itself.
+func TestOpenDumpDirWritesRounds(t *testing.T) {
+	resp1 := concat(initFrames(0, []byte("INIT")), segFrames(1, 1, []byte("AAA")), formatInitFrame(2))
+	resp2 := segFrames(2, 2, []byte("BBB"))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1, resp2}}
+	cfg := baseConfig(d)
+	cfg.DumpDir = t.TempDir()
+
+	rc, _, err := Open(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "INITAAABBB" {
+		t.Errorf("stream = %q, want INITAAABBB (dump must not change behavior)", got)
+	}
+
+	entries, err := os.ReadDir(cfg.DumpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rounds, requests []string
+	for _, e := range entries {
+		switch {
+		case strings.Contains(e.Name(), "-round-"):
+			rounds = append(rounds, e.Name())
+		case strings.Contains(e.Name(), "-request-"):
+			requests = append(requests, e.Name())
+		}
+	}
+	if len(rounds) != 2 || len(requests) != 2 {
+		t.Fatalf("dump files = %d rounds, %d requests; want 2 each", len(rounds), len(requests))
+	}
+	sort.Strings(rounds)
+	first, err := os.ReadFile(filepath.Join(cfg.DumpDir, rounds[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, resp1) {
+		t.Error("first round dump does not match the raw response body")
+	}
 }
 
 func TestOpenHTTPErrorStatus(t *testing.T) {

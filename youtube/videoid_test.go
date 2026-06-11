@@ -75,7 +75,12 @@ func TestExtractPlaylistID(t *testing.T) {
 		{"playlist url", "https://www.youtube.com/playlist?list=" + list, list, nil},
 		{"watch with list", "https://www.youtube.com/watch?v=testVideo01&list=" + list, list, nil},
 		{"radio mix", "https://www.youtube.com/watch?v=testVideo01&list=RDabcdefghij", "RDabcdefghij", nil},
+		{"education course", "ECabcdefghijklmnop", "ECabcdefghijklmnop", nil},
+		{"popular uploads", "PUabcdefghijklmnop", "PUabcdefghijklmnop", nil},
 		{"not a playlist", "https://www.youtube.com/watch?v=testVideo01", "", waxerr.ErrInvalidPlaylistID},
+		// Exactly 11 chars: a video-id-shaped token that happens to start with a
+		// playlist prefix pair must not validate as a playlist.
+		{"video-id-shaped token", "PLabcdefghi", "", waxerr.ErrInvalidPlaylistID},
 		{"garbage", "hello", "", waxerr.ErrInvalidPlaylistID},
 	}
 

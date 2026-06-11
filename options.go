@@ -64,11 +64,23 @@ type Options struct {
 	// configured.
 	POTokenProvider POTokenProvider
 
+	// PlayerContextProvider enables the opt-in WEB SABR audio path: it supplies an
+	// attested /player streaming context (from an external attesting browser such
+	// as WaxSeal) that WaxTap streams Go-side. When set, WaxTap tries the WEB
+	// context first (even over a forced Client, whose chain stays the fallback)
+	// and falls back to the normal extraction chain on a context failure. It
+	// needs a GVS PO-token provider too (the stream binds a GVS token to the
+	// context's visitorData); New rejects a configuration without one, because
+	// the token mint happens at SABR setup, past the fallback boundary. Nil
+	// leaves WaxTap on its default chain.
+	PlayerContextProvider PlayerContextProvider
+
 	// Client, when non-empty, forces a single built-in client as the whole
 	// strategy chain instead of the default multi-client fallback. Valid values
 	// are "web", "ios", "android_vr", and "web_embedded". It applies the built-in
 	// WEB-family User-Agent / ChromeMajor treatment. It is mutually exclusive with
-	// ProfileOverridePath.
+	// ProfileOverridePath. A configured PlayerContextProvider is tried before
+	// this chain; the forced client serves as its fallback.
 	Client string
 
 	// Session is an externally supplied guest identity (visitorData + cookies)
@@ -123,6 +135,7 @@ type Concurrency struct {
 type Timeouts struct {
 	Extraction     time.Duration // player-response fetch + parse
 	Resolve        time.Duration // stream-URL resolution (incl. cipher JS)
+	WebContext     time.Duration // per attested /player-context fetch, mid-stream re-fetches included
 	SponsorBlock   time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
 	ChunkRetry     time.Duration // per-chunk deadline for ranged downloads
 	FFmpegShutdown time.Duration // grace period before killing ffmpeg on cancel

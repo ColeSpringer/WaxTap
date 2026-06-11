@@ -3,8 +3,8 @@ package youtube
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"time"
+
+	"github.com/colespringer/waxtap/internal/dumpfile"
 )
 
 // dumpEnvVar names the directory for env-gated diagnostic artifacts. When it is
@@ -12,6 +12,11 @@ import (
 // maintainer can inspect what YouTube returned. It is off by default and checked
 // only on failure paths.
 const dumpEnvVar = "WAXTAP_DUMP_DIR"
+
+// sabrDumpEnvVar names the directory for raw SABR round dumps. When it is set,
+// every SABR response body is written there so the exact UMP/protobuf bytes
+// can be re-decoded offline (see internal/sabr Config.DumpDir). Off by default.
+const sabrDumpEnvVar = "WAXTAP_SABR_DUMP_DIR"
 
 // dumpArtifact writes data to a timestamped file under WAXTAP_DUMP_DIR when that
 // variable is set. It is best-effort: an unset variable does nothing, and every
@@ -23,14 +28,9 @@ func (c *Client) dumpArtifact(ctx context.Context, label string, data []byte) {
 	if dir == "" || len(data) == 0 {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		c.log.DebugContext(ctx, "artifact dump skipped: create dir failed", "dir", dir, "err", err)
-		return
-	}
-	name := time.Now().UTC().Format("20060102T150405.000Z") + "-" + sanitizeLabel(label)
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		c.log.DebugContext(ctx, "artifact dump failed", "path", path, "err", err)
+	path, err := dumpfile.Write(dir, sanitizeLabel(label), data)
+	if err != nil {
+		c.log.DebugContext(ctx, "artifact dump failed", "dir", dir, "err", err)
 		return
 	}
 	c.log.DebugContext(ctx, "wrote diagnostic artifact", "path", path)

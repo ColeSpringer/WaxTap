@@ -9,6 +9,7 @@ package sabr
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,8 +17,12 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/colespringer/waxtap/internal/dumpfile"
+	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -94,6 +99,10 @@ type Config struct {
 	UstreamerConfig []byte
 	// Format selects the audio encoding to stream.
 	Format FormatId
+	// DRC mirrors the selected audio format's isDrc flag.
+	DRC bool
+	// AudioTrackID is the selected audio track id, for multi-audio videos.
+	AudioTrackID string
 	// ClientInfo is the wire identity sent in streamerContext.client_info.
 	ClientInfo ClientInfo
 	// UserAgent is the HTTP User-Agent for the SABR POST; it must match the
@@ -112,6 +121,11 @@ type Config struct {
 	// DescrambleN resolves the throttling n parameter of a SABR_REDIRECT URL. Nil
 	// follows redirects unchanged.
 	DescrambleN func(ctx context.Context, rawURL string) (string, error)
+	// DumpDir, when set, receives each round's raw response body as a
+	// timestamped file so the exact UMP/protobuf bytes can be re-decoded
+	// offline. Best-effort diagnostics: write failures are logged at debug and
+	// never affect the stream.
+	DumpDir string
 }
 
 // Open starts a SABR stream and returns a reader over the reassembled audio.
@@ -164,6 +178,7 @@ type stream struct {
 	redirects      int
 	emptyRounds    int
 	contextRounds  int
+	rounds         int // total POSTs sent, for log correlation and dump names
 
 	// SABR context state. sabrContexts holds the value last received for each
 	// context type; activeContextTypes is the subset currently echoed back to the
@@ -194,6 +209,15 @@ type stream struct {
 	// not treat it as complete.
 	attestationPending bool
 
+	// formatInitSeen records that FORMAT_INITIALIZATION_METADATA arrived, after
+	// which the audio format is also reported in selected_format_ids (matching
+	// the reference client's notion of a committed format).
+	formatInitSeen bool
+
+	// audioRound holds the selected audio format's media headers received in the
+	// current round, drained into a buffered range by the next buildRequest.
+	audioRound []*MediaHeader
+
 	done bool
 	err  error
 }
@@ -203,6 +227,15 @@ type stream struct {
 type mediaSegment struct {
 	data     []byte
 	duration int64
+}
+
+// headerItag returns the itag identifying a media header's format, preferring
+// the nested format id. Zero means the header did not identify its format.
+func headerItag(h *MediaHeader) int32 {
+	if h.FormatId.Itag != 0 {
+		return h.FormatId.Itag
+	}
+	return h.Itag
 }
 
 func (s *stream) Read(p []byte) (int, error) {
@@ -266,8 +299,17 @@ func (s *stream) round() error {
 	if res.attestationPending {
 		s.attestationPending = true
 	}
-	if res.policy != nil && len(res.policy.PlaybackCookie) > 0 {
-		s.playbackCookie = res.policy.PlaybackCookie
+	if res.policy != nil {
+		// The server's pacing directives, for diagnosing withheld-media stalls.
+		s.log.DebugContext(s.ctx, "sabr: next request policy",
+			"round", s.rounds,
+			"target_audio_readahead_ms", res.policy.TargetAudioReadaheadMs,
+			"max_time_since_last_request_ms", res.policy.MaxTimeSinceLastRequestMs,
+			"backoff_ms", res.policy.BackoffTimeMs,
+			"playback_cookie_len", len(res.policy.PlaybackCookie))
+		if len(res.policy.PlaybackCookie) > 0 {
+			s.playbackCookie = res.policy.PlaybackCookie
+		}
 	}
 	// Apply SABR context updates before the redirect/progress checks so an update
 	// is never dropped. changed reports whether the next request will differ.
@@ -312,8 +354,15 @@ func (s *stream) round() error {
 			return s.stallResult()
 		}
 	}
+	s.log.DebugContext(s.ctx, "sabr: round complete",
+		"round", s.rounds,
+		"headers", len(res.headers), "media_parts", len(res.media),
+		"emitted_bytes", emitted, "advanced", advanced,
+		"next_seq", s.nextSeq, "end_segment", s.endSegment,
+		"buffered_segments", len(s.segments), "downloaded_ms", s.downloadedMs,
+		"empty_rounds", s.emptyRounds, "context_rounds", s.contextRounds)
 	if waiting {
-		return s.sleep(clampBackoff(res.policy.BackoffTimeMs, s.maxBackoff()))
+		return httpx.Sleep(s.ctx, clampBackoff(res.policy.BackoffTimeMs, s.maxBackoff()))
 	}
 	return nil
 }
@@ -381,6 +430,14 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 			if err != nil {
 				return res, wrapExtraction(err)
 			}
+			// Only the selected audio format's metadata may drive completion;
+			// with a declared (discarded) video format the server can describe
+			// that format too, and its segment count must not become ours.
+			if m.FormatId.Itag != 0 && m.FormatId.Itag != s.cfg.Format.Itag {
+				s.log.DebugContext(s.ctx, "sabr: ignoring format metadata for non-selected format", "itag", m.FormatId.Itag)
+				continue
+			}
+			s.formatInitSeen = true
 			if m.EndSegmentNumber > 0 {
 				res.endSegment = uint64(m.EndSegmentNumber)
 			}
@@ -456,11 +513,35 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 	if res.contentType != "" {
 		s.contentType = res.contentType
 	}
+	// The per-segment trace boxes a large argument list, so it is gated here
+	// rather than left to slog's internal level check.
+	debug := s.log.Enabled(s.ctx, slog.LevelDebug)
 	for _, hid := range res.mediaOrder {
 		h := res.headers[hid]
 		data := res.media[hid]
 		if h == nil {
 			s.log.WarnContext(s.ctx, "sabr: media bytes without a header", "header_id", hid)
+			continue
+		}
+		// Per-segment trace ahead of the skip branches below, so re-sent and
+		// below-start segments stay visible when diagnosing pacing stalls. A
+		// zero duration_ms with a non-zero effective_duration_ms means the
+		// server moved the duration into time_range.
+		if debug {
+			s.log.DebugContext(s.ctx, "sabr: segment received",
+				"round", s.rounds,
+				"seq", h.SequenceNumber, "is_init", h.IsInitSeg,
+				"duration_ms", h.DurationMs, "effective_duration_ms", h.effectiveDurationMs(),
+				"start_ms", h.StartMs, "itag", h.Itag,
+				"format_itag", h.FormatId.Itag, "format_lmt", h.FormatId.LastModified, "format_xtags", h.FormatId.XTags,
+				"content_length", h.ContentLength, "bytes", len(data))
+		}
+		// Route by format. Only the selected audio format reaches the output;
+		// any other format is dropped outright so it can never corrupt the audio.
+		// Itag 0 means the header did not name a format; in an audio-led session
+		// it can only be the audio track.
+		if itag := headerItag(h); itag != 0 && itag != s.cfg.Format.Itag {
+			s.log.DebugContext(s.ctx, "sabr: dropping media for unexpected format", "itag", itag, "seq", h.SequenceNumber, "bytes", len(data))
 			continue
 		}
 		if h.IsInitSeg {
@@ -489,7 +570,11 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 		if _, exists := s.segments[seq]; exists {
 			continue // duplicate within the buffer; do not double-count duration
 		}
-		s.segments[seq] = mediaSegment{data: data, duration: h.DurationMs}
+		// effectiveDurationMs, not the flat DurationMs: this duration drives
+		// downloadedMs and therefore player_time_ms, which must keep advancing
+		// on servers that carry segment timing only in time_range.
+		s.segments[seq] = mediaSegment{data: data, duration: h.effectiveDurationMs()}
+		s.audioRound = append(s.audioRound, h)
 		advanced = true
 	}
 	if !s.seqInit && len(s.segments) > 0 {
@@ -569,26 +654,48 @@ func (s *stream) complete() bool {
 
 // stallResult returns an error when the stream is detectably incomplete. Without
 // an end segment or content length, an exhausted stream is treated as complete.
+//
+// A stall under attestation-pending (STREAM_PROTECTION_STATUS=2) is reported
+// token-neutrally. A live A/B (2026-06) holding the request constant and varying
+// only the GVS PO token showed the server delivers the same ~first minute of
+// audio and then withholds the rest whether the token is a real INTEGRITY mint,
+// garbage, or absent. The output is byte-identical, so the cap is upstream of
+// the token and refreshing it does not help; the cause (a per-session preview
+// limit) is still under investigation. The message must not point at the token,
+// or it sends operators chasing a lever that isn't there.
 func (s *stream) stallResult() error {
+	desc := s.stallDescription()
+	if desc == "" {
+		// No available metadata proves that more data is expected.
+		s.done = true
+		return nil
+	}
+	if s.attestationPending {
+		return fmt.Errorf("%w: %s under attestation-pending (status 2); cause is upstream of the PO token (refreshing it does not lift the cap)", waxerr.ErrExtractionFailed, desc)
+	}
+	return fmt.Errorf("%w: %s", waxerr.ErrExtractionFailed, desc)
+}
+
+// stallDescription names what is provably missing, or "" when nothing proves
+// the stream incomplete.
+func (s *stream) stallDescription() string {
 	switch {
 	case !s.initWritten:
-		return fmt.Errorf("%w: SABR stream stalled before delivering an init segment", waxerr.ErrExtractionFailed)
+		return "SABR stream stalled before delivering an init segment"
 	case s.endSegment > 0 && s.nextSeq <= s.endSegment:
-		return fmt.Errorf("%w: SABR stream stalled at segment %d of %d", waxerr.ErrExtractionFailed, s.nextSeq, s.endSegment)
+		return fmt.Sprintf("SABR stream stalled at segment %d of %d", s.nextSeq, s.endSegment)
 	case len(s.segments) > 0:
-		return fmt.Errorf("%w: SABR stream stalled with %d undelivered segments", waxerr.ErrExtractionFailed, len(s.segments))
+		return fmt.Sprintf("SABR stream stalled with %d undelivered segments", len(s.segments))
 	case s.contentLen > 0 && s.bytesWritten < s.contentLen:
-		return fmt.Errorf("%w: SABR stream stalled after %d of %d bytes", waxerr.ErrExtractionFailed, s.bytesWritten, s.contentLen)
+		return fmt.Sprintf("SABR stream stalled after %d of %d bytes", s.bytesWritten, s.contentLen)
 	case s.bytesWritten == 0:
-		return fmt.Errorf("%w: SABR stream stalled before delivering any media", waxerr.ErrExtractionFailed)
+		return "SABR stream stalled before delivering any media"
 	case s.attestationPending:
-		// Status 2 with no end-segment or content length to prove completeness; it
-		// may be a withheld partial, so do not treat it as complete.
-		return fmt.Errorf("%w: SABR stream ended under attestation-pending (status 2) without completion metadata", waxerr.ErrExtractionFailed)
+		// Status 2 with no end-segment or content length to prove completeness;
+		// it may be a withheld partial, so do not treat it as complete.
+		return "SABR stream ended without completion metadata"
 	}
-	// No available metadata proves that more data is expected.
-	s.done = true
-	return nil
+	return ""
 }
 
 // applyContextUpdates folds part-57 updates and a part-59 policy into the stored
@@ -706,7 +813,9 @@ func (s *stream) populateContexts(sc *streamerContext) {
 
 // post builds and sends one VideoPlaybackAbrRequest, returning the response body.
 func (s *stream) post() ([]byte, error) {
+	s.rounds++
 	body := s.buildRequest().marshal()
+	s.dumpBody("request", body)
 
 	ctx := s.ctx
 	if to := s.roundTimeout(); to > 0 {
@@ -715,12 +824,13 @@ func (s *stream) post() ([]byte, error) {
 		defer cancel()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.requestURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept", "application/vnd.yt-ump")
+	req.Header.Set("Accept-Encoding", "identity")
 	if s.cfg.UserAgent != "" {
 		req.Header.Set("User-Agent", s.cfg.UserAgent)
 	}
@@ -736,19 +846,56 @@ func (s *stream) post() ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: s.serverURL}
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxRoundBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRoundBytes))
+	if err != nil {
+		return nil, err
+	}
+	s.dumpBody("round", respBody)
+	return respBody, nil
+}
+
+// requestURL returns the SABR endpoint with the 0-based request number
+// appended, matching the reference client's `rn` parameter. The signed URL is
+// extended verbatim, never re-encoded: round-tripping it through url.Values
+// would re-order and re-escape signature-covered parameters and silently drop
+// any pair the query parser rejects.
+func (s *stream) requestURL() string {
+	sep := "&"
+	if !strings.Contains(s.serverURL, "?") {
+		sep = "?"
+	}
+	return s.serverURL + sep + "rn=" + strconv.Itoa(s.rounds-1)
+}
+
+// dumpBody writes a raw request/response body under cfg.DumpDir, mirroring the
+// WAXTAP_DUMP_DIR philosophy: gated by configuration, best-effort, and never
+// affecting the stream. kind is "round" (response) or "request".
+func (s *stream) dumpBody(kind string, body []byte) {
+	dir := s.cfg.DumpDir
+	if dir == "" || len(body) == 0 {
+		return
+	}
+	path, err := dumpfile.Write(dir, fmt.Sprintf("sabr-%s-%03d.bin", kind, s.rounds), body)
+	if err != nil {
+		s.log.DebugContext(s.ctx, "sabr: dump failed", "dir", dir, "err", err)
+		return
+	}
+	s.log.DebugContext(s.ctx, "sabr: wrote dump", "path", path)
 }
 
 // buildRequest assembles the next SABR request from the current stream state.
+// client_abr_state.player_time_ms reports the contiguous downloaded audio
+// duration as the playback position.
 func (s *stream) buildRequest() videoPlaybackAbrRequest {
 	req := videoPlaybackAbrRequest{
 		ClientAbrState: clientAbrState{
 			PlayerTimeMs:      s.downloadedMs,
 			EnabledTrackTypes: enabledTrackTypesAudioOnly,
+			DrcEnabled:        s.cfg.DRC,
+			AudioTrackID:      s.cfg.AudioTrackID,
 		},
-		SelectedAudioFormatIds: []FormatId{s.cfg.Format},
-		PlayerTimeMs:           s.downloadedMs,
-		UstreamerConfig:        s.cfg.UstreamerConfig,
+		PreferredAudioFormatIds: []FormatId{s.cfg.Format},
+		UstreamerConfig:         s.cfg.UstreamerConfig,
 		StreamerContext: streamerContext{
 			ClientInfo:     s.cfg.ClientInfo,
 			POToken:        s.cfg.POToken,
@@ -756,19 +903,58 @@ func (s *stream) buildRequest() videoPlaybackAbrRequest {
 		},
 	}
 	s.populateContexts(&req.StreamerContext)
-	// Report only the contiguous run already emitted ([firstSeq, nextSeq-1]).
-	// Reporting the highest received segment would hide any gap and prevent
-	// retransmission.
-	if s.seqInit && s.nextSeq > s.firstSeq {
-		req.BufferedRanges = []BufferedRange{{
-			FormatId:          s.cfg.Format,
-			StartTimeMs:       0,
-			DurationMs:        s.downloadedMs,
-			StartSegmentIndex: int32(s.firstSeq),
-			EndSegmentIndex:   int32(s.nextSeq - 1),
-		}}
+	// Acknowledge the segments received last round as buffered. The reference
+	// client reports these per-round deltas (with real start times and sequence
+	// numbers) rather than a cumulative range; the server accumulates them.
+	req.BufferedRanges = append(req.BufferedRanges, bufferedRangesFromHeaders(s.cfg.Format, s.audioRound)...)
+	s.audioRound = s.audioRound[:0]
+	if s.formatInitSeen {
+		req.SelectedFormatIds = append(req.SelectedFormatIds, s.cfg.Format)
 	}
+	// Outgoing pacing state: the server streams ahead of player_time_ms, so a
+	// player_time_ms that stops advancing explains withheld media.
+	s.log.DebugContext(s.ctx, "sabr: request state",
+		"round", s.rounds,
+		"player_time_ms", s.downloadedMs,
+		"buffered_ranges", len(req.BufferedRanges),
+		"first_seq", s.firstSeq, "next_seq", s.nextSeq)
 	return req
+}
+
+// bufferedRangesFromHeaders builds the buffered ranges covering the segments a
+// format received in one round, one range per contiguous sequence run. The
+// headers are sorted by sequence number first: acknowledging one span across a
+// gap (or an inverted span, on out-of-order arrival) would tell the server a
+// never-received segment is buffered and prevent its retransmission. Start and
+// duration fall back to time_range when the flat fields are absent; timescale
+// 1000 keeps ticks in milliseconds.
+func bufferedRangesFromHeaders(f FormatId, hs []*MediaHeader) []BufferedRange {
+	if len(hs) == 0 {
+		return nil
+	}
+	slices.SortFunc(hs, func(a, b *MediaHeader) int {
+		return cmp.Compare(a.SequenceNumber, b.SequenceNumber)
+	})
+	var out []BufferedRange
+	for i := 0; i < len(hs); {
+		j := i + 1
+		dur := hs[i].effectiveDurationMs()
+		for j < len(hs) && hs[j].SequenceNumber == hs[j-1].SequenceNumber+1 {
+			dur += hs[j].effectiveDurationMs()
+			j++
+		}
+		start := hs[i].effectiveStartMs()
+		out = append(out, BufferedRange{
+			FormatId:          f,
+			StartTimeMs:       start,
+			DurationMs:        dur,
+			StartSegmentIndex: int32(hs[i].SequenceNumber),
+			EndSegmentIndex:   int32(hs[j-1].SequenceNumber),
+			TimeRange:         &TimeRange{StartTicks: start, DurationTicks: dur, Timescale: 1000},
+		})
+		i = j
+	}
+	return out
 }
 
 // descramble solves the n parameter of a redirect URL when a DescrambleN hook is
@@ -782,20 +968,6 @@ func (s *stream) descramble(rawURL string) (string, error) {
 		return "", fmt.Errorf("%w: descramble SABR redirect: %v", waxerr.ErrExtractionFailed, err)
 	}
 	return out, nil
-}
-
-func (s *stream) sleep(d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-s.ctx.Done():
-		return s.ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }
 
 func (s *stream) roundTimeout() time.Duration {

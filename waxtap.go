@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/colespringer/waxtap/download"
 	"github.com/colespringer/waxtap/format"
@@ -44,6 +45,12 @@ type Client struct {
 	runnerOnce sync.Once
 	runner     *transcode.Runner
 	runnerErr  error
+
+	// WEB player-context provider cooldown (see acquire): after a provider
+	// failure the attempt is skipped until webCtxDownUntil, so a dead sidecar
+	// taxes a batch once per window instead of once per video.
+	webCtxMu        sync.Mutex
+	webCtxDownUntil time.Time
 }
 
 // New constructs a Client from Options, applying defaults for unset fields.
@@ -66,6 +73,12 @@ func New(opts Options) (*Client, error) {
 	}
 	if opts.Politeness.Cooldown < 0 {
 		return nil, fmt.Errorf("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
+	}
+	// The WEB player-context path defers its GVS token mint to SABR setup, past
+	// the acquire-time fallback, so a missing token provider would hard-fail
+	// every download there instead of falling back. Reject it up front.
+	if opts.PlayerContextProvider != nil && opts.POTokenProvider == nil {
+		return nil, fmt.Errorf("PlayerContextProvider requires a POTokenProvider: the WEB stream binds a GVS PO token to the context's visitorData")
 	}
 
 	// Resolve the client strategy chain: a single forced Client, a file override,
@@ -133,18 +146,20 @@ func New(opts Options) (*Client, error) {
 		log:  log,
 		http: hc,
 		yt: youtube.New(youtube.Config{
-			HTTP:             hc,
-			Logger:           log,
-			Profiles:         profiles, // nil => youtube.DefaultProfiles()
-			ChromeMajor:      opts.ChromeMajor,
-			ResolveTimeout:   opts.Timeouts.Resolve,
-			CacheDir:         resolveCacheDir(opts, log),
-			DisableDiskCache: opts.DisableDiskCache,
-			POTokenProvider:  opts.POTokenProvider,
-			Session:          opts.Session,
-			SessionProvider:  opts.SessionProvider,
-			HL:               opts.Locale.HL,
-			GL:               opts.Locale.GL,
+			HTTP:                  hc,
+			Logger:                log,
+			Profiles:              profiles, // nil => youtube.DefaultProfiles()
+			ChromeMajor:           opts.ChromeMajor,
+			ResolveTimeout:        opts.Timeouts.Resolve,
+			CacheDir:              resolveCacheDir(opts, log),
+			DisableDiskCache:      opts.DisableDiskCache,
+			POTokenProvider:       opts.POTokenProvider,
+			PlayerContextProvider: opts.PlayerContextProvider,
+			WebContextTimeout:     opts.Timeouts.WebContext,
+			Session:               opts.Session,
+			SessionProvider:       opts.SessionProvider,
+			HL:                    opts.Locale.HL,
+			GL:                    opts.Locale.GL,
 		}),
 		dl: download.New(download.Config{
 			HTTPClient:      hc,

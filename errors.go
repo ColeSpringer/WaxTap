@@ -33,6 +33,9 @@ var (
 	ErrIsPlaylist        = waxerr.ErrIsPlaylist
 	ErrInvalidVideoID    = waxerr.ErrInvalidVideoID
 	ErrInvalidPlaylistID = waxerr.ErrInvalidPlaylistID
+	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
+	// response parsed but matched no known shape.
+	ErrPlaylistParse = waxerr.ErrPlaylistParse
 
 	// Processing / local files.
 	ErrIncompatibleSpec = waxerr.ErrIncompatibleSpec

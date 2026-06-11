@@ -27,12 +27,14 @@ type Client struct {
 	http        *httpx.Client
 	log         *slog.Logger
 	profiles    []ClientProfile
-	webFallback ClientProfile            // built-in WEB profile for ancillary requests
-	resolver    resolver.Resolver        // stream-URL resolution
-	inspector   resolver.PlayerInspector // signature timestamp lookup; nil if unsupported
-	potoken     potoken.Provider         // PO-token provider, when configured
-	visitors    *cache.Store[string]     // bootstrapped guest visitorData, singleflighted
-	hl, gl      string                   // InnerTube host language / content region
+	webFallback ClientProfile                 // built-in WEB profile for ancillary requests
+	resolver    resolver.Resolver             // stream-URL resolution
+	inspector   resolver.PlayerInspector      // signature timestamp lookup; nil if unsupported
+	potoken     potoken.Provider              // PO-token provider, when configured
+	webContext  potoken.PlayerContextProvider // attested WEB player-context provider, when configured
+	webCtxTO    time.Duration                 // per-call bound on the player-context provider; 0 = none
+	visitors    *cache.Store[string]          // bootstrapped guest visitorData, singleflighted
+	hl, gl      string                        // InnerTube host language / content region
 
 	// External session adoption. At most one of staticSession / sessionProvider
 	// is set (the facade rejects both). When either is set, Extract adopts that
@@ -69,6 +71,14 @@ type Config struct {
 	// call it during extraction for a player-scope token and during resolution for
 	// a GVS-scope stream token. Nil means no provider is configured.
 	POTokenProvider potoken.Provider
+	// PlayerContextProvider supplies an attested WEB /player streaming context,
+	// enabling the opt-in WEB SABR audio path (see Client.ExtractWebContext). Nil
+	// leaves WaxTap on its default extraction chain.
+	PlayerContextProvider potoken.PlayerContextProvider
+	// WebContextTimeout bounds each PlayerContextProvider call, both the initial
+	// extraction and a mid-stream reload's re-fetch, so a hung provider cannot
+	// hang a download. Zero adds no bound.
+	WebContextTimeout time.Duration
 	// Session is an externally supplied guest identity the Client adopts verbatim,
 	// skipping its own homepage bootstrap. It is pre-resolved: its cookies are
 	// seeded at New and its visitorData is used for every extraction. Use it for
@@ -110,6 +120,8 @@ func New(cfg Config) *Client {
 		profiles:        cfg.Profiles,
 		resolver:        cfg.Resolver,
 		potoken:         cfg.POTokenProvider,
+		webContext:      cfg.PlayerContextProvider,
+		webCtxTO:        cfg.WebContextTimeout,
 		hl:              cfg.HL,
 		gl:              cfg.GL,
 		staticSession:   cfg.Session,
@@ -437,6 +449,13 @@ func (c *Client) Info(ctx context.Context, videoID string) (*Video, error) {
 	return ext.video, nil
 }
 
+// Bounds for retrying the initial playlist browse page. Continuation pages
+// soft-fail per page instead.
+const (
+	browseRetries    = 2 // extra attempts after the first
+	browseRetryDelay = 500 * time.Millisecond
+)
+
 // Enumerate expands a playlist into lightweight entries without downloading. It
 // pages through continuations until exhausted or maxItems (<= 0 means all) is
 // reached. Per-page failures after the first page are collected in Playlist.Errors
@@ -449,11 +468,7 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 	}
 	pl := &Playlist{ID: playlistID}
 
-	body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))
-	if err != nil {
-		return nil, err
-	}
-	meta, items, token, err := parseBrowseInitial(body)
+	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)
 	if err != nil {
 		return nil, err
 	}
@@ -488,6 +503,38 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 		pl.Continuation = token
 	}
 	return pl, nil
+}
+
+// browseInitial fetches and parses the first browse page of a playlist,
+// retrying transient failures a bounded number of times so a single flaky
+// page does not fail the whole enumeration.
+func (c *Client) browseInitial(ctx context.Context, profile ClientProfile, sess *session, playlistID string) (playlistMeta, []playlistItem, string, error) {
+	for attempt := 0; ; attempt++ {
+		body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))
+		if err == nil {
+			meta, items, token, perr := parseBrowseInitial(body)
+			if perr == nil {
+				return meta, items, token, nil
+			}
+			err = perr
+		}
+		if attempt >= browseRetries || !retryableBrowse(err) {
+			return playlistMeta{}, nil, "", err
+		}
+		c.log.DebugContext(ctx, "initial browse failed; retrying", "attempt", attempt+1, "playlist", playlistID, "err", err)
+		if err := httpx.Sleep(ctx, browseRetryDelay); err != nil {
+			return playlistMeta{}, nil, "", err
+		}
+	}
+}
+
+// retryableBrowse reports whether an initial-browse failure is worth another
+// same-session attempt: only an unrecognized page shape (A/B experiments can
+// be per-request). Transient HTTP statuses are not re-retried here: httpx
+// already retried them with backoff, so a surfaced status error is exhausted.
+// Context errors and hard bad-id failures are surfaced as-is.
+func retryableBrowse(err error) bool {
+	return errors.Is(err, waxerr.ErrPlaylistParse)
 }
 
 // playlistProfile returns the first configured profile that supports browse

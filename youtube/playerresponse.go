@@ -91,18 +91,21 @@ type rawFormat struct {
 	ContentLength   string `json:"contentLength"`
 	// LastModified and XTags distinguish encodings that share an itag. SABR
 	// sends them back as part of FormatId.
-	LastModified     string `json:"lastModified"`
-	XTags            string `json:"xtags"`
-	AudioSampleRate  string `json:"audioSampleRate"`
-	AudioChannels    int    `json:"audioChannels"`
-	AudioQuality     string `json:"audioQuality"`
-	ApproxDurationMs string `json:"approxDurationMs"`
-	IsDrc            *bool  `json:"isDrc"`
-	AudioTrack       *struct {
-		ID             string `json:"id"`
-		DisplayName    string `json:"displayName"`
-		AudioIsDefault *bool  `json:"audioIsDefault"`
-	} `json:"audioTrack"`
+	LastModified     string         `json:"lastModified"`
+	XTags            string         `json:"xtags"`
+	AudioSampleRate  string         `json:"audioSampleRate"`
+	AudioChannels    int            `json:"audioChannels"`
+	AudioQuality     string         `json:"audioQuality"`
+	ApproxDurationMs string         `json:"approxDurationMs"`
+	IsDrc            *bool          `json:"isDrc"`
+	AudioTrack       *rawAudioTrack `json:"audioTrack"`
+}
+
+// rawAudioTrack identifies one audio track of a multi-audio video.
+type rawAudioTrack struct {
+	ID             string `json:"id"`
+	DisplayName    string `json:"displayName"`
+	AudioIsDefault *bool  `json:"audioIsDefault"`
 }
 
 // parsePlayerResponse unmarshals a raw /player JSON body.

@@ -1,0 +1,112 @@
+{
+  "responseContext": { "visitorData": "Cgtsb..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Lockup Playlist" } },
+  "header": {
+    "playlistHeaderRenderer": {
+      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo0",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailOverlayBadgeViewModel": {
+                                      "thumbnailBadges": [
+                                        { "thumbnailBadgeViewModel": { "text": "3:00" } }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": { "content": "Song A" },
+                                "metadata": {
+                                  "contentMetadataViewModel": {
+                                    "metadataRows": [
+                                      { "metadataParts": [{ "text": { "content": "Artist A" } }] },
+                                      {
+                                        "metadataParts": [
+                                          { "text": { "content": "1M views" } },
+                                          { "text": { "content": "1 year ago" } }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo1",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailBottomOverlayViewModel": {
+                                      "badges": [
+                                        { "thumbnailBadgeViewModel": { "text": "1:02:03" } }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": { "content": "Song B" }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "continuationItemRenderer": {
+                            "trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN",
+                            "continuationEndpoint": {
+                              "commandExecutorCommand": {
+                                "commands": [
+                                  {
+                                    "playlistVotingRefreshPopupCommand": { "command": {} }
+                                  },
+                                  {
+                                    "continuationCommand": {
+                                      "token": "LOCKUP_CONT_1",
+                                      "request": "CONTINUATION_REQUEST_TYPE_BROWSE"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

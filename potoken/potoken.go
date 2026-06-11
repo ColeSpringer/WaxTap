@@ -1,4 +1,6 @@
-// Package potoken defines the PO-token provider contract.
+// Package potoken defines the PO-token provider contract and the related
+// browser-attested handoff contracts ([Session] and [PlayerContext]) that let
+// WaxTap adopt an external attesting browser's identity and streaming context.
 //
 // PO ("proof of origin") tokens are used by some YouTube clients at two points. A
 // player-scope token goes in the /player request body; without it, WEB-family

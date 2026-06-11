@@ -76,11 +76,10 @@ func pb(num protowire.Number, raw []byte) []byte {
 
 func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	req := videoPlaybackAbrRequest{
-		ClientAbrState:         clientAbrState{PlayerTimeMs: 1234, EnabledTrackTypes: enabledTrackTypesAudioOnly},
-		SelectedAudioFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "acont=original"}},
-		BufferedRanges:         []BufferedRange{{FormatId: FormatId{Itag: 251}, DurationMs: 5000, StartSegmentIndex: 1, EndSegmentIndex: 3}},
-		PlayerTimeMs:           1234,
-		UstreamerConfig:        []byte("ustreamer-bytes"),
+		ClientAbrState:          clientAbrState{PlayerTimeMs: 1234, EnabledTrackTypes: enabledTrackTypesAudioOnly},
+		PreferredAudioFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "acont=original"}},
+		BufferedRanges:          []BufferedRange{{FormatId: FormatId{Itag: 251}, DurationMs: 5000, StartSegmentIndex: 1, EndSegmentIndex: 3}},
+		UstreamerConfig:         []byte("ustreamer-bytes"),
 		StreamerContext: streamerContext{
 			ClientInfo:     ClientInfo{ClientName: 1, ClientVersion: "2.x", OSName: "Windows", OSVersion: "10.0", AcceptLanguage: "en-US"},
 			POToken:        []byte("po-token-bytes"),
@@ -89,15 +88,16 @@ func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	}
 	top := protoScan(t, req.marshal())
 
-	// Top-level VideoPlaybackAbrRequest field numbers.
-	if got := one(t, top, 4).v; got != 1234 {
-		t.Errorf("player_time_ms(4) = %d, want 1234", got)
+	// Top-level VideoPlaybackAbrRequest field numbers. player_time_ms (4) is the
+	// Onesie osts and must not be sent on a regular SABR request.
+	if len(top[4]) != 0 {
+		t.Errorf("player_time_ms(4) present (%d); it must be omitted on SABR requests", len(top[4]))
 	}
 	if got := one(t, top, 5).b; string(got) != "ustreamer-bytes" {
 		t.Errorf("video_playback_ustreamer_config(5) = %q", got)
 	}
 	if len(top[16]) != 1 {
-		t.Fatalf("selected_audio_format_ids(16): got %d, want 1", len(top[16]))
+		t.Fatalf("preferred_audio_format_ids(16): got %d, want 1", len(top[16]))
 	}
 	if len(top[3]) != 1 {
 		t.Fatalf("buffered_ranges(3): got %d, want 1", len(top[3]))
@@ -184,6 +184,70 @@ func TestUnmarshalMediaHeader(t *testing.T) {
 	}
 }
 
+// TestMediaHeaderTimeRangeDuration covers servers that carry the per-segment
+// duration only in time_range (field 15) with no flat duration_ms: the
+// derived duration must be ceil(duration_ticks/timescale*1000).
+func TestMediaHeaderTimeRangeDuration(t *testing.T) {
+	// time_range=15 (TimeRange: start_ticks=1, duration_ticks=2, timescale=3).
+	tr := bytes.Join([][]byte{pv(1, 96000), pv(2, 441001), pv(3, 44100)}, nil)
+	body := bytes.Join([][]byte{pv(9, 8), pb(15, tr)}, nil) // sequence_number + time_range only
+
+	h, err := unmarshalMediaHeader(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.TimeRange.StartTicks != 96000 || h.TimeRange.DurationTicks != 441001 || h.TimeRange.Timescale != 44100 {
+		t.Errorf("time_range = %+v", h.TimeRange)
+	}
+	if h.DurationMs != 0 {
+		t.Errorf("duration_ms = %d, want 0 (not on the wire)", h.DurationMs)
+	}
+	// ceil(441001 / 44100 * 1000) = ceil(10000.02...) = 10001.
+	if got := h.effectiveDurationMs(); got != 10001 {
+		t.Errorf("effectiveDurationMs = %d, want 10001", got)
+	}
+}
+
+func TestMediaHeaderEffectiveDurationMs(t *testing.T) {
+	tests := []struct {
+		name string
+		h    MediaHeader
+		want int64
+	}{
+		{"flat wins over time_range", MediaHeader{DurationMs: 5000, TimeRange: TimeRange{DurationTicks: 441000, Timescale: 44100}}, 5000},
+		{"exact tick conversion", MediaHeader{TimeRange: TimeRange{DurationTicks: 441000, Timescale: 44100}}, 10000},
+		{"zero timescale is unusable", MediaHeader{TimeRange: TimeRange{DurationTicks: 441000}}, 0},
+		{"nothing populated", MediaHeader{}, 0},
+		// A tick count that would overflow the millisecond conversion is server
+		// garbage; it must report "no usable duration", not a negative value.
+		{"overflowing ticks are unusable", MediaHeader{TimeRange: TimeRange{DurationTicks: 1 << 60, Timescale: 44100}}, 0},
+	}
+	for _, tc := range tests {
+		if got := tc.h.effectiveDurationMs(); got != tc.want {
+			t.Errorf("%s: effectiveDurationMs = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestMediaHeaderEffectiveStartMs(t *testing.T) {
+	tests := []struct {
+		name string
+		h    MediaHeader
+		want int64
+	}{
+		{"flat wins over time_range", MediaHeader{StartMs: 7000, TimeRange: TimeRange{StartTicks: 96000, Timescale: 44100}}, 7000},
+		{"tick conversion", MediaHeader{TimeRange: TimeRange{StartTicks: 96000, Timescale: 48000}}, 2000},
+		{"zero timescale is unusable", MediaHeader{TimeRange: TimeRange{StartTicks: 96000}}, 0},
+		{"nothing populated", MediaHeader{}, 0},
+		{"overflowing ticks are unusable", MediaHeader{TimeRange: TimeRange{StartTicks: 1 << 60, Timescale: 44100}}, 0},
+	}
+	for _, tc := range tests {
+		if got := tc.h.effectiveStartMs(); got != tc.want {
+			t.Errorf("%s: effectiveStartMs = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestUnmarshalFormatInitMetadata(t *testing.T) {
 	// format_id=2, end_segment_number=4, mime_type=5, init_range=6, index_range=7,
 	// duration_units=9, duration_timescale=10. misc.Range: start=3, end=4.
@@ -218,13 +282,14 @@ func TestUnmarshalFormatInitMetadata(t *testing.T) {
 }
 
 func TestUnmarshalNextRequestPolicy(t *testing.T) {
-	// target_audio_readahead_ms=1, backoff_time_ms=4, playback_cookie=7.
-	body := bytes.Join([][]byte{pv(1, 20000), pv(4, 1500), pb(7, []byte("cookie-bytes"))}, nil)
+	// target_audio_readahead_ms=1, max_time_since_last_request_ms=3,
+	// backoff_time_ms=4, playback_cookie=7.
+	body := bytes.Join([][]byte{pv(1, 20000), pv(3, 60000), pv(4, 1500), pb(7, []byte("cookie-bytes"))}, nil)
 	p, err := unmarshalNextRequestPolicy(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.TargetAudioReadaheadMs != 20000 || p.BackoffTimeMs != 1500 {
+	if p.TargetAudioReadaheadMs != 20000 || p.MaxTimeSinceLastRequestMs != 60000 || p.BackoffTimeMs != 1500 {
 		t.Errorf("policy = %+v", p)
 	}
 	if string(p.PlaybackCookie) != "cookie-bytes" {

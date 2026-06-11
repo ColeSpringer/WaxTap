@@ -10,27 +10,28 @@ import (
 // top-level error renderer in main can read the --json setting after Execute
 // returns, before any appEnv exists.
 type rootFlags struct {
-	json            bool
-	quiet           bool
-	verbose         bool
-	config          string
-	cacheDir        string
-	noCache         bool
-	tempDir         string
-	proxy           string
-	insecure        bool
-	qps             float64
-	cooldown        time.Duration
-	hl              string
-	gl              string
-	sponsorblockURL string
-	profileOverride string
-	chromeMajor     int
-	potokenURL      string
-	client          string
-	sessionURL      string
-	visitorData     string
-	cookies         string
+	json             bool
+	quiet            bool
+	verbose          bool
+	config           string
+	cacheDir         string
+	noCache          bool
+	tempDir          string
+	proxy            string
+	insecure         bool
+	qps              float64
+	cooldown         time.Duration
+	hl               string
+	gl               string
+	sponsorblockURL  string
+	profileOverride  string
+	chromeMajor      int
+	potokenURL       string
+	playerContextURL string
+	client           string
+	sessionURL       string
+	visitorData      string
+	cookies          string
 }
 
 var rootFlagsValue rootFlags
@@ -73,7 +74,8 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.profileOverride, "profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
 	pf.IntVar(&rootFlagsValue.chromeMajor, "chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
 	pf.StringVar(&rootFlagsValue.potokenURL, "potoken-url", "", "bgutil PO-token provider URL, e.g. http://127.0.0.1:4417 (enables WEB/GVS tokens; contacted directly, not via --proxy; mint host and downloads must share an egress IP for full WEB validation)")
-	pf.StringVar(&rootFlagsValue.client, "client", "", "force one built-in client as the whole chain: web|ios|android_vr|web_embedded (conflicts with --profile-override)")
+	pf.StringVar(&rootFlagsValue.playerContextURL, "player-context-url", "", "attested WEB /player-context provider URL (opt-in full WEB audio; same host as --potoken-url, which it also requires; contacted directly, not via --proxy; mint host and downloads must share an egress IP)")
+	pf.StringVar(&rootFlagsValue.client, "client", "", "force one built-in client as the whole chain: web|ios|android_vr|web_embedded (conflicts with --profile-override; --player-context-url is tried first when set, this chain is its fallback)")
 	pf.StringVar(&rootFlagsValue.sessionURL, "session-url", "", "URL of a /session endpoint returning {visitorData,cookies} to adopt verbatim (contacted directly, not via --proxy; needs a uniform --client)")
 	pf.StringVar(&rootFlagsValue.visitorData, "visitor-data", "", "adopt this exact X-Goog-Visitor-Id literal and skip WaxTap's bootstrap (needs a uniform --client)")
 	pf.StringVar(&rootFlagsValue.cookies, "cookies", "", "Netscape cookie file to adopt alongside --visitor-data")

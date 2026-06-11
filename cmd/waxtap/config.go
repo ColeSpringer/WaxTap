@@ -29,6 +29,7 @@ const cacheSubdir = "waxtap"
 const (
 	defaultExtractionTimeout   = 45 * time.Second
 	defaultResolveTimeout      = 30 * time.Second
+	defaultWebContextTimeout   = 20 * time.Second
 	defaultSponsorBlockTimeout = 10 * time.Second
 	defaultChunkTimeout        = 120 * time.Second
 	defaultFFmpegShutdown      = 5 * time.Second
@@ -52,20 +53,22 @@ type appConfig struct {
 	cooldown   time.Duration
 	hl, gl     string
 
-	ffmpegProcs     int
-	chunks          int
-	downloads       int
-	sbBaseURL       string
-	profileOverride string
-	chromeMajor     int
-	potokenURL      string
-	client          string
-	sessionURL      string
-	visitorData     string
-	cookiesPath     string
+	ffmpegProcs      int
+	chunks           int
+	downloads        int
+	sbBaseURL        string
+	profileOverride  string
+	chromeMajor      int
+	potokenURL       string
+	playerContextURL string
+	client           string
+	sessionURL       string
+	visitorData      string
+	cookiesPath      string
 
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
+	webContextTimeout   time.Duration
 	sponsorBlockTimeout time.Duration
 	chunkTimeout        time.Duration
 }
@@ -89,6 +92,7 @@ type fileConfig struct {
 	ProfileOverridePath *string  `json:"profileOverridePath"`
 	ChromeMajor         *int     `json:"chromeMajor"`
 	POTokenURL          *string  `json:"poTokenURL"`
+	PlayerContextURL    *string  `json:"playerContextURL"`
 	Client              *string  `json:"client"`
 	SessionURL          *string  `json:"sessionURL"`
 	VisitorData         *string  `json:"visitorData"`
@@ -96,6 +100,7 @@ type fileConfig struct {
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
+	WebContextTimeoutSec   *float64 `json:"webContextTimeoutSeconds"`
 	SponsorBlockTimeoutSec *float64 `json:"sponsorBlockTimeoutSeconds"`
 	ChunkTimeoutSec        *float64 `json:"chunkTimeoutSeconds"`
 }
@@ -138,20 +143,22 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		hl:         str("hl", rootFlagsValue.hl, fc.HL, ec.HL, ""),
 		gl:         str("gl", rootFlagsValue.gl, fc.GL, ec.GL, ""),
 
-		ffmpegProcs:     coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
-		chunks:          coalesceInt(0, fc.Chunks, ec.Chunks, nil),
-		downloads:       coalesceInt(0, fc.Downloads, ec.Downloads, nil),
-		sbBaseURL:       str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
-		profileOverride: str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
-		chromeMajor:     coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
-		potokenURL:      str("potoken-url", rootFlagsValue.potokenURL, fc.POTokenURL, ec.POTokenURL, ""),
-		client:          str("client", rootFlagsValue.client, fc.Client, ec.Client, ""),
-		sessionURL:      str("session-url", rootFlagsValue.sessionURL, fc.SessionURL, ec.SessionURL, ""),
-		visitorData:     str("visitor-data", rootFlagsValue.visitorData, fc.VisitorData, ec.VisitorData, ""),
-		cookiesPath:     str("cookies", rootFlagsValue.cookies, fc.CookiesPath, ec.CookiesPath, ""),
+		ffmpegProcs:      coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
+		chunks:           coalesceInt(0, fc.Chunks, ec.Chunks, nil),
+		downloads:        coalesceInt(0, fc.Downloads, ec.Downloads, nil),
+		sbBaseURL:        str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
+		profileOverride:  str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
+		chromeMajor:      coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
+		potokenURL:       str("potoken-url", rootFlagsValue.potokenURL, fc.POTokenURL, ec.POTokenURL, ""),
+		playerContextURL: str("player-context-url", rootFlagsValue.playerContextURL, fc.PlayerContextURL, ec.PlayerContextURL, ""),
+		client:           str("client", rootFlagsValue.client, fc.Client, ec.Client, ""),
+		sessionURL:       str("session-url", rootFlagsValue.sessionURL, fc.SessionURL, ec.SessionURL, ""),
+		visitorData:      str("visitor-data", rootFlagsValue.visitorData, fc.VisitorData, ec.VisitorData, ""),
+		cookiesPath:      str("cookies", rootFlagsValue.cookies, fc.CookiesPath, ec.CookiesPath, ""),
 
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
+		webContextTimeout:   coalesceDuration(defaultWebContextTimeout, fc.WebContextTimeoutSec, ec.WebContextTimeoutSec),
 		sponsorBlockTimeout: coalesceDuration(defaultSponsorBlockTimeout, fc.SponsorBlockTimeoutSec, ec.SponsorBlockTimeoutSec),
 		chunkTimeout:        coalesceDuration(defaultChunkTimeout, fc.ChunkTimeoutSec, ec.ChunkTimeoutSec),
 	}
@@ -253,12 +260,14 @@ func envOverlay() (fileConfig, error) {
 	ec.ProfileOverridePath = getStr("WAXTAP_PROFILE_OVERRIDE")
 	ec.ChromeMajor = getInt("WAXTAP_CHROME_MAJOR")
 	ec.POTokenURL = getStr("WAXTAP_POTOKEN_URL")
+	ec.PlayerContextURL = getStr("WAXTAP_PLAYER_CONTEXT_URL")
 	ec.Client = getStr("WAXTAP_CLIENT")
 	ec.SessionURL = getStr("WAXTAP_SESSION_URL")
 	ec.VisitorData = getStr("WAXTAP_VISITOR_DATA")
 	ec.CookiesPath = getStr("WAXTAP_COOKIES")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
+	ec.WebContextTimeoutSec = getFloat("WAXTAP_WEB_CONTEXT_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
 	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT")
 
@@ -295,6 +304,17 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		poProvider = newBgutilProvider(a.potokenURL)
 	}
 
+	// The attested WEB /player-context path streams full WEB audio Go-side. It
+	// binds a GVS PO token to the context's visitorData, so it requires a token
+	// provider alongside it. Its own dedicated client is never proxied.
+	var pcProvider waxtap.PlayerContextProvider
+	if a.playerContextURL != "" {
+		if a.potokenURL == "" {
+			return waxtap.Options{}, fmt.Errorf("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
+		}
+		pcProvider = newPlayerContextProvider(a.playerContextURL)
+	}
+
 	// External session adoption: a pull-based --session-url provider, or a static
 	// --visitor-data (+ optional --cookies) session. New enforces the uniform-chain
 	// requirement and the Session/SessionProvider exclusivity.
@@ -304,18 +324,19 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	}
 
 	return waxtap.Options{
-		HTTPClient:          hc,
-		Logger:              log,
-		Locale:              waxtap.Locale{HL: a.hl, GL: a.gl},
-		CacheDir:            a.cacheDir,
-		DisableDiskCache:    a.noCache,
-		TempDir:             a.tempDir,
-		ProfileOverridePath: a.profileOverride,
-		ChromeMajor:         a.chromeMajor,
-		POTokenProvider:     poProvider,
-		Client:              a.client,
-		Session:             session,
-		SessionProvider:     sessionProvider,
+		HTTPClient:            hc,
+		Logger:                log,
+		Locale:                waxtap.Locale{HL: a.hl, GL: a.gl},
+		CacheDir:              a.cacheDir,
+		DisableDiskCache:      a.noCache,
+		TempDir:               a.tempDir,
+		ProfileOverridePath:   a.profileOverride,
+		ChromeMajor:           a.chromeMajor,
+		POTokenProvider:       poProvider,
+		PlayerContextProvider: pcProvider,
+		Client:                a.client,
+		Session:               session,
+		SessionProvider:       sessionProvider,
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,
@@ -324,6 +345,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		Timeouts: waxtap.Timeouts{
 			Extraction:     a.extractionTimeout,
 			Resolve:        a.resolveTimeout,
+			WebContext:     a.webContextTimeout,
 			SponsorBlock:   a.sponsorBlockTimeout,
 			ChunkRetry:     a.chunkTimeout,
 			FFmpegShutdown: defaultFFmpegShutdown,

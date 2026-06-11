@@ -20,9 +20,9 @@ keeps the selected source stream and does not re-encode.
   facade; `cmd/waxtap` is a real CLI built on the same packages.
 - **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
   default ANDROID_VR and iOS clients return playable audio for public videos with
-  no PO token; the WEB-family fallback clients require a caller-supplied
-  `potoken.Provider` to stream audio over SABR/UMP (and WEB remains experimental;
-  see [PO tokens & WEB](#po-tokens--web)).
+  no PO token. Full WEB audio over SABR/UMP is opt-in: it needs a GVS
+  `potoken.Provider` plus an attested `/player-context` handoff (WaxTap's own WEB
+  `/player` only earns a ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
 - **Volatile surfaces are isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so a YouTube change touches few, marked files.
 - **Server-friendly:** concurrency-safe, context-cancelable, bounded memory,
@@ -242,22 +242,60 @@ Useful operational knobs:
   and resolution failures do not count. With `--concurrency 1`, the interval
   falls between completed downloads.
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
-  extraction failures.
+  extraction failures, and `WAXTAP_SABR_DUMP_DIR` to write each raw SABR
+  round for offline inspection.
 
 `ffmpeg` and `ffprobe` are required only for processing or probing. Plain
 metadata, stream resolution, and keep-source downloads do not need them.
 
 ## PO tokens & WEB
 
-ANDROID_VR and iOS return playable audio for public videos with **no PO token**.
+ANDROID_VR and iOS return playable audio for public videos with **no PO token**,
+and they are WaxTap's zero-dependency default. Everything below is opt-in, for
+callers who specifically want the WEB path.
+
 The WEB-family clients serve URL-less audio over SABR/UMP and need a GVS-scope
 `potoken.Provider`; WaxTap ships no token generator (supply one via
 `Options.POTokenProvider`, or the CLI's `--potoken-url` for a bgutil server).
 
-For byte-exact session coherence with a minter, WaxTap can **adopt an external
-guest session** instead of bootstrapping its own. The GVS token binds to the
-session `visitorData`, so WaxTap streams under the exact identity a real browser
-attested. Adoption requires a uniform client chain:
+### Full WEB audio: the attested `/player-context` handoff
+
+A WEB `/player` call WaxTap makes itself only earns a **~1-minute preview**
+(YouTube's anti-automation grade: `STREAM_PROTECTION_STATUS=2`). Full delivery
+(`status 1`) is baked into a `serverAbrStreamingUrl` minted by an **attested
+browser** that has actually begun playback. So for complete WEB audio, WaxTap
+consumes a streaming **context** from an external attesting browser (e.g. a
+WaxSeal `/player-context` endpoint) instead of building its own preview-grade URL:
+
+```sh
+waxtap download <url> \
+  --player-context-url http://127.0.0.1:4416 \
+  --potoken-url        http://127.0.0.1:4416
+```
+
+The provider returns snake_case JSON: `{ player_url, server_abr_streaming_url
+(scrambled n), video_playback_ustreamer_config, visitor_data, client_version,
+audio_formats, title, length_seconds, … }`; each `audio_formats` entry carries
+`itag, lmt, xtags, mime_type, …` plus optional `is_drc` / `audio_track_id` for
+DRC and multi-audio renditions. WaxTap descrambles `n` with the context's
+`player_url`, mints a GVS token bound to its `visitor_data`, picks a format, and
+streams the file through its existing SABR loop. Go-side, cold start, no
+browser. Wire it as `Options.PlayerContextProvider`.
+
+`--player-context-url` requires `--potoken-url` (the stream binds a GVS token to
+the context's `visitor_data`), and the context mint and the download **must share
+an egress IP** (the signed URL is IP-bound). When the WEB context is unavailable,
+WaxTap logs a `web-context-fallback` warning and falls back to the default chain
+(or the forced `--client` chain) so the download still succeeds; after a provider
+failure the attempt is skipped for a short cooldown so a dead sidecar does not
+tax every video in a batch. Each context fetch is bounded by
+`webContextTimeoutSeconds` / `WAXTAP_WEB_CONTEXT_TIMEOUT` (default 20s).
+
+### Session adoption (byte-exact identity)
+
+For byte-exact session coherence with a minter, WaxTap can also **adopt an
+external guest session** instead of bootstrapping its own, so it streams under the
+exact identity a real browser attested. Adoption requires a uniform client chain:
 
 ```sh
 # Force WEB and adopt a session from a /session endpoint (e.g. a token minter):
@@ -273,10 +311,6 @@ literal (sent verbatim); the session must be a logged-out **guest** (login cooki
 are dropped); the minter host and downloads must share an egress IP (use `--proxy`
 to align them). The session resolves once per client, so long-running services
 should construct a fresh client per task.
-
-With that setup, WEB audio streams end to end (verified against a complete,
-playable Opus/WebM). It carries more moving parts than the default path, so it is
-for callers who need it. The default ANDROID_VR/iOS chain needs none of this.
 
 ## Maintenance
 

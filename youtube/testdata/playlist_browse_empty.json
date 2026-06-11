@@ -1,0 +1,32 @@
+{
+  "responseContext": { "visitorData": "CgtsZ..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Empty Playlist" } },
+  "header": {
+    "playlistHeaderRenderer": {
+      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        { "playlistVideoListRenderer": { "contents": [] } }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

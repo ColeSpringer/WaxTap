@@ -33,6 +33,29 @@ func (stubSessionProvider) ProvideSession(context.Context) (potoken.Session, err
 	return potoken.Session{VisitorData: "Cgt%3D%3D"}, nil
 }
 
+// TestNew_PlayerContextRequiresPOTokenProvider pins the pairing rule at New:
+// the WEB-context path mints its GVS token at SABR setup, past the acquire-time
+// fallback, so a missing token provider must fail construction rather than
+// hard-failing every download at transfer time.
+func TestNew_PlayerContextRequiresPOTokenProvider(t *testing.T) {
+	pc := potoken.PlayerContextProviderFunc(
+		func(context.Context, string) (potoken.PlayerContext, error) { return potoken.PlayerContext{}, nil },
+	)
+	if _, err := New(Options{PlayerContextProvider: pc}); err == nil ||
+		!strings.Contains(err.Error(), "POTokenProvider") {
+		t.Errorf("PlayerContextProvider without POTokenProvider err = %v, want a pairing error", err)
+	}
+	if _, err := New(Options{PlayerContextProvider: pc, POTokenProvider: stubPOTokenProvider{}}); err != nil {
+		t.Errorf("PlayerContextProvider with POTokenProvider err = %v, want nil", err)
+	}
+}
+
+type stubPOTokenProvider struct{}
+
+func (stubPOTokenProvider) ProvidePOToken(context.Context, potoken.Request) (potoken.Response, error) {
+	return potoken.Response{Token: "tok"}, nil
+}
+
 func TestNew_AdoptionValidation(t *testing.T) {
 	vd := &potoken.Session{VisitorData: "Cgt%3D%3D"}
 

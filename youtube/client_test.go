@@ -547,6 +547,94 @@ func TestEnumerate_LegacyContinuationShape(t *testing.T) {
 	}
 }
 
+// TestEnumerate_LockupShape pages through the 2025 lockup layout end to end:
+// a lockup initial page, a lockup continuation (view-model marker), then a
+// legacy continuation page, mirroring how YouTube mixes shapes across pages.
+func TestEnumerate_LockupShape(t *testing.T) {
+	browse := readFixture(t, "playlist_browse_lockup.json")
+	lockupCont := readFixture(t, "playlist_continuation_lockup.json")
+	legacyCont := readFixture(t, "playlist_continuation.json")
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case bytes.Contains(body, []byte("LOCKUP_CONT_1")):
+			return fixtureResp(http.StatusOK, lockupCont), nil
+		case bytes.Contains(body, []byte("LOCKUP_CONT_2")):
+			return fixtureResp(http.StatusOK, legacyCont), nil
+		}
+		return fixtureResp(http.StatusOK, browse), nil
+	}))
+
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pl.Title != "Lockup Playlist" {
+		t.Errorf("title = %q", pl.Title)
+	}
+	if len(pl.Errors) != 0 {
+		t.Errorf("errors = %v", pl.Errors)
+	}
+	wantIDs := []string{"dummyVideo0", "dummyVideo1", "dummyVideo2", "ccccccccccc"}
+	if len(pl.Entries) != len(wantIDs) {
+		t.Fatalf("entries = %d, want %d", len(pl.Entries), len(wantIDs))
+	}
+	for i, e := range pl.Entries {
+		if e.VideoID != wantIDs[i] {
+			t.Errorf("entry[%d].VideoID = %q, want %q", i, e.VideoID, wantIDs[i])
+		}
+	}
+	if e := pl.Entries[0]; e.Author != "Artist A" || e.Duration != 3*time.Minute {
+		t.Errorf("entry0 = %+v, want lockup author/badge duration", e)
+	}
+}
+
+// TestEnumerate_RetriesUnrecognizedInitialPage covers the Finding 4 gap: a
+// browse page in an unparseable A/B shape is retried instead of failing the
+// whole enumeration.
+func TestEnumerate_RetriesUnrecognizedInitialPage(t *testing.T) {
+	browse := readFixture(t, "playlist_browse.json")
+	var calls int
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			// Parses as JSON, no error alert, but no recognizable container.
+			return fixtureResp(http.StatusOK, []byte(`{"contents":{}}`)), nil
+		}
+		return fixtureResp(http.StatusOK, browse), nil
+	}))
+
+	pl, err := c.Enumerate(context.Background(), "PLtest", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(pl.Entries))
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (one retry after the unrecognized page)", calls)
+	}
+}
+
+// TestEnumerate_DoesNotRetryRateLimit pins that the initial-browse retry loop
+// leaves a 429 alone: an immediate same-session retry is counterproductive.
+func TestEnumerate_DoesNotRetryRateLimit(t *testing.T) {
+	var calls int
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return fixtureResp(http.StatusTooManyRequests, nil), nil
+	}))
+
+	_, err := c.Enumerate(context.Background(), "PLtest", 0)
+	if !errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+	// httpx itself makes MaxRetries+1 = 2 attempts; Enumerate must add none.
+	if calls != 2 {
+		t.Errorf("transport calls = %d, want 2 (httpx-internal only, no Enumerate-level 429 retry)", calls)
+	}
+}
+
 func TestEnumerate_HonorsConfiguredProfile(t *testing.T) {
 	browse := readFixture(t, "playlist_browse.json")
 	cont := readFixture(t, "playlist_continuation.json")

@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -56,32 +53,10 @@ func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request
 	if err != nil {
 		return potoken.Response{}, err
 	}
-	body, err := json.Marshal(bgutilRequest{ContentBinding: binding})
-	if err != nil {
-		return potoken.Response{}, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return potoken.Response{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-
-	resp, err := p.http.Do(httpReq)
-	if err != nil {
-		return potoken.Response{}, fmt.Errorf("bgutil PO-token request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		// Surface a short snippet of the body to aid diagnosis.
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return potoken.Response{}, fmt.Errorf("bgutil PO-token server returned %s: %s",
-			resp.Status, strings.TrimSpace(string(snippet)))
-	}
-
 	var out bgutilResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return potoken.Response{}, fmt.Errorf("decode bgutil PO-token response: %w", err)
+	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server",
+		bgutilRequest{ContentBinding: binding}, &out); err != nil {
+		return potoken.Response{}, err
 	}
 	if out.POToken == "" {
 		return potoken.Response{}, fmt.Errorf("bgutil PO-token server returned an empty token")

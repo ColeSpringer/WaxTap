@@ -250,7 +250,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				}
 				rlRetryStatus = status
 				c.log.DebugContext(ctx, "httpx: rate limited, backing off", "host", host, "wait", sleepFor)
-				if werr := sleep(ctx, sleepFor); werr != nil {
+				if werr := Sleep(ctx, sleepFor); werr != nil {
 					return nil, werr
 				}
 				continue
@@ -301,10 +301,12 @@ func (c *Client) backoffDuration(attempt int) time.Duration {
 }
 
 func (c *Client) backoff(ctx context.Context, attempt int) error {
-	return sleep(ctx, c.backoffDuration(attempt))
+	return Sleep(ctx, c.backoffDuration(attempt))
 }
 
-func sleep(ctx context.Context, d time.Duration) error {
+// Sleep waits for d or until ctx is done, whichever comes first, returning the
+// context error on cancellation. A non-positive d returns immediately.
+func Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
