@@ -214,7 +214,7 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 			Tracks        []albumTrackJSON `json:"tracks"`
 		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), albumTracksJSON(inputs, res.PerTrack, res.Outputs)})
 	}
-	env.printf("Album:  %s LUFS  →  applied %+.1f dB to each track\n\n", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
+	env.printf("Album:  %s LUFS; applied %+.1f dB to each track\n\n", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tLUFS\tOUTPUT")
 	for i := range res.Outputs {

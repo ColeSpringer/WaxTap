@@ -37,7 +37,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 		env.printf("Encoded:  %s\n", formatLabel(res.OutputFormat))
 	}
 	if res.SourceBytes > 0 || res.OutputBytes > 0 {
-		env.printf("Size:     %s in → %s out\n", humanBytes(res.SourceBytes), humanBytes(res.OutputBytes))
+		env.printf("Size:     %s in, %s out\n", humanBytes(res.SourceBytes), humanBytes(res.OutputBytes))
 	}
 
 	if effects := effectSummary(res); effects != "" {

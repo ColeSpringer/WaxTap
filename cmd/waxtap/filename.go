@@ -177,8 +177,8 @@ func nextAvailable(path string) string {
 }
 
 // nextAvailableFunc returns the first "name (n).ext" variant of path for which
-// taken reports false. The predicate lets callers exclude paths already claimed
-// in-memory (not just those on disk).
+// taken reports false. The predicate can account for paths already claimed in
+// memory as well as paths on disk.
 func nextAvailableFunc(path string, taken func(string) bool) string {
 	dir := filepath.Dir(path)
 	ext := filepath.Ext(path)

@@ -86,9 +86,10 @@ func TestExtract_AdoptsSessionVerbatimSkipsBootstrap(t *testing.T) {
 	}
 }
 
-// TestExtract_AdoptionFailureAborts ensures a failed session resolution is fatal
-// under adoption: extraction returns the error and never falls back to a synthetic
-// visitorData (which would send the wrong content_binding to a token minter).
+// TestExtract_AdoptionFailureAborts verifies that a failed session resolution
+// is fatal under adoption: extraction returns the error and never falls back to
+// a synthetic visitorData (which would send the wrong content_binding to a token
+// minter).
 func TestExtract_AdoptionFailureAborts(t *testing.T) {
 	provider := &fakeSessionProvider{err: errProvider}
 	jar, _ := cookiejar.New(nil)
@@ -188,9 +189,9 @@ func TestExtract_AdoptedCookiesSeededLoginDropped(t *testing.T) {
 	}
 }
 
-// TestExtract_AdoptedCookiesNoJarErrors ensures supplying guest cookies without a
-// cookie jar is a hard error (no silent drop), while visitorData-only adoption
-// still works jarless.
+// TestExtract_AdoptedCookiesNoJarErrors verifies that supplying guest cookies
+// without a cookie jar is a hard error (no silent drop), while visitorData-only
+// adoption still works jarless.
 func TestExtract_AdoptedCookiesNoJarErrors(t *testing.T) {
 	ok := readFixture(t, "player_ok.json")
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -221,9 +222,10 @@ func TestExtract_AdoptedCookiesNoJarErrors(t *testing.T) {
 	}
 }
 
-// TestExtract_StaticEmptyVisitorDataAborts ensures a static Session with an empty
-// VisitorData is not silently adopted (which would break GVS content_binding) but
-// aborts extraction with a clear error, matching the provider path.
+// TestExtract_StaticEmptyVisitorDataAborts verifies that a static Session with
+// an empty VisitorData is not silently adopted (which would break GVS
+// content_binding) but aborts extraction with a clear error, matching the
+// provider path.
 func TestExtract_StaticEmptyVisitorDataAborts(t *testing.T) {
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		t.Errorf("no request expected when adoption has an empty visitorData: %s", r.URL)
@@ -239,10 +241,10 @@ func TestExtract_StaticEmptyVisitorDataAborts(t *testing.T) {
 	}
 }
 
-// TestExtract_ProviderCookiesNoJarCachesError ensures a provider that returns
-// cookies while the client has no jar fails once (a permanent config error) and is
-// not re-invoked on every Extract; the cache-on-success rule must not retry a
-// permanent misconfiguration.
+// TestExtract_ProviderCookiesNoJarCachesError verifies that a provider that
+// returns cookies while the client has no jar fails once (a permanent config
+// error) and is not re-invoked on every Extract; the cache-on-success rule must
+// not retry a permanent misconfiguration.
 func TestExtract_ProviderCookiesNoJarCachesError(t *testing.T) {
 	provider := &fakeSessionProvider{sess: potoken.Session{
 		VisitorData: "CgtADOPTED%3D%3D",

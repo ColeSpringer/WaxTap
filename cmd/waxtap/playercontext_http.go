@@ -10,9 +10,9 @@ import (
 )
 
 // playerContextProvider is a potoken.PlayerContextProvider that fetches an
-// attested WEB /player streaming context from a WaxSeal-style server. It POSTs
-// {"video_id": …} to <baseURL>/player-context and maps the snake_case response
-// onto a potoken.PlayerContext.
+// attested WEB /player streaming context from a WaxSeal-style server. It posts a
+// JSON body containing video_id to <baseURL>/player-context and maps the
+// snake_case response onto a potoken.PlayerContext.
 //
 // Like the bgutil token provider, it uses its own dedicated HTTP client, never
 // WaxTap's --proxy/--insecure client: the provider is typically a localhost
@@ -72,6 +72,8 @@ type playerContextFormatJSON struct {
 	AudioTrackID string `json:"audio_track_id"`
 }
 
+// ProvidePlayerContext requests an attested WEB context from the configured
+// sidecar.
 func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoID string) (potoken.PlayerContext, error) {
 	var out playerContextResponse
 	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "player-context server",

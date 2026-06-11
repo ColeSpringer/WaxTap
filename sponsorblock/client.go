@@ -59,13 +59,13 @@ type Segment struct {
 	ActionType string
 	// Start and End are the half-open time span to remove.
 	Start time.Duration
-	End   time.Duration
+	End   time.Duration // exclusive end offset
 	// UUID is the SponsorBlock submission ID.
 	UUID string
 	// Locked and Votes are the SponsorBlock authority signals used to choose
 	// between overlapping submissions.
 	Locked bool
-	Votes  int
+	Votes  int // net community vote count
 	// VideoDuration is 0 when the server did not report it.
 	VideoDuration time.Duration
 }

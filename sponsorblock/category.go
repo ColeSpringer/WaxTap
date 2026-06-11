@@ -7,14 +7,14 @@ package sponsorblock
 type Category string
 
 const (
-	CategorySponsor       Category = "sponsor"
-	CategorySelfPromo     Category = "selfpromo"
-	CategoryInteraction   Category = "interaction"
-	CategoryIntro         Category = "intro"
-	CategoryOutro         Category = "outro"
-	CategoryPreview       Category = "preview"
-	CategoryFiller        Category = "filler"
-	CategoryMusicOffTopic Category = "music_offtopic"
+	CategorySponsor       Category = "sponsor"        // paid promotion
+	CategorySelfPromo     Category = "selfpromo"      // unpaid self-promotion
+	CategoryInteraction   Category = "interaction"    // engagement reminder
+	CategoryIntro         Category = "intro"          // intermission or intro animation
+	CategoryOutro         Category = "outro"          // credits or end card
+	CategoryPreview       Category = "preview"        // recap or preview
+	CategoryFiller        Category = "filler"         // tangential filler
+	CategoryMusicOffTopic Category = "music_offtopic" // non-music section in a music video
 )
 
 // DefaultCategories is used when a caller enables SponsorBlock without naming

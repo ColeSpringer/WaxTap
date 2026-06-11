@@ -117,7 +117,7 @@ func umpVarintSize(prefix byte) int {
 
 // leadingVarint reads a UMP varint from the front of payload and returns it with
 // the remaining bytes. MEDIA parts begin with a header_id followed by raw media
-// bytes; MEDIA_END parts carry just the header_id.
+// bytes; MEDIA_END parts carry only the header_id.
 func leadingVarint(payload []byte) (value uint64, rest []byte, err error) {
 	r := umpReader{b: payload}
 	value, err = r.readVarint()

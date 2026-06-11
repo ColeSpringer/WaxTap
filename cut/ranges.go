@@ -10,8 +10,8 @@ import (
 // Range is a half-open [Start, End) time span. End must be greater than Start to
 // describe a non-empty span.
 type Range struct {
-	Start time.Duration
-	End   time.Duration
+	Start time.Duration // inclusive start offset
+	End   time.Duration // exclusive end offset
 }
 
 // Duration returns the span length, or zero when the range is empty or inverted.

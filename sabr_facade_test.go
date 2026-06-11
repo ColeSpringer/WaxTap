@@ -63,7 +63,8 @@ func TestFacade_SABRDownloadToWriter(t *testing.T) {
 			return resp(http.StatusOK, umpBody), nil
 		default:
 			// Signature-timestamp discovery (embed/base.js) is best-effort; a 404
-			// just omits sts. The watch page is never reached because WEB succeeds.
+			// The request omits sts. The watch page is never reached because WEB
+			// succeeds.
 			return resp(http.StatusNotFound, nil), nil
 		}
 	})

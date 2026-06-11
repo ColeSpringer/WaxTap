@@ -136,6 +136,7 @@ type ProcessSpec struct {
 
 // Request is a YouTube acquisition + processing request.
 type Request struct {
+	// URL is a YouTube video URL or bare video ID.
 	URL string
 
 	// Audio selects which audio stream to take. The zero value is BestAudio.
@@ -163,20 +164,21 @@ type ProcessRequest struct {
 type TranscodeFormat uint8
 
 const (
-	FormatCopy TranscodeFormat = iota // remux / stream-copy (no re-encode)
-	FormatFLAC
-	FormatALAC
-	FormatWAV
-	FormatMP3
-	FormatAAC // delivered in an .m4a container
-	FormatOpus
-	FormatVorbis
+	FormatCopy   TranscodeFormat = iota // remux / stream-copy (no re-encode)
+	FormatFLAC                          // FLAC lossless audio
+	FormatALAC                          // Apple Lossless audio
+	FormatWAV                           // uncompressed PCM in a WAV container
+	FormatMP3                           // MP3 audio
+	FormatAAC                           // delivered in an .m4a container
+	FormatOpus                          // Opus audio
+	FormatVorbis                        // Vorbis audio
 )
 
 // TranscodeSpec requests ffmpeg processing. An explicit FormatCopy stream-copies
 // through ffmpeg to remux into the destination container; a nil TranscodeSpec
 // keeps the selected source bytes untouched.
 type TranscodeSpec struct {
+	// Format selects the output preset.
 	Format TranscodeFormat
 	// Bitrate is the target bits per second for lossy presets (e.g. 256000).
 	// Zero selects the preset default. Ignored by lossless presets.
@@ -243,6 +245,7 @@ const (
 
 // LoudnessSpec requests loudness measurement or normalization (EBU R128).
 type LoudnessSpec struct {
+	// Mode selects measurement or applied normalization.
 	Mode LoudnessMode
 	// Target is the target integrated loudness in LUFS for Apply (e.g. -14). The
 	// value is the caller's policy; WaxTap does not impose one.
@@ -262,13 +265,13 @@ type LoudnessInfo struct {
 type LoudnessResult struct {
 	Input  *LoudnessInfo // measured input loudness (post-cut)
 	Output *LoudnessInfo // post-apply loudness; set only when Mode == LoudnessApply
-	Target float64
+	Target float64       // requested integrated loudness in LUFS
 }
 
 // TimeRange is a half-open [Start, End) span. End must be greater than Start.
 type TimeRange struct {
-	Start time.Duration
-	End   time.Duration
+	Start time.Duration // inclusive start offset
+	End   time.Duration // exclusive end offset
 }
 
 type outputKind uint8
@@ -302,8 +305,8 @@ func ToWriter(w io.Writer) Output { return Output{kind: outputWriter, writer: w}
 type SourceKind uint8
 
 const (
-	SourceYouTube SourceKind = iota
-	SourceLocalFile
+	SourceYouTube   SourceKind = iota // media acquired from YouTube
+	SourceLocalFile                   // media read from a local file
 )
 
 func (k SourceKind) String() string {
@@ -320,35 +323,35 @@ func (k SourceKind) String() string {
 // SponsorBlockApplied false, and ranges that vanish after clamping leave
 // CutApplied false.
 type Result struct {
-	SourceKind SourceKind
-	VideoID    string // empty for local files
-	Title      string // empty for local files
-	InputPath  string // set for local files
-	OutputPath string // empty for ToWriter delivery
+	SourceKind SourceKind // identifies a YouTube or local-file source
+	VideoID    string     // empty for local files
+	Title      string     // empty for local files
+	InputPath  string     // set for local files
+	OutputPath string     // empty for ToWriter delivery
 
 	SourceFormat Format // input/source format
 	OutputFormat Format // after transcode (== source when copy/keep)
 
-	SourceBytes int64
-	OutputBytes int64
+	SourceBytes int64 // bytes read from the acquired or local source
+	OutputBytes int64 // bytes delivered to the output sink
 
-	Transcoded          bool
-	CutApplied          bool
-	SponsorBlockApplied bool
-	LoudnessMeasured    bool // measured != normalized
-	LoudnessApplied     bool
+	Transcoded          bool            // audio was re-encoded or remuxed
+	CutApplied          bool            // at least one time range was removed
+	SponsorBlockApplied bool            // SponsorBlock contributed a removed range
+	LoudnessMeasured    bool            // measured != normalized
+	LoudnessApplied     bool            // normalization was applied
 	Loudness            *LoudnessResult // nil unless measured
 
-	Warnings []Warning
+	Warnings []Warning // non-fatal conditions encountered during processing
 }
 
 // StreamInfo is the initial metadata returned by Client.Stream alongside the
 // stream reader. Final byte counts are known only after read-to-EOF/Close.
 type StreamInfo struct {
-	VideoID       string
-	Title         string
-	Format        Format
-	ContentLength int64 // 0 if unknown
+	VideoID       string // resolved YouTube video ID
+	Title         string // extracted video title
+	Format        Format // selected source format
+	ContentLength int64  // 0 if unknown
 }
 
 // EnumerateOptions tunes playlist enumeration. Enumeration never downloads.
@@ -364,20 +367,20 @@ type EnumerateOptions struct {
 type Stage uint8
 
 const (
-	StageExtracting Stage = iota
-	StageResolving
-	StageDownloading
-	StageStaging
-	StageProbing
-	StageAnalyzing
-	StageCutting
-	StageNormalizing
-	StageTranscoding
-	StageFinalizing
-	StageSkipped
-	StageWarning
-	StageDone
-	StageFailed
+	StageExtracting  Stage = iota // fetching and parsing source metadata
+	StageResolving                // resolving the selected media stream
+	StageDownloading              // transferring source bytes
+	StageStaging                  // preparing a local working file
+	StageProbing                  // inspecting media with ffprobe
+	StageAnalyzing                // measuring loudness
+	StageCutting                  // removing time ranges
+	StageNormalizing              // applying loudness normalization
+	StageTranscoding              // encoding or remuxing audio
+	StageFinalizing               // delivering the completed output
+	StageSkipped                  // skipping work because output already exists
+	StageWarning                  // reporting a non-fatal warning
+	StageDone                     // reporting successful completion
+	StageFailed                   // reporting terminal failure
 )
 
 func (s Stage) String() string {
@@ -462,8 +465,8 @@ func (w WarningCode) String() string {
 // Warning is a typed, non-fatal signal. It is both delivered as a StageWarning
 // Event and accumulated in Result.Warnings.
 type Warning struct {
-	Code   WarningCode
-	Detail string // human-readable context
+	Code   WarningCode // stable machine-readable identifier
+	Detail string      // human-readable context
 }
 
 // Event is a best-effort progress signal. Callbacks are invoked synchronously
@@ -471,8 +474,8 @@ type Warning struct {
 // StageDone on success or StageFailed with Err. For Stream, the terminal event
 // is emitted when the returned reader is closed.
 type Event struct {
-	Stage   Stage
-	VideoID string
+	Stage   Stage  // current pipeline stage
+	VideoID string // empty for local-file processing
 
 	// Downloading progress.
 	Bytes int64
@@ -480,9 +483,9 @@ type Event struct {
 
 	// CLI playlist expansion.
 	ItemIndex int
-	ItemCount int
+	ItemCount int // total playlist entries, or 0 when unknown
 
 	Warning *Warning // set when Stage == StageWarning
 	Err     error    // set when Stage == StageFailed
-	Message string
+	Message string   // optional human-readable detail
 }

@@ -437,7 +437,7 @@ func (df *downloadFlags) buildLoudnessSpec() (*waxtap.LoudnessSpec, error) {
 }
 
 // pathReserver hands out output paths for concurrent playlist downloads. It
-// tracks paths already chosen in this run, not only paths already present on disk.
+// tracks paths already chosen in this run as well as paths present on disk.
 type pathReserver struct {
 	mu      sync.Mutex
 	claimed map[string]bool

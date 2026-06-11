@@ -24,7 +24,7 @@ const (
 
 // Command is a built ffmpeg invocation. Args excludes the binary name.
 type Command struct {
-	Args []string
+	Args []string // ffmpeg arguments, excluding the binary name
 }
 
 func (c Command) String() string { return "ffmpeg " + strings.Join(c.Args, " ") }
@@ -33,8 +33,8 @@ func (c Command) String() string { return "ffmpeg " + strings.Join(c.Args, " ") 
 // lossy preset defaults in bits/sec, and the optional filter fields run before
 // encoding. The zero value is a stream copy with no filters.
 type Spec struct {
-	Codec   Codec
-	Bitrate int
+	Codec   Codec // output codec; zero selects stream copy
+	Bitrate int   // target bits per second for lossy codecs; zero uses the preset default
 	// Filters is a comma-joined -af chain for linear audio filters such as
 	// loudnorm. It is mutually exclusive with FilterComplex.
 	Filters []string
@@ -126,7 +126,7 @@ type RunnerConfig struct {
 	// FFmpegPath and FFprobePath override the binaries; empty looks them up in
 	// PATH by name.
 	FFmpegPath  string
-	FFprobePath string
+	FFprobePath string // ffprobe binary path or name
 	// ShutdownGrace is how long a canceled process is given to exit after SIGTERM
 	// before it is force-killed (default 5s).
 	ShutdownGrace time.Duration
@@ -204,8 +204,8 @@ func resolveBinary(explicit, name string) (string, error) {
 
 // RunResult holds captured output from an ffmpeg run. Stderr is a bounded tail.
 type RunResult struct {
-	Stdout []byte
-	Stderr []byte
+	Stdout []byte // captured standard output
+	Stderr []byte // bounded tail of standard error
 }
 
 // Run executes ffmpeg with cmd's arguments. A non-zero exit becomes a *RunError
@@ -310,11 +310,11 @@ func classifyRun(bin string, args []string, stderr []byte, err error) error {
 // RunError reports a non-zero ffmpeg/ffprobe exit and includes a bounded stderr
 // tail for diagnosis.
 type RunError struct {
-	Binary   string
-	Args     []string
-	ExitCode int
-	Stderr   string
-	Err      error
+	Binary   string   // executable name
+	Args     []string // arguments passed to the executable
+	ExitCode int      // process exit code
+	Stderr   string   // bounded tail of standard error
+	Err      error    // underlying process error
 }
 
 func (e *RunError) Error() string {

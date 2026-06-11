@@ -13,8 +13,8 @@ import (
 
 // bgutilProvider is a potoken.Provider that mints PO tokens from a bgutil-wire
 // HTTP server (the protocol bgutil-ytdlp-pot-provider and WaxSeal's token server
-// speak). It POSTs {"content_binding": …} to <baseURL>/get_pot and maps the
-// returned poToken/expiresAt onto a potoken.Response.
+// speak). It posts a JSON body containing content_binding to <baseURL>/get_pot
+// and maps the returned poToken/expiresAt onto a potoken.Response.
 //
 // The content binding is scope-specific: a player-scope token binds to the video
 // ID; a GVS (stream) token binds to the session's visitor-data string.
@@ -48,6 +48,7 @@ type bgutilResponse struct {
 	ExpiresAt      string `json:"expiresAt"`
 }
 
+// ProvidePOToken requests a scope-bound token from the configured sidecar.
 func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request) (potoken.Response, error) {
 	binding, err := contentBinding(req)
 	if err != nil {

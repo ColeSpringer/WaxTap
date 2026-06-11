@@ -88,8 +88,8 @@ func TestExtract_BootstrapsRealVisitorData(t *testing.T) {
 	}
 }
 
-// TestExtract_BootstrapFailureFallsBack ensures a failed bootstrap still allows
-// extraction to continue with synthetic visitorData.
+// TestExtract_BootstrapFailureFallsBack verifies that a failed bootstrap still
+// allows extraction to continue with synthetic visitorData.
 func TestExtract_BootstrapFailureFallsBack(t *testing.T) {
 	ok := readFixture(t, "player_ok.json")
 
@@ -119,8 +119,8 @@ func TestExtract_BootstrapFailureFallsBack(t *testing.T) {
 	}
 }
 
-// TestExtract_NoJarSkipsBootstrap ensures jarless clients do not attempt the page
-// fetch and stay on the synthetic visitorData path.
+// TestExtract_NoJarSkipsBootstrap verifies that jarless clients do not attempt
+// the page fetch and stay on the synthetic visitorData path.
 func TestExtract_NoJarSkipsBootstrap(t *testing.T) {
 	ok := readFixture(t, "player_ok.json")
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {

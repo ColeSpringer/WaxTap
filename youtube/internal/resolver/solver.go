@@ -93,8 +93,8 @@ func parsePlayer(js string) (*ast.FunctionLiteral, string, error) {
 // locateIIFE finds the player's wrapping IIFE among the program's top-level
 // statements, handling the two shapes YouTube emits:
 //
-//	var X={}; (function(g){…})(X);   - callee is the function literal
-//	(function(){…}).call(this);      - callee is (function).call
+//	var X={}; (function(g){...})(X);   - callee is the function literal
+//	(function(){...}).call(this);      - callee is (function).call
 func locateIIFE(prog *ast.Program) *ast.FunctionLiteral {
 	for _, st := range prog.Body {
 		es, ok := st.(*ast.ExpressionStatement)
@@ -144,7 +144,7 @@ func unwrapPlayer(js string, iife *ast.FunctionLiteral, argName string) (string,
 	if iife.Body == nil {
 		return "", fmt.Errorf("%w: player IIFE has no body", waxerr.ErrCipherSolve)
 	}
-	// file.Idx is 1-based, so int(LeftBrace) is already the offset just past '{'
+	// file.Idx is 1-based, so int(LeftBrace) is the offset immediately after '{'
 	// and int(RightBrace)-1 is the offset of '}'. The slice is the inner body.
 	lb, rb := int(iife.Body.LeftBrace), int(iife.Body.RightBrace)
 	if lb < 1 || rb-1 < lb || rb-1 > len(js) {
@@ -331,7 +331,7 @@ func runCandidate(vm *goja.Runtime, cand candidate, kind transformKind) (string,
 
 // validResult pre-filters a candidate's output before consensus. Both transforms
 // reject the empty/"undefined"/echo (no-op) cases; n additionally rejects
-// YouTube's own "enhanced_except_…<n>" failure sentinel (which ends with the
+// YouTube's own "enhanced_except_...<n>" failure sentinel (which ends with the
 // input). Filtering these no-ops keeps an echoing candidate from breaking
 // consensus; one that returns a different wrong value is still caught there.
 func validResult(kind transformKind, in, out string) bool {

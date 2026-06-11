@@ -30,11 +30,11 @@ import (
 type Stage uint8
 
 const (
-	StageProbing Stage = iota
-	StageAnalyzing
-	StageCutting
-	StageNormalizing
-	StageTranscoding
+	StageProbing     Stage = iota // inspecting source media
+	StageAnalyzing                // measuring loudness
+	StageCutting                  // removing time ranges
+	StageNormalizing              // applying loudness normalization
+	StageTranscoding              // encoding or remuxing audio
 )
 
 func (s Stage) String() string {
@@ -57,7 +57,7 @@ func (s Stage) String() string {
 // Loudness configures the loudness stage. The zero value (Apply false) measures
 // only; Apply normalizes to Target, fused into the encode.
 type Loudness struct {
-	Apply  bool
+	Apply  bool    // normalize when true; measure only when false
 	Target float64 // target integrated loudness in LUFS for Apply
 }
 
@@ -69,13 +69,13 @@ type Spec struct {
 	// the probed duration, so out-of-range or overlapping spans are harmless. An
 	// empty slice means no cut.
 	Remove    []cut.Range
-	CutMode   cut.Mode
-	Crossfade time.Duration
+	CutMode   cut.Mode      // rendering strategy for effective cuts
+	Crossfade time.Duration // overlap applied at each splice
 
 	// Codec is the transcode target. transcode.CodecCopy means keep the source
 	// codec (no re-encode unless a cut or loudness apply forces one).
 	Codec   transcode.Codec
-	Bitrate int
+	Bitrate int // target bits per second for lossy codecs
 
 	// Remux requests a stream copy through ffmpeg even when Codec is CodecCopy,
 	// for an explicit copy/remux into the output container (which strips non-audio
@@ -102,12 +102,12 @@ type Result struct {
 	// re-probing. It is 0 when the input duration is unknown.
 	SourceDuration time.Duration
 
-	Cut              bool          // an effective cut was rendered
-	Removed          time.Duration // audio removed by the cut
-	Transcoded       bool          // a re-encode to a new codec ran
-	OutputCodec      transcode.Codec
-	LoudnessMeasured bool
-	LoudnessApplied  bool
+	Cut              bool            // an effective cut was rendered
+	Removed          time.Duration   // audio removed by the cut
+	Transcoded       bool            // a re-encode to a new codec ran
+	OutputCodec      transcode.Codec // codec written to OutputPath
+	LoudnessMeasured bool            // input loudness was measured
+	LoudnessApplied  bool            // normalization was applied
 
 	InputLoudness  *normalize.Loudness // measured post-cut input loudness
 	OutputLoudness *normalize.Loudness // measured output loudness, set only on Apply

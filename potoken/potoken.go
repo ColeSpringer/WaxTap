@@ -31,10 +31,10 @@ import (
 type Scope uint8
 
 const (
-	ScopeNone      Scope = iota
-	ScopePlayer          // /player request body
-	ScopeGVS             // googlevideo stream (download) URLs
-	ScopeSubtitles       // subtitle/timedtext URLs
+	ScopeNone      Scope = iota // no token scope
+	ScopePlayer                 // /player request body
+	ScopeGVS                    // googlevideo stream (download) URLs
+	ScopeSubtitles              // subtitle/timedtext URLs
 )
 
 func (s Scope) String() string {
@@ -72,22 +72,22 @@ func ParseScope(s string) (Scope, error) {
 // Request is passed to a Provider when WaxTap needs a token. It carries only
 // stable public data, not WaxTap's internal client profile or session.
 type Request struct {
-	VideoID       string
+	VideoID       string // target video ID, when the scope is video-bound
 	ClientName    string // InnerTube client name in play, e.g. "WEB"
-	ClientVersion string
-	VisitorData   string
+	ClientVersion string // InnerTube client version
+	VisitorData   string // exact guest-session visitorData value
 	// UserAgent is the exact User-Agent WaxTap will send for this scope.
 	// Providers that bind tokens to request headers should use it when minting.
 	// Empty means the provider can use its own default.
 	UserAgent string
-	Scope     Scope
+	Scope     Scope        // requested token scope
 	Failure   *HTTPFailure // the 403 that triggered this refresh, if any
 }
 
 // Response is what a Provider returns. Response.Token is the token string; stream
 // tokens may also require additional request headers or query parameters.
 type Response struct {
-	Token     string
+	Token     string      // minted PO token
 	Headers   http.Header // additional headers to send (may be nil)
 	Query     url.Values  // additional query parameters (may be nil)
 	ExpiresAt time.Time   // zero == unknown
@@ -96,6 +96,7 @@ type Response struct {
 // Provider supplies PO tokens on demand. Implementations must honor ctx
 // cancellation and should be safe for concurrent use.
 type Provider interface {
+	// ProvidePOToken returns a token for req.
 	ProvidePOToken(ctx context.Context, req Request) (Response, error)
 }
 
@@ -124,8 +125,8 @@ func (f ProviderFunc) ProvidePOToken(ctx context.Context, req Request) (Response
 // values issued with that visitorData; they must be a logged-out guest session
 // (a logged-in visitorData is account-bound).
 type Session struct {
-	VisitorData string
-	Cookies     []*http.Cookie
+	VisitorData string         // exact X-Goog-Visitor-Id literal
+	Cookies     []*http.Cookie // guest-session cookies associated with VisitorData
 }
 
 // SessionProvider supplies a guest Session on demand. WaxTap resolves it once per
@@ -134,14 +135,15 @@ type Session struct {
 // the Client per task to pick up a fresh session. Implementations must honor ctx
 // cancellation and should be safe for concurrent use.
 type SessionProvider interface {
+	// ProvideSession returns the guest identity WaxTap should adopt.
 	ProvideSession(ctx context.Context) (Session, error)
 }
 
 // HTTPFailure is a compact snapshot of the HTTP failure that triggered a token
 // refresh, for diagnosis by the provider.
 type HTTPFailure struct {
-	StatusCode int
-	Status     string
-	URL        string
+	StatusCode int    // HTTP status code
+	Status     string // HTTP status text, such as "403 Forbidden"
+	URL        string // request URL that failed
 	Body       string // truncated response body
 }

@@ -52,7 +52,7 @@ func TestParseLoudness(t *testing.T) {
 }
 
 func TestParseLoudnessNoJSON(t *testing.T) {
-	if _, err := parseLoudness([]byte("just info, no json here")); err == nil {
+	if _, err := parseLoudness([]byte("plain text, no json here")); err == nil {
 		t.Fatal("parseLoudness(no json) = nil error, want error")
 	}
 }

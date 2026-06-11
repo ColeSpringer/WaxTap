@@ -40,11 +40,11 @@ type PlaylistDownloadOptions struct {
 
 // PlaylistItemOutcome describes the result for one playlist entry.
 type PlaylistItemOutcome struct {
-	Entry      PlaylistEntry
-	Attempted  bool    // whether Download was called and counted against MaxDownloads
-	Result     *Result // set only after a successful download
-	SkipReason string  // set when Resolve skipped the entry
-	Err        error   // from Resolve when not Attempted, otherwise from Download
+	Entry      PlaylistEntry // playlist entry associated with this outcome
+	Attempted  bool          // whether Download was called and counted against MaxDownloads
+	Result     *Result       // set only after a successful download
+	SkipReason string        // set when Resolve skipped the entry
+	Err        error         // from Resolve when not Attempted, otherwise from Download
 }
 
 // PlaylistRunResult summarizes a playlist download.

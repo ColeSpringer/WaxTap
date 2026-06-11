@@ -36,8 +36,8 @@ type SABRStream struct {
 
 // SABRStreamInfo describes an open SABR stream.
 type SABRStreamInfo struct {
-	ContentLength int64
-	ContentType   string
+	ContentLength int64  // bytes, or 0 when unknown
+	ContentType   string // MIME type reported by the SABR response
 }
 
 func (c *Client) newSABRStream(ext *Extraction, formatIndex int, rf rawFormat) *SABRStream {

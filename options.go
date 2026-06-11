@@ -33,13 +33,14 @@ type Options struct {
 	// TempDir is where intermediate/staging files are written; empty uses the OS
 	// temp dir. MaxTempBytes optionally guards total staging size (0 =
 	// unlimited). This is useful in constrained containers.
-	TempDir      string
+	TempDir string
+	// MaxTempBytes limits temporary staging bytes. Zero disables the limit.
 	MaxTempBytes int64
 
-	Concurrency Concurrency
-	Timeouts    Timeouts
-	Retry       RetryPolicy
-	Politeness  Politeness
+	Concurrency Concurrency // limits parallel network and ffmpeg work
+	Timeouts    Timeouts    // sets per-operation deadlines
+	Retry       RetryPolicy // tunes HTTP retries and backoff
+	Politeness  Politeness  // limits request rate and applies cooldowns
 
 	// ProfileOverridePath points at a strict JSON file that replaces the built-in
 	// YouTube client profile chain at startup. Use it to refresh client versions,
@@ -55,7 +56,7 @@ type Options struct {
 	// values outside 0..999.
 	ChromeMajor int
 
-	SponsorBlock SponsorBlockOptions
+	SponsorBlock SponsorBlockOptions // configures SponsorBlock API access
 
 	// POTokenProvider supplies PO tokens for profiles that require them. WaxTap may
 	// call it during extraction for a player-scope token and during resolution for

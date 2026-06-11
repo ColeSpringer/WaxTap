@@ -1,8 +1,7 @@
 # WaxTap
 
-WaxTap is an audio-focused YouTube downloader and audio processor for Go. It is
-available as both a reusable library and the `waxtap` CLI, with both surfaces
-built on the same core.
+WaxTap downloads and processes YouTube audio. It is available as a Go library
+and as the `waxtap` command-line tool. Both use the same processing core.
 
 WaxTap can download the best available YouTube audio or process an existing local
 file. Processing stages are opt-in: transcode, cut explicit time ranges, remove
@@ -14,7 +13,7 @@ keeps the selected source stream and does not re-encode.
 > anti-bot behavior without notice; see [MAINTENANCE.md](MAINTENANCE.md) for the
 > recovery runbook and runtime knobs.
 
-## Design at a glance
+## Design
 
 - **Library and CLI over one core.** `github.com/colespringer/waxtap` is the stable
   facade; `cmd/waxtap` is a real CLI built on the same packages.
@@ -23,11 +22,11 @@ keeps the selected source stream and does not re-encode.
   no PO token. Full WEB audio over SABR/UMP is opt-in: it needs a GVS
   `potoken.Provider` plus an attested `/player-context` handoff (WaxTap's own WEB
   `/player` only earns a ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
-- **Volatile surfaces are isolated** behind small interfaces (`youtube`,
-  `youtube/internal/resolver`) so a YouTube change touches few, marked files.
-- **Server-friendly:** concurrency-safe, context-cancelable, bounded memory,
+- **YouTube-specific code is isolated** behind small interfaces (`youtube`,
+  `youtube/internal/resolver`) so most upstream changes stay in a few files.
+- **Operational behavior:** concurrency-safe, context-cancelable, bounded memory,
   per-operation timeouts (never a single global cap), atomic temp-file output.
-- **Clear about quality:** YouTube audio is lossy; FLAC/ALAC/WAV are lossless
+- **Encoding behavior:** YouTube audio is lossy; FLAC/ALAC/WAV are lossless
   *re-encodes* of a lossy source. Only copy/remux avoids re-encoding.
 
 ## Package layout
@@ -35,7 +34,7 @@ keeps the selected source stream and does not re-encode.
 | Package | Role |
 |---|---|
 | `waxtap` (root) | Stable facade: `Client`, `Request`/`Result`, `Options`. |
-| `cmd/waxtap` | The CLI (cobra): `download`, `info`, `cut`, `normalize`, `doctor`, … |
+| `cmd/waxtap` | The CLI (cobra): `download`, `info`, `cut`, `normalize`, `doctor`, and other commands. |
 | `format` | Audio-first `Format` model and selectors. |
 | `download` | Resilient ranged/streaming download (parallel chunks, expiry refresh). |
 | `transcode` | ffmpeg/ffprobe execution home (codecs, probing). |
@@ -47,7 +46,7 @@ keeps the selected source stream and does not re-encode.
 | `youtube` | YouTube extraction (volatile; exported for the facade, may churn). |
 | `youtube/internal/resolver` | Cipher / base.js / stream-URL resolution. |
 | `youtube/internal/sabr` | SABR/UMP streaming for URL-less WEB-family audio. |
-| `internal/pipeline` | Fused probe → cut → loudness → encode pipeline. |
+| `internal/pipeline` | Fused probe, cut, loudness, and encode pipeline. |
 | `internal/httpx` | HTTP client: retry, backoff, Retry-After, per-host limiter. |
 | `internal/cache` | In-memory LRU+TTL+singleflight cache. |
 | `internal/diskcache` | On-disk, size-capped, schema-versioned player-JS cache. |
@@ -273,14 +272,15 @@ waxtap download <url> \
   --potoken-url        http://127.0.0.1:4416
 ```
 
-The provider returns snake_case JSON: `{ player_url, server_abr_streaming_url
-(scrambled n), video_playback_ustreamer_config, visitor_data, client_version,
-audio_formats, title, length_seconds, … }`; each `audio_formats` entry carries
-`itag, lmt, xtags, mime_type, …` plus optional `is_drc` / `audio_track_id` for
-DRC and multi-audio renditions. WaxTap descrambles `n` with the context's
-`player_url`, mints a GVS token bound to its `visitor_data`, picks a format, and
-streams the file through its existing SABR loop. Go-side, cold start, no
-browser. Wire it as `Options.PlayerContextProvider`.
+The provider returns snake_case JSON with `player_url`,
+`server_abr_streaming_url` (scrambled `n`),
+`video_playback_ustreamer_config`, `visitor_data`, `client_version`,
+`audio_formats`, and video metadata. Each `audio_formats` entry includes `itag`,
+`lmt`, `xtags`, and `mime_type`, plus optional `is_drc` and `audio_track_id`
+fields for DRC and multi-audio renditions. WaxTap descrambles `n` with the
+context's `player_url`, mints a GVS token bound to its `visitor_data`, picks a
+format, and streams the file through its existing SABR loop. Wire the provider
+as `Options.PlayerContextProvider`.
 
 `--player-context-url` requires `--potoken-url` (the stream binds a GVS token to
 the context's `visitor_data`), and the context mint and the download **must share
@@ -337,4 +337,4 @@ failures, not something WaxTap promises to bypass.
 
 ## License
 
-[MIT](LICENSE) © Cole Springer.
+[MIT](LICENSE). Copyright Cole Springer.

@@ -50,7 +50,7 @@ func newDoctorCmd() *cobra.Command {
 
 			var lastErr error
 			for _, id := range candidates {
-				env.info("checking %s…\n", id)
+				env.info("checking %s\n", id)
 				if err := runDoctorCheck(cmd.Context(), env, id, full, rep); err != nil {
 					lastErr = err
 					env.info("  %s: %s\n", id, friendlyError(err))

@@ -5,7 +5,7 @@
 // diagnostics, and terminates the process, or its process group where supported,
 // when a context is canceled.
 //
-// A [Command] is just an argument list, so command construction can be tested
+// A [Command] is an argument list, so command construction can be tested
 // without starting ffmpeg. A [Spec] selects the target [Codec], optional bitrate,
 // and pre-encode audio filters. Loudness normalization and cuts are passed in as
 // filters so they can run in the same encode as the format conversion.

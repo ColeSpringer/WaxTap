@@ -37,7 +37,9 @@ const (
 // Limiter gates outbound requests. Wait blocks until a request may proceed or
 // ctx is done. Penalize pauses requests to one host for at least d.
 type Limiter interface {
+	// Wait blocks until host may receive another request or ctx is canceled.
 	Wait(ctx context.Context, host string) error
+	// Penalize pauses requests to host for at least d.
 	Penalize(host string, d time.Duration)
 }
 

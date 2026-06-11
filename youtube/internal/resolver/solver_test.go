@@ -67,7 +67,7 @@ const (
 
 // wrapPlayer builds an IIFE-wrapped synthetic player from the shared URL
 // machinery plus the given descrambler definitions, matching the real
-// var X={};(function(g){…})(X) shape the solver unwraps.
+// var X={};(function(g){...})(X) shape the solver unwraps.
 func wrapPlayer(descramblers ...string) string {
 	return "var T={};(function(g){" + urlMachinery + strings.Join(descramblers, "\n") + "\n})(T);"
 }

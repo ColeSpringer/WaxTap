@@ -17,26 +17,26 @@ type ClientProfile struct {
 	Name          string // internal name, e.g. "ANDROID_VR"
 	InnerTubeName string // InnerTube context clientName, e.g. "ANDROID_VR"
 	InnerTubeID   int    // drives X-Youtube-Client-Name (never hardcoded)
-	Version       string
-	APIKey        string
-	UserAgent     string
+	Version       string // InnerTube client version
+	APIKey        string // optional InnerTube API key
+	UserAgent     string // request User-Agent
 
 	// Device and OS fields sent in the InnerTube client context. Mobile and VR
 	// clients need these populated; sparse identities are more likely to hit the
 	// bot-check path. Zero values are omitted from the request.
 	DeviceMake        string
-	DeviceModel       string
-	OSName            string
-	OSVersion         string
-	AndroidSDKVersion int
+	DeviceModel       string // client device model
+	OSName            string // client operating-system name
+	OSVersion         string // client operating-system version
+	AndroidSDKVersion int    // Android SDK level, or 0 when not applicable
 
 	// RequiresPOTokens lists the PO-token scopes this client must supply: a
 	// player-scope token in the /player body, a GVS token on the stream URL,
 	// or both. Empty means none. NewClientProfile clones and canonicalizes
 	// the slice.
 	RequiresPOTokens  []potoken.Scope
-	SupportsCookies   bool
-	SupportsPlaylists bool
+	SupportsCookies   bool // whether cookie-backed sessions are supported
+	SupportsPlaylists bool // whether the profile can browse playlists
 
 	// NeedsSignatureTimestamp indicates that /player requests for this profile
 	// must include the signature timestamp from base.js. Profiles that return

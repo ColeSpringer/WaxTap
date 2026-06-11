@@ -170,7 +170,7 @@ func TestFlagIntPtrOnlyWhenChanged(t *testing.T) {
 	}
 }
 
-// newConfigTestCmd builds a command exposing just the --config flag bound to the
+// newConfigTestCmd builds a command exposing only the --config flag bound to the
 // global rootFlagsValue, as readConfigFile expects.
 func newConfigTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "test"}

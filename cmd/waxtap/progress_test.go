@@ -25,8 +25,8 @@ func TestProgress_OffTTYAnnouncesStageWithoutByteCount(t *testing.T) {
 	if got := strings.Count(out, "downloading"); got != 1 {
 		t.Fatalf("download stage should be announced once, got %d in %q", got, out)
 	}
-	if !strings.Contains(out, "downloading…") {
-		t.Fatalf("expected \"downloading…\", got %q", out)
+	if !strings.Contains(out, "downloading\n") {
+		t.Fatalf("expected a downloading line, got %q", out)
 	}
 }
 

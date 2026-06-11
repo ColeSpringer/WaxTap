@@ -168,7 +168,7 @@ func assertDuration(t *testing.T, got, want, tol time.Duration) {
 		diff = -diff
 	}
 	if diff > tol {
-		t.Errorf("duration = %v, want %v ± %v", got, want, tol)
+		t.Errorf("duration = %v, want %v +/- %v", got, want, tol)
 	}
 }
 

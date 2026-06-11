@@ -105,7 +105,7 @@ type Config struct {
 	// InnerTube locale. Empty defaults to en / US. These are localization hints:
 	// geo-restricted availability is still governed by the request IP.
 	HL string
-	GL string
+	GL string // content-region hint
 }
 
 // playerCacheSchema namespaces the on-disk base.js source cache. Bump it if the
@@ -470,7 +470,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
 }
 
-// Info returns just the video metadata and candidate formats.
+// Info returns video metadata and candidate formats.
 func (c *Client) Info(ctx context.Context, videoID string) (*Video, error) {
 	ext, err := c.Extract(ctx, videoID)
 	if err != nil {

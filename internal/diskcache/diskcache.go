@@ -4,7 +4,7 @@
 //
 // The cache is deliberately fail-soft. Disk errors are logged and treated as
 // misses or skipped writes; callers never receive them. A read-only or full
-// filesystem just means the resolver fetches from the network again.
+// filesystem causes the resolver to fetch from the network again.
 //
 // Entries are individual SHA-256(key) files under Dir/v<schema>. Writes use a
 // sibling temp file and rename, files are mode 0600, and eviction removes the
@@ -71,7 +71,7 @@ type Store struct {
 
 // New returns a Store with defaults applied. It never fails: directory creation
 // is deferred to the first write and is itself best-effort, so a Store backed by
-// an unwritable location simply behaves as a perpetual miss.
+// an unwritable location behaves as a perpetual miss.
 func New(opts Options) *Store {
 	if opts.MaxBytes == 0 {
 		opts.MaxBytes = defaultMaxBytes

@@ -65,13 +65,14 @@ var ErrReloadPlayer = errors.New("sabr: reload player response")
 
 // HTTPDoer is the HTTP operation SABR requires.
 type HTTPDoer interface {
+	// Do executes a SABR HTTP request.
 	Do(*http.Request) (*http.Response, error)
 }
 
 // Progress reports the number of bytes emitted by the stream.
 type Progress struct {
-	BytesWritten int64
-	Total        int64
+	BytesWritten int64 // bytes emitted so far
+	Total        int64 // expected bytes, or 0 when unknown
 }
 
 // ProgressFunc receives best-effort byte progress. Read calls it synchronously,
@@ -80,8 +81,8 @@ type ProgressFunc func(Progress)
 
 // StreamInfo is the response metadata returned alongside the reader.
 type StreamInfo struct {
-	ContentLength int64
-	ContentType   string
+	ContentLength int64  // bytes, or 0 when unknown
+	ContentType   string // response MIME type
 }
 
 // Config contains the normalized values needed to open a SABR stream.

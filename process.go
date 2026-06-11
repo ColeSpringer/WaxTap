@@ -124,8 +124,8 @@ func processRanges(cs *CutSpec) []TimeRange {
 // measurements, in input order. The album value is a true group EBU R128
 // measurement, not a mean of the per-track LUFS.
 type AlbumLoudnessResult struct {
-	Album    LoudnessInfo
-	PerTrack []LoudnessInfo
+	Album    LoudnessInfo   // loudness measured across the complete album
+	PerTrack []LoudnessInfo // measurements in input order
 }
 
 // MeasureAlbum measures local audio files as one album and also returns each
@@ -159,17 +159,17 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 // AlbumTrack names one album input and where its processed output should be
 // written.
 type AlbumTrack struct {
-	Input  string
-	Output string
+	Input  string // source file path
+	Output string // destination file path
 }
 
 // AlbumProcessResult reports the album loudness, the gain applied to every track,
 // the input measurements, and the output paths.
 type AlbumProcessResult struct {
-	Album    LoudnessInfo
-	GainDB   float64 // Target - album integrated LUFS, applied to every track (0 for a silent album)
-	PerTrack []LoudnessInfo
-	Outputs  []string
+	Album    LoudnessInfo   // loudness measured across the complete album
+	GainDB   float64        // Target - album integrated LUFS, applied to every track (0 for a silent album)
+	PerTrack []LoudnessInfo // input measurements in track order
+	Outputs  []string       // completed output paths in track order
 }
 
 // ProcessAlbum measures local files as one album, then bakes the same gain into

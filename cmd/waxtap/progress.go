@@ -96,7 +96,7 @@ func (r *progressReporter) renderStage(s waxtap.Stage) {
 		return
 	}
 	r.lastStg, r.haveStg = s, true
-	label := s.String() + "…"
+	label := s.String()
 	if r.tty {
 		r.writeLineLocked(label)
 		return

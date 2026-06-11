@@ -119,10 +119,10 @@ func (e *Extraction) rawFormatByIndex(i int) (rawFormat, bool) {
 // streams include a URL and request headers; SABR streams set IsSABR and leave
 // URL empty.
 type ResolvedStream struct {
-	URL           string
-	ExpiresAt     time.Time
-	ContentLength int64
-	Headers       http.Header
+	URL           string      // signed media URL; empty for SABR streams
+	ExpiresAt     time.Time   // URL expiry, or zero when unknown
+	ContentLength int64       // bytes, or 0 when unknown
+	Headers       http.Header // headers required when fetching URL
 	// IsSABR reports whether the stream must be fetched through SABR.
 	IsSABR bool
 }
@@ -135,8 +135,8 @@ func (rs ResolvedStream) Probeable() bool {
 // MediaPlan describes how to fetch a selected format. Exactly one of Direct or
 // SABR is non-nil.
 type MediaPlan struct {
-	Direct *ResolvedStream
-	SABR   *SABRStream
+	Direct *ResolvedStream // direct signed-URL stream
+	SABR   *SABRStream     // SABR-backed stream
 }
 
 // Diagnostic returns the metadata available without opening the stream.

@@ -1,19 +1,10 @@
-// Package waxerr defines WaxTap's domain error taxonomy: a flat set of sentinel
-// errors plus a few structured error types that carry diagnostic context.
+// Package waxerr defines the sentinel and structured errors shared by WaxTap's
+// extraction, download, and processing packages.
 //
-// It is the single source of truth for errors that cross package boundaries:
-// extraction (youtube), download, transcode, and the facade all classify
-// failures into these values. Keeping the taxonomy in one leaf package (it
-// imports only the standard library) lets every layer agree on the same
-// errors.Is targets without import cycles, and lets the top-level waxtap package
-// re-export the user-facing names.
-//
-// Classification intent:
-//   - "YouTube changed" ([ErrExtractionFailed] / [ErrCipherSolve]) means the
-//     maintainer must act. It is distinct from a video simply being unavailable,
-//     restricted, or rate-limited.
-//   - Expected-in-v1 failures ([ErrVideoRestricted] / [ErrLoginRequired] /
-//     [ErrLiveContent]) are never reported as ErrExtractionFailed.
+// [ErrExtractionFailed] and [ErrCipherSolve] indicate likely extractor
+// breakage. Availability, login, live-content, and rate-limit failures use
+// separate errors so callers can handle them without treating them as
+// maintenance incidents.
 package waxerr
 
 import (
@@ -109,7 +100,7 @@ func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 type ExtractionError struct {
 	Stage     string // e.g. "player-response", "format-parse"
 	PlayerURL string // base.js URL in play, if known
-	Cause     error
+	Cause     error  // underlying extraction failure
 }
 
 func (e *ExtractionError) Error() string {
@@ -151,9 +142,9 @@ func (e *PlayabilityError) Unwrap() error { return e.Sentinel }
 // HTTPStatusError reports an unexpected HTTP status from a YouTube,
 // googlevideo, or SponsorBlock endpoint.
 type HTTPStatusError struct {
-	StatusCode int
+	StatusCode int    // numeric HTTP status code
 	Status     string // raw status line, if available
-	URL        string
+	URL        string // endpoint that returned the status, if known
 }
 
 func (e *HTTPStatusError) Error() string {

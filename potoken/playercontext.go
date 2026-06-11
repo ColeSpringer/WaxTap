@@ -32,7 +32,7 @@ type PlayerContext struct {
 	// Title and Author are video metadata for the output. They may be empty; the
 	// consumer falls back to the video ID for the filename when Title is empty.
 	Title  string
-	Author string
+	Author string // channel or uploader name
 	// LengthSeconds is the video duration in seconds. Zero means unknown.
 	LengthSeconds int
 	// AudioFormats are the audio renditions available for this context.
@@ -44,16 +44,16 @@ type PlayerContext struct {
 // that matches no rendition makes the SABR server answer RELOAD_PLAYER_RESPONSE,
 // so a consumer must carry all three together.
 type PlayerContextFormat struct {
-	Itag             int
+	Itag             int    // YouTube format identifier
 	LMT              string // lastModified, distinguishes encodings sharing an itag
-	XTags            string
-	MimeType         string
-	Bitrate          int
+	XTags            string // SABR format tags
+	MimeType         string // raw YouTube MIME type
+	Bitrate          int    // bits per second
 	AudioQuality     string // YouTube's audioQuality tier, e.g. AUDIO_QUALITY_MEDIUM
-	AudioChannels    int
-	AudioSampleRate  int
-	ContentLength    int64
-	ApproxDurationMs int64
+	AudioChannels    int    // channel count
+	AudioSampleRate  int    // samples per second
+	ContentLength    int64  // bytes, or 0 when unknown
+	ApproxDurationMs int64  // approximate duration in milliseconds
 	// IsDrc marks a DRC (dynamic-range-compressed) rendition. The SABR request
 	// declares it in client_abr_state.drc_enabled when streaming one, so a
 	// provider omitting it leaves DRC renditions misdescribed on the wire.
@@ -68,6 +68,7 @@ type PlayerContextFormat struct {
 // demand. Implementations must honor ctx cancellation and should be safe for
 // concurrent use.
 type PlayerContextProvider interface {
+	// ProvidePlayerContext returns an attested streaming context for videoID.
 	ProvidePlayerContext(ctx context.Context, videoID string) (PlayerContext, error)
 }
 

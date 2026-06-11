@@ -18,9 +18,9 @@ import (
 type Tri uint8
 
 const (
-	Unknown Tri = iota
-	Yes
-	No
+	Unknown Tri = iota // the source did not provide the value
+	Yes                // the source explicitly reported true
+	No                 // the source explicitly reported false
 )
 
 func (t Tri) String() string {
@@ -42,11 +42,11 @@ func (t Tri) String() string {
 type AudioQualityTier uint8
 
 const (
-	QualityUnknown  AudioQualityTier = iota
-	QualityUltraLow                  // AUDIO_QUALITY_ULTRALOW, distinct from QualityLow
-	QualityLow
-	QualityMedium
-	QualityHigh
+	QualityUnknown  AudioQualityTier = iota // no recognized quality tier
+	QualityUltraLow                         // AUDIO_QUALITY_ULTRALOW, distinct from QualityLow
+	QualityLow                              // AUDIO_QUALITY_LOW
+	QualityMedium                           // AUDIO_QUALITY_MEDIUM
+	QualityHigh                             // AUDIO_QUALITY_HIGH
 )
 
 func (q AudioQualityTier) String() string {
@@ -68,7 +68,7 @@ func (q AudioQualityTier) String() string {
 // audio, but video formats can appear in unfiltered player responses and are
 // excluded by audio selectors.
 type Format struct {
-	Itag int
+	Itag int // YouTube format identifier
 
 	// Codec / container.
 	MIMEType  string // raw mimeType, e.g. `audio/webm; codecs="opus"`
@@ -79,7 +79,7 @@ type Format struct {
 	Bitrate        int // declared / peak bits per second
 	AverageBitrate int // average bits per second (preferred for comparison)
 	SampleRate     int // Hz
-	Channels       int
+	Channels       int // audio channel count
 
 	// AudioQuality is the tier reported by YouTube. QualityUnknown means no
 	// usable tier was reported.
@@ -95,15 +95,15 @@ type Format struct {
 
 	// Size / length when known (0 == unknown).
 	ContentLength int64
-	Duration      time.Duration
+	Duration      time.Duration // media duration, or 0 when unknown
 }
 
 // AudioTrack holds the raw audioTrack metadata YouTube attaches to dubbed or
 // multi-language renditions.
 type AudioTrack struct {
-	ID          string
-	DisplayName string
-	IsOriginal  Tri
+	ID          string // YouTube audio-track identifier
+	DisplayName string // localized track label
+	IsOriginal  Tri    // whether this is the video's original-language track
 }
 
 // EffectiveBitrate returns AverageBitrate when known, otherwise Bitrate.

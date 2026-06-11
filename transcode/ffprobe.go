@@ -15,35 +15,35 @@ import (
 // ProbeResult is the parsed subset of ffprobe's -show_format -show_streams JSON:
 // container metadata plus per-stream codec details.
 type ProbeResult struct {
-	Format  ProbeFormat
-	Streams []ProbeStream
+	Format  ProbeFormat   // container metadata
+	Streams []ProbeStream // media streams in ffprobe order
 }
 
 // ProbeFormat describes the container.
 type ProbeFormat struct {
-	FormatName string
-	Duration   time.Duration
-	Size       int64
-	BitRate    int
+	FormatName string        // ffprobe format name
+	Duration   time.Duration // container duration, or 0 when unknown
+	Size       int64         // bytes, or 0 when unknown
+	BitRate    int           // bits per second, or 0 when unknown
 }
 
 // ProbeStream describes one media stream.
 type ProbeStream struct {
-	Index      int
-	CodecType  string // "audio", "video", ...
-	CodecName  string // e.g. "opus", "aac", "flac"
-	SampleRate int    // Hz (audio)
-	Channels   int
-	BitRate    int
-	Duration   time.Duration
+	Index      int           // ffprobe stream index
+	CodecType  string        // "audio", "video", ...
+	CodecName  string        // e.g. "opus", "aac", "flac"
+	SampleRate int           // Hz (audio)
+	Channels   int           // audio channel count
+	BitRate    int           // bits per second, or 0 when unknown
+	Duration   time.Duration // stream duration, or 0 when unknown
 
 	// SampleFmt is ffprobe's sample_fmt (for example "s16", "s32", or "fltp").
 	// BitsPerSample is the coded PCM depth. BitsPerRawSample is the source depth
 	// reported by some lossless codecs, such as a 24-bit FLAC. A zero value means
 	// ffprobe did not report the field.
 	SampleFmt        string
-	BitsPerSample    int
-	BitsPerRawSample int
+	BitsPerSample    int // coded PCM bit depth, or 0 when unknown
+	BitsPerRawSample int // source bit depth reported by some lossless codecs
 }
 
 // effectiveBits returns the best available integer bit depth. It prefers

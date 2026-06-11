@@ -48,6 +48,7 @@ var expirePathRe = regexp.MustCompile(`/expire/(\d+)`)
 // satisfies it; it is an interface so tests can stub transport without the
 // resolver importing httpx.
 type HTTPDoer interface {
+	// Do executes an HTTP request.
 	Do(*http.Request) (*http.Response, error)
 }
 

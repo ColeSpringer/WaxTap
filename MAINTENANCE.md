@@ -1,8 +1,8 @@
 # Maintaining WaxTap
 
 WaxTap extracts audio from YouTube, whose player and anti-bot surfaces change
-without notice. This document is the playbook for when something breaks, plus the
-reference for the knobs that let you respond without rebuilding.
+without notice. Use this guide to diagnose extraction failures, update client
+profiles, and verify fixes.
 
 ## Quick response: YouTube broke extraction
 
@@ -29,8 +29,8 @@ reference for the knobs that let you respond without rebuilding.
    ```
    On an extraction failure, WaxTap writes the raw player response(s) it could not
    use to `./dump/<timestamp>-playerresponse-<client>-<videoID>.json` (and the
-   watch page on a watch-page parse failure). These are the ground truth for
-   diagnosis. They are diagnostic only and never change WaxTap's behavior.
+   watch page on a watch-page parse failure). Keep these files for diagnosis.
+   Dumping is diagnostic only and never changes WaxTap's behavior.
 
 3. **Capture a fresh base.js** (the cipher source). WaxTap already persists it in
    the on-disk cache (see below); you can also fetch it directly. Find the current
@@ -239,8 +239,8 @@ instead of re-downloading it.
 - Location: `waxtap cache dir` (default `os.UserCacheDir()/waxtap`, under
   `players/v<schema>/`). Override with `--cache-dir` / `WAXTAP_CACHE_DIR`.
 - It is size-capped (LRU), schema-versioned, written `0600` with atomic
-  temp+rename, and entirely best-effort: a read-only or full filesystem just
-  degrades to network-only, it never fails extraction.
+  temp+rename, and best-effort. A read-only or full filesystem falls back to
+  network fetches and does not fail extraction.
 - Only genuine player JS is cached: a 200 response with no extractable cipher
   transform (a bot wall, captive portal, or truncated body) is never persisted,
   and an already-poisoned entry is ignored in favor of a fresh fetch. A
@@ -433,8 +433,9 @@ without one it fails with `ErrNeedsPOToken`.
 The known WEB-SABR cap (root-caused by live capture + a joint investigation with
 the WaxSeal PO-token team, 2026-06): when `STREAM_PROTECTION_STATUS` stays 2
 (attestation pending), the server delivers roughly the first minute of audio
-(itag 258 ≈ 70s / 8 segments / 3.39 MB; itag 251 ≈ 60s / 6 segments) and then
-goes media-empty for the rest of the session, no matter how the request advances.
+(itag 258 is about 70s / 8 segments / 3.39 MB; itag 251 is about 60s / 6
+segments) and then goes media-empty for the rest of the session, no matter how
+the request advances.
 
 It is **not** a PO-token problem and **not** a request-shape problem. Do not
 re-chase either. The evidence:
@@ -552,24 +553,3 @@ release for final review before publishing. For a local dry run, use
 `go install github.com/colespringer/waxtap/cmd/waxtap@vX.Y.Z` should also work
 because the version subcommand reads module build info when no ldflags are
 injected.
-
-### API stability
-
-The project may ship a breaking change in a minor release instead of moving to a
-`/v2` module path when the affected API has no known consumers, as it did for
-v1.1.0. Document these changes in the GitHub release notes.
-
-- **v1.4.0** added SABR/UMP audio streaming for the WEB and WEB_EMBEDDED clients
-  (`youtube/internal/sabr`) and the `signatureTimestamp` the WEB `/player` request
-  needs. `youtube.Client.Resolve` and `ResolveWithFailure` now return
-  `(MediaPlan, error)` instead of `(*ResolvedStream, error)`, since a SABR stream
-  has no direct URL; the `waxtap` facade is unchanged, with `Client.Resolve` still
-  returning a `ResolvedStream` via `MediaPlan.Diagnostic()`. The breaking change is
-  confined to the exported-but-volatile `youtube` package. Profile override files
-  gain a `needsSignatureTimestamp` key for WEB-family clients, and the release adds
-  `google.golang.org/protobuf` (used via `encoding/protowire` only; CGO stays off).
-- **v1.3.0** removed the unused `Politeness.MaxDownloadsPerRun` field. Per-run
-  limits now use `PlaylistDownloadOptions.MaxDownloads`, which is enforced by
-  `Client.DownloadPlaylist` and exposed by the download command's
-  `--max-downloads` flag. This release also added `Politeness.Cooldown` and its
-  `--cooldown`, `WAXTAP_COOLDOWN`, and `cooldownSeconds` settings.

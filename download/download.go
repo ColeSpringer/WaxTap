@@ -79,7 +79,7 @@ type ProgressFunc func(Progress)
 
 // Result reports the byte count for a completed download.
 type Result struct {
-	BytesWritten int64
+	BytesWritten int64 // bytes delivered to the sink
 }
 
 // StreamInfo is the response metadata returned by Stream alongside the reader.
@@ -115,7 +115,7 @@ type Config struct {
 	// BaseBackoff and MaxBackoff tune the download-layer retry sleep (distinct
 	// from httpx's own HTTP-level backoff).
 	BaseBackoff time.Duration
-	MaxBackoff  time.Duration
+	MaxBackoff  time.Duration // maximum sleep between download-layer retries
 }
 
 // Downloader fetches Sources into sinks. It is safe for concurrent use.
