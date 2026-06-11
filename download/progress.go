@@ -90,15 +90,21 @@ func (p *progressReporter) snapshotLocked() Progress {
 
 // countingWriter forwards writes to w while reporting their length to a
 // progressReporter. It lets io.Copy drive both the sink and progress in one pass.
+// It records the first sink error so callers can distinguish a local write
+// failure from a truncated source.
 type countingWriter struct {
-	w   io.Writer
-	rep *progressReporter
+	w    io.Writer
+	rep  *progressReporter
+	werr error // first error from the underlying writer
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	if n > 0 {
 		c.rep.add(int64(n))
+	}
+	if err != nil && c.werr == nil {
+		c.werr = err
 	}
 	return n, err
 }

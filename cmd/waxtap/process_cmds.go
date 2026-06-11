@@ -72,6 +72,14 @@ func sameLocalPath(a, b string) bool {
 	return e1 == nil && e2 == nil && pa == pb
 }
 
+// warnALACToAlacExt warns when an ALAC stream will use an MP4 container despite
+// the output path ending in ".alac".
+func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
+	if tf == waxtap.FormatALAC && strings.EqualFold(filepath.Ext(outPath), ".alac") {
+		env.info("note: .alac output uses an MP4 container; use .m4a for the conventional filename\n")
+	}
+}
+
 func newCutCmd() *cobra.Command {
 	var (
 		out          string
@@ -140,10 +148,11 @@ func newCutCmd() *cobra.Command {
 
 			spec := waxtap.ProcessSpec{Cut: cs}
 			newExt := ""
+			var tf waxtap.TranscodeFormat // FormatCopy when no transcode is requested
 			if transcode != "" {
-				tf, err := parseTranscodeFormat(transcode)
-				if err != nil {
-					return err
+				var terr error
+				if tf, terr = parseTranscodeFormat(transcode); terr != nil {
+					return terr
 				}
 				spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}
 				newExt = transcodeExt(tf)
@@ -161,6 +170,7 @@ func newCutCmd() *cobra.Command {
 				env.info("skipped (exists): %s\n", outPath)
 				return nil
 			}
+			warnALACToAlacExt(env, outPath, tf)
 			spec.Output = waxtap.ToFile(outPath)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy)
@@ -177,7 +187,7 @@ func newCutCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path")
 	f.StringArrayVar(&ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
-	f.StringVar(&sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (YouTube only; bare flag = music_offtopic)")
+	f.StringVar(&sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (YouTube only; comma-separated after =, for example --cut-sponsorblock=intro,outro; bare flag = music_offtopic)")
 	f.StringVar(&cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
 	f.DurationVar(&crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
 	f.StringVar(&sbOnError, "sponsorblock-onerror", "proceed", "on SponsorBlock fetch failure: proceed|fail")
@@ -242,6 +252,7 @@ func newTranscodeCmd() *cobra.Command {
 				env.info("skipped (exists): %s\n", outPath)
 				return nil
 			}
+			warnALACToAlacExt(env, outPath, tf)
 			spec.Output = waxtap.ToFile(outPath)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy)

@@ -2,8 +2,38 @@ package youtube
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// AttemptID is a stable identifier for one extraction attempt within a client
+// chain. It allows callers to repeat or skip an attempt without relying on
+// non-unique profile names.
+type AttemptID string
+
+const (
+	// AttemptWatchPage is the final watch-page scrape attempt.
+	AttemptWatchPage AttemptID = "watch-page"
+	// AttemptWebContext is the opt-in attested WEB /player-context attempt.
+	AttemptWebContext AttemptID = "web-context"
+)
+
+// profileAttempt is the AttemptID for the profile at index i in the chain.
+func profileAttempt(i int) AttemptID { return AttemptID("profile:" + strconv.Itoa(i)) }
+
+// profileIndex parses a "profile:<index>" AttemptID.
+func profileIndex(a AttemptID) (int, bool) {
+	s, ok := strings.CutPrefix(string(a), "profile:")
+	if !ok {
+		return 0, false
+	}
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return i, true
+}
 
 // Extraction contains video metadata plus the client profile and session needed
 // to resolve and download its formats with the same identity.
@@ -11,6 +41,8 @@ type Extraction struct {
 	video   *Video
 	profile ClientProfile
 	session *session
+	// attempt identifies the chain attempt that produced this extraction.
+	attempt AttemptID
 	// rawAudio stores the resolver input for each public Format. It is kept in
 	// the same order as Video.Formats because itag is not unique on videos with
 	// multiple languages or DRC variants.
@@ -37,11 +69,12 @@ type Extraction struct {
 }
 
 // buildExtraction keeps the InnerTube and watch-page extraction paths in sync.
-func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []rawFormat, pr *playerResponse) *Extraction {
+func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []rawFormat, pr *playerResponse, attempt AttemptID) *Extraction {
 	return &Extraction{
 		video:           video,
 		profile:         profile,
 		session:         sess,
+		attempt:         attempt,
 		rawAudio:        raw,
 		expiresAt:       pr.expiresAt(time.Now()),
 		serverAbrURL:    pr.serverAbrURL(),
@@ -55,6 +88,23 @@ func (e *Extraction) Video() *Video {
 		return nil
 	}
 	return e.video
+}
+
+// Attempt returns the chain attempt that produced this Extraction.
+func (e *Extraction) Attempt() AttemptID {
+	if e == nil {
+		return ""
+	}
+	return e.attempt
+}
+
+// ClientName returns the winning client's display name. Use Attempt when a
+// unique attempt identifier is required.
+func (e *Extraction) ClientName() string {
+	if e == nil {
+		return ""
+	}
+	return e.profile.Name
 }
 
 // rawFormatByIndex returns the raw resolver input for Video.Formats[i].

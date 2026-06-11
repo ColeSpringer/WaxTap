@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/colespringer/waxtap/internal/tempfile"
+	"github.com/colespringer/waxtap/waxerr"
 )
 
 // chunkSpan is an inclusive byte range [start, end].
@@ -211,11 +212,25 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 
 		// Remove partial bytes from progress before retrying this span.
 		rep.add(-n)
-		if attempt >= d.maxChunkRetries || ctx.Err() != nil {
+		// Preserve cancellation and deadlines so callers do not retry the download
+		// with another client.
+		if ctx.Err() != nil {
 			if copyErr != nil {
 				return fmt.Errorf("download: chunk at offset %d: %w", span.start, copyErr)
 			}
-			return fmt.Errorf("download: short chunk at offset %d: got %d bytes, want %d", span.start, n, expected)
+			return fmt.Errorf("download: chunk at offset %d: %w", span.start, ctx.Err())
+		}
+		// A persistently short chunk proves that the source did not satisfy the
+		// requested range. Mark it incomplete so the caller can try another client.
+		if attempt >= d.maxChunkRetries {
+			if w.werr != nil {
+				// A local write failure must not be mistaken for a truncated source.
+				return fmt.Errorf("download: write chunk at offset %d: %w", span.start, w.werr)
+			}
+			if copyErr != nil {
+				return fmt.Errorf("%w: chunk at offset %d: %w", waxerr.ErrIncompleteStream, span.start, copyErr)
+			}
+			return fmt.Errorf("%w: short chunk at offset %d: got %d bytes, want %d", waxerr.ErrIncompleteStream, span.start, n, expected)
 		}
 		if berr := d.backoff(ctx, attempt); berr != nil {
 			return berr

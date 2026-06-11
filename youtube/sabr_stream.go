@@ -90,7 +90,7 @@ func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total
 		case errors.Is(err, waxerr.ErrNeedsPOToken) || isSABRAuthFailure(err):
 			// Both statuses indicate that the GVS token was rejected.
 			if potRefreshes >= maxSABRPOTRefreshes {
-				return nil, SABRStreamInfo{}, err
+				return nil, SABRStreamInfo{}, sabrClientTokenError(ext.profile.Name, err)
 			}
 			potRefreshes++
 			failure = sabrRefreshFailure(cfg.ServerAbrURL, err)
@@ -110,7 +110,9 @@ func (s *SABRStream) reextract(ctx context.Context) (*Extraction, error) {
 	if s.ext.webContext {
 		ext, err = s.client.ExtractWebContext(ctx, s.ext.video.ID)
 	} else {
-		ext, err = s.client.Extract(ctx, s.ext.video.ID)
+		// Reload through the original attempt so resumed media comes from the same
+		// client.
+		ext, err = s.client.ExtractAttempt(ctx, s.ext.video.ID, s.ext.Attempt())
 	}
 	if err != nil {
 		return nil, err
@@ -224,6 +226,15 @@ func sabrClientInfo(p ClientProfile, hl string) sabr.ClientInfo {
 		DeviceModel:    p.DeviceModel,
 		AcceptLanguage: acceptLanguage(hl),
 	}
+}
+
+// sabrClientTokenError adds the rejected client's name while preserving the
+// original error for errors.Is and errors.As.
+func sabrClientTokenError(clientName string, err error) error {
+	if clientName == "" {
+		return err
+	}
+	return fmt.Errorf("%w (client %q)", err, clientName)
 }
 
 // isSABRAuthFailure reports whether the SABR endpoint returned HTTP 401 or 403.

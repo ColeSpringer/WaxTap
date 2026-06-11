@@ -89,6 +89,7 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrPlaylistParse, 4}, // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
 		{waxtap.ErrFFmpegNotFound, 6},
+		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
 		{&usageError{"bad"}, 2},
 		{waxtap.ErrInvalidPlaylistID, 1},
 		{errFake("other"), 1},
@@ -109,6 +110,9 @@ func TestErrorCode(t *testing.T) {
 	}
 	if got := errorCode(waxtap.ErrPlaylistParse); got != "stale-parser" {
 		t.Errorf("errorCode(playlist parse) = %q, want stale-parser", got)
+	}
+	if got := errorCode(waxtap.ErrIncompleteStream); got != "incomplete-stream" {
+		t.Errorf("errorCode(incomplete) = %q, want incomplete-stream", got)
 	}
 	if got := errorCode(waxtap.ErrInvalidPlaylistID); got != "invalid-input" {
 		t.Errorf("errorCode(invalid playlist) = %q, want invalid-input", got)

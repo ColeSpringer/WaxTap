@@ -20,6 +20,17 @@ func profileByName(t *testing.T, name string) ClientProfile {
 	return ClientProfile{}
 }
 
+func TestDefaultChainOrder(t *testing.T) {
+	want := []string{"ANDROID_VR", "WEB", "IOS", "WEB_EMBEDDED_PLAYER"}
+	got := make([]string, 0, len(DefaultProfiles()))
+	for _, p := range DefaultProfiles() {
+		got = append(got, p.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("default chain order = %v, want %v", got, want)
+	}
+}
+
 // TestAndroidVRFingerprint checks the android_vr request shape. The device and
 // OS fields must stay populated and must reach the InnerTube body context.
 func TestAndroidVRFingerprint(t *testing.T) {

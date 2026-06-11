@@ -48,6 +48,7 @@ func (c Codec) String() string {
 type preset struct {
 	encoder     string   // -c:a value ("copy" for a stream copy)
 	extension   string   // canonical output extension without a dot ("" for copy)
+	muxer       string   // forced -f format, when the file extension has no muxer ("" = infer from extension)
 	lossless    bool     // true for copy and the lossless re-encoders
 	defaultRate int      // default -b:a in bits/sec for lossy codecs (0 if N/A)
 	qualityArgs []string // VBR-quality args used for lossy codecs when no bitrate is given
@@ -58,7 +59,9 @@ type preset struct {
 var presets = map[Codec]preset{
 	CodecCopy: {encoder: "copy", lossless: true},
 	CodecFLAC: {encoder: "flac", extension: "flac", lossless: true},
-	CodecALAC: {encoder: "alac", extension: "m4a", lossless: true},
+	// A bare ".alac" extension does not identify a container, so use ffmpeg's
+	// MP4/M4A muxer when the output path cannot select one.
+	CodecALAC: {encoder: "alac", extension: "m4a", muxer: "ipod", lossless: true},
 	// CodecWAV uses pcm_s16le only as a fallback. Runner.Transcode probes the
 	// input and passes a depth-matched encoder when the source reports one.
 	CodecWAV:    {encoder: "pcm_s16le", extension: "wav", lossless: true},

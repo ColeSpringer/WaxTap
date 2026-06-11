@@ -87,7 +87,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.BoolVar(&df.skipExisting, "skip-existing", false, "skip when the target file already exists")
 	f.StringVar(&df.transcode, "transcode", "", "transcode to: copy|flac|alac|wav|mp3|aac|opus|vorbis")
 	f.IntVar(&df.bitrate, "bitrate", 0, "target bitrate (bits/sec) for lossy transcodes (0 = preset default)")
-	f.StringVar(&df.sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (comma-separated; bare flag = music_offtopic)")
+	f.StringVar(&df.sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (comma-separated after =, for example --cut-sponsorblock=intro,outro; bare flag = music_offtopic)")
 	f.StringArrayVar(&df.ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
 	f.StringVar(&df.cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
 	f.DurationVar(&df.crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
@@ -309,6 +309,9 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 	}
 	if skip {
 		return waxtap.Request{}, "exists", nil
+	}
+	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
+		warnALACToAlacExt(env, resolved, tf)
 	}
 
 	req, err := df.buildRequest(idOrURL, resolved)

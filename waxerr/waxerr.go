@@ -36,6 +36,12 @@ var (
 	ErrNeedsPOToken = errors.New("waxtap: PO token required")
 	// ErrURLExpired indicates a signed stream URL expired and re-resolution failed.
 	ErrURLExpired = errors.New("waxtap: stream URL expired")
+	// ErrIncompleteStream indicates that a client returned a detectably truncated
+	// stream. Another client may still deliver the complete stream.
+	ErrIncompleteStream = errors.New("waxtap: stream ended before completion")
+	// ErrChainExhausted indicates that an exclusion-aware extraction has no
+	// remaining attempts. Callers should report the errors from earlier attempts.
+	ErrChainExhausted = errors.New("waxtap: no extraction attempts remain")
 )
 
 // Availability errors are expected failures, not maintenance signals.
@@ -166,4 +172,50 @@ func hostOr(host string) string {
 		return "server"
 	}
 	return host
+}
+
+// PreferErr returns the more informative of two terminal errors. From highest to
+// lowest precedence:
+//
+//   - availability verdicts
+//   - extraction, cipher, or parse failures
+//   - ErrIncompleteStream
+//   - generic or network failures
+//   - ErrNeedsPOToken
+//
+// A non-nil error wins over nil, and ties preserve a. Callers must handle
+// cancellation and rate limiting before calling PreferErr.
+func PreferErr(a, b error) error {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case errRank(b) > errRank(a):
+		return b
+	default:
+		return a
+	}
+}
+
+// errRank returns the precedence used by PreferErr.
+func errRank(err error) int {
+	switch {
+	case errors.Is(err, ErrVideoUnavailable),
+		errors.Is(err, ErrVideoRestricted),
+		errors.Is(err, ErrLoginRequired),
+		errors.Is(err, ErrLiveContent),
+		errors.Is(err, ErrNoAudioFormats):
+		return 5
+	case errors.Is(err, ErrExtractionFailed),
+		errors.Is(err, ErrCipherSolve),
+		errors.Is(err, ErrPlaylistParse):
+		return 4
+	case errors.Is(err, ErrIncompleteStream):
+		return 3
+	case errors.Is(err, ErrNeedsPOToken):
+		return 1 // lowest: a precondition, not a diagnosis
+	default:
+		return 2 // generic / network
+	}
 }

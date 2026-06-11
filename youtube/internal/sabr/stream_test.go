@@ -333,10 +333,8 @@ func TestOpenAttestationRequired(t *testing.T) {
 }
 
 // TestOpenAttestationPendingNoMetadataIsError covers a status-2 (PENDING) stream
-// that ends without an end-segment or a content length: it may be a withheld
-// partial, so it must error. The classification is token-neutral
-// (ErrExtractionFailed): a live A/B proved the status-2 cap is identical with a
-// real, garbage, or absent token, so the message must not blame the token.
+// that ends without an end segment or content length. The error remains
+// token-neutral because changing the token does not affect this limit.
 func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
 	resp := concat(
 		umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2})),
@@ -354,8 +352,8 @@ func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
 		_, err = io.ReadAll(rc)
 		rc.Close()
 	}
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (status-2 partial, no completion metadata)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (status-2 partial, no completion metadata)", err)
 	}
 	if errors.Is(err, waxerr.ErrNeedsPOToken) {
 		t.Error("status-2 cap must not classify as a PO-token error (token is proven irrelevant)")
@@ -365,11 +363,9 @@ func TestOpenAttestationPendingNoMetadataIsError(t *testing.T) {
 	}
 }
 
-// TestOpenAttestationPendingCapIsTokenNeutral mirrors the live capture of the
-// status-2 cap: status 2 every round, a burst of media, then rounds with nothing
-// new. The stall must classify token-neutrally (ErrExtractionFailed) and never as
-// a PO-token error: a request-constant, token-varied A/B proved the cap is
-// identical with a real, garbage, or absent token, so it is upstream of the token.
+// TestOpenAttestationPendingCapIsTokenNeutral covers a status-2 stream that sends
+// an initial burst of media and then stops making progress. The error must not
+// blame the token.
 func TestOpenAttestationPendingCapIsTokenNeutral(t *testing.T) {
 	status2 := umpFrame(partStreamProtection, marshalStreamProtectionStatus(StreamProtectionStatus{Status: 2}))
 	resp1 := concat(
@@ -379,7 +375,7 @@ func TestOpenAttestationPendingCapIsTokenNeutral(t *testing.T) {
 		segFrames(2, 2, []byte("BBB")),
 		formatInitFrame(4),
 	)
-	// The live pattern: subsequent rounds re-send only the init segment.
+	// Subsequent rounds re-send only the init segment.
 	initOnly := concat(status2, initFrames(0, []byte("INIT")))
 	d := &scriptedDoer{t: t, responses: [][]byte{resp1, initOnly, initOnly}}
 
@@ -389,8 +385,8 @@ func TestOpenAttestationPendingCapIsTokenNeutral(t *testing.T) {
 	}
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (capped delivery under status 2)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (capped delivery under status 2)", err)
 	}
 	if errors.Is(err, waxerr.ErrNeedsPOToken) {
 		t.Error("capped delivery must not classify as a PO-token error (token is proven irrelevant)")
@@ -464,8 +460,8 @@ func TestOpenStallBeforeFinalSegmentIsError(t *testing.T) {
 	}
 	defer rc.Close()
 	_, err = io.ReadAll(rc)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (stalled)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (stalled)", err)
 	}
 }
 
@@ -485,8 +481,8 @@ func TestOpenTruncationWithKnownLengthIsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rc.Close()
-	if _, err := io.ReadAll(rc); !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (truncated below content length)", err)
+	if _, err := io.ReadAll(rc); !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (truncated below content length)", err)
 	}
 }
 
@@ -518,8 +514,8 @@ func TestOpenMissingInitSegmentIsError(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: [][]byte{resp1, nil, nil}}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (missing init segment)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (missing init segment)", err)
 	}
 	if err != nil && !strings.Contains(err.Error(), "init segment") {
 		t.Errorf("err = %q, want it to mention the missing init segment", err)
@@ -641,8 +637,8 @@ func TestOpenDuplicateContextStalls(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: [][]byte{ctxResp, ctxResp, ctxResp}}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (stalled, not an infinite loop)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (stalled, not an infinite loop)", err)
 	}
 }
 
@@ -755,8 +751,8 @@ func TestOpenContextChurnStalls(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: responses}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed (context churn must not loop forever)", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (context churn must not loop forever)", err)
 	}
 	if d.calls != maxContextRounds {
 		t.Fatalf("calls = %d, want %d (one POST per context round, then stall)", d.calls, maxContextRounds)
@@ -776,8 +772,8 @@ func TestOpenStartPolicyForUnknownContextIsNotProgress(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: [][]byte{p(901), p(902), p(903)}}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
-	if !errors.Is(err, waxerr.ErrExtractionFailed) {
-		t.Fatalf("err = %v, want ErrExtractionFailed", err)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream", err)
 	}
 	if d.calls != maxEmptyRounds {
 		t.Fatalf("calls = %d, want %d (unknown starts are empty rounds, not context progress)", d.calls, maxEmptyRounds)
@@ -869,8 +865,8 @@ func TestOpenHTTPErrorStatus(t *testing.T) {
 	d := &scriptedDoer{t: t, responses: [][]byte{nil}, statuses: []int{403}}
 
 	_, _, err := Open(context.Background(), baseConfig(d), nil)
-	var httpErr *waxerr.HTTPStatusError
-	if !errors.As(err, &httpErr) {
+	httpErr, ok := errors.AsType[*waxerr.HTTPStatusError](err)
+	if !ok {
 		t.Fatalf("err = %v, want *waxerr.HTTPStatusError", err)
 	}
 	if httpErr.StatusCode != 403 {

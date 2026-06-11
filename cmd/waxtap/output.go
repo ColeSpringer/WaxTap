@@ -204,6 +204,8 @@ func friendlyError(err error) string {
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrRateLimited):
 		return "rate limited by YouTube; back off and retry later"
+	case errors.Is(err, waxtap.ErrIncompleteStream):
+		return "the download ended before the full stream was received"
 	case errors.Is(err, waxtap.ErrPlaylistParse):
 		return "YouTube returned a playlist shape WaxTap doesn't recognize; the parser may need updating"
 	}
@@ -223,6 +225,8 @@ func errorHint(err error) string {
 		// is a different failure: it classifies token-neutrally and must not be
 		// blamed on the token (see MAINTENANCE.md).
 		return "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
+	case errors.Is(err, waxtap.ErrIncompleteStream):
+		return "configure --potoken-url and --player-context-url when full WEB audio is required"
 	}
 	return ""
 }
@@ -242,6 +246,8 @@ func errorCode(err error) string {
 		return "needs-po-token"
 	case errors.Is(err, waxtap.ErrRateLimited):
 		return "rate-limited"
+	case errors.Is(err, waxtap.ErrIncompleteStream):
+		return "incomplete-stream"
 	case errors.Is(err, waxtap.ErrVideoUnavailable):
 		return "video-unavailable"
 	case errors.Is(err, waxtap.ErrVideoRestricted):
@@ -293,6 +299,10 @@ func exitCodeFor(err error) int {
 		return 5
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return 6
+	case errors.Is(err, waxtap.ErrIncompleteStream):
+		// Incomplete delivery is an upstream or content-specific failure, not an
+		// extraction or cipher maintenance failure.
+		return 7
 	}
 	if _, ok := errors.AsType[*usageError](err); ok {
 		return 2

@@ -41,6 +41,53 @@ func TestBuildCommand_Lossless(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_ALACForcesIpodMuxer(t *testing.T) {
+	// A bare ".alac" extension does not identify an ffmpeg muxer.
+	cmd, err := buildCommand("in.flac", "out.alac", Spec{Codec: CodecALAC})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-c:a", "alac")
+	assertSeq(t, cmd.Args, "-f", "ipod")
+	if cmd.Args[len(cmd.Args)-1] != "out.alac" {
+		t.Errorf("output arg = %q, want out.alac", cmd.Args[len(cmd.Args)-1])
+	}
+	// The muxer flag must precede the output filename.
+	if fi := slices.Index(cmd.Args, "-f"); fi < 0 || fi >= len(cmd.Args)-1 {
+		t.Errorf("-f muxer must come before output: %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_NonALACHasNoForcedMuxer(t *testing.T) {
+	cmd, err := buildCommand("in.webm", "out.flac", Spec{Codec: CodecFLAC})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	if hasFlag(cmd.Args, "-f") {
+		t.Errorf("non-ALAC command should not force a muxer: %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_ALACValidContainerNotForced(t *testing.T) {
+	for _, out := range []string{"out.m4a", "out.caf", "out.mp4", "out.M4A"} {
+		cmd, err := buildCommand("in.flac", out, Spec{Codec: CodecALAC})
+		if err != nil {
+			t.Fatalf("buildCommand(%q): %v", out, err)
+		}
+		if hasFlag(cmd.Args, "-f") {
+			t.Errorf("ALAC to %q should not force a muxer (ffmpeg infers it): %v", out, cmd.Args)
+		}
+	}
+}
+
+func TestBuildCommand_ALACExtensionlessForcesMuxer(t *testing.T) {
+	cmd, err := buildCommand("in.flac", "out", Spec{Codec: CodecALAC})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-f", "ipod")
+}
+
 func TestBuildCommand_LossyDefaults(t *testing.T) {
 	cases := []struct {
 		name  string

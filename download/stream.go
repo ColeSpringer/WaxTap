@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/colespringer/waxtap/waxerr"
 )
 
 // ToWriter streams src to w in order, with bounded memory and no temp file. If
@@ -161,7 +163,8 @@ func (r *resumableReader) guardStall(cause error) error {
 	}
 	r.stalls++
 	if r.stalls > r.d.maxChunkRetries {
-		return fmt.Errorf("download: stream stalled at offset %d: %w", r.offset, cause)
+		// Repeated resumes without progress prove that the stream is incomplete.
+		return fmt.Errorf("%w: stream stalled at offset %d: %w", waxerr.ErrIncompleteStream, r.offset, cause)
 	}
 	return nil
 }

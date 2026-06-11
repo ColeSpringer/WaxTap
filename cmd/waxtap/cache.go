@@ -19,6 +19,15 @@ func newCacheCmd() *cobra.Command {
 			"Entries are size-capped and schema-versioned. `cache clean` is safe to run\n" +
 			"any time. WaxTap re-fetches whatever it needs. Disable persistence with\n" +
 			"--no-cache.",
+		// A bare cache command prints help, but an unknown subcommand is a usage
+		// error rather than a successful help request.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return usagef("unknown cache subcommand %q; expected dir or clean", args[0])
+			}
+			return cmd.Help()
+		},
 	}
 	cmd.AddCommand(newCacheDirCmd(), newCacheCleanCmd())
 	return cmd

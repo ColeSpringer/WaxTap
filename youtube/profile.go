@@ -218,8 +218,8 @@ func BuildProfile(base ClientProfile) ClientProfile {
 func makeProfile(base ClientProfile) ClientProfile { return BuildProfile(base) }
 
 // DefaultProfiles returns the ordered client strategy chain using the default
-// built-in Chrome identity. ANDROID_VR leads because it usually returns direct
-// URLs without a PO token; the embedded and WEB clients cover fallback cases.
+// built-in Chrome identity. Token-free clients and clients capable of full-track
+// delivery are tried before clients with observed range or token restrictions.
 func DefaultProfiles() []ClientProfile {
 	return buildDefaultProfiles(clientident.UserAgent(0))
 }
@@ -261,8 +261,8 @@ func buildDefaultProfiles(webUA string) []ClientProfile {
 	embedded.UserAgent = webUA
 	return []ClientProfile{
 		makeProfile(profileAndroidVR),
+		makeProfile(web),
 		makeProfile(profileIOS),
 		makeProfile(embedded),
-		makeProfile(web),
 	}
 }

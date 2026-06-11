@@ -101,25 +101,146 @@ func TestExtract_RejectsHeaderOnlyPlayerToken(t *testing.T) {
 	}), []ClientProfile{makeProfile(profileWeb)}, fp)
 
 	_, err := c.Extract(context.Background(), "testVideo01")
-	if !errors.Is(err, waxerr.ErrNeedsPOToken) {
-		t.Fatalf("err = %v, want ErrNeedsPOToken", err)
+	if err == nil {
+		t.Fatal("err = nil, want a failure when the only client has no usable player token")
 	}
 	if playerCalls != 0 {
 		t.Errorf("/player POST count = %d, want 0 (an empty player token must not be sent)", playerCalls)
 	}
 }
 
-// TestExtract_NoProviderForPlayerToken uses a WEB-only chain and a failing
-// watch-page fallback so the missing-provider error comes from the player-token
-// path.
-func TestExtract_NoProviderForPlayerToken(t *testing.T) {
+func TestExtract_GenericBeatsNeedsPOToken(t *testing.T) {
 	c := newTestClientWith(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}), []ClientProfile{makeProfile(profileWeb)}, nil)
 
 	_, err := c.Extract(context.Background(), "testVideo01")
-	if !errors.Is(err, waxerr.ErrNeedsPOToken) {
-		t.Fatalf("err = %v, want ErrNeedsPOToken (WEB needs a player token, no provider)", err)
+	if err == nil {
+		t.Fatal("err = nil, want a failure")
+	}
+	if errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Errorf("err = %v, want the generic HTTP failure to outrank ErrNeedsPOToken", err)
+	}
+	if _, ok := errors.AsType[*waxerr.HTTPStatusError](err); !ok {
+		t.Errorf("err = %v (%T), want a generic *waxerr.HTTPStatusError", err, err)
+	}
+}
+
+func TestExtract_UnavailableBeatsNeedsPOToken(t *testing.T) {
+	unavailable := readFixture(t, "player_unavailable.json") // status ERROR
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, unavailable), nil // ANDROID_VR: unavailable
+		default:
+			return fixtureResp(http.StatusNotFound, nil), nil // watch page fails generically
+		}
+	}), []ClientProfile{makeProfile(profileAndroidVR), makeProfile(profileWeb)}, nil)
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if !errors.Is(err, waxerr.ErrVideoUnavailable) {
+		t.Fatalf("err = %v, want ErrVideoUnavailable (must not be masked by WEB's needs-po-token)", err)
+	}
+	if errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Errorf("err = %v, must not be classified as needs-po-token", err)
+	}
+}
+
+func TestExtractExcluding_SkipsByStableIDDuplicateNames(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	dup := profileAndroidVR // token-free, so no provider is needed
+	dup.Name = "DUP"
+	profiles := []ClientProfile{makeProfile(dup), makeProfile(dup)}
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), profiles, nil)
+
+	ext, err := c.ExtractExcluding(context.Background(), "testVideo01", map[AttemptID]bool{profileAttempt(0): true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.Attempt() != profileAttempt(1) {
+		t.Errorf("attempt = %q, want profile:1 (skip by index, not by the shared name)", ext.Attempt())
+	}
+}
+
+func TestExtractExcluding_WatchPageIsIndependentAttempt(t *testing.T) {
+	login := readFixture(t, "player_login_required.json")
+	html := readFixture(t, "watch_page.html")
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/watch":
+			return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, login), nil // the single profile is login-gated
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	})
+
+	// Skipping the watch-page attempt leaves only the failing profile, so its
+	// login-required verdict surfaces instead of the watch page rescuing it.
+	c := newTestClientWith(transport, []ClientProfile{makeProfile(profileAndroidVR)}, nil)
+	if _, err := c.ExtractExcluding(context.Background(), "testVideo01", map[AttemptID]bool{AttemptWatchPage: true}); !errors.Is(err, waxerr.ErrLoginRequired) {
+		t.Fatalf("err = %v, want ErrLoginRequired (watch page skipped)", err)
+	}
+
+	// Skipping the profile leaves the watch page, which rescues extraction.
+	c2 := newTestClientWith(transport, []ClientProfile{makeProfile(profileAndroidVR)}, nil)
+	ext, err := c2.ExtractExcluding(context.Background(), "testVideo01", map[AttemptID]bool{profileAttempt(0): true})
+	if err != nil {
+		t.Fatalf("skip profile, watch page should rescue: %v", err)
+	}
+	if ext.Attempt() != AttemptWatchPage {
+		t.Errorf("attempt = %q, want watch-page", ext.Attempt())
+	}
+}
+
+func TestExtractExcluding_AllSkippedReturnsChainExhausted(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileAndroidVR)}, nil)
+
+	skip := map[AttemptID]bool{profileAttempt(0): true, AttemptWatchPage: true}
+	_, err := c.ExtractExcluding(context.Background(), "testVideo01", skip)
+	if !errors.Is(err, waxerr.ErrChainExhausted) {
+		t.Fatalf("err = %v, want ErrChainExhausted", err)
+	}
+	if errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Errorf("chain-exhausted must not be classified as an extraction failure: %v", err)
+	}
+}
+
+func TestExtractAttempt_PinsToOneProfile(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var clients []string // X-Youtube-Client-Name on each /player POST
+	profiles := []ClientProfile{makeProfile(profileAndroidVR), makeProfile(profileIOS)}
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			clients = append(clients, r.Header.Get("X-Youtube-Client-Name"))
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), profiles, nil)
+
+	ext, err := c.ExtractAttempt(context.Background(), "testVideo01", profileAttempt(1)) // IOS
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.Attempt() != profileAttempt(1) {
+		t.Errorf("attempt = %q, want profile:1", ext.Attempt())
+	}
+	// IOS is InnerTube client 5; ANDROID_VR (28) must not have been contacted.
+	if len(clients) != 1 || clients[0] != "5" {
+		t.Errorf("client POSTs = %v, want exactly [\"5\"] (pinned to IOS, chain not re-run)", clients)
 	}
 }
 

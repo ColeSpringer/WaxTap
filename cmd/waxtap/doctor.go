@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/colespringer/waxtap"
 	"github.com/spf13/cobra"
@@ -87,9 +89,21 @@ type doctorReport struct {
 // runDoctorCheck performs one candidate's check, filling rep on success.
 func runDoctorCheck(ctx context.Context, env *appEnv, id string, full bool, rep *doctorReport) error {
 	if full {
+		// Stage the track in --temp-dir so the full check exercises cross-client
+		// fallback and uses the configured filesystem.
+		if base := env.cfg.tempDir; base != "" {
+			if err := os.MkdirAll(base, 0o700); err != nil {
+				return err
+			}
+		}
+		dir, err := os.MkdirTemp(env.cfg.tempDir, "waxtap-doctor-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
 		res, err := env.client.Download(ctx, waxtap.Request{
 			URL:         id,
-			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToWriter(io.Discard)},
+			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(filepath.Join(dir, "track"))},
 		})
 		if err != nil {
 			return err

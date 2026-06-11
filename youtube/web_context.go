@@ -77,6 +77,7 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		video:           video,
 		profile:         c.webContextProfile(pc.ClientVersion),
 		session:         sess,
+		attempt:         AttemptWebContext,
 		rawAudio:        raw,
 		expiresAt:       expiresAtFromURL(pc.ServerAbrURL),
 		serverAbrURL:    pc.ServerAbrURL, // raw, scrambled n; buildSABRConfig descrambles it

@@ -16,7 +16,12 @@ reference for the knobs that let you respond without rebuilding.
    decide the result. Exit code `4` means an extraction/cipher failure: the class
    that usually requires a WaxTap code or profile update. Exit `3` means
    availability/restriction, and exit `5` means rate limiting; both are often
-   environmental, especially from datacenter IPs.
+   environmental, especially from datacenter IPs. Exit `7` (`incomplete-stream`)
+   means WaxTap could not obtain a complete stream from the attempted clients,
+   for example because of an iOS range limit or a WEB SABR preview limit. This is
+   not a WaxTap maintenance signal, so it remains distinct from exit `4`.
+   Configure `--potoken-url` and `--player-context-url` when full WEB audio is
+   required.
 
 2. **Capture what YouTube returned.** Set the dump directory and reproduce:
    ```

@@ -429,6 +429,7 @@ const (
 	WarnRangesEmpty                            // cut ranges were empty after clamp/merge
 	WarnThrottled                              // a limiter/cooldown is active
 	WarnWebContextFallback                     // WEB player-context failed; fell back to the default chain
+	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
 )
 
 func (w WarningCode) String() string {
@@ -451,6 +452,8 @@ func (w WarningCode) String() string {
 		return "throttled"
 	case WarnWebContextFallback:
 		return "web-context-fallback"
+	case WarnIncompleteFallback:
+		return "incomplete-fallback"
 	default:
 		return "unknown"
 	}

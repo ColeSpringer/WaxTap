@@ -39,6 +39,9 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 			em.stage(StageSkipped)
 			return &Result{SourceKind: SourceLocalFile, InputPath: req.Input, OutputPath: req.Output.path}, nil
 		}
+		if err := ensureParentDir(req.Output.path); err != nil {
+			return nil, err
+		}
 	}
 
 	runner, err := c.ffmpeg()
@@ -232,6 +235,9 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		res.PerTrack[i] = loudnessInfo(l)
 	}
 	for i, t := range tracks {
+		if err := ensureParentDir(t.Output); err != nil {
+			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
+		}
 		if _, err := runner.Transcode(ctx, t.Input, t.Output, tspec); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}

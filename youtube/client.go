@@ -269,108 +269,138 @@ func (c *Client) seedAdoptedCookies(cookies []*http.Cookie) error {
 // session are carried in the returned Extraction so stream resolution uses the
 // same identity.
 func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, error) {
+	return c.ExtractExcluding(ctx, videoID, nil)
+}
+
+// ExtractExcluding behaves like Extract but skips the specified attempts. It
+// returns the highest-precedence error when all remaining attempts fail.
+// Cancellation and rate limiting stop the chain immediately.
+func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[AttemptID]bool) (*Extraction, error) {
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
 		return nil, err // fatal only under adoption; otherwise newBootstrappedSession never errors
 	}
-	var lastErr error
+	var bestErr error
 
 	for i, profile := range c.profiles {
+		if skip[profileAttempt(i)] {
+			continue
+		}
 		// A failed profile must not carry its PO-token binding into the next
 		// attempt. The winning attempt returns with its binding intact.
 		sess.resetPOBinding()
 
-		// WEB-family profiles need a player-scope PO token in the /player body
-		// before YouTube returns usable stream URLs. Profiles that do not list
-		// ScopePlayer skip the provider lookup.
-		playerResp, err := c.fetchPOToken(ctx, profile, sess, videoID, potoken.ScopePlayer, nil)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
+		ext, perr := c.extractProfile(ctx, sess, profile, videoID, i)
+		if perr == nil {
+			if i > 0 {
+				c.log.DebugContext(ctx, "extracted via fallback client", "client", profile.Name)
 			}
-			lastErr = err
-			c.log.DebugContext(ctx, "player PO token unavailable; trying next client", "client", profile.Name, "err", err)
-			continue
+			return ext, nil
 		}
-		var playerTok string
-		if playerResp != nil {
-			playerTok = playerResp.Token
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
-
-		// WEB-family clients require the base.js signature timestamp in the
-		// /player body. If lookup fails, this attempt proceeds without it.
-		sts := c.signatureTimestamp(ctx, profile, videoID)
-
-		body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, playerRequestOpts{VideoID: videoID, POToken: playerTok, STS: sts}))
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			if errors.Is(err, waxerr.ErrRateLimited) {
-				return nil, err // throttling won't differ across clients; surface it
-			}
-			lastErr = err
-			c.log.DebugContext(ctx, "player request failed; trying next client", "client", profile.Name, "err", err)
-			continue
+		if errors.Is(perr, waxerr.ErrRateLimited) {
+			return nil, perr // throttling won't differ across clients; surface it
 		}
-
-		pr, err := parsePlayerResponse(body)
-		if err != nil {
-			lastErr = &waxerr.ExtractionError{Stage: "player-response", Cause: err}
-			c.log.DebugContext(ctx, "player-response parse failed; trying next client", "client", profile.Name, "err", err)
-			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-			continue
-		}
-		sess.learnVisitorData(pr.ResponseContext.VisitorData)
-
-		if perr := pr.playabilityError(); perr != nil {
-			// Playability failures can be client-specific: stale versions, sparse
-			// context, and bot checks often report generic ERROR or UNPLAYABLE.
-			// Keep the latest error, try the remaining clients, then fall back to
-			// the watch page before returning it.
-			lastErr = perr
-			// sts==0 here means the timestamp lookup failed, so the resulting
-			// UNPLAYABLE is a maintenance problem, not an unavailable video.
-			// Reclassify it so the terminal error names that cause instead of a
-			// generic ErrVideoUnavailable.
-			if profile.NeedsSignatureTimestamp && sts == 0 {
-				lastErr = missingTimestampError(perr)
-			}
-			c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", lastErr)
-			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-			continue
-		}
-
-		video, raw, err := pr.toVideo(videoID)
-		if err != nil {
-			lastErr = err
-			c.log.DebugContext(ctx, "no usable formats; trying next client", "client", profile.Name, "err", err)
-			c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-			continue
-		}
-
-		if i > 0 {
-			c.log.DebugContext(ctx, "extracted via fallback client", "client", profile.Name)
-		}
-		return buildExtraction(video, profile, sess, raw, pr), nil
+		bestErr = waxerr.PreferErr(bestErr, perr)
 	}
 
-	// Final fallback: scrape the watch page for ytInitialPlayerResponse. This
-	// reaches some embed-disabled videos the InnerTube clients refused. It does
-	// not override a more specific terminal error from the chain.
-	if ctx.Err() == nil && !errors.Is(lastErr, waxerr.ErrRateLimited) {
-		if ext, ferr := c.extractFromWatchPage(ctx, videoID); ferr == nil {
+	// The watch page is a separate fallback attempt and participates in error
+	// precedence like the profile attempts.
+	if !skip[AttemptWatchPage] && ctx.Err() == nil && !errors.Is(bestErr, waxerr.ErrRateLimited) {
+		ext, ferr := c.extractFromWatchPage(ctx, videoID)
+		if ferr == nil {
 			c.log.DebugContext(ctx, "extracted via watch-page fallback")
 			return ext, nil
-		} else if lastErr == nil {
-			lastErr = ferr
 		}
+		bestErr = waxerr.PreferErr(bestErr, ferr)
 	}
 
-	if lastErr == nil {
-		lastErr = waxerr.ErrExtractionFailed
+	if bestErr == nil {
+		// Every attempt was excluded.
+		bestErr = waxerr.ErrChainExhausted
 	}
-	return nil, lastErr
+	return nil, bestErr
+}
+
+// ExtractAttempt repeats one profile or watch-page attempt. Refresh and SABR
+// reload paths use it to remain on the client that produced the original stream.
+// Use ExtractWebContext to repeat the web-context attempt.
+func (c *Client) ExtractAttempt(ctx context.Context, videoID string, a AttemptID) (*Extraction, error) {
+	if a == AttemptWatchPage {
+		return c.extractFromWatchPage(ctx, videoID)
+	}
+	i, ok := profileIndex(a)
+	if !ok || i < 0 || i >= len(c.profiles) {
+		return nil, fmt.Errorf("%w: cannot re-extract attempt %q", waxerr.ErrExtractionFailed, a)
+	}
+	sess, err := c.newBootstrappedSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sess.resetPOBinding()
+	return c.extractProfile(ctx, sess, c.profiles[i], videoID, i)
+}
+
+// extractProfile performs one profile's /player extraction. The caller resets the
+// session PO binding and decides whether to continue the profile chain.
+func (c *Client) extractProfile(ctx context.Context, sess *session, profile ClientProfile, videoID string, i int) (*Extraction, error) {
+	// WEB-family profiles need a player-scope PO token in the /player body before
+	// YouTube returns usable stream URLs. Profiles that do not list ScopePlayer
+	// skip the provider lookup.
+	playerResp, err := c.fetchPOToken(ctx, profile, sess, videoID, potoken.ScopePlayer, nil)
+	if err != nil {
+		c.log.DebugContext(ctx, "player PO token unavailable; trying next client", "client", profile.Name, "err", err)
+		return nil, err
+	}
+	var playerTok string
+	if playerResp != nil {
+		playerTok = playerResp.Token
+	}
+
+	// WEB-family clients require the base.js signature timestamp in the /player
+	// body. If lookup fails, this attempt proceeds without it.
+	sts := c.signatureTimestamp(ctx, profile, videoID)
+
+	body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, playerRequestOpts{VideoID: videoID, POToken: playerTok, STS: sts}))
+	if err != nil {
+		c.log.DebugContext(ctx, "player request failed; trying next client", "client", profile.Name, "err", err)
+		return nil, err
+	}
+
+	pr, err := parsePlayerResponse(body)
+	if err != nil {
+		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
+		c.log.DebugContext(ctx, "player-response parse failed; trying next client", "client", profile.Name, "err", err)
+		return nil, &waxerr.ExtractionError{Stage: "player-response", Cause: err}
+	}
+	sess.learnVisitorData(pr.ResponseContext.VisitorData)
+
+	if perr := pr.playabilityError(); perr != nil {
+		// Playability failures can be client-specific: stale versions, sparse
+		// context, and bot checks often report generic ERROR or UNPLAYABLE.
+		result := perr
+		// sts==0 here means the timestamp lookup failed, so the resulting
+		// UNPLAYABLE is a maintenance problem, not an unavailable video. Reclassify
+		// it so the terminal error names that cause instead of a generic
+		// ErrVideoUnavailable.
+		if profile.NeedsSignatureTimestamp && sts == 0 {
+			result = missingTimestampError(perr)
+		}
+		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
+		c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", result)
+		return nil, result
+	}
+
+	video, raw, err := pr.toVideo(videoID)
+	if err != nil {
+		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
+		c.log.DebugContext(ctx, "no usable formats; trying next client", "client", profile.Name, "err", err)
+		return nil, err
+	}
+
+	return buildExtraction(video, profile, sess, raw, pr, profileAttempt(i)), nil
 }
 
 // signatureTimestamp returns the base.js signature timestamp required by
@@ -437,7 +467,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	if err != nil {
 		return nil, err
 	}
-	return buildExtraction(video, profile, sess, raw, pr), nil
+	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
 }
 
 // Info returns just the video metadata and candidate formats.

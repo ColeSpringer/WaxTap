@@ -300,6 +300,13 @@ func fileSize(p string) int64 {
 	return fi.Size()
 }
 
+// ensureParentDir creates the parent directory for an output path. The caller's
+// umask controls permissions; private internal directories use stricter modes.
+// For a bare filename, filepath.Dir returns "." and MkdirAll is a no-op.
+func ensureParentDir(path string) error {
+	return os.MkdirAll(filepath.Dir(path), 0o777)
+}
+
 // sameFile reports whether two paths refer to the same file, falling back to an
 // absolute-path comparison when either does not yet exist.
 func sameFile(a, b string) bool {

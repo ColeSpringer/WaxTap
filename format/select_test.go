@@ -186,6 +186,38 @@ func TestEligibleAudio_ExcludesVideoInUnlabeledFallback(t *testing.T) {
 	}
 }
 
+func TestBestForTarget_PreferCodecHonoredForNoneTarget(t *testing.T) {
+	cands := []Format{aud(251, "opus", 160000), aud(140, "mp4a.40.2", 128000)}
+	for _, tc := range []struct {
+		name   string
+		target Target
+	}{
+		{"none/mp3", Target{}},
+		{"lossless/flac", Target{Lossless: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx, err := BestForTarget(cands, PreferCodec("aac"), tc.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if idx != 1 {
+				t.Fatalf("idx = %d, want 1 (prefer:aac selects the AAC source over opus)", idx)
+			}
+		})
+	}
+}
+
+func TestBestForTarget_NoneTargetDefaultStillBestAudio(t *testing.T) {
+	cands := []Format{aud(251, "opus", 160000), aud(140, "mp4a.40.2", 128000)}
+	idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx != 0 {
+		t.Fatalf("idx = %d, want 0 (opus, highest bitrate; default ranking unchanged)", idx)
+	}
+}
+
 func TestSelect_Itag(t *testing.T) {
 	cands := []Format{aud(251, "opus", 160000), aud(140, "mp4a.40.2", 128000)}
 	idx, err := Itag(140).Select(cands, SourcePolicy{}, Target{})

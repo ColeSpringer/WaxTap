@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/sponsorblock"
+	"github.com/colespringer/waxtap/waxerr"
 	"github.com/colespringer/waxtap/youtube"
 )
 
@@ -37,39 +39,42 @@ func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, cate
 	return c.sb.FetchSegments(sbCtx, id, categories)
 }
 
-// acquired contains the selected format and the backend that delivers it.
+// acquired contains a selected format, its transfer backend, and the extraction
+// attempt that produced it.
 type acquired struct {
 	video    *youtube.Video
 	fmtSel   Format
 	transfer mediaTransfer
+	attempt  youtube.AttemptID
+	client   string // display name for logs and warnings
 }
 
-// webContextCooldown is how long acquire skips the WEB player-context attempt
-// after a provider failure, so a dead or hanging sidecar taxes a batch once
-// per window instead of paying the full provider budget on every video.
+// webContextCooldown limits a failing WEB player-context provider to one attempt
+// per window during batch downloads.
 const webContextCooldown = 30 * time.Second
 
-// acquire extracts, selects, and resolves one video, then builds the appropriate
-// transfer backend.
+// isIncompleteDelivery reports whether another client may be able to complete a
+// download that ended early.
+func isIncompleteDelivery(err error) bool {
+	return errors.Is(err, ErrIncompleteStream) || errors.Is(err, ErrURLExpired)
+}
+
+// acquire extracts, selects, and resolves a single transfer. It is used for sinks
+// that cannot discard bytes after an incomplete delivery.
 func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitter) (*acquired, error) {
 	target := transcodeTarget(req.Transcode)
 
-	// Opt-in WEB path: when an attested player-context provider is configured, try
-	// it first (full WEB audio, status 1), even over a forced Options.Client, whose
-	// chain stays the fallback. On any failure, warn and fall back to the default
-	// tokenless chain so the download still succeeds; the provider call is bounded
-	// by Timeouts.WebContext inside the youtube client, so a dead provider can't
-	// eat the fallback budget. Caller cancellation is propagated, never warned and
-	// never "recovered" by running the fallback chain on a dead context.
+	// Try the optional WEB player-context provider before the configured client
+	// chain. Provider failures emit a warning; caller cancellation stops fallback.
 	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() {
-		a, err := c.acquireWebContext(ctx, req, id, target, em)
+		a, err := c.acquireWebContext(ctx, req, id, target, em, 0)
 		if err == nil {
 			return a, nil
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; falling back to the default client chain")
+		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
 	}
 
 	em.stage(StageExtracting)
@@ -79,63 +84,85 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	if err != nil {
 		return nil, err
 	}
+	return c.buildTransfer(ctx, req, id, target, ext, em, 0)
+}
 
-	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em)
+// buildTransfer selects and resolves a format from ext. When pinnedItag is
+// non-zero, selection prefers that encoding.
+func (c *Client) buildTransfer(ctx context.Context, req Request, id string, target format.Target, ext *youtube.Extraction, em *emitter, pinnedItag int) (*acquired, error) {
+	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em, pinnedItag)
 	if err != nil {
 		return nil, err
 	}
+	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName()}
 
-	// SABR streams handle their own refresh and retry behavior.
+	// SABR reloads are pinned to the original attempt by SABRStream.reextract.
 	if plan.SABR != nil {
-		return &acquired{video: video, fmtSel: selFmt, transfer: sabrTransfer{dl: c.dl, handle: plan.SABR}}, nil
+		a.transfer = sabrTransfer{dl: c.dl, handle: plan.SABR}
+		return a, nil
 	}
+	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext.Attempt(), selFmt.Itag, em)}
+	return a, nil
+}
 
-	// Signed URL expiry lives in the player response. Refreshing after a 403/410
-	// therefore starts with a new extraction, then resolves the originally chosen
-	// itag so resumed byte ranges stay on the same encoding.
-	pinnedItag := selFmt.Itag
-	refresh := func(fctx context.Context, failure *potoken.HTTPFailure) (download.Source, error) {
+// directRefresh builds a signed-URL refresh callback pinned to the original
+// extraction attempt and itag. Pinning prevents a resumed range from mixing bytes
+// from different encodings.
+func (c *Client) directRefresh(req Request, id string, target format.Target, attempt youtube.AttemptID, pinnedItag int, em *emitter) download.RefreshFunc {
+	return func(fctx context.Context, failure *potoken.HTTPFailure) (download.Source, error) {
 		rext, rerr := func() (*youtube.Extraction, error) {
 			fectx, cancel := withTimeout(fctx, c.opts.Timeouts.Extraction)
 			defer cancel()
-			return c.yt.Extract(fectx, id)
+			return c.yt.ExtractAttempt(fectx, id, attempt)
 		}()
 		if rerr != nil {
-			return download.Source{}, rerr
+			return download.Source{}, refreshFailure(fctx, "re-extract attempt "+string(attempt), rerr)
 		}
+		// A refresh resumes an existing byte range, so the original itag is
+		// mandatory. A client fallback starts from offset zero and may select a
+		// substitute format.
 		ridx, rerr := selectIndex(Itag(pinnedItag), req.SourcePolicy, target, rext.Video().Formats)
 		if rerr != nil {
-			// The pinned itag is gone from the fresh extraction; fall back to the
-			// original selector rather than failing the refresh outright.
-			ridx, rerr = selectIndex(req.Audio, req.SourcePolicy, target, rext.Video().Formats)
-			if rerr != nil {
-				return download.Source{}, rerr
-			}
+			return download.Source{}, fmt.Errorf("%w: pinned itag %d absent after re-extract: %v", ErrURLExpired, pinnedItag, rerr)
 		}
 		rrctx, cancel := withTimeout(fctx, c.opts.Timeouts.Resolve)
 		defer cancel()
 		nplan, rerr := c.yt.ResolveWithFailure(rrctx, rext, ridx, failure)
 		if rerr != nil {
-			return download.Source{}, rerr
+			return download.Source{}, refreshFailure(fctx, "re-resolve after refresh", rerr)
 		}
 		if nplan.Direct == nil {
-			return download.Source{}, fmt.Errorf("waxtap: stream refresh resolved itag %d to SABR", pinnedItag)
+			return download.Source{}, fmt.Errorf("%w: stream refresh resolved itag %d to SABR", ErrURLExpired, pinnedItag)
 		}
 		em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
 		return toSource(*nplan.Direct), nil
 	}
-
-	return &acquired{video: video, fmtSel: selFmt, transfer: urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: refresh}}, nil
 }
 
-// acquireWebContext builds the transfer from an attested WEB /player context.
-// It always yields a SABR stream (the context's formats carry no direct URL), so
-// there is no signed-URL refresh path here; a mid-stream reload re-fetches a
-// fresh context (see SABRStream.reextract). Any error is returned so acquire can
-// warn and fall back to the default chain. Only a context failure trips the
-// provider cooldown: a per-video selection or resolve failure says nothing
-// about the provider's health.
-func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, target format.Target, em *emitter) (*acquired, error) {
+// refreshFailure preserves errors that must stop fallback. Other refresh failures
+// become ErrURLExpired so file-based downloads can restart with another client.
+func refreshFailure(fctx context.Context, what string, err error) error {
+	if ctxErr := fctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, ErrRateLimited) || isAvailabilityError(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %s: %v", ErrURLExpired, what, err)
+}
+
+// isAvailabilityError reports whether err describes the video's availability.
+func isAvailabilityError(err error) bool {
+	return errors.Is(err, ErrVideoUnavailable) ||
+		errors.Is(err, ErrVideoRestricted) ||
+		errors.Is(err, ErrLoginRequired) ||
+		errors.Is(err, ErrLiveContent) ||
+		errors.Is(err, ErrNoAudioFormats)
+}
+
+// acquireWebContext builds a SABR transfer from an attested WEB player context.
+// Only provider failures start the provider cooldown.
+func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, target format.Target, em *emitter, pinnedItag int) (*acquired, error) {
 	em.stage(StageExtracting)
 	ext, err := c.yt.ExtractWebContext(ctx, id)
 	if err != nil {
@@ -146,22 +173,21 @@ func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, 
 	}
 	c.noteWebContextSuccess()
 
-	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em)
+	a, err := c.buildTransfer(ctx, req, id, target, ext, em, pinnedItag)
 	if err != nil {
 		return nil, err
 	}
-	if plan.SABR == nil {
+	if _, ok := a.transfer.(sabrTransfer); !ok {
 		return nil, fmt.Errorf("WEB player-context did not resolve to a SABR stream")
 	}
-	return &acquired{video: video, fmtSel: selFmt, transfer: sabrTransfer{dl: c.dl, handle: plan.SABR}}, nil
+	return a, nil
 }
 
-// selectAndResolve picks the format for req and resolves its delivery plan,
-// emitting the standard stage event. It is the shared tail of acquire's
-// default chain and the WEB player-context path.
-func (c *Client) selectAndResolve(ctx context.Context, req Request, target format.Target, ext *youtube.Extraction, em *emitter) (*youtube.Video, Format, youtube.MediaPlan, error) {
+// selectAndResolve selects a format and resolves its delivery plan. A non-zero
+// pinnedItag preserves the preferred encoding across client fallback.
+func (c *Client) selectAndResolve(ctx context.Context, req Request, target format.Target, ext *youtube.Extraction, em *emitter, pinnedItag int) (*youtube.Video, Format, youtube.MediaPlan, error) {
 	video := ext.Video()
-	idx, err := selectIndex(req.Audio, req.SourcePolicy, target, video.Formats)
+	idx, err := c.selectSourceIndex(req, target, video.Formats, pinnedItag)
 	if err != nil {
 		return nil, Format{}, youtube.MediaPlan{}, err
 	}
@@ -174,6 +200,160 @@ func (c *Client) selectAndResolve(ctx context.Context, req Request, target forma
 		return nil, Format{}, youtube.MediaPlan{}, err
 	}
 	return video, video.Formats[idx], plan, nil
+}
+
+// selectSourceIndex chooses a source format, preferring pinnedItag when available.
+// If a fallback client lacks that itag, normal selection chooses a replacement.
+func (c *Client) selectSourceIndex(req Request, target format.Target, formats []Format, pinnedItag int) (int, error) {
+	if pinnedItag != 0 {
+		if idx, err := selectIndex(Itag(pinnedItag), req.SourcePolicy, target, formats); err == nil {
+			return idx, nil
+		}
+	}
+	idx, err := selectIndex(req.Audio, req.SourcePolicy, target, formats)
+	if err != nil {
+		return -1, err
+	}
+	if pinnedItag != 0 && formats[idx].Itag != pinnedItag {
+		c.log.Info("pinned itag absent on fallback client; selecting a different format",
+			"pinnedItag", pinnedItag, "itag", formats[idx].Itag, "codec", formats[idx].Codec, "ext", sourceExt(formats[idx]))
+	}
+	return idx, nil
+}
+
+// acquireNext resolves the next non-skipped extraction attempt. It returns the
+// attempt ID when one attempt can be skipped after a selection or resolution
+// failure. An empty ID means that no individual attempt can be blamed.
+func (c *Client) acquireNext(ctx context.Context, req Request, id string, target format.Target, em *emitter, skip map[youtube.AttemptID]bool, pinnedItag int) (*acquired, youtube.AttemptID, error) {
+	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() && !skip[youtube.AttemptWebContext] {
+		a, err := c.acquireWebContext(ctx, req, id, target, em, pinnedItag)
+		if err == nil {
+			return a, youtube.AttemptWebContext, nil
+		}
+		if ctx.Err() != nil {
+			return nil, youtube.AttemptWebContext, ctx.Err()
+		}
+		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
+		return nil, youtube.AttemptWebContext, err
+	}
+
+	em.stage(StageExtracting)
+	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
+	ext, err := c.yt.ExtractExcluding(ectx, id, skip)
+	ecancel()
+	if err != nil {
+		return nil, "", err
+	}
+	a, err := c.buildTransfer(ctx, req, id, target, ext, em, pinnedItag)
+	if err != nil {
+		return nil, ext.Attempt(), err
+	}
+	return a, ext.Attempt(), nil
+}
+
+// acquireAndDownload downloads to a file, retrying incomplete deliveries with
+// other extraction attempts. dest returns the path for each selected format.
+//
+// Cancellation, rate limiting, and local download failures stop the loop.
+func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string, em *emitter, dest func(*acquired) string) (*acquired, download.Result, string, error) {
+	target := transcodeTarget(req.Transcode)
+	skip := map[youtube.AttemptID]bool{}
+	var causes attemptErrors
+	pinnedItag := 0
+	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
+
+	for {
+		a, attempt, err := c.acquireNext(ctx, req, id, target, em, skip, pinnedItag)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, download.Result{}, "", ctx.Err()
+			}
+			if errors.Is(err, ErrRateLimited) {
+				return nil, download.Result{}, "", err
+			}
+			if attempt == "" {
+				// ErrChainExhausted only marks the end of the chain. The recorded
+				// per-attempt errors contain the useful causes.
+				if !errors.Is(err, waxerr.ErrChainExhausted) {
+					causes.add(attempt, err)
+				}
+				break
+			}
+			causes.add(attempt, err)
+			skip[attempt] = true
+			continue
+		}
+
+		// Prefer the first selected encoding on later attempts.
+		if pinnedItag == 0 {
+			pinnedItag = a.fmtSel.Itag
+		}
+		path := dest(a)
+		em.stage(StageDownloading)
+		res, derr := a.transfer.toFile(ctx, path, progress)
+		if derr == nil {
+			return a, res, path, nil
+		}
+		if ctx.Err() != nil {
+			return nil, download.Result{}, "", ctx.Err()
+		}
+		if errors.Is(derr, ErrRateLimited) {
+			return nil, download.Result{}, "", derr
+		}
+		if !isIncompleteDelivery(derr) {
+			return nil, download.Result{}, "", derr
+		}
+		causes.add(a.attempt, derr)
+		skip[a.attempt] = true
+		em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
+	}
+	return nil, download.Result{}, "", causes.aggregate()
+}
+
+// attemptErrors collects failures from a cross-client download.
+type attemptErrors struct {
+	causes []attemptCause
+}
+
+type attemptCause struct {
+	id  youtube.AttemptID
+	err error
+}
+
+func (a *attemptErrors) add(id youtube.AttemptID, err error) {
+	a.causes = append(a.causes, attemptCause{id: id, err: err})
+}
+
+func (a *attemptErrors) aggregate() error {
+	if len(a.causes) == 0 {
+		return ErrIncompleteStream
+	}
+	best := a.causes[0].err
+	for _, cause := range a.causes[1:] {
+		best = waxerr.PreferErr(best, cause.err)
+	}
+	var tried []string
+	for _, cause := range a.causes {
+		if cause.id != "" {
+			tried = append(tried, string(cause.id))
+		}
+	}
+	summary := "no attempted client delivered a complete stream"
+	if len(tried) > 0 {
+		summary += " (tried " + strings.Join(tried, ", ") + ")"
+	}
+	switch {
+	case errors.Is(best, ErrIncompleteStream):
+		// Preserve the most useful truncation detail.
+		return fmt.Errorf("%s: %w", summary, best)
+	case isIncompleteDelivery(best):
+		// A refresh failure is an incomplete file delivery once all attempts fail.
+		return fmt.Errorf("%w: %s: %w", ErrIncompleteStream, summary, best)
+	case len(tried) == 0:
+		return best
+	default:
+		return fmt.Errorf("%w (tried %s)", best, strings.Join(tried, ", "))
+	}
 }
 
 // webContextCoolingDown reports whether the WEB player-context attempt is
@@ -291,58 +471,76 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 	if req.Output.kind == outputNone {
 		return nil, fmt.Errorf("waxtap.Download: an Output is required (use Stream for reader delivery)")
 	}
-	if req.Output.kind == outputFile && req.SkipIfExists && fileExists(req.Output.path) {
-		em.stage(StageSkipped)
-		return &Result{SourceKind: SourceYouTube, VideoID: id, OutputPath: req.Output.path}, nil
-	}
-
-	a, err := c.acquire(ctx, req, id, em)
-	if err != nil {
-		return nil, err
+	if req.Output.kind == outputFile {
+		if req.SkipIfExists && fileExists(req.Output.path) {
+			em.stage(StageSkipped)
+			return &Result{SourceKind: SourceYouTube, VideoID: id, OutputPath: req.Output.path}, nil
+		}
+		// Create the output directory before downloading so staging failures are
+		// reported early.
+		if err := ensureParentDir(req.Output.path); err != nil {
+			return nil, err
+		}
 	}
 
 	if !needsProcessing(req.ProcessSpec) {
-		return c.deliverSource(ctx, req, id, a, em)
+		return c.deliverSource(ctx, req, id, em)
 	}
-	return c.downloadAndProcess(ctx, req, a, em)
+	return c.downloadAndProcess(ctx, req, id, em)
 }
 
-// deliverSource downloads the source straight to the sink without staging,
-// preserving the keep-source, no-re-encode default.
-func (c *Client) deliverSource(ctx context.Context, req Request, id string, a *acquired, em *emitter) (*Result, error) {
-	res := &Result{
-		SourceKind:   SourceYouTube,
-		VideoID:      id,
-		Title:        a.video.Title,
-		SourceFormat: a.fmtSel,
-		OutputFormat: a.fmtSel,
-	}
-	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
-
-	em.stage(StageDownloading)
+// deliverSource downloads without processing. File outputs can retry incomplete
+// attempts because staging is atomic; Writer outputs cannot retract written bytes.
+func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *emitter) (*Result, error) {
 	switch req.Output.kind {
 	case outputFile:
-		r, err := a.transfer.toFile(ctx, req.Output.path, progress)
+		a, r, _, err := c.acquireAndDownload(ctx, req, id, em, func(*acquired) string { return req.Output.path })
 		if err != nil {
 			return nil, err
 		}
-		res.OutputPath = req.Output.path
-		res.SourceBytes, res.OutputBytes = r.BytesWritten, r.BytesWritten
+		em.stage(StageFinalizing)
+		return &Result{
+			SourceKind:   SourceYouTube,
+			VideoID:      id,
+			Title:        a.video.Title,
+			SourceFormat: a.fmtSel,
+			OutputFormat: a.fmtSel,
+			OutputPath:   req.Output.path,
+			SourceBytes:  r.BytesWritten,
+			OutputBytes:  r.BytesWritten,
+		}, nil
 	case outputWriter:
-		r, err := a.transfer.toWriter(ctx, req.Output.writer, progress)
+		a, err := c.acquire(ctx, req, id, em)
 		if err != nil {
 			return nil, err
 		}
-		res.SourceBytes, res.OutputBytes = r.BytesWritten, r.BytesWritten
+		em.stage(StageDownloading)
+		r, derr := a.transfer.toWriter(ctx, req.Output.writer, func(p download.Progress) { em.progress(p.BytesWritten, p.Total) })
+		if derr != nil {
+			if isIncompleteDelivery(derr) {
+				// Written bytes cannot be retracted, so report the partial delivery.
+				return nil, fmt.Errorf("%w: %v", ErrIncompleteStream, derr)
+			}
+			return nil, derr
+		}
+		em.stage(StageFinalizing)
+		return &Result{
+			SourceKind:   SourceYouTube,
+			VideoID:      id,
+			Title:        a.video.Title,
+			SourceFormat: a.fmtSel,
+			OutputFormat: a.fmtSel,
+			SourceBytes:  r.BytesWritten,
+			OutputBytes:  r.BytesWritten,
+		}, nil
 	}
-	em.stage(StageFinalizing)
-	return res, nil
+	return nil, fmt.Errorf("waxtap: unsupported output kind for keep-source delivery")
 }
 
 // downloadAndProcess stages the source to a temp file and runs the fused
 // pipeline, then finalizes to the sink. For a file sink the pipeline writes the
 // destination path directly (atomic), so only a measure-only pass needs a move.
-func (c *Client) downloadAndProcess(ctx context.Context, req Request, a *acquired, em *emitter) (*Result, error) {
+func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string, em *emitter) (*Result, error) {
 	jobDir, err := os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
 	if err != nil {
 		return nil, err
@@ -354,7 +552,7 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, a *acquire
 		pipeOut = req.Output.path
 	}
 
-	deliver, res, err := c.produce(ctx, req, a, jobDir, pipeOut, em)
+	deliver, res, err := c.produce(ctx, req, id, jobDir, pipeOut, em)
 	if err != nil {
 		return nil, err
 	}
@@ -385,17 +583,14 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, a *acquire
 // pipeline writing to pipeOut (or a temp inside jobDir when pipeOut is ""). It
 // returns the deliverable file path and a Result with metadata and flags filled,
 // leaving sink-specific fields to the caller.
-func (c *Client) produce(ctx context.Context, req Request, a *acquired, jobDir, pipeOut string, em *emitter) (string, *Result, error) {
-	srcExt := sourceExt(a.fmtSel)
-	srcPath := filepath.Join(jobDir, "source"+srcExt)
-
-	em.stage(StageDownloading)
-	dlRes, err := a.transfer.toFile(ctx, srcPath, func(p download.Progress) {
-		em.progress(p.BytesWritten, p.Total)
-	})
+func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut string, em *emitter) (string, *Result, error) {
+	// The selected format determines the staged source filename.
+	dest := func(a *acquired) string { return filepath.Join(jobDir, "source"+sourceExt(a.fmtSel)) }
+	a, dlRes, srcPath, err := c.acquireAndDownload(ctx, req, id, em, dest)
 	if err != nil {
 		return "", nil, err
 	}
+	srcExt := sourceExt(a.fmtSel)
 
 	em.stage(StageStaging)
 	ranges, sbRanges, err := c.collectRanges(ctx, req.Cut, a.video.ID, em)
@@ -518,30 +713,31 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	// Report HTTP throttling as job warnings.
 	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
+	// Processing stages the source and can retry. Keep-source streaming returns
+	// bytes immediately and therefore uses one attempt.
+	if needsProcessing(req.ProcessSpec) {
+		return c.streamProcessed(ctx, req, id, em)
+	}
+
 	a, err := c.acquire(ctx, req, id, em)
 	if err != nil {
 		return nil, StreamInfo{}, err
 	}
-
-	if !needsProcessing(req.ProcessSpec) {
-		em.stage(StageDownloading)
-		body, sinfo, derr := a.transfer.stream(ctx, func(p download.Progress) {
-			em.progress(p.BytesWritten, p.Total)
-		})
-		if derr != nil {
-			return nil, StreamInfo{}, derr
-		}
-		info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength}
-		return &doneReader{ReadCloser: body, em: em}, info, nil
+	em.stage(StageDownloading)
+	body, sinfo, derr := a.transfer.stream(ctx, func(p download.Progress) {
+		em.progress(p.BytesWritten, p.Total)
+	})
+	if derr != nil {
+		return nil, StreamInfo{}, derr
 	}
-
-	return c.streamProcessed(ctx, req, id, a, em)
+	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength}
+	return &doneReader{ReadCloser: body, em: em}, info, nil
 }
 
 // streamProcessed stages and processes to a temp file, then returns a reader over
 // the result that cleans up the temp directory and fires the terminal event on
 // Close.
-func (c *Client) streamProcessed(ctx context.Context, req Request, id string, a *acquired, em *emitter) (io.ReadCloser, StreamInfo, error) {
+func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em *emitter) (io.ReadCloser, StreamInfo, error) {
 	jobDir, err := os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
 	if err != nil {
 		return nil, StreamInfo{}, err
@@ -553,7 +749,7 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, a 
 		}
 	}()
 
-	deliver, res, err := c.produce(ctx, req, a, jobDir, "", em)
+	deliver, res, err := c.produce(ctx, req, id, jobDir, "", em)
 	if err != nil {
 		return nil, StreamInfo{}, err
 	}
@@ -562,7 +758,7 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, a 
 	if err != nil {
 		return nil, StreamInfo{}, err
 	}
-	info := StreamInfo{VideoID: id, Title: a.video.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver)}
+	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver)}
 	ok = true
 	return &dirCleanupReader{File: f, dir: jobDir, em: em}, info, nil
 }
@@ -586,6 +782,11 @@ type streamErr struct {
 func (s *streamErr) record(err error) {
 	if err == nil || errors.Is(err, io.EOF) {
 		return
+	}
+	// Bytes already returned to the caller cannot be retried through another
+	// client.
+	if isIncompleteDelivery(err) {
+		err = fmt.Errorf("%w: %v", ErrIncompleteStream, err)
 	}
 	s.mu.Lock()
 	if s.err == nil {

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -99,8 +100,24 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 			args = append(args, "-b:a", strconv.Itoa(p.defaultRate))
 		}
 	}
+	// Force a muxer only when the output path cannot identify one. Explicit
+	// container extensions such as ".m4a" and ".caf" remain authoritative.
+	if p.muxer != "" && needsForcedMuxer(output, spec.Codec) {
+		args = append(args, "-f", p.muxer)
+	}
 	args = append(args, output)
 	return Command{Args: args}, nil
+}
+
+// needsForcedMuxer reports whether ffmpeg needs the preset's -f argument because
+// the output path does not identify a container.
+//
+// ALAC is currently the only preset with a forced muxer. Its codec-name extension,
+// ".alac", is not a container. If another codec gains a forced muxer, this rule
+// may need to become preset-specific.
+func needsForcedMuxer(output string, codec Codec) bool {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
+	return ext == "" || ext == codec.String()
 }
 
 // RunnerConfig configures a Runner. The binary paths are looked up in PATH when

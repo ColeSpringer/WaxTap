@@ -18,6 +18,9 @@ var (
 	ErrCipherSolve      = waxerr.ErrCipherSolve
 	ErrNeedsPOToken     = waxerr.ErrNeedsPOToken
 	ErrURLExpired       = waxerr.ErrURLExpired
+	// ErrIncompleteStream indicates that a client returned a detectably truncated
+	// stream. Another client may still deliver the complete stream.
+	ErrIncompleteStream = waxerr.ErrIncompleteStream
 
 	// Availability failures.
 	ErrVideoUnavailable = waxerr.ErrVideoUnavailable
@@ -43,7 +46,7 @@ var (
 	ErrFFmpegNotFound   = waxerr.ErrFFmpegNotFound
 )
 
-// Re-exported structured error types. Use errors.As to inspect them.
+// Re-exported structured error types. Use errors.AsType to inspect them.
 type (
 	RateLimitError   = waxerr.RateLimitError
 	ExtractionError  = waxerr.ExtractionError

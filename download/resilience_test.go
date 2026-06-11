@@ -17,6 +17,7 @@ import (
 
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/waxerr"
 )
 
 // noHTTPRetryDownloader lets retryable statuses reach the download layer by
@@ -136,12 +137,59 @@ func TestStream_StallGuardTerminates(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "stalled") {
-			t.Fatalf("err = %v, want a stall error", err)
+		// A terminal stall is incomplete delivery, and the error should retain the
+		// stall detail.
+		if !errors.Is(err, waxerr.ErrIncompleteStream) {
+			t.Fatalf("err = %v, want ErrIncompleteStream (stall)", err)
+		}
+		if !strings.Contains(err.Error(), "stalled") {
+			t.Errorf("err = %q, want it to mention the stall", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("stall guard did not terminate the download")
 	}
+}
+
+// shortAlways returns two fewer bytes than each range requests.
+type shortAlways struct{ payload []byte }
+
+func (o *shortAlways) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	total := int64(len(o.payload))
+	h := r.Header.Get("Range")
+	if h == "" {
+		serveRange(w, r, o.payload)
+		return
+	}
+	start, end := parseTestRange(strings.TrimPrefix(h, "bytes="), total)
+	full := end - start + 1
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	w.Header().Set("Content-Length", strconv.FormatInt(full, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	short := full - 2
+	if short < 0 {
+		short = 0
+	}
+	_, _ = w.Write(o.payload[start : start+short])
+}
+
+func TestToFile_PersistentShortChunkIsIncomplete(t *testing.T) {
+	payload := makePayload(8000)
+	srv := httptest.NewServer(&shortAlways{payload: payload})
+	defer srv.Close()
+
+	d := newTestDownloader(1000, 4)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+
+	src := Source{URL: srv.URL, ContentLength: int64(len(payload))}
+	_, err := d.ToFile(context.Background(), src, path, nil, nil)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream (persistent short chunk)", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("no output file should remain after an incomplete download")
+	}
+	assertNoTempFiles(t, dir)
 }
 
 // TestToFile_AlreadyCanceledContext covers cancellation before any worker starts

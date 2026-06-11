@@ -69,10 +69,14 @@ func (s AudioSelector) Select(candidates []Format, policy SourcePolicy, target T
 func BestForTarget(candidates []Format, policy SourcePolicy, target Target) (int, error) {
 	eligible := eligibleAudio(candidates)
 
-	// Copying the source or writing a lossless target gains nothing from a
-	// codec-matched source.
+	// MinimizeLoss codec matching does not affect copies or lossless targets, but
+	// an explicit prefer:<codec> policy must still influence source selection.
 	if target.none() || target.Lossless {
-		return pick(candidates, eligible, "")
+		prefCodec := ""
+		if policy.kind == polPreferCodec {
+			prefCodec = policy.codec
+		}
+		return pick(candidates, eligible, prefCodec)
 	}
 
 	switch policy.kind {

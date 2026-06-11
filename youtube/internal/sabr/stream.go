@@ -670,10 +670,13 @@ func (s *stream) stallResult() error {
 		s.done = true
 		return nil
 	}
+	// A stalled SABR delivery may succeed through another client. Keep the
+	// attestation-pending message neutral because changing the token does not lift
+	// this limit.
 	if s.attestationPending {
-		return fmt.Errorf("%w: %s under attestation-pending (status 2); cause is upstream of the PO token (refreshing it does not lift the cap)", waxerr.ErrExtractionFailed, desc)
+		return fmt.Errorf("%w: %s under attestation-pending (status 2); cause is upstream of the PO token (refreshing it does not lift the cap)", waxerr.ErrIncompleteStream, desc)
 	}
-	return fmt.Errorf("%w: %s", waxerr.ErrExtractionFailed, desc)
+	return fmt.Errorf("%w: %s", waxerr.ErrIncompleteStream, desc)
 }
 
 // stallDescription names what is provably missing, or "" when nothing proves
