@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -57,6 +58,20 @@ func TestRefreshFailure(t *testing.T) {
 	})
 }
 
+func TestBaseSkip(t *testing.T) {
+	if skip := baseSkip(Request{}); len(skip) != 0 {
+		t.Errorf("default baseSkip = %v, want empty (all fallbacks allowed)", skip)
+	}
+	skip := baseSkip(Request{NoFallback: true})
+	if !skip[youtube.AttemptWatchPage] {
+		t.Errorf("NoFallback baseSkip must exclude the watch-page attempt, got %v", skip)
+	}
+	// Only the watch-page is pre-skipped; the primary profile chain still runs.
+	if skip[youtube.AttemptWebContext] {
+		t.Errorf("NoFallback baseSkip must not pre-skip the web-context attempt, got %v", skip)
+	}
+}
+
 func TestIsIncompleteDelivery(t *testing.T) {
 	cases := []struct {
 		name string
@@ -81,6 +96,43 @@ func TestIsIncompleteDelivery(t *testing.T) {
 				t.Errorf("isIncompleteDelivery(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsUpstreamDiagnostic(t *testing.T) {
+	upstream := []error{
+		ErrNeedsPOToken,
+		ErrExtractionFailed,
+		ErrCipherSolve,
+		&waxerr.PlayabilityError{Status: "ERROR", Sentinel: waxerr.ErrVideoUnavailable},
+		ErrLoginRequired,
+	}
+	for _, err := range upstream {
+		if !isUpstreamDiagnostic(err) {
+			t.Errorf("isUpstreamDiagnostic(%v) = false, want true", err)
+		}
+	}
+	// Local I/O failures must never be classified as upstream, so they are never
+	// masked by an earlier incomplete delivery.
+	for _, err := range []error{os.ErrPermission, errors.New("write: no space left on device"), ErrIncompleteStream} {
+		if isUpstreamDiagnostic(err) {
+			t.Errorf("isUpstreamDiagnostic(%v) = true, want false", err)
+		}
+	}
+}
+
+func TestAttemptErrorsHasIncomplete(t *testing.T) {
+	var causes attemptErrors
+	if causes.hasIncomplete() {
+		t.Error("empty causes should report no incomplete")
+	}
+	causes.add(youtube.AttemptID("profile:2"), ErrNeedsPOToken)
+	if causes.hasIncomplete() {
+		t.Error("needs-po-token alone is not an incomplete delivery")
+	}
+	causes.add(youtube.AttemptID("profile:0"), fmt.Errorf("chunk: %w", ErrIncompleteStream))
+	if !causes.hasIncomplete() {
+		t.Error("a recorded incomplete delivery should be detected")
 	}
 }
 

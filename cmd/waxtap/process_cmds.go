@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,8 @@ func isLocalFile(arg string) bool {
 
 // dispatchProcess runs a ProcessSpec against a local file or a YouTube URL and
 // returns the Result. A live progress reporter is attached for the duration.
-func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap.AudioSelector, policy waxtap.SourcePolicy, spec waxtap.ProcessSpec) (*waxtap.Result, error) {
+// noFallback applies only to URL sources.
+func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap.AudioSelector, policy waxtap.SourcePolicy, spec waxtap.ProcessSpec, noFallback bool) (*waxtap.Result, error) {
 	prog := env.newProgress()
 	spec.Events = prog.handle
 	defer prog.finish()
@@ -30,9 +32,14 @@ func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap
 		return env.client.Process(ctx, waxtap.ProcessRequest{Input: source, ProcessSpec: spec})
 	}
 	if _, err := youtube.ExtractVideoID(source); err != nil {
+		// Report both accepted input forms because this is usually a mistyped
+		// local path, not an intended video ID.
+		if errors.Is(err, waxtap.ErrInvalidVideoID) || errors.Is(err, waxtap.ErrVideoIDTooShort) {
+			return nil, usagef("no such file and not a valid YouTube URL or ID: %s", source)
+		}
 		return nil, err
 	}
-	return env.client.Download(ctx, waxtap.Request{URL: source, Audio: sel, SourcePolicy: policy, ProcessSpec: spec})
+	return env.client.Download(ctx, waxtap.Request{URL: source, Audio: sel, SourcePolicy: policy, NoFallback: noFallback, ProcessSpec: spec})
 }
 
 // resolveProcessOutput resolves the output path for a single-file process command
@@ -92,6 +99,9 @@ func newCutCmd() *cobra.Command {
 		bitrate      int
 		itag         int
 		codec        string
+		channels     string
+		downmix      bool
+		noFallback   bool
 		sourcePolicy string
 		collisionStr string
 	)
@@ -133,6 +143,10 @@ func newCutCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
+			if err != nil {
+				return err
+			}
 			cs := &waxtap.CutSpec{Ranges: rangeList, Mode: mode, Crossfade: crossfade}
 			if sbSet {
 				cats, err := parseCategories(sbCats)
@@ -146,7 +160,7 @@ func newCutCmd() *cobra.Command {
 				cs.SponsorBlock, cs.OnError = cats, pol
 			}
 
-			spec := waxtap.ProcessSpec{Cut: cs}
+			spec := waxtap.ProcessSpec{Cut: cs, Channels: layout, Downmix: doDownmix}
 			newExt := ""
 			var tf waxtap.TranscodeFormat // FormatCopy when no transcode is requested
 			if transcode != "" {
@@ -173,11 +187,11 @@ func newCutCmd() *cobra.Command {
 			warnALACToAlacExt(env, outPath, tf)
 			spec.Output = waxtap.ToFile(outPath)
 
-			sel, policy, err := urlSelection(itag, codec, sourcePolicy)
+			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
 				return err
 			}
-			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec)
+			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
 				return err
 			}
@@ -195,6 +209,7 @@ func newCutCmd() *cobra.Command {
 	f.IntVar(&bitrate, "bitrate", 0, "target bitrate for lossy transcodes")
 	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
 	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
+	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
 	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
 	if fl := f.Lookup("cut-sponsorblock"); fl != nil {
@@ -210,6 +225,9 @@ func newTranscodeCmd() *cobra.Command {
 		bitrate      int
 		itag         int
 		codec        string
+		channels     string
+		downmix      bool
+		noFallback   bool
 		sourcePolicy string
 		collisionStr string
 	)
@@ -238,7 +256,11 @@ func newTranscodeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			spec := waxtap.ProcessSpec{Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}}
+			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
+			if err != nil {
+				return err
+			}
+			spec := waxtap.ProcessSpec{Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}, Channels: layout, Downmix: doDownmix}
 
 			mc, err := collisionFor(cmd, collisionStr)
 			if err != nil {
@@ -255,11 +277,11 @@ func newTranscodeCmd() *cobra.Command {
 			warnALACToAlacExt(env, outPath, tf)
 			spec.Output = waxtap.ToFile(outPath)
 
-			sel, policy, err := urlSelection(itag, codec, sourcePolicy)
+			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
 				return err
 			}
-			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec)
+			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
 				return err
 			}
@@ -272,6 +294,7 @@ func newTranscodeCmd() *cobra.Command {
 	f.IntVar(&bitrate, "bitrate", 0, "target bitrate (bits/sec) for lossy formats")
 	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
 	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
+	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
 	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
 	return cmd
@@ -290,9 +313,10 @@ func transcodeFormatFor(format, output string) (waxtap.TranscodeFormat, error) {
 }
 
 // urlSelection builds the audio selector and source policy used when a process
-// command is given a URL source.
-func urlSelection(itag int, codec, sourcePolicy string) (waxtap.AudioSelector, waxtap.SourcePolicy, error) {
-	sel, err := audioSelector(itag, codec)
+// command is given a URL source. layout sets its preferred native channel
+// layout.
+func urlSelection(itag int, codec, sourcePolicy string, layout waxtap.ChannelLayout) (waxtap.AudioSelector, waxtap.SourcePolicy, error) {
+	sel, err := audioSelector(itag, codec, layout)
 	if err != nil {
 		return sel, waxtap.SourcePolicy{}, err
 	}

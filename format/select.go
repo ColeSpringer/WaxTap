@@ -40,17 +40,19 @@ func (s AudioSelector) Select(candidates []Format, policy SourcePolicy, target T
 	eligible := eligibleAudio(candidates)
 	switch s.kind {
 	case selItag:
-		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && f.Itag == s.itag }, ""); ok {
+		// An itag names an exact encoding, so the layout preference does not apply.
+		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && f.Itag == s.itag }, "", LayoutAny); ok {
 			return i, nil
 		}
 		return -1, fmt.Errorf("%w: itag %d", ErrNoMatch, s.itag)
 	case selCodec:
-		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && codecMatches(s.codec, f.Codec) }, ""); ok {
+		// The codec filter restricts the set; the layout refines within it.
+		if i, ok := bestWith(candidates, func(f Format) bool { return eligible(f) && codecMatches(s.codec, f.Codec) }, "", s.layout); ok {
 			return i, nil
 		}
 		return -1, fmt.Errorf("%w: codec %q", ErrNoMatch, s.codec)
 	default: // selBestAudio
-		return BestForTarget(candidates, policy, target)
+		return bestForTarget(candidates, policy, target, s.layout)
 	}
 }
 
@@ -66,7 +68,15 @@ func (s AudioSelector) Select(candidates []Format, policy SourcePolicy, target T
 // dubbed track over the original for codec compatibility. When no candidate
 // matches the preferred codec, selection falls back to normal ranking. It
 // returns ErrNoMatch only when there are no selectable audio candidates.
+//
+// BestForTarget is layout-neutral; the layout-aware path is reached through
+// AudioSelector.WithChannels.
 func BestForTarget(candidates []Format, policy SourcePolicy, target Target) (int, error) {
+	return bestForTarget(candidates, policy, target, LayoutAny)
+}
+
+// bestForTarget is BestForTarget with an explicit channel-layout preference.
+func bestForTarget(candidates []Format, policy SourcePolicy, target Target, layout ChannelLayout) (int, error) {
 	eligible := eligibleAudio(candidates)
 
 	// MinimizeLoss codec matching does not affect copies or lossless targets, but
@@ -76,22 +86,22 @@ func BestForTarget(candidates []Format, policy SourcePolicy, target Target) (int
 		if policy.kind == polPreferCodec {
 			prefCodec = policy.codec
 		}
-		return pick(candidates, eligible, prefCodec)
+		return pick(candidates, eligible, prefCodec, layout)
 	}
 
 	switch policy.kind {
 	case polBestNative:
-		return pick(candidates, eligible, "")
+		return pick(candidates, eligible, "", layout)
 	case polPreferCodec:
-		return pick(candidates, eligible, policy.codec)
+		return pick(candidates, eligible, policy.codec, layout)
 	default: // polMinimizeLoss
-		return pick(candidates, eligible, target.Codec)
+		return pick(candidates, eligible, target.Codec, layout)
 	}
 }
 
 // pick returns the best eligible index, or ErrNoMatch when none are eligible.
-func pick(candidates []Format, eligible func(Format) bool, prefCodec string) (int, error) {
-	if i, ok := bestWith(candidates, eligible, prefCodec); ok {
+func pick(candidates []Format, eligible func(Format) bool, prefCodec string, layout ChannelLayout) (int, error) {
+	if i, ok := bestWith(candidates, eligible, prefCodec, layout); ok {
 		return i, nil
 	}
 	return -1, ErrNoMatch
@@ -99,8 +109,8 @@ func pick(candidates []Format, eligible func(Format) bool, prefCodec string) (in
 
 // bestWith returns the highest-ranked eligible candidate. It decides whether to
 // use quality tiers once so the comparator remains consistent.
-func bestWith(c []Format, keep func(Format) bool, prefCodec string) (int, bool) {
-	return bestAmong(c, keep, betterThan(prefCodec, tierUsable(c, keep, prefCodec)))
+func bestWith(c []Format, keep func(Format) bool, prefCodec string, layout ChannelLayout) (int, bool) {
+	return bestAmong(c, keep, betterThan(prefCodec, layout, tierUsable(c, keep, prefCodec, layout)))
 }
 
 // bestAmong returns the highest-ranked candidate kept by keep. Ties resolve to
@@ -121,19 +131,27 @@ func bestAmong(candidates []Format, keep func(Format) bool, better func(a, b For
 // betterThan builds the audio-ranking comparator. Candidates are ranked by:
 //
 //  1. original track, because the wrong language is a content error
-//  2. preferred codec family, when one was requested
-//  3. non-DRC audio
-//  4. higher reported quality tier, when useTier is true
-//  5. Opus over other codecs, when useTier is true
-//  6. higher effective bitrate
+//  2. requested channel layout, when one was requested
+//  3. preferred codec family, when one was requested
+//  4. non-DRC audio
+//  5. higher reported quality tier, when useTier is true
+//  6. Opus over other codecs, when useTier is true
+//  7. higher effective bitrate
 //
-// If tier metadata is incomplete, tier and Opus preference are skipped and
-// bitrate decides between candidates otherwise tied on the first three rules.
-// Equal candidates retain their original order.
-func betterThan(prefCodec string, useTier bool) func(a, b Format) bool {
+// Original-language selection takes precedence over layout, so a dubbed track
+// cannot win only because it matches the requested layout. If tier metadata is
+// incomplete, tier and Opus preference are skipped and bitrate decides between
+// candidates otherwise tied on the earlier rules. Equal candidates retain their
+// original order.
+func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b Format) bool {
 	return func(a, b Format) bool {
 		if ra, rb := originalRank(a.IsOriginal), originalRank(b.IsOriginal); ra != rb {
 			return ra > rb
+		}
+		if layout != LayoutAny {
+			if am, bm := channelMatches(layout, a.Channels), channelMatches(layout, b.Channels); am != bm {
+				return am // a matches the requested layout and b does not
+			}
 		}
 		if prefCodec != "" {
 			if am, bm := codecMatches(prefCodec, a.Codec), codecMatches(prefCodec, b.Codec); am != bm {
@@ -155,6 +173,25 @@ func betterThan(prefCodec string, useTier bool) func(a, b Format) bool {
 	}
 }
 
+// channelMatches reports whether a stream's channel count satisfies layout.
+// Unknown counts and LayoutAny do not match, leaving the layout ranking step
+// inactive when there is no usable preference.
+func channelMatches(layout ChannelLayout, ch int) bool {
+	if ch <= 0 {
+		return false
+	}
+	switch layout {
+	case LayoutMono:
+		return ch == 1
+	case LayoutStereo:
+		return ch == 2
+	case LayoutSurround:
+		return ch > 2
+	default: // LayoutAny
+		return false
+	}
+}
+
 // codecPreferenceRank prefers Opus when candidates share a reported tier.
 func codecPreferenceRank(codec string) int {
 	if codecFamily(codec) == "opus" {
@@ -164,17 +201,22 @@ func codecPreferenceRank(codec string) int {
 }
 
 // tierUsable reports whether every eligible candidate tied on original track,
-// requested codec, and DRC status has a known quality tier. Lower-ranked
-// candidates do not affect the decision.
-func tierUsable(c []Format, keep func(Format) bool, prefCodec string) bool {
-	key := func(f Format) [3]int {
-		m := 0
-		if prefCodec != "" && codecMatches(prefCodec, f.Codec) {
-			m = 1
+// requested layout, requested codec, and DRC status has a known quality tier.
+// Lower-ranked candidates do not affect the decision. The key mirrors
+// betterThan's order so tiers compare within the layout-preferred group.
+func tierUsable(c []Format, keep func(Format) bool, prefCodec string, layout ChannelLayout) bool {
+	key := func(f Format) [4]int {
+		lm := 0
+		if channelMatches(layout, f.Channels) {
+			lm = 1
 		}
-		return [3]int{originalRank(f.IsOriginal), m, nonDRCRank(f.IsDRC)}
+		cm := 0
+		if prefCodec != "" && codecMatches(prefCodec, f.Codec) {
+			cm = 1
+		}
+		return [4]int{originalRank(f.IsOriginal), lm, cm, nonDRCRank(f.IsDRC)}
 	}
-	var best [3]int
+	var best [4]int
 	have := false
 	for i := range c {
 		if !keep(c[i]) {
@@ -196,7 +238,7 @@ func tierUsable(c []Format, keep func(Format) bool, prefCodec string) bool {
 }
 
 // lessKey compares ranking keys lexicographically.
-func lessKey(a, b [3]int) bool {
+func lessKey(a, b [4]int) bool {
 	for i := range a {
 		if a[i] != b[i] {
 			return a[i] < b[i]

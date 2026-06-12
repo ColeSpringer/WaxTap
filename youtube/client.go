@@ -491,6 +491,10 @@ const (
 // reached. Per-page failures after the first page are collected in Playlist.Errors
 // rather than discarding the entries already gathered.
 func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int) (*Playlist, error) {
+	// Reject negative caps instead of treating them as an unlimited request.
+	if maxItems < 0 {
+		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, maxItems)
+	}
 	profile := c.playlistProfile()
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
@@ -500,6 +504,11 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 
 	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)
 	if err != nil {
+		// A 400 from the initial browse request means YouTube rejected the
+		// playlist ID.
+		if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok && hse.StatusCode == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidPlaylistID, err)
+		}
 		return nil, err
 	}
 	sess.learnVisitorData(meta.visitorData)

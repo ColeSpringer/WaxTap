@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,8 +18,9 @@ import (
 )
 
 // schemaVersion tags JSON output so callers can handle shape changes. Version 2
-// adds audioQuality to format objects.
-const schemaVersion = 2
+// added audioQuality to format objects; version 3 adds the YouTube client used
+// for each result.
+const schemaVersion = 3
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -193,13 +196,24 @@ func cleanMessage(msg string) string {
 
 // friendlyError returns a human message for an error, expanding common sentinels.
 func friendlyError(err error) string {
-	switch {
-	case errors.Is(err, context.Canceled):
+	// Provider connection errors may be wrapped by ErrNeedsPOToken. Check them
+	// first so the endpoint failure remains visible.
+	if errors.Is(err, context.Canceled) {
 		return "canceled"
+	}
+	if isProxyError(err) {
+		return "proxy connection failed (check --proxy)"
+	}
+	if se, ok := errors.AsType[*sidecarError](err); ok {
+		return fmt.Sprintf("%s unreachable at %s", se.label, se.endpoint)
+	}
+	switch {
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return "ffmpeg/ffprobe not found on PATH"
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "that is a playlist URL, not a single video"
+	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
+		return "invalid or missing playlist ID"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrRateLimited):
@@ -212,8 +226,27 @@ func friendlyError(err error) string {
 	return err.Error()
 }
 
+// isProxyError reports whether err is a failure to connect to the configured
+// proxy. It prefers typed unwrapping and falls back to a string match for
+// transports that do not expose a typed proxyconnect error.
+func isProxyError(err error) bool {
+	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "proxyconnect" {
+		return true
+	}
+	if ue, ok := errors.AsType[*url.Error](err); ok && ue.Err != nil && strings.Contains(ue.Err.Error(), "proxyconnect") {
+		return true
+	}
+	return strings.Contains(err.Error(), "proxyconnect")
+}
+
 // errorHint returns an optional next-step hint for an error.
 func errorHint(err error) string {
+	if isProxyError(err) {
+		return "check the proxy is reachable and that --proxy is a correct URL"
+	}
+	if _, ok := errors.AsType[*sidecarError](err); ok {
+		return "start the provider sidecar or correct its URL (--potoken-url/--player-context-url/--session-url)"
+	}
 	switch {
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
@@ -268,8 +301,12 @@ func errorCode(err error) string {
 		return "incompatible-spec"
 	case errors.Is(err, waxtap.ErrUnsupportedInput):
 		return "unsupported-input"
-	case errors.Is(err, waxtap.ErrInvalidVideoID), errors.Is(err, waxtap.ErrInvalidPlaylistID):
+	case errors.Is(err, waxtap.ErrInvalidVideoID),
+		errors.Is(err, waxtap.ErrVideoIDTooShort),
+		errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid-input"
+	case errors.Is(err, waxtap.ErrInvalidConfig):
+		return "invalid-config"
 	}
 	if _, ok := errors.AsType[*usageError](err); ok {
 		return "usage"
@@ -303,6 +340,13 @@ func exitCodeFor(err error) int {
 		// Incomplete delivery is an upstream or content-specific failure, not an
 		// extraction or cipher maintenance failure.
 		return 7
+	case errors.Is(err, waxtap.ErrInvalidVideoID),
+		errors.Is(err, waxtap.ErrVideoIDTooShort),
+		errors.Is(err, waxtap.ErrInvalidPlaylistID),
+		errors.Is(err, waxtap.ErrIncompatibleSpec),
+		errors.Is(err, waxtap.ErrInvalidConfig):
+		// These errors describe requests the user can correct.
+		return 2
 	}
 	if _, ok := errors.AsType[*usageError](err); ok {
 		return 2

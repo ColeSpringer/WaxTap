@@ -190,18 +190,27 @@ func AlbumGainFilter(target, albumIntegrated float64) string {
 // loudnorm's linear mode. Pass the result through transcode.Spec.Filters to run
 // normalization as part of the encode.
 //
+// When sampleRate contains a positive value, the filter appends aresample to
+// preserve that output rate. Without it, loudnorm outputs 192 kHz. The variadic
+// parameter preserves compatibility with the original two-argument API; only
+// the first value is used.
+//
 // When the measurement is not finite, ApplyFilter returns anull. That keeps
 // silent inputs valid and avoids formatting loudnorm parameters such as
 // measured_I=-Inf, which ffmpeg rejects.
-func ApplyFilter(target float64, m Loudness) string {
+func ApplyFilter(target float64, m Loudness, sampleRate ...int) string {
 	if !m.Finite() {
 		return passthroughFilter
 	}
-	return fmt.Sprintf(
+	filter := fmt.Sprintf(
 		"loudnorm=I=%s:TP=%s:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true",
 		ftoa(target), ftoa(defaultTruePeak),
 		ftoa(m.IntegratedLUFS), ftoa(m.TruePeakDBTP), ftoa(m.LRA), ftoa(m.Threshold), ftoa(m.Offset),
 	)
+	if len(sampleRate) > 0 && sampleRate[0] > 0 {
+		filter += ",aresample=" + strconv.Itoa(sampleRate[0])
+	}
+	return filter
 }
 
 // rawLoudness mirrors loudnorm's JSON block, where every value is a string.

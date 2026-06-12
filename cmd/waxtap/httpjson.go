@@ -34,7 +34,9 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s request: %w", label, err)
+		// Preserve the provider name and endpoint so the CLI can distinguish a
+		// connection failure from the sentinel that may wrap it.
+		return &sidecarError{label: label, endpoint: endpoint, err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -46,3 +48,17 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 	}
 	return nil
 }
+
+// sidecarError reports a connection failure to a configured provider endpoint.
+// It remains available through wrappers such as ErrNeedsPOToken.
+type sidecarError struct {
+	label    string
+	endpoint string
+	err      error
+}
+
+func (e *sidecarError) Error() string {
+	return fmt.Sprintf("%s unreachable at %s: %v", e.label, e.endpoint, e.err)
+}
+
+func (e *sidecarError) Unwrap() error { return e.err }

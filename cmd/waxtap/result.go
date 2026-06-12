@@ -33,6 +33,9 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	}
 
 	env.printf("Source:   %s\n", formatLabel(res.SourceFormat))
+	if res.Client != "" {
+		env.printf("Client:   %s\n", res.Client)
+	}
 	if res.Transcoded {
 		env.printf("Encoded:  %s\n", formatLabel(res.OutputFormat))
 	}
@@ -117,6 +120,7 @@ type resultJSON struct {
 	Title         string `json:"title,omitempty"`
 	InputPath     string `json:"inputPath,omitempty"`
 	OutputPath    string `json:"outputPath,omitempty"`
+	Client        string `json:"client,omitempty"`
 
 	SourceFormat formatJSON `json:"sourceFormat"`
 	OutputFormat formatJSON `json:"outputFormat"`
@@ -142,6 +146,7 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		Title:               res.Title,
 		InputPath:           res.InputPath,
 		OutputPath:          res.OutputPath,
+		Client:              res.Client,
 		SourceFormat:        formatToJSON(res.SourceFormat),
 		OutputFormat:        formatToJSON(res.OutputFormat),
 		SourceBytes:         res.SourceBytes,

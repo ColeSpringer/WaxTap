@@ -18,8 +18,14 @@ import (
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/sponsorblock"
 	"github.com/colespringer/waxtap/transcode"
+	"github.com/colespringer/waxtap/waxerr"
 	"github.com/colespringer/waxtap/youtube"
 )
+
+// configErr wraps a configuration message with ErrInvalidConfig.
+func configErr(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{waxerr.ErrInvalidConfig}, args...)...)
+}
 
 // cacheDirName is the WaxTap subdirectory under the OS user cache directory. The
 // CLI's cache subcommands resolve the same path so cache clean targets the
@@ -47,8 +53,7 @@ type Client struct {
 	runnerErr  error
 
 	// WEB player-context provider cooldown (see acquire): after a provider
-	// failure the attempt is skipped until webCtxDownUntil, so a dead sidecar
-	// taxes a batch once per window instead of once per video.
+	// failure, the attempt is skipped until webCtxDownUntil.
 	webCtxMu        sync.Mutex
 	webCtxDownUntil time.Time
 }
@@ -63,22 +68,21 @@ func New(opts Options) (*Client, error) {
 	// youtube.New cannot report invalid configuration, so validate the override
 	// here.
 	if !clientident.ValidChromeMajor(opts.ChromeMajor) {
-		return nil, fmt.Errorf("invalid ChromeMajor %d: must be 0 (default) or 1..999", opts.ChromeMajor)
+		return nil, configErr("invalid ChromeMajor %d: must be 0 (default) or 1..999", opts.ChromeMajor)
 	}
 	if opts.ChromeMajor != 0 && opts.ProfileOverridePath != "" {
-		return nil, fmt.Errorf("ChromeMajor and ProfileOverridePath are mutually exclusive: an override file supplies its own user agents")
+		return nil, configErr("ChromeMajor and ProfileOverridePath are mutually exclusive: an override file supplies its own user agents")
 	}
 	if opts.Client != "" && opts.ProfileOverridePath != "" {
-		return nil, fmt.Errorf("Client and ProfileOverridePath are mutually exclusive: choose a single built-in client or supply an override file")
+		return nil, configErr("Client and ProfileOverridePath are mutually exclusive: choose a single built-in client or supply an override file")
 	}
 	if opts.Politeness.Cooldown < 0 {
-		return nil, fmt.Errorf("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
+		return nil, configErr("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
 	}
-	// The WEB player-context path defers its GVS token mint to SABR setup, past
-	// the acquire-time fallback, so a missing token provider would hard-fail
-	// every download there instead of falling back. Reject it up front.
+	// The WEB player-context path mints its GVS token during SABR setup. Reject a
+	// missing provider during construction instead of failing each download.
 	if opts.PlayerContextProvider != nil && opts.POTokenProvider == nil {
-		return nil, fmt.Errorf("PlayerContextProvider requires a POTokenProvider: the WEB stream binds a GVS PO token to the context's visitorData")
+		return nil, configErr("PlayerContextProvider requires a POTokenProvider: the WEB stream binds a GVS PO token to the context's visitorData")
 	}
 
 	// Resolve the client strategy chain: a single forced Client, a file override,
@@ -101,17 +105,17 @@ func New(opts Options) (*Client, error) {
 	// explicitly-selected chain so the adopted identity is never routed through a
 	// different client, and the two session sources are mutually exclusive.
 	if opts.Session != nil && opts.SessionProvider != nil {
-		return nil, fmt.Errorf("Session and SessionProvider are mutually exclusive: supply at most one external session source")
+		return nil, configErr("Session and SessionProvider are mutually exclusive: supply at most one external session source")
 	}
 	if opts.Session != nil || opts.SessionProvider != nil {
 		if err := requireUniformChain(profiles); err != nil {
 			return nil, err
 		}
 		if opts.Session != nil && opts.Session.VisitorData == "" {
-			return nil, fmt.Errorf("adopted Session requires a non-empty VisitorData (the browser's exact X-Goog-Visitor-Id literal)")
+			return nil, configErr("adopted Session requires a non-empty VisitorData (the browser's exact X-Goog-Visitor-Id literal)")
 		}
 		if opts.Session != nil && len(opts.Session.Cookies) > 0 && !optsHasJar(opts) {
-			return nil, fmt.Errorf("adopted session cookies require an HTTPClient with a cookie jar; pass one or supply visitorData only")
+			return nil, configErr("adopted session cookies require an HTTPClient with a cookie jar; pass one or supply visitorData only")
 		}
 	}
 
@@ -185,12 +189,12 @@ func New(opts Options) (*Client, error) {
 // identity is never routed through a client it was not minted for.
 func requireUniformChain(profiles []youtube.ClientProfile) error {
 	if len(profiles) == 0 {
-		return fmt.Errorf("session adoption requires a uniform client chain: set Options.Client (e.g. \"web\") or a single-client ProfileOverridePath; the default multi-client chain is rejected")
+		return configErr("session adoption requires a uniform client chain: set Options.Client (e.g. \"web\") or a single-client ProfileOverridePath; the default multi-client chain is rejected")
 	}
 	first := profiles[0].InnerTubeName
 	for _, p := range profiles[1:] {
 		if p.InnerTubeName != first {
-			return fmt.Errorf("session adoption requires a uniform client chain, but it mixes %q and %q clients", first, p.InnerTubeName)
+			return configErr("session adoption requires a uniform client chain, but it mixes %q and %q clients", first, p.InnerTubeName)
 		}
 	}
 	return nil
@@ -307,6 +311,9 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 // refreshed with bounded-parallel InfoBasic calls; item-level failures are kept
 // on Playlist.Errors.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
+	if opts.MaxItems < 0 {
+		return nil, configErr("Enumerate: MaxItems must be >= 0, got %d", opts.MaxItems)
+	}
 	id, err := youtube.ExtractPlaylistID(url)
 	if err != nil {
 		return nil, err

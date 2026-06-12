@@ -93,17 +93,54 @@ func TestTranscodeExt(t *testing.T) {
 }
 
 func TestAudioSelectorMutualExclusion(t *testing.T) {
-	if _, err := audioSelector(140, "opus"); err == nil {
+	if _, err := audioSelector(140, "opus", waxtap.LayoutStereo); err == nil {
 		t.Error("--itag and --codec together should error")
 	}
-	if _, err := audioSelector(140, ""); err != nil {
+	if _, err := audioSelector(140, "", waxtap.LayoutStereo); err != nil {
 		t.Errorf("itag alone: %v", err)
 	}
-	if _, err := audioSelector(0, "opus"); err != nil {
+	if _, err := audioSelector(0, "opus", waxtap.LayoutStereo); err != nil {
 		t.Errorf("codec alone: %v", err)
 	}
-	if _, err := audioSelector(0, ""); err != nil {
+	if _, err := audioSelector(0, "", waxtap.LayoutStereo); err != nil {
 		t.Errorf("neither (best audio): %v", err)
+	}
+}
+
+func TestParseChannels(t *testing.T) {
+	cases := map[string]waxtap.ChannelLayout{
+		"":         waxtap.LayoutStereo,
+		"stereo":   waxtap.LayoutStereo,
+		"mono":     waxtap.LayoutMono,
+		"surround": waxtap.LayoutSurround,
+		"any":      waxtap.LayoutAny,
+		"ANY":      waxtap.LayoutAny,
+	}
+	for in, want := range cases {
+		got, err := parseChannels(in)
+		if err != nil {
+			t.Errorf("parseChannels(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("parseChannels(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if _, err := parseChannels("quad"); err == nil {
+		t.Error("parseChannels(quad) should error")
+	}
+}
+
+func TestChannelsAndDownmix_RejectsSurroundAndAny(t *testing.T) {
+	for _, c := range []string{"surround", "any"} {
+		if _, _, err := channelsAndDownmix(c, true); err == nil {
+			t.Errorf("--downmix with --channels %s should be a usage error", c)
+		}
+	}
+	for _, c := range []string{"mono", "stereo"} {
+		if _, on, err := channelsAndDownmix(c, true); err != nil || !on {
+			t.Errorf("--downmix with --channels %s: on=%v err=%v, want on=true err=nil", c, on, err)
+		}
 	}
 }
 

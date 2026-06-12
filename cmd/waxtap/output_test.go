@@ -3,7 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
+	"net"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,7 +96,11 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrFFmpegNotFound, 6},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
 		{&usageError{"bad"}, 2},
-		{waxtap.ErrInvalidPlaylistID, 1},
+		{waxtap.ErrInvalidVideoID, 2},
+		{waxtap.ErrVideoIDTooShort, 2},
+		{waxtap.ErrInvalidPlaylistID, 2},
+		{waxtap.ErrIncompatibleSpec, 2},
+		{waxtap.ErrInvalidConfig, 2},
 		{errFake("other"), 1},
 	}
 	for _, tt := range cases {
@@ -116,6 +125,50 @@ func TestErrorCode(t *testing.T) {
 	}
 	if got := errorCode(waxtap.ErrInvalidPlaylistID); got != "invalid-input" {
 		t.Errorf("errorCode(invalid playlist) = %q, want invalid-input", got)
+	}
+	if got := errorCode(waxtap.ErrVideoIDTooShort); got != "invalid-input" {
+		t.Errorf("errorCode(too-short id) = %q, want invalid-input", got)
+	}
+	if got := errorCode(waxtap.ErrInvalidConfig); got != "invalid-config" {
+		t.Errorf("errorCode(invalid config) = %q, want invalid-config", got)
+	}
+}
+
+func TestIsProxyError(t *testing.T) {
+	// net/http wraps a proxyconnect OpError in a url.Error.
+	typed := &url.Error{Op: "Get", URL: "https://www.youtube.com", Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("connection refused")}}
+	if !isProxyError(typed) {
+		t.Error("typed proxyconnect OpError should be detected")
+	}
+	// String fallback for transports that do not expose a typed proxyconnect.
+	if !isProxyError(errors.New("proxyconnect tcp: dial tcp 127.0.0.1:8080: connection refused")) {
+		t.Error("string-match proxyconnect should be detected")
+	}
+	if isProxyError(errors.New("some unrelated network error")) {
+		t.Error("a non-proxy error must not be classified as a proxy failure")
+	}
+}
+
+func TestFriendlyError_ProxyAndInvalidPlaylist(t *testing.T) {
+	proxy := &url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Err: errors.New("refused")}}
+	if msg := friendlyError(proxy); !strings.Contains(msg, "proxy connection failed") {
+		t.Errorf("proxy friendlyError = %q, want a proxy failure message", msg)
+	}
+	if msg := friendlyError(waxtap.ErrInvalidPlaylistID); !strings.Contains(msg, "playlist ID") {
+		t.Errorf("invalid-playlist friendlyError = %q", msg)
+	}
+}
+
+func TestFriendlyError_SidecarUnreachableBeatsPOToken(t *testing.T) {
+	se := &sidecarError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", err: errors.New("connection refused")}
+	// The YouTube layer wraps provider failures with ErrNeedsPOToken.
+	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
+	msg := friendlyError(wrapped)
+	if !strings.Contains(msg, "unreachable") || !strings.Contains(msg, "127.0.0.1:4417") {
+		t.Errorf("friendlyError = %q, want it to name the unreachable provider", msg)
+	}
+	if strings.Contains(msg, "verified PO token") {
+		t.Errorf("friendlyError = %q, want the unreachable message to win over the generic PO-token text", msg)
 	}
 }
 

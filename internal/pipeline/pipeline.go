@@ -6,17 +6,16 @@
 // local file) and a transcode.Runner, then calls [Run]. The pipeline never knows
 // where the audio came from, so the YouTube and local-file paths share it.
 //
-// The stages are: probe, then an optional loudness analysis pass over the
-// post-cut audio, then one fused apply (cut + loudnorm + transcode), then an
-// optional post-measure of the output. Measurement runs before the encode so the
-// loudnorm values describe exactly the audio that will be written, and the cut
-// graph is reused so the measured and encoded audio match even across a
-// multi-segment cut.
+// The stages are probe, optional loudness analysis, one fused processing pass,
+// and an optional output loudness measurement. Analysis includes any requested
+// cut and downmix so loudnorm measures the audio that will be encoded.
 package pipeline
 
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/cut"
@@ -65,17 +64,24 @@ type Loudness struct {
 // nothing to cut, copy the source codec, no loudness work, which Run reports as
 // no output produced.
 type Spec struct {
-	// Remove lists [Start, End) spans to cut. They are clamped and merged against
-	// the probed duration, so out-of-range or overlapping spans are harmless. An
-	// empty slice means no cut.
+	// Remove lists [Start, End) spans to cut. Spans are clamped to the probed
+	// duration and merged before processing. An empty slice means no cut.
 	Remove    []cut.Range
 	CutMode   cut.Mode      // rendering strategy for effective cuts
 	Crossfade time.Duration // overlap applied at each splice
+	// RejectEmptyRemoval rejects a non-empty Remove when every span lies outside
+	// the media. The check runs before output is written.
+	RejectEmptyRemoval bool
 
 	// Codec is the transcode target. transcode.CodecCopy means keep the source
-	// codec (no re-encode unless a cut or loudness apply forces one).
+	// codec (no re-encode unless a cut, loudness apply, or downmix forces one).
 	Codec   transcode.Codec
 	Bitrate int // target bits per second for lossy codecs
+
+	// Downmix reduces sources with more channels to this count. Supported values
+	// are 1 and 2. A downmix requires encoding; CodecCopy uses the source codec
+	// family when possible.
+	Downmix int
 
 	// Remux requests a stream copy through ffmpeg even when Codec is CodecCopy,
 	// for an explicit copy/remux into the output container (which strips non-audio
@@ -159,6 +165,12 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 			return Result{}, fmt.Errorf("%w: cut would remove the entire track", waxerr.ErrIncompatibleSpec)
 		}
 		effectiveCut = cut.OutputDuration(keeps, 0) < total
+		// Reject caller-supplied spans that do not intersect the media before
+		// opening the output.
+		if !effectiveCut && spec.RejectEmptyRemoval {
+			return Result{}, fmt.Errorf("%w: cut ranges %s do not intersect the media (duration %s)",
+				waxerr.ErrIncompatibleSpec, formatRanges(spec.Remove), total.Round(time.Second))
+		}
 	}
 	if effectiveCut && spec.Crossfade > 0 {
 		if err := cut.ValidateCrossfade(keeps, spec.Crossfade); err != nil {
@@ -169,20 +181,73 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	var res Result
 	res.OutputCodec = transcode.CodecCopy
 	res.SourceDuration = total
+	srcSampleRate, srcChannels, srcBitrate := 0, 0, 0
 	if audio, ok := probe.AudioStream(); ok {
 		res.SourceCodec = audio.CodecName
+		srcSampleRate = audio.SampleRate
+		srcChannels = audio.Channels
+		srcBitrate = audio.BitRate
 	}
 
-	// Loudness analysis over the post-cut audio. Reusing the cut graph keeps the
-	// measured audio identical to what the fused encode will produce.
+	// Reduce the channel count only when the source exceeds the requested target.
+	fold := 0
+	if spec.Downmix > 0 && srcChannels > spec.Downmix {
+		fold = spec.Downmix
+	}
+
+	// Resolve container compatibility before choosing an encoder for downmixing.
+	// Automatic processing may select the container's default codec, while an
+	// explicitly requested stream copy must fail.
+	if spec.Codec == transcode.CodecCopy && (effectiveCut || remux || fold > 0) {
+		ext := containerExt(output)
+		if !containerAccepts(ext, res.SourceCodec) {
+			if remux || spec.CutMode == cut.ModeCopy {
+				return Result{}, fmt.Errorf("%w: cannot stream-copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)
+			}
+			c, ok := containerCodec(ext)
+			if !ok {
+				return Result{}, fmt.Errorf("%w: cannot infer an encoder for the .%s container; pass --transcode", waxerr.ErrIncompatibleSpec, ext)
+			}
+			spec.Codec = c
+			transcoding = true
+			remux = false
+		}
+	}
+
+	// A downmix into a compatible container uses the source codec family when no
+	// transcode target was requested.
+	if fold > 0 && spec.Codec == transcode.CodecCopy {
+		c, ok := sourceEncodeCodec(res.SourceCodec)
+		if !ok {
+			return Result{}, fmt.Errorf("%w: cannot downmix %s without a transcode target (pass --transcode)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+		}
+		spec.Codec = c
+		if spec.Bitrate == 0 && !c.IsLossless() {
+			spec.Bitrate = srcBitrate // 0 falls back to the preset default
+		}
+		transcoding = true
+		remux = false
+	}
+
+	// Measure after applying the requested cut and downmix. Reusing the same
+	// filters keeps the measured and encoded audio equivalent.
 	var measured normalize.Loudness
 	if measure {
 		send(StageAnalyzing)
 		if effectiveCut {
 			graph := cut.Graph(keeps, spec.Crossfade, total, "pre")
-			measured, err = normalize.MeasureComplex(ctx, r, input, graph, "pre")
+			sink := "pre"
+			if fold > 0 {
+				graph += ";[pre]" + foldFilter(fold) + "[folded]"
+				sink = "folded"
+			}
+			measured, err = normalize.MeasureComplex(ctx, r, input, graph, sink)
 		} else {
-			measured, err = normalize.Measure(ctx, r, input, nil)
+			var pre []string
+			if fold > 0 {
+				pre = []string{foldFilter(fold)}
+			}
+			measured, err = normalize.Measure(ctx, r, input, pre)
 		}
 		if err != nil {
 			return Result{}, err
@@ -198,9 +263,17 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		return res, nil
 	}
 
+	// Preserve the source sample rate because loudnorm otherwise outputs 192 kHz.
 	enc := transcode.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate}
-	if apply {
-		enc.Filters = []string{normalize.ApplyFilter(spec.Loudness.Target, measured)}
+	switch {
+	case fold > 0 && apply:
+		// Fold before loudnorm so its true-peak limiter bounds fold clipping.
+		enc.Filters = []string{foldFilter(fold), normalize.ApplyFilter(spec.Loudness.Target, measured, srcSampleRate)}
+	case fold > 0:
+		// No loudnorm: fold via -ac with ffmpeg's normalized downmix coefficients.
+		enc.Channels = fold
+	case apply:
+		enc.Filters = []string{normalize.ApplyFilter(spec.Loudness.Target, measured, srcSampleRate)}
 	}
 
 	if apply {
@@ -241,4 +314,117 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		}
 	}
 	return res, nil
+}
+
+// foldFilter returns an ffmpeg filter that uses libswresample's normalized
+// downmix matrix. It is used when downmixing must precede another filter.
+func foldFilter(channels int) string {
+	if channels == 1 {
+		return "aformat=channel_layouts=mono"
+	}
+	return "aformat=channel_layouts=stereo"
+}
+
+// sourceEncodeCodec maps a probed source codec name to the transcode.Codec that
+// re-encodes in the same family, so a downmix with no transcode target keeps the
+// source codec. It reports false for codecs WaxTap cannot encode.
+func sourceEncodeCodec(name string) (transcode.Codec, bool) {
+	switch strings.ToLower(name) {
+	case "opus":
+		return transcode.CodecOpus, true
+	case "aac":
+		return transcode.CodecAAC, true
+	case "vorbis":
+		return transcode.CodecVorbis, true
+	case "mp3":
+		return transcode.CodecMP3, true
+	case "flac":
+		return transcode.CodecFLAC, true
+	case "alac":
+		return transcode.CodecALAC, true
+	}
+	if strings.HasPrefix(strings.ToLower(name), "pcm") {
+		return transcode.CodecWAV, true
+	}
+	return transcode.CodecCopy, false
+}
+
+// sourceCodecLabel formats a probed codec name for error messages.
+func sourceCodecLabel(name string) string {
+	if name == "" {
+		return "the source stream"
+	}
+	return name + " audio"
+}
+
+// containerExt returns the lowercased output extension without a dot, or "" when
+// the path has none.
+func containerExt(output string) string {
+	return strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
+}
+
+// formatRanges renders removal ranges as "start-end" pairs for an error message.
+func formatRanges(rs []cut.Range) string {
+	parts := make([]string, len(rs))
+	for i, r := range rs {
+		parts[i] = r.Start.Round(time.Second).String() + "-" + r.End.Round(time.Second).String()
+	}
+	return strings.Join(parts, ", ")
+}
+
+// containerAccepts reports whether the container named by ext can stream-copy
+// the given ffprobe codec. Some extensions support several codecs, so this uses
+// a container compatibility table rather than comparing names. Unknown
+// extensions are left for ffmpeg to validate.
+func containerAccepts(ext, codec string) bool {
+	c := strings.ToLower(codec)
+	switch ext {
+	case "flac":
+		return c == "flac"
+	case "wav":
+		return strings.HasPrefix(c, "pcm")
+	case "mp3":
+		return c == "mp3"
+	case "m4a", "mp4", "m4b":
+		return c == "aac" || c == "alac"
+	case "aac":
+		// .aac selects the raw ADTS muxer, which carries AAC only (not ALAC).
+		return c == "aac"
+	case "ogg", "oga":
+		return c == "vorbis" || c == "opus" || c == "flac"
+	case "opus":
+		return c == "opus"
+	case "webm":
+		return c == "opus" || c == "vorbis"
+	case "mka", "mkv":
+		// Matroska is a general-purpose container; accept the codecs WaxTap handles.
+		switch c {
+		case "opus", "vorbis", "aac", "flac", "mp3", "alac":
+			return true
+		}
+		return strings.HasPrefix(c, "pcm")
+	}
+	return true
+}
+
+// containerCodec returns the default encoder for a container extension. It
+// reports false for an unknown extension.
+func containerCodec(ext string) (transcode.Codec, bool) {
+	switch ext {
+	case "flac":
+		return transcode.CodecFLAC, true
+	case "wav":
+		return transcode.CodecWAV, true
+	case "mp3":
+		return transcode.CodecMP3, true
+	case "m4a", "mp4", "m4b", "aac":
+		return transcode.CodecAAC, true
+	case "ogg", "oga":
+		return transcode.CodecVorbis, true
+	case "opus":
+		return transcode.CodecOpus, true
+	case "webm", "mka", "mkv":
+		return transcode.CodecOpus, true
+	}
+	return transcode.CodecCopy, false
 }

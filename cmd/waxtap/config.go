@@ -66,6 +66,9 @@ type appConfig struct {
 	visitorData      string
 	cookiesPath      string
 
+	channels string // default channel layout for download/transcode/cut
+	downmix  bool   // default --downmix
+
 	extractionTimeout   time.Duration
 	resolveTimeout      time.Duration
 	webContextTimeout   time.Duration
@@ -97,6 +100,8 @@ type fileConfig struct {
 	SessionURL          *string  `json:"sessionURL"`
 	VisitorData         *string  `json:"visitorData"`
 	CookiesPath         *string  `json:"cookies"`
+	Channels            *string  `json:"channels"`
+	Downmix             *bool    `json:"downmix"`
 
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
@@ -156,6 +161,11 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		visitorData:      str("visitor-data", rootFlagsValue.visitorData, fc.VisitorData, ec.VisitorData, ""),
 		cookiesPath:      str("cookies", rootFlagsValue.cookies, fc.CookiesPath, ec.CookiesPath, ""),
 
+		// These are command flags, so configuration applies only when the
+		// corresponding flag is unset.
+		channels: coalesceString("", fc.Channels, ec.Channels),
+		downmix:  coalesceBool(false, fc.Downmix, ec.Downmix),
+
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
 		webContextTimeout:   coalesceDuration(defaultWebContextTimeout, fc.WebContextTimeoutSec, ec.WebContextTimeoutSec),
@@ -187,10 +197,10 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 		if errors.Is(err, fs.ErrNotExist) && !explicit {
 			return fc, nil // no default file present; fine
 		}
-		return fc, fmt.Errorf("read config %s: %w", path, err)
+		return fc, usagef("read config %s: %v", path, err)
 	}
 	if err := json.Unmarshal(data, &fc); err != nil {
-		return fc, fmt.Errorf("parse config %s: %w", path, err)
+		return fc, usagef("parse config %s: %v", path, err)
 	}
 	return fc, nil
 }
@@ -265,6 +275,8 @@ func envOverlay() (fileConfig, error) {
 	ec.SessionURL = getStr("WAXTAP_SESSION_URL")
 	ec.VisitorData = getStr("WAXTAP_VISITOR_DATA")
 	ec.CookiesPath = getStr("WAXTAP_COOKIES")
+	ec.Channels = getStr("WAXTAP_CHANNELS")
+	ec.Downmix = getBool("WAXTAP_DOWNMIX")
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.WebContextTimeoutSec = getFloat("WAXTAP_WEB_CONTEXT_TIMEOUT")
@@ -272,9 +284,28 @@ func envOverlay() (fileConfig, error) {
 	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT")
 
 	if len(errs) > 0 {
-		return ec, fmt.Errorf("invalid environment configuration: %w", errors.Join(errs...))
+		return ec, usagef("invalid environment configuration: %v", errors.Join(errs...))
 	}
 	return ec, nil
+}
+
+// resolveChannelsFlag returns the explicit --channels value when set, otherwise
+// the configured default or the command's built-in default.
+func resolveChannelsFlag(cmd *cobra.Command, cfg *appConfig, channels string) string {
+	if !cmd.Flags().Changed("channels") && cfg.channels != "" {
+		return cfg.channels
+	}
+	return channels
+}
+
+// resolveChannels returns and validates the effective channel layout and
+// downmix setting for a processing command.
+func resolveChannels(cmd *cobra.Command, cfg *appConfig, channels string, downmix bool) (waxtap.ChannelLayout, bool, error) {
+	channels = resolveChannelsFlag(cmd, cfg, channels)
+	if !cmd.Flags().Changed("downmix") && cfg.downmix {
+		downmix = true
+	}
+	return channelsAndDownmix(channels, downmix)
 }
 
 // resolvedCacheDir returns the effective on-disk cache directory: the configured
@@ -310,7 +341,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	var pcProvider waxtap.PlayerContextProvider
 	if a.playerContextURL != "" {
 		if a.potokenURL == "" {
-			return waxtap.Options{}, fmt.Errorf("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
+			return waxtap.Options{}, usagef("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
 		}
 		pcProvider = newPlayerContextProvider(a.playerContextURL)
 	}
@@ -369,12 +400,12 @@ func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSes
 	switch {
 	case a.sessionURL != "":
 		if a.visitorData != "" || a.cookiesPath != "" {
-			return nil, nil, fmt.Errorf("--session-url cannot be combined with --visitor-data/--cookies")
+			return nil, nil, usagef("--session-url cannot be combined with --visitor-data/--cookies")
 		}
 		return nil, newHTTPSessionProvider(a.sessionURL), nil
 	case a.visitorData != "" || a.cookiesPath != "":
 		if a.visitorData == "" {
-			return nil, nil, fmt.Errorf("--cookies requires --visitor-data: adoption needs the browser's exact visitorData")
+			return nil, nil, usagef("--cookies requires --visitor-data: adoption needs the browser's exact visitorData")
 		}
 		var cookies []*http.Cookie
 		if a.cookiesPath != "" {
@@ -408,7 +439,7 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 	if a.proxy != "" {
 		u, err := url.Parse(a.proxy)
 		if err != nil {
-			return nil, fmt.Errorf("invalid --proxy %q: %w", a.proxy, err)
+			return nil, usagef("invalid --proxy %q: %v", a.proxy, err)
 		}
 		tr.Proxy = http.ProxyURL(u)
 	}

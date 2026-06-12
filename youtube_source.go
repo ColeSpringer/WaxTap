@@ -59,13 +59,22 @@ func isIncompleteDelivery(err error) bool {
 	return errors.Is(err, ErrIncompleteStream) || errors.Is(err, ErrURLExpired)
 }
 
+// baseSkip returns the extraction attempts disabled before a request starts.
+func baseSkip(req Request) map[youtube.AttemptID]bool {
+	skip := map[youtube.AttemptID]bool{}
+	if req.NoFallback {
+		skip[youtube.AttemptWatchPage] = true
+	}
+	return skip
+}
+
 // acquire extracts, selects, and resolves a single transfer. It is used for sinks
 // that cannot discard bytes after an incomplete delivery.
 func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitter) (*acquired, error) {
 	target := transcodeTarget(req.Transcode)
 
-	// Try the optional WEB player-context provider before the configured client
-	// chain. Provider failures emit a warning; caller cancellation stops fallback.
+	// Try the optional WEB player context before the configured client chain.
+	// Caller cancellation and NoFallback stop before the chain is attempted.
 	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() {
 		a, err := c.acquireWebContext(ctx, req, id, target, em, 0)
 		if err == nil {
@@ -74,13 +83,16 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if req.NoFallback {
+			return nil, err
+		}
 		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
 	}
 
 	em.stage(StageExtracting)
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
-	ext, err := c.yt.Extract(ectx, id)
+	ext, err := c.yt.ExtractExcluding(ectx, id, baseSkip(req))
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +172,15 @@ func isAvailabilityError(err error) bool {
 		errors.Is(err, ErrNoAudioFormats)
 }
 
+// isUpstreamDiagnostic reports whether err describes extraction, authentication,
+// or availability rather than a local I/O failure.
+func isUpstreamDiagnostic(err error) bool {
+	return errors.Is(err, ErrNeedsPOToken) ||
+		errors.Is(err, ErrExtractionFailed) ||
+		errors.Is(err, ErrCipherSolve) ||
+		isAvailabilityError(err)
+}
+
 // acquireWebContext builds a SABR transfer from an attested WEB player context.
 // Only provider failures start the provider cooldown.
 func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, target format.Target, em *emitter, pinnedItag int) (*acquired, error) {
@@ -233,6 +254,10 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 		if ctx.Err() != nil {
 			return nil, youtube.AttemptWebContext, ctx.Err()
 		}
+		// NoFallback returns the WEB player-context error directly.
+		if req.NoFallback {
+			return nil, youtube.AttemptWebContext, err
+		}
 		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
 		return nil, youtube.AttemptWebContext, err
 	}
@@ -257,9 +282,10 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 // Cancellation, rate limiting, and local download failures stop the loop.
 func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string, em *emitter, dest func(*acquired) string) (*acquired, download.Result, string, error) {
 	target := transcodeTarget(req.Transcode)
-	skip := map[youtube.AttemptID]bool{}
+	skip := baseSkip(req)
 	var causes attemptErrors
 	pinnedItag := 0
+	firstClient := ""
 	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
 
 	for {
@@ -280,6 +306,9 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 				break
 			}
 			causes.add(attempt, err)
+			if req.NoFallback {
+				break // do not try another download attempt
+			}
 			skip[attempt] = true
 			continue
 		}
@@ -288,10 +317,16 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 		if pinnedItag == 0 {
 			pinnedItag = a.fmtSel.Itag
 		}
+		if firstClient == "" {
+			firstClient = a.client
+		}
 		path := dest(a)
 		em.stage(StageDownloading)
 		res, derr := a.transfer.toFile(ctx, path, progress)
 		if derr == nil {
+			if a.client != firstClient {
+				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
+			}
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -301,9 +336,19 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			return nil, download.Result{}, "", derr
 		}
 		if !isIncompleteDelivery(derr) {
+			// Preserve an earlier incomplete-delivery error when a later attempt
+			// fails during extraction or availability checks. Local I/O errors
+			// remain terminal.
+			if isUpstreamDiagnostic(derr) && causes.hasIncomplete() {
+				causes.add(a.attempt, derr)
+				break
+			}
 			return nil, download.Result{}, "", derr
 		}
 		causes.add(a.attempt, derr)
+		if req.NoFallback {
+			break // do not switch clients after an incomplete delivery
+		}
 		skip[a.attempt] = true
 		em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
 	}
@@ -322,6 +367,16 @@ type attemptCause struct {
 
 func (a *attemptErrors) add(id youtube.AttemptID, err error) {
 	a.causes = append(a.causes, attemptCause{id: id, err: err})
+}
+
+// hasIncomplete reports whether any recorded cause is an incomplete delivery.
+func (a *attemptErrors) hasIncomplete() bool {
+	for _, c := range a.causes {
+		if isIncompleteDelivery(c.err) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *attemptErrors) aggregate() error {
@@ -465,6 +520,9 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 		return nil, err
 	}
 	em.videoID = id
+	if err = validateProcessSpec(req.ProcessSpec); err != nil {
+		return nil, err
+	}
 	// Report HTTP throttling as job warnings.
 	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
@@ -503,6 +561,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			SourceKind:   SourceYouTube,
 			VideoID:      id,
 			Title:        a.video.Title,
+			Client:       a.client,
 			SourceFormat: a.fmtSel,
 			OutputFormat: a.fmtSel,
 			OutputPath:   req.Output.path,
@@ -528,6 +587,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			SourceKind:   SourceYouTube,
 			VideoID:      id,
 			Title:        a.video.Title,
+			Client:       a.client,
 			SourceFormat: a.fmtSel,
 			OutputFormat: a.fmtSel,
 			SourceBytes:  r.BytesWritten,
@@ -541,7 +601,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 // pipeline, then finalizes to the sink. For a file sink the pipeline writes the
 // destination path directly (atomic), so only a measure-only pass needs a move.
 func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string, em *emitter) (*Result, error) {
-	jobDir, err := os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
+	jobDir, err := c.makeJobDir()
 	if err != nil {
 		return nil, err
 	}
@@ -600,12 +660,14 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 
 	// A SponsorBlock-only request can resolve to no ranges. In that case, deliver
 	// the staged source unchanged without requiring ffmpeg. Explicit FormatCopy
-	// still goes through ffmpeg because it asks for a remux.
-	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil {
+	// still goes through ffmpeg because it asks for a remux, and a downmix needs the
+	// probe to decide whether to fold.
+	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil && !req.Downmix {
 		res := &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      a.video.ID,
 			Title:        a.video.Title,
+			Client:       a.client,
 			SourceFormat: a.fmtSel,
 			OutputFormat: a.fmtSel,
 			SourceBytes:  dlRes.BytesWritten,
@@ -627,6 +689,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	if err != nil {
 		return "", nil, err
 	}
+	warnEmptyCut(em, req.Cut, pres)
 
 	deliver := pres.OutputPath
 	if deliver == "" {
@@ -640,6 +703,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	res := newProcessResult(SourceYouTube, pres, a.fmtSel, loudnessTarget(req.Loudness))
 	res.VideoID = a.video.ID
 	res.Title = a.video.Title
+	res.Client = a.client
 	res.SourceBytes = dlRes.BytesWritten
 	res.SponsorBlockApplied = sponsorBlockContributed(explicit, sbRanges, pres)
 	return deliver, res, nil
@@ -710,6 +774,9 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 		return nil, StreamInfo{}, err
 	}
 	em.videoID = id
+	if err = validateProcessSpec(req.ProcessSpec); err != nil {
+		return nil, StreamInfo{}, err
+	}
 	// Report HTTP throttling as job warnings.
 	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
@@ -730,7 +797,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	if derr != nil {
 		return nil, StreamInfo{}, derr
 	}
-	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength}
+	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength, Client: a.client}
 	return &doneReader{ReadCloser: body, em: em}, info, nil
 }
 
@@ -738,7 +805,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 // the result that cleans up the temp directory and fires the terminal event on
 // Close.
 func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em *emitter) (io.ReadCloser, StreamInfo, error) {
-	jobDir, err := os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
+	jobDir, err := c.makeJobDir()
 	if err != nil {
 		return nil, StreamInfo{}, err
 	}
@@ -758,7 +825,7 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em
 	if err != nil {
 		return nil, StreamInfo{}, err
 	}
-	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver)}
+	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver), Client: res.Client}
 	ok = true
 	return &dirCleanupReader{File: f, dir: jobDir, em: em}, info, nil
 }

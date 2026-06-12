@@ -513,6 +513,149 @@ func TestProcessLocalCutTranscode(t *testing.T) {
 	}
 }
 
+func TestEnumerateRejectsNegativeMaxItems(t *testing.T) {
+	c := newOfflineClient(t)
+	// The guard runs before any network work, so a negative cap fails fast and is
+	// classified as invalid config (exit 2 for the CLI), not a generic error.
+	_, err := c.Enumerate(context.Background(), "https://www.youtube.com/playlist?list=PLxxxxxxxxxxxx", EnumerateOptions{MaxItems: -1})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("Enumerate with MaxItems < 0 = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestWarnEmptyCut(t *testing.T) {
+	const dur = 200 * time.Second
+
+	warned := func(cs *CutSpec, pres pipeline.Result) bool {
+		var got bool
+		em := newEmitter(func(e Event) {
+			if e.Stage == StageWarning && e.Warning != nil && e.Warning.Code == WarnRangesEmpty {
+				got = true
+			}
+		}, "")
+		warnEmptyCut(em, cs, pres)
+		return got
+	}
+
+	// A SponsorBlock-only request that removes nothing emits WarnRangesEmpty.
+	sbOnly := &CutSpec{SponsorBlock: []sponsorblock.Category{}}
+	if !warned(sbOnly, pipeline.Result{SourceDuration: dur}) {
+		t.Error("SponsorBlock-only empty cut should emit WarnRangesEmpty")
+	}
+	// Do not warn after an effective cut, for explicit ranges, without a cut, with
+	// unknown duration, or for an empty CutSpec.
+	if warned(sbOnly, pipeline.Result{SourceDuration: dur, Cut: true}) {
+		t.Error("an effective cut must not warn")
+	}
+	if warned(&CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}}, pipeline.Result{SourceDuration: dur}) {
+		t.Error("explicit ranges are handled in the pipeline, not warned here")
+	}
+	if warned(&CutSpec{}, pipeline.Result{SourceDuration: dur}) {
+		t.Error("an empty CutSpec (no ranges, no SponsorBlock) is not a cut and must not warn")
+	}
+	if warned(nil, pipeline.Result{SourceDuration: dur}) {
+		t.Error("nil cut must not warn")
+	}
+	if warned(sbOnly, pipeline.Result{}) {
+		t.Error("unknown duration must not warn")
+	}
+}
+
+func TestValidateProcessSpec_Downmix(t *testing.T) {
+	// Downmix requires a fixed mono or stereo target.
+	for _, layout := range []ChannelLayout{LayoutSurround, LayoutAny} {
+		if err := validateProcessSpec(ProcessSpec{Downmix: true, Channels: layout}); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("Downmix+%s = %v, want ErrIncompatibleSpec", layout, err)
+		}
+	}
+	for _, layout := range []ChannelLayout{LayoutMono, LayoutStereo} {
+		if err := validateProcessSpec(ProcessSpec{Downmix: true, Channels: layout}); err != nil {
+			t.Errorf("Downmix+%s = %v, want nil", layout, err)
+		}
+	}
+	// Without Downmix the layout is only a selection hint, never rejected.
+	if err := validateProcessSpec(ProcessSpec{Channels: LayoutSurround}); err != nil {
+		t.Errorf("no downmix = %v, want nil", err)
+	}
+}
+
+func TestProcessRejectedCutPreservesExistingOutput(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 4, "flac")
+	out := filepath.Join(dir, "out.mp3")
+	if err := os.WriteFile(out, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The transcode would normally clobber out.mp3, but the out-of-range cut is
+	// rejected before any write, so the pre-existing file must survive intact.
+	_, err := c.Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(out),
+			Cut:       &CutSpec{Ranges: []TimeRange{{Start: 999 * time.Second, End: 1000 * time.Second}}},
+			Transcode: &TranscodeSpec{Format: FormatMP3},
+		},
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+	data, rerr := os.ReadFile(out)
+	if rerr != nil || string(data) != "ORIGINAL" {
+		t.Errorf("pre-existing output was destroyed: data=%q err=%v", data, rerr)
+	}
+}
+
+func TestProcessExplicitCutOutOfRangeRejected(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 4, "flac")
+	out := filepath.Join(dir, "out.flac")
+
+	// A cut whose only range lies entirely past the media must fail, not silently
+	// return the whole file.
+	_, err := c.Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output: ToFile(out),
+			Cut:    &CutSpec{Ranges: []TimeRange{{Start: 999 * time.Second, End: 1000 * time.Second}}},
+		},
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("out-of-range cut err = %v, want ErrIncompatibleSpec", err)
+	}
+	if fileExists(out) {
+		t.Error("a rejected cut must not leave an output file")
+	}
+}
+
+func TestProcessPartialOverlapCutSucceeds(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 4, "flac")
+	out := filepath.Join(dir, "out.flac")
+
+	// A range that overruns the end still intersects the media, so clamping keeps
+	// it valid and the cut succeeds.
+	res, err := c.Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output: ToFile(out),
+			Cut:    &CutSpec{Ranges: []TimeRange{{Start: 3 * time.Second, End: 999 * time.Second}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("partial-overlap cut: %v", err)
+	}
+	if !res.CutApplied || !fileExists(out) {
+		t.Errorf("partial-overlap cut result = %+v, want CutApplied and an output file", res)
+	}
+}
+
 func TestProcessLocalCopyRemux(t *testing.T) {
 	ffmpegOrSkip(t)
 	c := newOfflineClient(t)

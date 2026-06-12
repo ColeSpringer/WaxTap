@@ -31,7 +31,18 @@ func New(finalPath string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := chmodUmask(f.Name()); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, err
+	}
 	return &File{File: f, finalPath: finalPath, tmpPath: f.Name()}, nil
+}
+
+// chmodUmask changes a staged file from os.CreateTemp's private mode to the mode
+// selected by the process umask for a regular output file.
+func chmodUmask(path string) error {
+	return os.Chmod(path, 0o666&^currentUmask())
 }
 
 // Commit flushes and closes the temp, then atomically renames it to the final
@@ -97,6 +108,12 @@ func NewExternal(finalPath string) (*External, error) {
 	}
 	name := f.Name()
 	_ = f.Close() // the external process reopens and overwrites this path
+	// Widen before the external writer truncates: an O_TRUNC reopen keeps the
+	// existing mode, so the published output honors the umask.
+	if err := chmodUmask(name); err != nil {
+		_ = os.Remove(name)
+		return nil, err
+	}
 	return &External{finalPath: finalPath, tmpPath: name}, nil
 }
 

@@ -6,7 +6,16 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/spf13/pflag"
 )
+
+// bindSourceSelectionFlags registers the source-selection flags shared by
+// download, cut, and transcode.
+func bindSourceSelectionFlags(f *pflag.FlagSet, channels *string, downmix, noFallback *bool) {
+	f.StringVar(channels, "channels", "stereo", "channel layout to prefer: mono|stereo|surround|any")
+	f.BoolVar(downmix, "downmix", false, "fold the selected source down to --channels when it has more channels")
+	f.BoolVar(noFallback, "no-fallback", false, "disable WEB-context, watch-page, and incomplete-download fallbacks")
+}
 
 // parseTranscodeFormat maps a user codec name to a TranscodeFormat. An empty
 // string is the caller's signal for "no transcode" and is rejected here.
@@ -100,9 +109,9 @@ func parseSponsorErrorPolicy(s string) (waxtap.SponsorBlockErrorPolicy, error) {
 	}
 }
 
-// audioSelector builds an AudioSelector from --itag/--codec. They are mutually
-// exclusive; with neither set it returns the best-audio selector.
-func audioSelector(itag int, codec string) (waxtap.AudioSelector, error) {
+// audioSelector builds an AudioSelector from --itag, --codec, and the preferred
+// channel layout. An itag identifies an exact encoding and ignores layout.
+func audioSelector(itag int, codec string, layout waxtap.ChannelLayout) (waxtap.AudioSelector, error) {
 	codec = strings.TrimSpace(codec)
 	switch {
 	case itag > 0 && codec != "":
@@ -110,10 +119,41 @@ func audioSelector(itag int, codec string) (waxtap.AudioSelector, error) {
 	case itag > 0:
 		return waxtap.Itag(itag), nil
 	case codec != "":
-		return waxtap.Codec(codec), nil
+		return waxtap.Codec(codec).WithChannels(layout), nil
 	default:
-		return waxtap.BestAudio(), nil
+		return waxtap.BestAudio().WithChannels(layout), nil
 	}
+}
+
+// parseChannels maps a --channels value to a ChannelLayout. The empty string is
+// the CLI's stereo default.
+func parseChannels(s string) (waxtap.ChannelLayout, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "stereo":
+		return waxtap.LayoutStereo, nil
+	case "mono":
+		return waxtap.LayoutMono, nil
+	case "surround":
+		return waxtap.LayoutSurround, nil
+	case "any":
+		return waxtap.LayoutAny, nil
+	default:
+		return 0, usagef("invalid --channels %q (want mono|stereo|surround|any)", s)
+	}
+}
+
+// channelsAndDownmix parses --channels and validates --downmix against it. A fold
+// needs a concrete mono or stereo target, so surround and any are rejected with
+// --downmix.
+func channelsAndDownmix(channels string, downmix bool) (waxtap.ChannelLayout, bool, error) {
+	layout, err := parseChannels(channels)
+	if err != nil {
+		return 0, false, err
+	}
+	if downmix && layout != waxtap.LayoutMono && layout != waxtap.LayoutStereo {
+		return 0, false, usagef("--downmix requires --channels mono or stereo (got %s)", layout)
+	}
+	return layout, downmix, nil
 }
 
 // parseRanges parses repeated "start-end" cut specs into TimeRanges. Each side

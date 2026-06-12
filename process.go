@@ -31,6 +31,9 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	if req.Output.kind == outputNone {
 		return nil, fmt.Errorf("waxtap.Process: an Output is required")
 	}
+	if err := validateProcessSpec(req.ProcessSpec); err != nil {
+		return nil, err
+	}
 	if req.Output.kind == outputFile {
 		if sameFile(req.Output.path, req.Input) {
 			return nil, fmt.Errorf("%w: output path equals input path", waxerr.ErrIncompatibleSpec)
@@ -49,7 +52,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		return nil, err
 	}
 
-	jobDir, err := os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
+	jobDir, err := c.makeJobDir()
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +71,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	if err != nil {
 		return nil, err
 	}
+	warnEmptyCut(em, req.Cut, pres)
 
 	srcFmt := Format{
 		Codec:     pres.SourceCodec,

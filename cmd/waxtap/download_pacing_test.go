@@ -117,11 +117,21 @@ func TestDownloadFlagsResolveSleepValidation(t *testing.T) {
 			if tt.maxDl != "" {
 				mustSet(t, cmd, "max-downloads", tt.maxDl)
 			}
-			err := df.resolve(cmd)
+			err := df.resolve(cmd, &appConfig{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("resolve() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestResolveRejectsNegativeMaxItems(t *testing.T) {
+	df := &downloadFlags{}
+	cmd := &cobra.Command{Use: "download"}
+	bindDownloadFlags(cmd, df)
+	mustSet(t, cmd, "max-items", "-1")
+	if err := df.resolve(cmd, &appConfig{}); err == nil {
+		t.Error("--max-items -1 should be rejected (it would otherwise page the whole playlist)")
 	}
 }
 

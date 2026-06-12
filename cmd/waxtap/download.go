@@ -30,6 +30,10 @@ type downloadFlags struct {
 	transcode string
 	bitrate   int
 
+	channels   string
+	downmix    bool
+	noFallback bool
+
 	sbCats    string
 	ranges    []string
 	cutMode   string
@@ -51,7 +55,8 @@ type downloadFlags struct {
 	maxSleepInterval time.Duration
 	listOnly         bool
 
-	collision collisionMode // resolved in RunE
+	collision collisionMode        // resolved in RunE
+	layout    waxtap.ChannelLayout // resolved in RunE from --channels
 	archive   *downloadArchive
 }
 
@@ -87,6 +92,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.BoolVar(&df.skipExisting, "skip-existing", false, "skip when the target file already exists")
 	f.StringVar(&df.transcode, "transcode", "", "transcode to: copy|flac|alac|wav|mp3|aac|opus|vorbis")
 	f.IntVar(&df.bitrate, "bitrate", 0, "target bitrate (bits/sec) for lossy transcodes (0 = preset default)")
+	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
 	f.StringVar(&df.sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (comma-separated after =, for example --cut-sponsorblock=intro,outro; bare flag = music_offtopic)")
 	f.StringArrayVar(&df.ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
 	f.StringVar(&df.cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
@@ -116,7 +122,7 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	if err != nil {
 		return err
 	}
-	if err := df.resolve(cmd); err != nil {
+	if err := df.resolve(cmd, env.cfg); err != nil {
 		return err
 	}
 	if df.archivePath != "" {
@@ -149,10 +155,9 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	}
 }
 
-// resolve validates flag combinations and computes the effective collision mode.
-// It runs before any network work, so spec errors (bad ranges, an incompatible
-// --normalize, etc.) fail fast instead of after a download.
-func (df *downloadFlags) resolve(cmd *cobra.Command) error {
+// resolve validates download flags and computes values used by every item. It
+// runs before network work so invalid requests fail before a playlist starts.
+func (df *downloadFlags) resolve(cmd *cobra.Command, cfg *appConfig) error {
 	if df.out != "" && df.dir != "" {
 		return usagef("--out and --dir are mutually exclusive")
 	}
@@ -174,9 +179,18 @@ func (df *downloadFlags) resolve(cmd *cobra.Command) error {
 	}
 	df.collision = mode
 
+	layout, downmix, err := resolveChannels(cmd, cfg, df.channels, df.downmix)
+	if err != nil {
+		return err
+	}
+	df.layout, df.downmix = layout, downmix
+
 	// Validate playlist pacing before starting network work.
 	if df.sleepInterval < 0 || df.maxSleepInterval < 0 {
 		return usagef("--sleep-interval and --max-sleep-interval must be non-negative")
+	}
+	if df.maxItems < 0 {
+		return usagef("--max-items must be non-negative")
 	}
 	if df.maxDownloads < 0 {
 		return usagef("--max-downloads must be non-negative")
@@ -338,7 +352,7 @@ func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 
 // buildRequest assembles a Download request for url delivering to outPath.
 func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, error) {
-	sel, err := audioSelector(df.itag, df.codec)
+	sel, err := audioSelector(df.itag, df.codec, df.layout)
 	if err != nil {
 		return waxtap.Request{}, err
 	}
@@ -351,13 +365,13 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 		return waxtap.Request{}, err
 	}
 	spec.Output = waxtap.ToFile(outPath)
-	return waxtap.Request{URL: url, Audio: sel, SourcePolicy: policy, ProcessSpec: spec}, nil
+	return waxtap.Request{URL: url, Audio: sel, SourcePolicy: policy, NoFallback: df.noFallback, ProcessSpec: spec}, nil
 }
 
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from
 // the flags, without an Output.
 func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
-	spec := waxtap.ProcessSpec{SkipIfExists: df.skipExisting}
+	spec := waxtap.ProcessSpec{SkipIfExists: df.skipExisting, Channels: df.layout, Downmix: df.downmix}
 	tf, hasTranscode, err := df.transcodeFormat()
 	if err != nil {
 		return spec, err
@@ -501,7 +515,7 @@ func (env *appEnv) namingData(ctx context.Context, url string, df *downloadFlags
 		return td, nil // all requested template fields are already known
 	}
 
-	sel, err := audioSelector(df.itag, df.codec)
+	sel, err := audioSelector(df.itag, df.codec, df.layout)
 	if err != nil {
 		return td, err
 	}

@@ -35,6 +35,9 @@ func (c Command) String() string { return "ffmpeg " + strings.Join(c.Args, " ") 
 type Spec struct {
 	Codec   Codec // output codec; zero selects stream copy
 	Bitrate int   // target bits per second for lossy codecs; zero uses the preset default
+	// Channels sets the output channel count with -ac when positive. Changing the
+	// channel count requires encoding.
+	Channels int
 	// Filters is a comma-joined -af chain for linear audio filters such as
 	// loudnorm. It is mutually exclusive with FilterComplex.
 	Filters []string
@@ -71,6 +74,8 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 		return Command{}, fmt.Errorf("%w: -af filters and filter_complex are mutually exclusive", waxerr.ErrIncompatibleSpec)
 	case isCopy && (hasAF || hasFC):
 		return Command{}, fmt.Errorf("%w: stream copy cannot apply audio filters", waxerr.ErrIncompatibleSpec)
+	case isCopy && spec.Channels > 0:
+		return Command{}, fmt.Errorf("%w: stream copy cannot change the channel count", waxerr.ErrIncompatibleSpec)
 	}
 	encoder := p.encoder
 	if encoderOverride != "" {
@@ -88,6 +93,10 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 		if hasAF {
 			args = append(args, "-af", strings.Join(spec.Filters, ","))
 		}
+	}
+	if spec.Channels > 0 {
+		// -ac folds (or expands) channels with ffmpeg's normalized downmix matrix.
+		args = append(args, "-ac", strconv.Itoa(spec.Channels))
 	}
 	args = append(args, "-c:a", encoder)
 	if !isCopy && !p.lossless {

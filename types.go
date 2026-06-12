@@ -17,6 +17,7 @@ type (
 	Tri              = format.Tri
 	AudioQualityTier = format.AudioQualityTier
 	AudioSelector    = format.AudioSelector
+	ChannelLayout    = format.ChannelLayout
 	SourcePolicy     = format.SourcePolicy
 	// Target describes a transcode output for source selection. The facade maps
 	// a TranscodeSpec onto it; most callers do not construct one directly.
@@ -49,6 +50,15 @@ const (
 	QualityLow      = format.QualityLow
 	QualityMedium   = format.QualityMedium
 	QualityHigh     = format.QualityHigh
+)
+
+// Channel layouts used by AudioSelector.WithChannels and ProcessSpec.Channels.
+// LayoutAny is the neutral zero value.
+const (
+	LayoutAny      = format.LayoutAny
+	LayoutMono     = format.LayoutMono
+	LayoutStereo   = format.LayoutStereo
+	LayoutSurround = format.LayoutSurround
 )
 
 // BestAudio selects the best audio stream. It prefers the original track,
@@ -121,6 +131,17 @@ type ProcessSpec struct {
 	Cut       *CutSpec       // nil = no cut
 	Loudness  *LoudnessSpec  // nil = no loudness work
 
+	// Channels is the output layout used by Downmix. LayoutAny, the zero value,
+	// disables downmixing. For YouTube requests, set the same preference on Audio
+	// with WithChannels to favor a native track before processing.
+	Channels ChannelLayout
+	// Downmix reduces a source with more channels to Channels after probing. It
+	// never adds channels and does nothing when the source already fits the
+	// requested layout. Channels must be LayoutMono or LayoutStereo. When
+	// Transcode is nil, the encoder is chosen from the source codec and destination
+	// container.
+	Downmix bool
+
 	// Output is the sink. For source-style delivery (an io.ReadCloser to pipe
 	// elsewhere) use Client.Stream instead of setting Output.
 	Output Output
@@ -144,6 +165,12 @@ type Request struct {
 	// SourcePolicy controls the source tradeoff when transcoding. The zero value
 	// is MinimizeLoss.
 	SourcePolicy SourcePolicy
+
+	// NoFallback prevents fallback from a WEB player context to the configured
+	// client chain, disables watch-page extraction, and prevents retrying another
+	// client after an incomplete download. The configured extraction chain may
+	// still select a working client. Set Options.Client to force a single client.
+	NoFallback bool
 
 	ProcessSpec
 }
@@ -214,7 +241,9 @@ const (
 
 // CutSpec describes time-range removal and/or SponsorBlock-driven cuts.
 type CutSpec struct {
-	// Ranges are explicit [Start, End) removals (optional).
+	// Ranges are explicit [Start, End) removals (optional). They are clamped to the
+	// media duration. A request whose ranges all lie outside the media returns
+	// ErrIncompatibleSpec; partial overlaps remain valid.
 	Ranges []TimeRange
 	// SponsorBlock lists categories to fetch and remove. Nil disables the SB
 	// fetch entirely; an empty-but-non-nil slice falls back to
@@ -319,15 +348,15 @@ func (k SourceKind) String() string {
 }
 
 // Result reports the outcome of a Download or Process. Boolean flags describe
-// completed effects, not requested work: an empty SponsorBlock match leaves
-// SponsorBlockApplied false, and ranges that vanish after clamping leave
-// CutApplied false.
+// completed effects, not requested work. For example, a SponsorBlock request
+// that matches no segments leaves SponsorBlockApplied and CutApplied false.
 type Result struct {
 	SourceKind SourceKind // identifies a YouTube or local-file source
 	VideoID    string     // empty for local files
 	Title      string     // empty for local files
 	InputPath  string     // set for local files
 	OutputPath string     // empty for ToWriter delivery
+	Client     string     // YouTube client used, such as "ANDROID_VR"; empty for local files
 
 	SourceFormat Format // input/source format
 	OutputFormat Format // after transcode (== source when copy/keep)
@@ -352,6 +381,7 @@ type StreamInfo struct {
 	Title         string // extracted video title
 	Format        Format // selected source format
 	ContentLength int64  // 0 if unknown
+	Client        string // YouTube client used, such as "ANDROID_VR"
 }
 
 // EnumerateOptions tunes playlist enumeration. Enumeration never downloads.
@@ -418,8 +448,8 @@ func (s Stage) String() string {
 	}
 }
 
-// WarningCode is a stable, machine-actionable warning identifier. Warning.Detail
-// is human-only.
+// WarningCode is a stable, machine-readable warning identifier. Warning.Detail
+// is intended for people.
 type WarningCode uint8
 
 const (
@@ -429,9 +459,9 @@ const (
 	WarnPlaylistEntryFailed                    // one playlist entry failed (others returned)
 	WarnRateLimitedRetried                     // a request was retried after a 429
 	WarnSponsorBlockEmpty                      // SponsorBlock matched no segments
-	WarnRangesEmpty                            // cut ranges were empty after clamp/merge
+	WarnRangesEmpty                            // requested cut ranges did not intersect the media
 	WarnThrottled                              // a limiter/cooldown is active
-	WarnWebContextFallback                     // WEB player-context failed; fell back to the default chain
+	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
 	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
 )
 

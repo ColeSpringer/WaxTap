@@ -57,9 +57,9 @@ func (m Mode) String() string {
 
 // Spec describes a cut.
 type Spec struct {
-	// Remove lists the [Start, End) spans to delete. They are clamped to the
-	// probed media duration and merged, so overlaps and out-of-range values are
-	// harmless.
+	// Remove lists the [Start, End) spans to delete. Render clamps them to the
+	// probed duration and merges overlaps. If no span intersects the media, Render
+	// returns Applied=false.
 	Remove []Range
 	// Mode selects copy/accurate/smart rendering.
 	Mode Mode

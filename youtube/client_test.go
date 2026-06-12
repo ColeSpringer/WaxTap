@@ -596,6 +596,29 @@ func TestEnumerate(t *testing.T) {
 	}
 }
 
+func TestEnumerate_NegativeMaxItemsIsInvalidConfig(t *testing.T) {
+	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		t.Fatal("Enumerate must reject a negative cap before any request")
+		return nil, nil
+	}))
+	_, err := c.Enumerate(context.Background(), "PLtest", -1)
+	if !errors.Is(err, waxerr.ErrInvalidConfig) {
+		t.Errorf("negative maxItems err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestEnumerate_BadRequestIsInvalidPlaylistID(t *testing.T) {
+	// A 400 from the browse endpoint means YouTube rejected the playlist ID; it
+	// must surface as ErrInvalidPlaylistID, not a raw HTTP status.
+	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusBadRequest, []byte(`{"error":{"code":400,"message":"Invalid value"}}`)), nil
+	}))
+	_, err := c.Enumerate(context.Background(), "PLbroken", 0)
+	if !errors.Is(err, waxerr.ErrInvalidPlaylistID) {
+		t.Fatalf("err = %v, want ErrInvalidPlaylistID", err)
+	}
+}
+
 func TestEnumerate_MaxItemsAtPageBoundary(t *testing.T) {
 	// maxItems equals the page's entry count: a clean page boundary, so the
 	// next-page token is a valid resume point.

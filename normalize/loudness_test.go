@@ -91,7 +91,7 @@ func TestLastJSONObject(t *testing.T) {
 
 func TestApplyFilter(t *testing.T) {
 	m := Loudness{IntegratedLUFS: -15.71, TruePeakDBTP: -1.49, LRA: 5.90, Threshold: -26.06, Offset: -0.99}
-	got := ApplyFilter(-14, m)
+	got := ApplyFilter(-14, m, 48000)
 
 	if !strings.HasPrefix(got, "loudnorm=") {
 		t.Fatalf("filter %q does not start with loudnorm=", got)
@@ -105,9 +105,25 @@ func TestApplyFilter(t *testing.T) {
 		"measured_thresh=-26.06",
 		"offset=-0.99",
 		"linear=true",
+		// loudnorm upsamples to 192 kHz unless pinned back to the source rate.
+		"aresample=48000",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("filter %q missing %q", got, want)
+		}
+	}
+}
+
+func TestApplyFilterNoSampleRate(t *testing.T) {
+	// The two-arg form (the stable API) and an explicit 0 both leave loudnorm's
+	// default rate: no aresample is added.
+	m := Loudness{IntegratedLUFS: -15.71, TruePeakDBTP: -1.49, LRA: 5.90, Threshold: -26.06, Offset: -0.99}
+	for _, got := range []string{ApplyFilter(-14, m), ApplyFilter(-14, m, 0)} {
+		if !strings.HasPrefix(got, "loudnorm=") {
+			t.Fatalf("filter %q does not start with loudnorm=", got)
+		}
+		if strings.Contains(got, "aresample") {
+			t.Errorf("ApplyFilter without a rate = %q, want no aresample", got)
 		}
 	}
 }
@@ -117,7 +133,7 @@ func TestApplyFilterNonFinite(t *testing.T) {
 	// fall back to a valid pass-through, not an out-of-range loudnorm that ffmpeg
 	// rejects ("Value -inf for parameter 'measured_I' out of range").
 	m := Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1), LRA: 0, Threshold: -70, Offset: math.Inf(1)}
-	if got := ApplyFilter(-14, m); got != "anull" {
+	if got := ApplyFilter(-14, m, 48000); got != "anull" {
 		t.Errorf("ApplyFilter(non-finite) = %q, want anull", got)
 	}
 }
@@ -230,12 +246,22 @@ func TestApply_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
 	}
+	const srcRate = 44100 // synthSine writes 44.1 kHz
 	out := filepath.Join(dir, "out.flac")
 	if _, err := r.Transcode(context.Background(), in, out, transcode.Spec{
 		Codec:   transcode.CodecFLAC,
-		Filters: []string{ApplyFilter(target, measured)},
+		Filters: []string{ApplyFilter(target, measured, srcRate)},
 	}); err != nil {
 		t.Fatalf("normalizing transcode: %v", err)
+	}
+
+	// The output must keep the source rate, not loudnorm's 192 kHz default.
+	probe, err := r.Probe(context.Background(), out)
+	if err != nil {
+		t.Fatalf("Probe(out): %v", err)
+	}
+	if a, ok := probe.AudioStream(); !ok || a.SampleRate != srcRate {
+		t.Errorf("output sample rate = %d Hz, want %d (loudnorm must not upsample to 192000)", a.SampleRate, srcRate)
 	}
 
 	// The lossless output should measure close to the target.
@@ -266,7 +292,7 @@ func TestApply_SilentTrack(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 	if _, err := r.Transcode(context.Background(), silent, out, transcode.Spec{
 		Codec:   transcode.CodecFLAC,
-		Filters: []string{ApplyFilter(-14, measured)},
+		Filters: []string{ApplyFilter(-14, measured, 44100)},
 	}); err != nil {
 		t.Fatalf("normalizing a silent track should succeed, got: %v", err)
 	}

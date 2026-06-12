@@ -17,7 +17,7 @@ var (
 	// playlistID matches the known playlist-ID prefixes (PL, OL albums, RD
 	// radios/mixes, UU/UL/PU uploads, LL likes, FL favorites, TL, WL
 	// watch-later, EC courses). The {10,} tail keeps every accepted id
-	// structurally longer than an 11-character video ID, so a video id that
+	// structurally longer than an 11-character video ID, so a video ID that
 	// happens to start with a prefix pair is rejected here instead of turning
 	// into a network round trip that ends in "playlist unavailable". More
 	// exotic ids still work via a list= URL, which bypasses this check.
@@ -42,6 +42,10 @@ func ExtractVideoID(input string) (string, error) {
 	}
 
 	if u, err := parseLoose(s); err == nil && u.Host != "" {
+		// Distinguish an unrelated URL from a malformed YouTube video ID.
+		if !isYouTubeHost(u.Hostname()) {
+			return "", errNotYouTubeURL
+		}
 		q := u.Query()
 		if v := q.Get("v"); v != "" {
 			return validateID(v)
@@ -111,6 +115,25 @@ func validateID(candidate string) (string, error) {
 		return candidate, nil
 	}
 	return "", waxerr.ErrInvalidVideoID
+}
+
+// errNotYouTubeURL reports an unrelated URL while retaining the
+// ErrInvalidVideoID classification.
+var errNotYouTubeURL error = notYouTubeURLError{}
+
+type notYouTubeURLError struct{}
+
+func (notYouTubeURLError) Error() string { return "waxtap: not a recognized YouTube URL or video ID" }
+func (notYouTubeURLError) Unwrap() error { return waxerr.ErrInvalidVideoID }
+
+// isYouTubeHost reports whether host is a YouTube domain WaxTap recognizes.
+func isYouTubeHost(host string) bool {
+	h := strings.ToLower(strings.TrimPrefix(host, "www."))
+	switch h {
+	case "youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "youtube-nocookie.com":
+		return true
+	}
+	return strings.HasSuffix(h, ".youtube.com")
 }
 
 // parseLoose parses s as a URL, supplying an https:// scheme when one is missing

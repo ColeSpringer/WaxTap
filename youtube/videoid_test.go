@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/waxerr"
@@ -42,6 +43,11 @@ func TestExtractVideoID(t *testing.T) {
 		{"overlong bare token not truncated", id + "x", "", waxerr.ErrInvalidVideoID},
 		{"overlong bare token plus more", id + "xy", "", waxerr.ErrInvalidVideoID},
 		{"overlong id in youtu.be path", "https://youtu.be/" + id + "x", "", waxerr.ErrInvalidVideoID},
+
+		// A non-YouTube host is not a video reference, even with a valid-looking ID.
+		{"non-youtube host", "https://example.com/watch?v=" + id, "", waxerr.ErrInvalidVideoID},
+		{"non-youtube host no scheme", "example.com/video/" + id, "", waxerr.ErrInvalidVideoID},
+		{"non-youtube host bare path", "vimeo.com/123456", "", waxerr.ErrInvalidVideoID},
 	}
 
 	for _, tc := range tests {
@@ -60,6 +66,16 @@ func TestExtractVideoID(t *testing.T) {
 				t.Fatalf("id = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestExtractVideoID_NonYouTubeHostMessage(t *testing.T) {
+	_, err := ExtractVideoID("https://example.com/watch?v=testVideo01")
+	if !errors.Is(err, waxerr.ErrInvalidVideoID) {
+		t.Fatalf("err = %v, want ErrInvalidVideoID", err)
+	}
+	if !strings.Contains(err.Error(), "not a recognized YouTube URL") {
+		t.Errorf("message = %q, want it to mention an unrecognized YouTube URL", err)
 	}
 }
 

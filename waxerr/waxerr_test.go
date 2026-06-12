@@ -23,6 +23,10 @@ func TestPreferErr(t *testing.T) {
 		{"generic beats needs-po-token", ErrNeedsPOToken, generic, generic},
 		{"unavailable beats extraction", ErrExtractionFailed, unavailable, unavailable},
 		{"tie keeps first", ErrNeedsPOToken, ErrNeedsPOToken, ErrNeedsPOToken},
+		// Expired URLs have the same precedence as incomplete streams.
+		{"url-expired beats needs-po-token", ErrNeedsPOToken, ErrURLExpired, ErrURLExpired},
+		{"url-expired beats generic", generic, ErrURLExpired, ErrURLExpired},
+		{"extraction beats url-expired", ErrURLExpired, ErrExtractionFailed, ErrExtractionFailed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

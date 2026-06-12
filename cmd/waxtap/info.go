@@ -9,6 +9,7 @@ func newInfoCmd() *cobra.Command {
 	var (
 		showURLs bool
 		probe    bool
+		channels string
 	)
 	cmd := &cobra.Command{
 		Use:   "info <url>",
@@ -19,6 +20,14 @@ func newInfoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Use download's source preference so "Best audio" reports the format
+			// a default download would select.
+			layout, err := parseChannels(resolveChannelsFlag(cmd, env.cfg, channels))
+			if err != nil {
+				return err
+			}
+			sel := waxtap.BestAudio().WithChannels(layout)
+
 			depth := waxtap.InfoBasic
 			if probe {
 				depth = waxtap.InfoProbe
@@ -30,14 +39,14 @@ func newInfoCmd() *cobra.Command {
 
 			var resolved *waxtap.ResolvedStream
 			if showURLs {
-				rs, rerr := env.client.Resolve(cmd.Context(), args[0], waxtap.BestAudio())
+				rs, rerr := env.client.Resolve(cmd.Context(), args[0], sel)
 				if rerr != nil {
 					return rerr
 				}
 				resolved = &rs
 			}
 
-			bestIdx, bestErr := waxtap.BestForTarget(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
+			bestIdx, bestErr := sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
 
 			if env.jsonMode() {
 				return emitInfoJSON(env, video, bestIdx, bestErr, resolved)
@@ -48,6 +57,7 @@ func newInfoCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&showURLs, "show-urls", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "ffprobe the selected stream for authoritative rate/channels/bitrate (requires ffmpeg)")
+	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	return cmd
 }
 

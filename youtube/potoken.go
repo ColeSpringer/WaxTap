@@ -47,9 +47,9 @@ func (c *Client) fetchPOToken(ctx context.Context, profile ClientProfile, sess *
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		// Keep the provider's reason in the message for logs while letting callers
-		// match ErrNeedsPOToken for control flow.
-		return nil, fmt.Errorf("%w: PO token provider failed: %v", waxerr.ErrNeedsPOToken, err)
+		// Preserve the provider error for diagnostics while retaining the
+		// ErrNeedsPOToken classification.
+		return nil, fmt.Errorf("%w: PO token provider failed: %w", waxerr.ErrNeedsPOToken, err)
 	}
 	if !usablePOToken(scope, resp) {
 		return nil, fmt.Errorf("%w: PO token provider returned nothing usable for client %q (scope %s)",

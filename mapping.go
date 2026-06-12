@@ -84,6 +84,31 @@ func cutRanges(rs []TimeRange) []cut.Range {
 	return out
 }
 
+// validateProcessSpec rejects unsupported ProcessSpec combinations before
+// acquisition or ffmpeg work begins.
+func validateProcessSpec(s ProcessSpec) error {
+	if s.Downmix && s.Channels != LayoutMono && s.Channels != LayoutStereo {
+		return fmt.Errorf("%w: downmix requires Channels mono or stereo, got %s", waxerr.ErrIncompatibleSpec, s.Channels)
+	}
+	return nil
+}
+
+// downmixChannels returns the requested output channel count, or 0 when downmix
+// is disabled. validateProcessSpec rejects layouts without a fixed count.
+func downmixChannels(layout ChannelLayout, downmix bool) int {
+	if !downmix {
+		return 0
+	}
+	switch layout {
+	case LayoutMono:
+		return 1
+	case LayoutStereo:
+		return 2
+	default:
+		return 0
+	}
+}
+
 // cutMode maps a public CutMode to a cut.Mode.
 func cutMode(m CutMode) cut.Mode {
 	switch m {
@@ -99,10 +124,13 @@ func cutMode(m CutMode) cut.Mode {
 // pipelineSpec builds the internal pipeline spec from a ProcessSpec and the
 // resolved removal ranges (explicit ranges plus any from SponsorBlock).
 func pipelineSpec(s ProcessSpec, ranges []cut.Range) pipeline.Spec {
-	ps := pipeline.Spec{Remove: ranges}
+	ps := pipeline.Spec{Remove: ranges, Downmix: downmixChannels(s.Channels, s.Downmix)}
 	if s.Cut != nil {
 		ps.CutMode = cutMode(s.Cut.Mode)
 		ps.Crossfade = s.Cut.Crossfade
+		// Explicit ranges that do not intersect the media are rejected. Empty
+		// SponsorBlock results are allowed and reported as a warning.
+		ps.RejectEmptyRemoval = len(s.Cut.Ranges) > 0
 	}
 	if s.Transcode != nil {
 		ps.Codec = transcodeCodec(s.Transcode.Format)
@@ -140,12 +168,21 @@ func cutRequested(c *CutSpec) bool {
 	return c != nil && (len(c.Ranges) > 0 || c.SponsorBlock != nil)
 }
 
+// warnEmptyCut reports a SponsorBlock-only request that removed no audio.
+// Explicit ranges that do not intersect the media are rejected by the pipeline.
+func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result) {
+	if cs != nil && cs.SponsorBlock != nil && len(cs.Ranges) == 0 && !pres.Cut && pres.SourceDuration > 0 {
+		em.warn(WarnRangesEmpty, "cut ranges did not intersect the media; delivered uncut")
+	}
+}
+
 // needsProcessing reports whether the spec needs ffmpeg and a staged input. When
 // false, a download can stream straight to the sink with no temp file. Any
 // non-nil Transcode counts, including an explicit FormatCopy remux (distinct from
-// a nil Transcode, which keeps the source bytes).
+// a nil Transcode, which keeps the source bytes). A downmix request also counts:
+// the fold needs a probe to decide and an encode to apply.
 func needsProcessing(s ProcessSpec) bool {
-	return cutRequested(s.Cut) || s.Transcode != nil || s.Loudness != nil
+	return cutRequested(s.Cut) || s.Transcode != nil || s.Loudness != nil || s.Downmix
 }
 
 // toSource maps a resolved stream to a download Source, selecting the query-range
@@ -285,6 +322,17 @@ func outputExt(t *TranscodeSpec, srcExt string) string {
 		return srcExt
 	}
 	return "." + c.Extension()
+}
+
+// makeJobDir creates a per-job directory under TempDir. A configured TempDir is
+// created first when necessary.
+func (c *Client) makeJobDir() (string, error) {
+	if c.opts.TempDir != "" {
+		if err := os.MkdirAll(c.opts.TempDir, 0o777); err != nil {
+			return "", err
+		}
+	}
+	return os.MkdirTemp(c.opts.TempDir, "waxtap-job-*")
 }
 
 func fileExists(p string) bool {

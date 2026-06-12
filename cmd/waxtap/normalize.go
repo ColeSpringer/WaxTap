@@ -22,6 +22,7 @@ func newNormalizeCmd() *cobra.Command {
 		dir          string
 		itag         int
 		codec        string
+		noFallback   bool
 		sourcePolicy string
 		collisionStr string
 	)
@@ -59,7 +60,7 @@ func newNormalizeCmd() *cobra.Command {
 			}
 
 			if !doApply {
-				return runMeasure(cmd, env, source, target, itag, codec, sourcePolicy)
+				return runMeasure(cmd, env, source, target, itag, codec, sourcePolicy, noFallback)
 			}
 
 			if transcode == "" {
@@ -86,11 +87,12 @@ func newNormalizeCmd() *cobra.Command {
 				return nil
 			}
 			spec.Output = waxtap.ToFile(outPath)
-			sel, policy, err := urlSelection(itag, codec, sourcePolicy)
+			// Normalize has no channel-layout preference.
+			sel, policy, err := urlSelection(itag, codec, sourcePolicy, waxtap.LayoutAny)
 			if err != nil {
 				return err
 			}
-			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec)
+			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
 				return err
 			}
@@ -107,6 +109,7 @@ func newNormalizeCmd() *cobra.Command {
 	f.StringVarP(&dir, "dir", "d", "", "output directory for --album --apply")
 	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
 	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
+	f.BoolVar(&noFallback, "no-fallback", false, "disable WEB-context, watch-page, and incomplete-download fallbacks")
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
 	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
 	return cmd
@@ -114,16 +117,16 @@ func newNormalizeCmd() *cobra.Command {
 
 // runMeasure measures a single source and prints its loudness without writing a
 // re-encoded file (the unchanged audio is discarded).
-func runMeasure(cmd *cobra.Command, env *appEnv, source string, target float64, itag int, codec, sourcePolicy string) error {
+func runMeasure(cmd *cobra.Command, env *appEnv, source string, target float64, itag int, codec, sourcePolicy string, noFallback bool) error {
 	spec := waxtap.ProcessSpec{
 		Loudness: &waxtap.LoudnessSpec{Mode: waxtap.LoudnessMeasureOnly, Target: target},
 		Output:   waxtap.ToWriter(io.Discard),
 	}
-	sel, policy, err := urlSelection(itag, codec, sourcePolicy)
+	sel, policy, err := urlSelection(itag, codec, sourcePolicy, waxtap.LayoutAny)
 	if err != nil {
 		return err
 	}
-	res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec)
+	res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 	if err != nil {
 		return err
 	}

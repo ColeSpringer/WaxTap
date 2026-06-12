@@ -123,6 +123,30 @@ func (f Format) String() string {
 	return fmt.Sprintf("itag=%d codec=%s ext=%s bitrate=%d", f.Itag, f.Codec, f.Extension, f.EffectiveBitrate())
 }
 
+// ChannelLayout identifies a preferred channel-count class. LayoutAny, the zero
+// value, leaves source selection unchanged.
+type ChannelLayout uint8
+
+const (
+	LayoutAny      ChannelLayout = iota // no preference (zero value)
+	LayoutMono                          // one channel
+	LayoutStereo                        // two channels
+	LayoutSurround                      // more than two channels
+)
+
+func (l ChannelLayout) String() string {
+	switch l {
+	case LayoutMono:
+		return "mono"
+	case LayoutStereo:
+		return "stereo"
+	case LayoutSurround:
+		return "surround"
+	default:
+		return "any"
+	}
+}
+
 type selectorKind uint8
 
 const (
@@ -137,9 +161,10 @@ const (
 // The selector stores caller intent; concrete selection is performed by the
 // extraction/download pipeline.
 type AudioSelector struct {
-	kind  selectorKind
-	itag  int
-	codec string
+	kind   selectorKind
+	itag   int
+	codec  string
+	layout ChannelLayout
 }
 
 // BestAudio selects the best audio stream. It prefers the original track,
@@ -152,6 +177,16 @@ func Itag(itag int) AudioSelector { return AudioSelector{kind: selItag, itag: it
 
 // Codec selects the best stream whose codec matches (e.g. "opus", "aac").
 func Codec(codec string) AudioSelector { return AudioSelector{kind: selCodec, codec: codec} }
+
+// WithChannels returns a copy of the selector that prefers the given channel
+// layout. For BestAudio, the preference ranks below original-language selection
+// and above source-policy codec preferences and bitrate. Codec selectors apply
+// the layout preference within the matching codec family. Itag selectors ignore
+// it. If no candidate matches the layout, normal ranking applies.
+func (s AudioSelector) WithChannels(layout ChannelLayout) AudioSelector {
+	s.layout = layout
+	return s
+}
 
 func (s AudioSelector) String() string {
 	switch s.kind {

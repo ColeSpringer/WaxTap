@@ -53,9 +53,9 @@ var ErrRateLimited = errors.New("waxtap: rate limited")
 // Input / routing.
 var (
 	ErrIsPlaylist        = errors.New("waxtap: URL is a playlist; use Enumerate")
-	ErrInvalidVideoID    = errors.New("waxtap: invalid characters in video id")
-	ErrVideoIDTooShort   = errors.New("waxtap: video id is too short")
-	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist id")
+	ErrInvalidVideoID    = errors.New("waxtap: invalid characters in video ID")
+	ErrVideoIDTooShort   = errors.New("waxtap: video ID is too short")
+	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist ID")
 	// ErrPlaylistParse indicates a playlist browse response that parsed as JSON
 	// but matched no known item shape. Unlike ErrInvalidPlaylistID it is a
 	// maintenance signal in the ErrExtractionFailed class: YouTube likely
@@ -74,6 +74,9 @@ var (
 	ErrUnsupportedInput = errors.New("waxtap: unsupported or unreadable input")
 	// ErrFFmpegNotFound indicates the ffmpeg / ffprobe binaries were not found.
 	ErrFFmpegNotFound = errors.New("waxtap: ffmpeg/ffprobe not found")
+	// ErrInvalidConfig indicates invalid or conflicting configuration or option
+	// values.
+	ErrInvalidConfig = errors.New("waxtap: invalid configuration")
 )
 
 // RateLimitError carries backoff context for an HTTP 429 (or a 403 that the
@@ -170,7 +173,7 @@ func hostOr(host string) string {
 //
 //   - availability verdicts
 //   - extraction, cipher, or parse failures
-//   - ErrIncompleteStream
+//   - incomplete delivery (ErrIncompleteStream or ErrURLExpired)
 //   - generic or network failures
 //   - ErrNeedsPOToken
 //
@@ -202,7 +205,9 @@ func errRank(err error) int {
 		errors.Is(err, ErrCipherSolve),
 		errors.Is(err, ErrPlaylistParse):
 		return 4
-	case errors.Is(err, ErrIncompleteStream):
+	case errors.Is(err, ErrIncompleteStream),
+		errors.Is(err, ErrURLExpired):
+		// An expired URL is an incomplete delivery when no retry succeeds.
 		return 3
 	case errors.Is(err, ErrNeedsPOToken):
 		return 1 // lowest: a precondition, not a diagnosis

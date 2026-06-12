@@ -130,7 +130,8 @@ The archive preserves the executable bit; a standalone downloaded binary may nee
 ### CLI
 
 Media commands accept a YouTube URL or bare video/playlist ID and support
-`--json` for a stable scriptable contract. `cut`, `transcode`, and `normalize`
+`--json` for a stable scriptable contract (`schemaVersion` 3; result objects now
+carry the YouTube `client` that was used). `cut`, `transcode`, and `normalize`
 also accept a local file, so no network is needed for local processing. Every
 command has `--help`.
 
@@ -144,6 +145,9 @@ waxtap download <video-url> -o track
 
 # Download and transcode to FLAC in a single ffmpeg pass
 waxtap download <video-url> --transcode flac -o track.flac
+
+# Prefer a native stereo track (the default); fold 5.1 to stereo only if needed
+waxtap download <video-url> --channels stereo --downmix --transcode flac -o track.flac
 
 # Remove SponsorBlock non-music segments and normalize loudness in one pass
 waxtap download <video-url> --cut-sponsorblock --transcode mp3 --normalize --loudness-target -14 -o track.mp3
@@ -240,6 +244,22 @@ Useful operational knobs:
   upper bound, and `--max-downloads` limits download attempts; skipped entries
   and resolution failures do not count. With `--concurrency 1`, the interval
   falls between completed downloads.
+- Channel layout (`download`, `transcode`, `cut`): `--channels
+  mono|stereo|surround|any` prefers the best **native** track of that layout. The
+  default is `stereo`, so a native stereo mix beats a 387 kbps 5.1 track (itag
+  258) instead of ranking by raw bitrate; `any` restores the bitrate-only ranking.
+  iOS exposes only ~128 kbps stereo, while android_vr and WEB also expose 5.1, so
+  `--channels surround` needs one of those clients. Selection prefers a native
+  match first; `--downmix` folds a selected higher-channel source to the requested
+  layout. It never upmixes and requires `--channels mono` or `stereo`. The
+  `channels` and `downmix` config keys set the defaults. Library callers opt in
+  with `AudioSelector.WithChannels` and `ProcessSpec.Channels`.
+- Extraction control: `--no-fallback` (download and process commands) prevents
+  fallback from a WEB player context to the configured client chain, disables
+  watch-page extraction, and prevents retrying another client after an incomplete
+  download. The configured extraction chain can still select a working client.
+  Use `--client` to force a single client. Results report the client used as
+  `Client:` (and `client` in `--json`).
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
   extraction failures, and `WAXTAP_SABR_DUMP_DIR` to write each raw SABR
   round for offline inspection.
@@ -285,11 +305,17 @@ as `Options.PlayerContextProvider`.
 `--player-context-url` requires `--potoken-url` (the stream binds a GVS token to
 the context's `visitor_data`), and the context mint and the download **must share
 an egress IP** (the signed URL is IP-bound). When the WEB context is unavailable,
-WaxTap logs a `web-context-fallback` warning and falls back to the default chain
-(or the forced `--client` chain) so the download still succeeds; after a provider
-failure the attempt is skipped for a short cooldown so a dead sidecar does not
-tax every video in a batch. Each context fetch is bounded by
-`webContextTimeoutSeconds` / `WAXTAP_WEB_CONTEXT_TIMEOUT` (default 20s).
+WaxTap logs a `web-context-fallback` warning and falls back to the configured
+client chain. After a provider failure, a short cooldown prevents the unavailable
+sidecar from being queried for every video in a batch. Each context fetch is
+bounded by `webContextTimeoutSeconds` / `WAXTAP_WEB_CONTEXT_TIMEOUT` (default 20s).
+
+Fallback applies to the **default multi-client chain**: it tries the next client
+when an attempt cannot deliver the stream. A forced single client
+(`--client web`) has no alternative. Pass `--no-fallback` to return the preferred
+attempt's error instead of trying another path. For example, a capped WEB context
+returns `ErrIncompleteStream` (exit 7) instead of falling back to android_vr.
+Every result reports the client used as `Client:` (and `client` in `--json`).
 
 ### Session adoption (byte-exact identity)
 

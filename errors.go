@@ -35,6 +35,7 @@ var (
 	// Input / routing.
 	ErrIsPlaylist        = waxerr.ErrIsPlaylist
 	ErrInvalidVideoID    = waxerr.ErrInvalidVideoID
+	ErrVideoIDTooShort   = waxerr.ErrVideoIDTooShort
 	ErrInvalidPlaylistID = waxerr.ErrInvalidPlaylistID
 	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
 	// response parsed but matched no known shape.
@@ -44,6 +45,9 @@ var (
 	ErrIncompatibleSpec = waxerr.ErrIncompatibleSpec
 	ErrUnsupportedInput = waxerr.ErrUnsupportedInput
 	ErrFFmpegNotFound   = waxerr.ErrFFmpegNotFound
+
+	// ErrInvalidConfig indicates invalid or conflicting library configuration.
+	ErrInvalidConfig = waxerr.ErrInvalidConfig
 )
 
 // Re-exported structured error types. Use errors.AsType to inspect them.

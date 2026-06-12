@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -9,6 +10,22 @@ import (
 
 	"github.com/colespringer/waxtap/potoken"
 )
+
+// TestNew_InvalidConfigSentinel verifies that configuration validation errors
+// retain the ErrInvalidConfig classification used by the CLI.
+func TestNew_InvalidConfigSentinel(t *testing.T) {
+	cases := map[string]Options{
+		"negative cooldown":            {Politeness: Politeness{Cooldown: -1}},
+		"chrome-major + override":      {ChromeMajor: 100, ProfileOverridePath: "x"},
+		"client + override":            {Client: "web", ProfileOverridePath: "x"},
+		"player-context without token": {PlayerContextProvider: potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) { return potoken.PlayerContext{}, nil })},
+	}
+	for name, opts := range cases {
+		if _, err := New(opts); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("%s: New err = %v, want ErrInvalidConfig", name, err)
+		}
+	}
+}
 
 // singleWEBOverride is a uniform (single-client) override chain, which satisfies
 // the adoption uniform-chain requirement.
@@ -33,10 +50,8 @@ func (stubSessionProvider) ProvideSession(context.Context) (potoken.Session, err
 	return potoken.Session{VisitorData: "Cgt%3D%3D"}, nil
 }
 
-// TestNew_PlayerContextRequiresPOTokenProvider pins the pairing rule at New:
-// the WEB-context path mints its GVS token at SABR setup, past the acquire-time
-// fallback, so a missing token provider must fail construction rather than
-// hard-failing every download at transfer time.
+// TestNew_PlayerContextRequiresPOTokenProvider verifies that New rejects a WEB
+// player-context provider without the token provider required during SABR setup.
 func TestNew_PlayerContextRequiresPOTokenProvider(t *testing.T) {
 	pc := potoken.PlayerContextProviderFunc(
 		func(context.Context, string) (potoken.PlayerContext, error) { return potoken.PlayerContext{}, nil },

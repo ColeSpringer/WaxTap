@@ -6,9 +6,9 @@ import (
 	"github.com/colespringer/waxtap"
 )
 
-func TestSchemaVersionIsTwo(t *testing.T) {
-	if schemaVersion != 2 {
-		t.Errorf("schemaVersion = %d, want 2", schemaVersion)
+func TestSchemaVersionIsThree(t *testing.T) {
+	if schemaVersion != 3 {
+		t.Errorf("schemaVersion = %d, want 3", schemaVersion)
 	}
 }
 

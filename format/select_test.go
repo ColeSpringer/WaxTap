@@ -625,20 +625,176 @@ func TestBestAudio_PicksWebmOpusOverM4aAAC(t *testing.T) {
 	}
 }
 
+// audchan builds an audio format with an explicit channel count.
+func audchan(itag int, codec string, avgBitrate, channels int) Format {
+	f := aud(itag, codec, avgBitrate)
+	f.Channels = channels
+	return f
+}
+
+func TestWithChannels_StereoBeatsSurround(t *testing.T) {
+	// Itag 258 is 5.1 surround at a much higher bitrate, but the stereo preference
+	// must select the native stereo track.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("stereo preference chose itag %d, want 140 (native stereo over 5.1)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_SurroundAndMono(t *testing.T) {
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+		audchan(599, "mp4a.40.5", 32000, 1),
+	}
+	cases := map[ChannelLayout]int{
+		LayoutSurround: 258,
+		LayoutStereo:   140,
+		LayoutMono:     599,
+	}
+	for layout, wantItag := range cases {
+		idx, err := BestAudio().WithChannels(layout).Select(cands, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatalf("%s: %v", layout, err)
+		}
+		if cands[idx].Itag != wantItag {
+			t.Errorf("%s preference chose itag %d, want %d", layout, cands[idx].Itag, wantItag)
+		}
+	}
+}
+
+func TestWithChannels_AnyIsNeutral(t *testing.T) {
+	// LayoutAny must reproduce the neutral bitrate-ranked result (258 surround).
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := BestAudio().WithChannels(LayoutAny).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	neutral, _ := BestForTarget(cands, MinimizeLoss(), Target{})
+	if idx != neutral || cands[idx].Itag != 258 {
+		t.Fatalf("LayoutAny chose itag %d (idx %d), want the neutral winner 258 (idx %d)", cands[idx].Itag, idx, neutral)
+	}
+}
+
+func TestWithChannels_NoNativeMatchFallsBack(t *testing.T) {
+	// No mono track exists; the preference is inert and the best available wins.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := BestAudio().WithChannels(LayoutMono).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 258 {
+		t.Fatalf("no-native-match chose itag %d, want best available 258", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_UnknownCountInert(t *testing.T) {
+	// Channels==0 (unknown) never matches, so a stereo preference cannot regress a
+	// set with no channel metadata: bitrate still decides.
+	cands := []Format{
+		aud(251, "opus", 160000),
+		aud(140, "mp4a.40.2", 128000),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("unknown-channels chose itag %d, want bitrate winner 251", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_OriginalOutranksLayout(t *testing.T) {
+	// Original-language audio takes precedence over a matching-layout dub.
+	cands := []Format{
+		{Itag: 258, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 387000, Channels: 6, IsOriginal: Yes},
+		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000, Channels: 2, IsOriginal: No},
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 258 {
+		t.Fatalf("chose itag %d, want the original 258 even though 140 matches the stereo layout", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_CodecFilterThenLayout(t *testing.T) {
+	// --codec restricts to opus; the layout refines within that codec set.
+	cands := []Format{
+		audchan(251, "opus", 160000, 6),
+		audchan(250, "opus", 70000, 2),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := Codec("opus").WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 250 {
+		t.Fatalf("codec+layout chose itag %d, want the stereo opus 250", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_LayoutOutranksPreferCodec(t *testing.T) {
+	// prefer:opus ranks below the layout, so the stereo aac track wins over a
+	// surround opus track.
+	cands := []Format{
+		audchan(251, "opus", 160000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, PreferCodec("opus"), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("layout vs prefer:opus chose itag %d, want stereo aac 140 (layout outranks codec)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_ItagIgnoresLayout(t *testing.T) {
+	// An itag selector names an exact encoding; the layout must not override it.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := Itag(258).WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 258 {
+		t.Fatalf("itag selector chose itag %d, want the named 258 regardless of layout", cands[idx].Itag)
+	}
+}
+
 func TestBetterThan_StrictWeakOrdering(t *testing.T) {
 	set := []Format{
-		{Itag: 1, Codec: "opus", AverageBitrate: 160000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No},
-		{Itag: 2, Codec: "mp4a.40.2", AverageBitrate: 128000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No},
-		{Itag: 3, Codec: "opus", AverageBitrate: 105000, AudioQuality: QualityMedium, IsOriginal: Yes, IsDRC: Yes},
-		{Itag: 4, Codec: "vorbis", AverageBitrate: 128000, AudioQuality: QualityMedium, IsOriginal: Unknown, IsDRC: No},
-		{Itag: 5, Codec: "mp4a.40.2", AverageBitrate: 200000, AudioQuality: QualityUnknown, IsOriginal: No, IsDRC: No},
-		{Itag: 6, Codec: "opus", AverageBitrate: 60000, AudioQuality: QualityUltraLow, IsOriginal: Yes, IsDRC: No},
-		{Itag: 7, Codec: "mp3", AverageBitrate: 128000, AudioQuality: QualityLow, IsOriginal: Yes, IsDRC: No},
+		{Itag: 1, Codec: "opus", AverageBitrate: 160000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No, Channels: 2},
+		{Itag: 2, Codec: "mp4a.40.2", AverageBitrate: 128000, AudioQuality: QualityHigh, IsOriginal: Yes, IsDRC: No, Channels: 2},
+		{Itag: 3, Codec: "opus", AverageBitrate: 105000, AudioQuality: QualityMedium, IsOriginal: Yes, IsDRC: Yes, Channels: 6},
+		{Itag: 4, Codec: "vorbis", AverageBitrate: 128000, AudioQuality: QualityMedium, IsOriginal: Unknown, IsDRC: No, Channels: 1},
+		{Itag: 5, Codec: "mp4a.40.2", AverageBitrate: 200000, AudioQuality: QualityUnknown, IsOriginal: No, IsDRC: No, Channels: 6},
+		{Itag: 6, Codec: "opus", AverageBitrate: 60000, AudioQuality: QualityUltraLow, IsOriginal: Yes, IsDRC: No, Channels: 0},
+		{Itag: 7, Codec: "mp3", AverageBitrate: 128000, AudioQuality: QualityLow, IsOriginal: Yes, IsDRC: No, Channels: 2},
 	}
 	for _, prefCodec := range []string{"", "aac"} {
-		for _, useTier := range []bool{false, true} {
-			name := fmt.Sprintf("prefCodec=%q/useTier=%v", prefCodec, useTier)
-			checkStrictWeakOrdering(t, name, set, betterThan(prefCodec, useTier))
+		for _, layout := range []ChannelLayout{LayoutAny, LayoutStereo, LayoutMono, LayoutSurround} {
+			for _, useTier := range []bool{false, true} {
+				name := fmt.Sprintf("prefCodec=%q/layout=%s/useTier=%v", prefCodec, layout, useTier)
+				checkStrictWeakOrdering(t, name, set, betterThan(prefCodec, layout, useTier))
+			}
 		}
 	}
 }
