@@ -129,6 +129,38 @@ func TestExternalCommit(t *testing.T) {
 	}
 }
 
+func TestExternalExtensionlessFinalStagesExtensionless(t *testing.T) {
+	// A dot before the random suffix would create a false numeric extension.
+	dir := t.TempDir()
+	final := filepath.Join(dir, "track")
+
+	e, err := NewExternal(final)
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	defer e.Discard()
+
+	if ext := filepath.Ext(e.Path()); ext != "" {
+		t.Errorf("extensionless final produced temp %q with pseudo-extension %q, want none", e.Path(), ext)
+	}
+	if filepath.Dir(e.Path()) != dir {
+		t.Errorf("temp path %q is not in the destination dir %q", e.Path(), dir)
+	}
+}
+
+func TestExternalDottedFinalPreservesExtension(t *testing.T) {
+	// Preserve extensions even when their container is unknown.
+	dir := t.TempDir()
+	e, err := NewExternal(filepath.Join(dir, "my.track.v1"))
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	defer e.Discard()
+	if ext := filepath.Ext(e.Path()); ext != ".v1" {
+		t.Errorf("temp path %q did not preserve the .v1 extension (got %q)", e.Path(), ext)
+	}
+}
+
 func TestExternalDiscardRemovesTemp(t *testing.T) {
 	dir := t.TempDir()
 	e, err := NewExternal(filepath.Join(dir, "out.mp3"))

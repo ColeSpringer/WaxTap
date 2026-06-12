@@ -122,7 +122,7 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	if err != nil {
 		return err
 	}
-	if err := df.resolve(cmd, env.cfg); err != nil {
+	if err := df.resolve(cmd, env); err != nil {
 		return err
 	}
 	if df.archivePath != "" {
@@ -155,9 +155,14 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	}
 }
 
+// maxConcurrency bounds the CLI playlist worker pool. DownloadPlaylist applies
+// the same limit for library callers.
+const maxConcurrency = 64
+
 // resolve validates download flags and computes values used by every item. It
 // runs before network work so invalid requests fail before a playlist starts.
-func (df *downloadFlags) resolve(cmd *cobra.Command, cfg *appConfig) error {
+func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
+	cfg := env.cfg
 	if df.out != "" && df.dir != "" {
 		return usagef("--out and --dir are mutually exclusive")
 	}
@@ -195,6 +200,13 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, cfg *appConfig) error {
 	if df.maxDownloads < 0 {
 		return usagef("--max-downloads must be non-negative")
 	}
+	if df.concurrency < 0 {
+		return usagef("--concurrency must be non-negative")
+	}
+	if df.concurrency > maxConcurrency {
+		env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", df.concurrency, maxConcurrency, maxConcurrency)
+		df.concurrency = maxConcurrency
+	}
 	if df.maxSleepInterval > 0 && df.sleepInterval == 0 {
 		return usagef("--max-sleep-interval requires --sleep-interval")
 	}
@@ -202,10 +214,14 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, cfg *appConfig) error {
 		return usagef("--max-sleep-interval must be >= --sleep-interval")
 	}
 
-	// Validate the processing spec up front (it is pure); buildRequest rebuilds it
-	// per item later. This surfaces incompatible flag combinations before any
-	// extraction or download.
-	if _, err := df.buildProcessSpec(); err != nil {
+	// Validate processing options before extraction or playlist enumeration.
+	// buildProcessSpec handles CLI constraints; ValidateProcessSpec enforces the
+	// library-level invariants.
+	spec, err := df.buildProcessSpec()
+	if err != nil {
+		return err
+	}
+	if err := waxtap.ValidateProcessSpec(spec); err != nil {
 		return err
 	}
 	return nil

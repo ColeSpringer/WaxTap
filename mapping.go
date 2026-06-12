@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -84,11 +85,50 @@ func cutRanges(rs []TimeRange) []cut.Range {
 	return out
 }
 
+// Inclusive bounds for an applied integrated-loudness target.
+const (
+	loudnessTargetMin = -70.0
+	loudnessTargetMax = -5.0
+)
+
+// ValidateProcessSpec checks a ProcessSpec without acquiring or processing media.
+// Invalid specs return an error that wraps [ErrIncompatibleSpec].
+// [Client.Download], [Client.Stream], and [Client.Process] call it automatically;
+// callers may use it to fail before starting batch work.
+func ValidateProcessSpec(s ProcessSpec) error { return validateProcessSpec(s) }
+
 // validateProcessSpec rejects unsupported ProcessSpec combinations before
 // acquisition or ffmpeg work begins.
 func validateProcessSpec(s ProcessSpec) error {
 	if s.Downmix && s.Channels != LayoutMono && s.Channels != LayoutStereo {
 		return fmt.Errorf("%w: downmix requires Channels mono or stereo, got %s", waxerr.ErrIncompatibleSpec, s.Channels)
+	}
+	if err := validateLoudness(s.Loudness); err != nil {
+		return err
+	}
+	return validateBitrate(s.Transcode)
+}
+
+// validateLoudness checks targets used for loudness application. Measure-only
+// specs do not use a target.
+func validateLoudness(l *LoudnessSpec) error {
+	if l == nil || l.Mode != LoudnessApply {
+		return nil
+	}
+	if math.IsNaN(l.Target) || math.IsInf(l.Target, 0) {
+		return fmt.Errorf("%w: loudness target must be a finite LUFS value, got %v", waxerr.ErrIncompatibleSpec, l.Target)
+	}
+	if l.Target < loudnessTargetMin || l.Target > loudnessTargetMax {
+		return fmt.Errorf("%w: loudness target %g LUFS is out of range [%g, %g]", waxerr.ErrIncompatibleSpec, l.Target, loudnessTargetMin, loudnessTargetMax)
+	}
+	return nil
+}
+
+// validateBitrate rejects a negative transcode bitrate. Zero selects the preset
+// default.
+func validateBitrate(t *TranscodeSpec) error {
+	if t != nil && t.Bitrate < 0 {
+		return fmt.Errorf("%w: transcode bitrate must be >= 0, got %d", waxerr.ErrIncompatibleSpec, t.Bitrate)
 	}
 	return nil
 }

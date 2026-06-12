@@ -190,6 +190,44 @@ func TestRunRemux(t *testing.T) {
 	}
 }
 
+func TestRunRemuxWithoutContainerRejected(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 1, "flac")
+
+	// Stream copy cannot infer a muxer from these output paths.
+	for _, out := range []string{filepath.Join(dir, "out"), filepath.Join(dir, "out.copy")} {
+		_, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("remux to %q = %v, want ErrIncompatibleSpec", out, err)
+		}
+		if fileExists(out) {
+			t.Errorf("remux to %q wrote output despite rejection", out)
+		}
+	}
+}
+
+func TestRunCopyCutWithoutContainerRejected(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+
+	// The removal creates two copied segments and exercises the multi-range path.
+	for _, out := range []string{filepath.Join(dir, "mytrack"), filepath.Join(dir, "mytrack.copy")} {
+		_, err := Run(context.Background(), r, in, out, Spec{
+			Codec:   transcode.CodecCopy,
+			CutMode: cut.ModeSmart,
+			Remove:  []cut.Range{{Start: 800 * time.Millisecond, End: 1200 * time.Millisecond}},
+		}, nil)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("copy cut to %q = %v, want ErrIncompatibleSpec", out, err)
+		}
+		if fileExists(out) {
+			t.Errorf("copy cut to %q wrote output despite rejection", out)
+		}
+	}
+}
+
 func TestRunNoOpCutStillTranscodes(t *testing.T) {
 	// SponsorBlock returned nothing useful (a zero-length / fully-clamped range),
 	// but a transcode was requested: the transcode must still run.

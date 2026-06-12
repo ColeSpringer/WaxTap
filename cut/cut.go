@@ -179,7 +179,7 @@ func resolveMode(mode Mode, crossfade time.Duration, enc transcode.Spec) (Mode, 
 // a single span is written straight to the output, and multiple spans are joined
 // with the concat demuxer over the separate, clean files. Concatenating distinct
 // rebased files is reliable, unlike trimming one file in place with copy.
-func renderCopy(ctx context.Context, r *transcode.Runner, input, output string, keeps []Range) error {
+func renderCopy(ctx context.Context, r *transcode.Runner, input, output string, keeps []Range) (err error) {
 	absIn, err := filepath.Abs(input)
 	if err != nil {
 		return err
@@ -190,6 +190,8 @@ func renderCopy(ctx context.Context, r *transcode.Runner, input, output string, 
 		return err
 	}
 	defer staged.Discard()
+	// Report the caller's output path instead of the staged file written by ffmpeg.
+	defer func() { err = transcode.RedactPath(err, staged.Path(), output) }()
 
 	if len(keeps) == 1 {
 		if err := extractCopy(ctx, r, absIn, staged.Path(), keeps[0]); err != nil {

@@ -88,6 +88,115 @@ func TestBuildCommand_ALACExtensionlessForcesMuxer(t *testing.T) {
 	assertSeq(t, cmd.Args, "-f", "ipod")
 }
 
+func TestRedactPath(t *testing.T) {
+	staged := "/tmp/job/track-918273"
+	final := "/home/u/track"
+	base := &RunError{
+		Binary:   "ffmpeg",
+		ExitCode: 1,
+		Stderr:   staged + ": Invalid data found when processing input",
+		Err:      errors.New("exit status 1"),
+	}
+	if !strings.Contains(base.Error(), staged) {
+		t.Fatalf("precondition: RunError message %q should contain the staged path", base.Error())
+	}
+
+	red := RedactPath(base, staged, final)
+	if strings.Contains(red.Error(), staged) {
+		t.Errorf("redacted message still contains the staged path: %q", red.Error())
+	}
+	if !strings.Contains(red.Error(), final) {
+		t.Errorf("redacted message missing the final path: %q", red.Error())
+	}
+	// Redaction must preserve the error chain.
+	var re *RunError
+	if !errors.As(red, &re) {
+		t.Error("errors.As lost the *RunError after redaction")
+	}
+
+	// Inputs that cannot or need not be rewritten pass through unchanged.
+	plain := errors.New("not a run error")
+	if RedactPath(plain, staged, final) != plain {
+		t.Error("RedactPath should pass a non-RunError through unchanged")
+	}
+	if got := RedactPath(base, "", final); got != error(base) {
+		t.Error("empty from should be a no-op")
+	}
+	if got := RedactPath(base, final, final); got != error(base) {
+		t.Error("from==to should be a no-op")
+	}
+}
+
+func TestBuildCommand_ExtensionlessForcesCanonicalMuxer(t *testing.T) {
+	// Without an extension, every encoding codec supplies its canonical muxer.
+	cases := []struct {
+		codec Codec
+		muxer string
+	}{
+		{CodecFLAC, "flac"},
+		{CodecMP3, "mp3"},
+		{CodecWAV, "wav"},
+		{CodecOpus, "opus"},
+		{CodecAAC, "ipod"},
+		{CodecVorbis, "ogg"},
+		{CodecALAC, "ipod"},
+	}
+	for _, c := range cases {
+		t.Run(c.codec.String(), func(t *testing.T) {
+			cmd, err := buildCommand("in.webm", "out", Spec{Codec: c.codec})
+			if err != nil {
+				t.Fatalf("buildCommand: %v", err)
+			}
+			assertSeq(t, cmd.Args, "-f", c.muxer)
+		})
+	}
+}
+
+func TestBuildCommand_AACDotAACStaysADTS(t *testing.T) {
+	// The .aac extension selects raw ADTS rather than the preset's M4A container.
+	cmd, err := buildCommand("in.webm", "out.aac", Spec{Codec: CodecAAC})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	if hasFlag(cmd.Args, "-f") {
+		t.Errorf(".aac must stay raw ADTS (no forced muxer): %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_VorbisDotVorbisForcesOgg(t *testing.T) {
+	// .vorbis names a codec, so the output still needs the Ogg muxer.
+	cmd, err := buildCommand("in.webm", "out.vorbis", Spec{Codec: CodecVorbis})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-f", "ogg")
+}
+
+func TestBuildCommand_ContainerExtensionsAuthoritative(t *testing.T) {
+	// Real container extensions remain authoritative.
+	cases := []struct {
+		out   string
+		codec Codec
+	}{
+		{"out.flac", CodecFLAC},
+		{"out.mp3", CodecMP3},
+		{"out.opus", CodecOpus},
+		{"out.wav", CodecWAV},
+		{"out.m4a", CodecAAC},
+		{"out.ogg", CodecVorbis},
+		{"out.m4a", CodecALAC},
+	}
+	for _, c := range cases {
+		cmd, err := buildCommand("in.webm", c.out, Spec{Codec: c.codec})
+		if err != nil {
+			t.Fatalf("buildCommand(%q): %v", c.out, err)
+		}
+		if hasFlag(cmd.Args, "-f") {
+			t.Errorf("%s to %q should infer the container (no -f): %v", c.codec, c.out, cmd.Args)
+		}
+	}
+}
+
 func TestBuildCommand_LossyDefaults(t *testing.T) {
 	cases := []struct {
 		name  string

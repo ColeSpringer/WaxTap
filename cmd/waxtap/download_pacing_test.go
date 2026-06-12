@@ -117,7 +117,7 @@ func TestDownloadFlagsResolveSleepValidation(t *testing.T) {
 			if tt.maxDl != "" {
 				mustSet(t, cmd, "max-downloads", tt.maxDl)
 			}
-			err := df.resolve(cmd, &appConfig{})
+			err := df.resolve(cmd, testResolveEnv())
 			if (err != nil) != tt.wantErr {
 				t.Errorf("resolve() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -130,9 +130,38 @@ func TestResolveRejectsNegativeMaxItems(t *testing.T) {
 	cmd := &cobra.Command{Use: "download"}
 	bindDownloadFlags(cmd, df)
 	mustSet(t, cmd, "max-items", "-1")
-	if err := df.resolve(cmd, &appConfig{}); err == nil {
+	if err := df.resolve(cmd, testResolveEnv()); err == nil {
 		t.Error("--max-items -1 should be rejected (it would otherwise page the whole playlist)")
 	}
+}
+
+// testResolveEnv returns an appEnv that discards informational output.
+func testResolveEnv() *appEnv {
+	return &appEnv{cfg: &appConfig{}, out: io.Discard, errOut: io.Discard}
+}
+
+func TestResolveConcurrency(t *testing.T) {
+	t.Run("negative rejected", func(t *testing.T) {
+		df := &downloadFlags{}
+		cmd := &cobra.Command{Use: "download"}
+		bindDownloadFlags(cmd, df)
+		mustSet(t, cmd, "concurrency", "-1")
+		if err := df.resolve(cmd, testResolveEnv()); err == nil {
+			t.Error("--concurrency -1 should be rejected")
+		}
+	})
+	t.Run("clamped above the ceiling", func(t *testing.T) {
+		df := &downloadFlags{}
+		cmd := &cobra.Command{Use: "download"}
+		bindDownloadFlags(cmd, df)
+		mustSet(t, cmd, "concurrency", "99999")
+		if err := df.resolve(cmd, testResolveEnv()); err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if df.concurrency != maxConcurrency {
+			t.Errorf("concurrency = %d, want clamp to %d", df.concurrency, maxConcurrency)
+		}
+	})
 }
 
 func mustSet(t *testing.T, cmd *cobra.Command, name, val string) {

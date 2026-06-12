@@ -82,6 +82,21 @@ func TestCleanMessage(t *testing.T) {
 	}
 }
 
+func TestErrorHint_WebEmbeddedNotEmbeddable(t *testing.T) {
+	err := &waxtap.PlayabilityError{
+		Status:   "ERROR",
+		Reason:   "video may not be embeddable; try --client web or android_vr",
+		Sentinel: waxtap.ErrVideoUnavailable,
+	}
+	hint := errorHint(err)
+	if !strings.Contains(hint, "--client web") {
+		t.Errorf("errorHint = %q, want it to suggest --client web for a non-embeddable video", hint)
+	}
+	if h := errorHint(waxtap.ErrVideoUnavailable); strings.Contains(h, "embed") {
+		t.Errorf("errorHint(ErrVideoUnavailable) = %q, should not mention embedding", h)
+	}
+}
+
 func TestExitCodeFor(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -95,11 +110,14 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrRateLimited, 5},
 		{waxtap.ErrFFmpegNotFound, 6},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
+		{waxtap.ErrNeedsPOToken, 8},     // distinct precondition failure
 		{&usageError{"bad"}, 2},
 		{waxtap.ErrInvalidVideoID, 2},
 		{waxtap.ErrVideoIDTooShort, 2},
 		{waxtap.ErrInvalidPlaylistID, 2},
 		{waxtap.ErrIncompatibleSpec, 2},
+		{waxtap.ErrUnsupportedInput, 2}, // a correctable bad local input
+		{waxtap.ErrIsPlaylist, 2},       // user can select the playlist command
 		{waxtap.ErrInvalidConfig, 2},
 		{errFake("other"), 1},
 	}

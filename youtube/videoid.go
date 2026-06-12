@@ -67,7 +67,9 @@ func ExtractVideoID(input string) (string, error) {
 	if id, ok := idFromLooseText(s); ok {
 		return id, nil
 	}
-	if countIDChars(s) < idLen {
+	// Length determines whether malformed input is too short or invalid. A token
+	// with 11 characters and an invalid symbol is long enough but malformed.
+	if len(s) < idLen {
 		return "", waxerr.ErrVideoIDTooShort
 	}
 	return "", waxerr.ErrInvalidVideoID
@@ -187,14 +189,4 @@ func firstSegment(p string) string {
 		return segs[0]
 	}
 	return ""
-}
-
-func countIDChars(s string) int {
-	n := 0
-	for _, r := range s {
-		if isIDChar(r) {
-			n++
-		}
-	}
-	return n
 }

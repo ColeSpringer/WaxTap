@@ -109,8 +109,10 @@ func renderInfoHuman(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, r
 }
 
 func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *waxtap.ResolvedStream) error {
-	formats := make([]formatJSON, len(v.Formats))
-	for i, f := range v.Formats {
+	// Match the human display without changing the selection indexed by bestIdx.
+	deduped := dedupFormats(v.Formats)
+	formats := make([]formatJSON, len(deduped))
+	for i, f := range deduped {
 		formats[i] = formatToJSON(f)
 	}
 	out := struct {

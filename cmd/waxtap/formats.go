@@ -46,7 +46,8 @@ func newFormatsCmd() *cobra.Command {
 }
 
 // audioFormats keeps the audio candidates, falling back to all formats when none
-// are explicitly labeled audio (some player responses omit the MIME prefix).
+// are explicitly labeled audio (some player responses omit the MIME prefix). The
+// result is deduplicated for display.
 func audioFormats(all []waxtap.Format) []waxtap.Format {
 	var audio []waxtap.Format
 	for _, f := range all {
@@ -55,9 +56,35 @@ func audioFormats(all []waxtap.Format) []waxtap.Format {
 		}
 	}
 	if len(audio) == 0 {
-		return all
+		return dedupFormats(all)
 	}
-	return audio
+	return dedupFormats(audio)
+}
+
+// dedupFormats removes repeated display rows while retaining distinct audio
+// tracks and DRC variants. The first occurrence wins to preserve source order.
+// Stream selection continues to use the full format list.
+func dedupFormats(formats []waxtap.Format) []waxtap.Format {
+	type key struct {
+		itag  int
+		track string
+		drc   waxtap.Tri
+	}
+	seen := make(map[key]bool, len(formats))
+	out := make([]waxtap.Format, 0, len(formats))
+	for _, f := range formats {
+		track := f.Language
+		if f.AudioTrack != nil && f.AudioTrack.ID != "" {
+			track = f.AudioTrack.ID
+		}
+		k := key{itag: f.Itag, track: track, drc: f.IsDRC}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 // renderFormatsTable writes an aligned table of formats to stdout.

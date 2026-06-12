@@ -166,6 +166,26 @@ waxtap download <playlist-url> -d ./music --concurrency 1 --sleep-interval 5s --
 waxtap doctor
 ```
 
+#### Exit codes
+
+The CLI maps each failure class to a stable exit code so scripts can branch
+without parsing messages (`--json` carries the same class in `error.code`):
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | unclassified error |
+| 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported local input, unknown `--client`, or invalid config |
+| 3 | video unavailable, restricted, login required, live, or no audio formats |
+| 4 | extraction, cipher, or playlist parsing failure (often indicates WaxTap needs an update) |
+| 5 | rate limited |
+| 6 | ffmpeg/ffprobe not found |
+| 7 | incomplete stream (delivery ended early; another client may work) |
+| 8 | PO token required (none configured, mint failed, or YouTube rejected it) |
+| 130 | canceled (SIGINT) |
+
+Scripts may rely on these codes.
+
 ### Library
 
 ```go
@@ -250,16 +270,24 @@ Useful operational knobs:
   258) instead of ranking by raw bitrate; `any` restores the bitrate-only ranking.
   iOS exposes only ~128 kbps stereo, while android_vr and WEB also expose 5.1, so
   `--channels surround` needs one of those clients. Selection prefers a native
-  match first; `--downmix` folds a selected higher-channel source to the requested
-  layout. It never upmixes and requires `--channels mono` or `stereo`. The
+  match first. Without a native mono or stereo match, it prefers a source that can
+  be downmixed to the requested layout over one that would require upmixing.
+  Among downmixable sources, codec preference and non-DRC audio take precedence
+  over channel count. If those are equal, the source with fewer channels wins.
+  For example, a stereo request chooses 5.1 over mono, while a mono request
+  chooses stereo over a comparable 5.1 source. `--downmix` applies the selected
+  downmix. It never upmixes and requires `--channels mono` or `stereo`. The
   `channels` and `downmix` config keys set the defaults. Library callers opt in
   with `AudioSelector.WithChannels` and `ProcessSpec.Channels`.
 - Extraction control: `--no-fallback` (download and process commands) prevents
   fallback from a WEB player context to the configured client chain, disables
   watch-page extraction, and prevents retrying another client after an incomplete
   download. The configured extraction chain can still select a working client.
-  Use `--client` to force a single client. Results report the client used as
-  `Client:` (and `client` in `--json`).
+  Use `--client` to force a single client. If a forced non-WEB client fails,
+  WaxTap may still use the WEB watch page. It reports this with a
+  `fallback-profile` warning and a matching stderr line. `--no-fallback`
+  disables the watch-page fallback. Results report the client used as `Client:`
+  (and `client` in `--json`).
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
   extraction failures, and `WAXTAP_SABR_DUMP_DIR` to write each raw SABR
   round for offline inspection.
@@ -310,12 +338,14 @@ client chain. After a provider failure, a short cooldown prevents the unavailabl
 sidecar from being queried for every video in a batch. Each context fetch is
 bounded by `webContextTimeoutSeconds` / `WAXTAP_WEB_CONTEXT_TIMEOUT` (default 20s).
 
-Fallback applies to the **default multi-client chain**: it tries the next client
-when an attempt cannot deliver the stream. A forced single client
-(`--client web`) has no alternative. Pass `--no-fallback` to return the preferred
-attempt's error instead of trying another path. For example, a capped WEB context
-returns `ErrIncompleteStream` (exit 7) instead of falling back to android_vr.
-Every result reports the client used as `Client:` (and `client` in `--json`).
+Fallback normally moves through the **default multi-client chain**. A forced
+non-WEB client can still fall back to the WEB watch page. When that happens,
+WaxTap reports that WEB delivered the result instead of the requested client.
+Forcing `--client web` does not count as a substitution because the watch page
+also uses WEB. Pass `--no-fallback` to return the forced client's error without
+trying another path. For example, a capped WEB context returns
+`ErrIncompleteStream` (exit 7) instead of falling back to android_vr. Every
+result reports the client used as `Client:` (and `client` in `--json`).
 
 ### Session adoption (byte-exact identity)
 

@@ -12,6 +12,42 @@ func TestSchemaVersionIsThree(t *testing.T) {
 	}
 }
 
+func TestDedupFormats(t *testing.T) {
+	// Preserve language and DRC variants while removing exact display duplicates.
+	in := []waxtap.Format{
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000},
+		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000},
+		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "es"},
+		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000, IsDRC: waxtap.Yes},
+	}
+	got := dedupFormats(in)
+
+	if len(got) != 4 {
+		t.Fatalf("dedupFormats kept %d rows, want 4: %+v", len(got), got)
+	}
+	// The first occurrence determines display order.
+	if got[0].Itag != 251 || got[1].Itag != 140 {
+		t.Errorf("order changed: got first itags %d, %d, want 251, 140", got[0].Itag, got[1].Itag)
+	}
+	var haveES, haveDRC bool
+	for _, f := range got {
+		if f.Itag == 251 && f.Language == "es" {
+			haveES = true
+		}
+		if f.Itag == 140 && f.IsDRC == waxtap.Yes {
+			haveDRC = true
+		}
+	}
+	if !haveES {
+		t.Error("dropped the Spanish-language 251 variant")
+	}
+	if !haveDRC {
+		t.Error("dropped the DRC 140 variant")
+	}
+}
+
 func TestFormatToJSON_AudioQuality(t *testing.T) {
 	f := waxtap.Format{Itag: 251, Codec: "opus", Extension: "webm", AverageBitrate: 105000, AudioQuality: waxtap.QualityMedium}
 	if got := formatToJSON(f).AudioQuality; got != "medium" {

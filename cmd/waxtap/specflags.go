@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -205,17 +206,26 @@ func parseTimestamp(s string) (time.Duration, error) {
 	return 0, usagef("invalid timestamp %q", s)
 }
 
-// parseClock parses a colon-separated [HH:]MM:SS[.frac] timestamp.
+// parseClock parses a colon-separated [HH:]MM:SS[.frac] timestamp. Only the
+// seconds field may be fractional, and each field after the first must be less
+// than 60.
 func parseClock(s string) (time.Duration, error) {
 	parts := strings.Split(s, ":")
 	if len(parts) < 2 || len(parts) > 3 {
 		return 0, usagef("invalid timestamp %q", s)
 	}
 	var total float64
-	for _, p := range parts {
+	last := len(parts) - 1
+	for i, p := range parts {
 		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
-		if err != nil || v < 0 {
+		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
 			return 0, usagef("invalid timestamp %q", s)
+		}
+		if i != last && v != math.Trunc(v) {
+			return 0, usagef("invalid timestamp %q: only the seconds field may be fractional", s)
+		}
+		if i != 0 && v >= 60 {
+			return 0, usagef("invalid timestamp %q: minutes and seconds must be below 60", s)
 		}
 		total = total*60 + v
 	}

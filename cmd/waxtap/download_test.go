@@ -1,6 +1,35 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/colespringer/waxtap"
+	"github.com/spf13/cobra"
+)
+
+func TestResolveValidatesProcessSpec(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+	}{
+		{"negative bitrate", map[string]string{"transcode": "mp3", "bitrate": "-1"}},
+		{"out-of-range loudness target", map[string]string{"transcode": "flac", "normalize": "true", "loudness-target": "50"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			df := &downloadFlags{}
+			cmd := &cobra.Command{Use: "download"}
+			bindDownloadFlags(cmd, df)
+			for name, val := range tt.set {
+				mustSet(t, cmd, name, val)
+			}
+			if err := df.resolve(cmd, testResolveEnv()); !errors.Is(err, waxtap.ErrIncompatibleSpec) {
+				t.Fatalf("resolve err = %v, want ErrIncompatibleSpec", err)
+			}
+		})
+	}
+}
 
 // TestBuildProcessSpecNormalizeRequiresEncode covers flag combinations before
 // any download starts.

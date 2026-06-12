@@ -119,14 +119,24 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 }
 
 // needsForcedMuxer reports whether ffmpeg needs the preset's -f argument because
-// the output path does not identify a container.
+// the output path does not identify a usable container.
 //
-// ALAC is currently the only preset with a forced muxer. Its codec-name extension,
-// ".alac", is not a container. If another codec gains a forced muxer, this rule
-// may need to become preset-specific.
+// An empty extension always needs the canonical muxer. Codec-name extensions
+// need it only when the name is not a container, as with ".vorbis" and ".alac".
+// Real container extensions remain authoritative so ffmpeg can infer them.
 func needsForcedMuxer(output string, codec Codec) bool {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
-	return ext == "" || ext == codec.String()
+	if ext == "" {
+		return true
+	}
+	switch codec {
+	case CodecVorbis:
+		return ext == "vorbis"
+	case CodecALAC:
+		return ext == "alac"
+	default:
+		return false
+	}
 }
 
 // RunnerConfig configures a Runner. The binary paths are looked up in PATH when
@@ -335,6 +345,28 @@ func (e *RunError) Error() string {
 }
 
 func (e *RunError) Unwrap() error { return e.Err }
+
+// RedactPath replaces occurrences of from with to in the message of a RunError
+// chain. It preserves wrapping and returns other errors unchanged.
+func RedactPath(err error, from, to string) error {
+	if err == nil || from == "" || from == to {
+		return err
+	}
+	if _, ok := errors.AsType[*RunError](err); !ok {
+		return err
+	}
+	return &redactedError{err: err, from: from, to: to}
+}
+
+// redactedError rewrites the wrapped error's message while preserving its chain.
+type redactedError struct {
+	err      error
+	from, to string
+}
+
+func (e *redactedError) Error() string { return strings.ReplaceAll(e.err.Error(), e.from, e.to) }
+
+func (e *redactedError) Unwrap() error { return e.err }
 
 // lastLines returns at most n trailing non-empty lines of s, collapsed onto one
 // line for a compact error message.

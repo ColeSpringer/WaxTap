@@ -3,6 +3,7 @@ package waxtap
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -62,6 +63,22 @@ func TestProcessAlbumValidation(t *testing.T) {
 		_, err := c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: FormatFLAC})
 		if !errors.Is(err, ErrIncompatibleSpec) {
 			t.Errorf("cross-clobber = %v, want ErrIncompatibleSpec", err)
+		}
+	})
+
+	t.Run("out-of-range or non-finite target rejected", func(t *testing.T) {
+		tracks := []AlbumTrack{{Input: "a.flac", Output: "out/a.flac"}}
+		for _, target := range []float64{-100, 0, math.NaN(), math.Inf(1)} {
+			if _, err := c.ProcessAlbum(ctx, tracks, target, TranscodeSpec{Format: FormatFLAC}); !errors.Is(err, ErrIncompatibleSpec) {
+				t.Errorf("target %v = %v, want ErrIncompatibleSpec", target, err)
+			}
+		}
+	})
+
+	t.Run("negative bitrate rejected", func(t *testing.T) {
+		tracks := []AlbumTrack{{Input: "a.flac", Output: "out/a.flac"}}
+		if _, err := c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: FormatMP3, Bitrate: -1}); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("negative bitrate = %v, want ErrIncompatibleSpec", err)
 		}
 	})
 }

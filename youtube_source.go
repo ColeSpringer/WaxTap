@@ -106,6 +106,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	if err != nil {
 		return nil, err
 	}
+	c.warnClientSubstitution(em, ext)
 	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName()}
 
 	// SABR reloads are pinned to the original attempt by SABRStream.reextract.
@@ -115,6 +116,14 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	}
 	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext.Attempt(), selFmt.Itag, em)}
 	return a, nil
+}
+
+// warnClientSubstitution adds a result warning when the WEB watch-page fallback
+// replaces a forced client.
+func (c *Client) warnClientSubstitution(em *emitter, ext *youtube.Extraction) {
+	if from := ext.SubstitutedFrom(); from != "" {
+		em.warn(WarnFallbackProfile, fmt.Sprintf("forced client %s was not delivered; served WEB via the watch-page fallback", from))
+	}
 }
 
 // directRefresh builds a signed-URL refresh callback pinned to the original

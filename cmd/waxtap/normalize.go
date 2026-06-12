@@ -13,18 +13,19 @@ import (
 
 func newNormalizeCmd() *cobra.Command {
 	var (
-		apply        bool
-		target       float64
-		transcode    string
-		bitrate      int
-		out          string
-		album        bool
-		dir          string
-		itag         int
-		codec        string
-		noFallback   bool
-		sourcePolicy string
-		collisionStr string
+		apply          bool
+		target         float64
+		loudnessTarget float64
+		transcode      string
+		bitrate        int
+		out            string
+		album          bool
+		dir            string
+		itag           int
+		codec          string
+		noFallback     bool
+		sourcePolicy   string
+		collisionStr   string
 	)
 	cmd := &cobra.Command{
 		Use:   "normalize <input> [output]",
@@ -39,7 +40,11 @@ func newNormalizeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			doApply := apply || cmd.Flags().Changed("target")
+			target, err = resolveLoudnessTarget(cmd, target, loudnessTarget)
+			if err != nil {
+				return err
+			}
+			doApply := apply || cmd.Flags().Changed("target") || cmd.Flags().Changed("loudness-target")
 
 			if album {
 				return runAlbum(cmd, env, args, albumParams{
@@ -101,7 +106,8 @@ func newNormalizeCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.BoolVar(&apply, "apply", false, "normalize (re-encode) instead of only measuring")
-	f.Float64Var(&target, "target", -14, "target integrated loudness (LUFS) for --apply")
+	f.Float64Var(&target, "target", -14, "target integrated loudness (LUFS) for --apply (alias: --loudness-target)")
+	f.Float64Var(&loudnessTarget, "loudness-target", -14, "alias of --target (consistent with download --loudness-target)")
 	f.StringVar(&transcode, "transcode", "", "output format for --apply: flac|alac|wav|mp3|aac|opus|vorbis")
 	f.IntVar(&bitrate, "bitrate", 0, "target bitrate for lossy formats")
 	f.StringVarP(&out, "out", "o", "", "output file path (single --apply)")
@@ -113,6 +119,21 @@ func newNormalizeCmd() *cobra.Command {
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
 	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
 	return cmd
+}
+
+// resolveLoudnessTarget returns the value supplied through either target flag.
+// Conflicting values are rejected.
+func resolveLoudnessTarget(cmd *cobra.Command, target, alias float64) (float64, error) {
+	tset := cmd.Flags().Changed("target")
+	aset := cmd.Flags().Changed("loudness-target")
+	switch {
+	case tset && aset && target != alias:
+		return 0, usagef("--target and --loudness-target are aliases; set only one (got %g and %g)", target, alias)
+	case aset:
+		return alias, nil
+	default:
+		return target, nil
+	}
 }
 
 // runMeasure measures a single source and prints its loudness without writing a

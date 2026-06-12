@@ -309,12 +309,24 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 	// The watch page is a separate fallback attempt and participates in error
 	// precedence like the profile attempts.
 	if !skip[AttemptWatchPage] && ctx.Err() == nil && !errors.Is(bestErr, waxerr.ErrRateLimited) {
+		// The watch page runs as WEB. Record and report any substitution for a
+		// forced non-WEB client.
+		substituting := c.forcedNonWebSingle()
+		if substituting {
+			c.log.WarnContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
+		}
 		ext, ferr := c.extractFromWatchPage(ctx, videoID)
 		if ferr == nil {
+			if substituting {
+				ext.substitutedFrom = c.profiles[0].Name
+			}
 			c.log.DebugContext(ctx, "extracted via watch-page fallback")
 			return ext, nil
 		}
 		bestErr = waxerr.PreferErr(bestErr, ferr)
+		if substituting {
+			bestErr = fmt.Errorf("forced client %s failed and the WEB watch-page fallback also failed: %w", c.profiles[0].Name, bestErr)
+		}
 	}
 
 	if bestErr == nil {
@@ -351,7 +363,7 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 	// skip the provider lookup.
 	playerResp, err := c.fetchPOToken(ctx, profile, sess, videoID, potoken.ScopePlayer, nil)
 	if err != nil {
-		c.log.DebugContext(ctx, "player PO token unavailable; trying next client", "client", profile.Name, "err", err)
+		c.log.DebugContext(ctx, "player PO token unavailable; trying next attempt", "client", profile.Name, "err", err)
 		return nil, err
 	}
 	var playerTok string
@@ -365,14 +377,14 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 
 	body, err := c.innertubePost(ctx, profile, sess, playerEndpoint, c.newPlayerRequest(profile, sess, playerRequestOpts{VideoID: videoID, POToken: playerTok, STS: sts}))
 	if err != nil {
-		c.log.DebugContext(ctx, "player request failed; trying next client", "client", profile.Name, "err", err)
+		c.log.DebugContext(ctx, "player request failed; trying next attempt", "client", profile.Name, "err", err)
 		return nil, err
 	}
 
 	pr, err := parsePlayerResponse(body)
 	if err != nil {
 		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-		c.log.DebugContext(ctx, "player-response parse failed; trying next client", "client", profile.Name, "err", err)
+		c.log.DebugContext(ctx, "player-response parse failed; trying next attempt", "client", profile.Name, "err", err)
 		return nil, &waxerr.ExtractionError{Stage: "player-response", Cause: err}
 	}
 	sess.learnVisitorData(pr.ResponseContext.VisitorData)
@@ -381,22 +393,27 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 		// Playability failures can be client-specific: stale versions, sparse
 		// context, and bot checks often report generic ERROR or UNPLAYABLE.
 		result := perr
+		switch {
 		// sts==0 here means the timestamp lookup failed, so the resulting
 		// UNPLAYABLE is a maintenance problem, not an unavailable video. Reclassify
 		// it so the terminal error names that cause instead of a generic
 		// ErrVideoUnavailable.
-		if profile.NeedsSignatureTimestamp && sts == 0 {
+		case profile.NeedsSignatureTimestamp && sts == 0:
 			result = missingTimestampError(perr)
+		// web_embedded reports a bare ERROR for videos the owner blocked from
+		// embedding. Annotate the reason so the user knows to switch clients.
+		case isWebEmbedded(profile):
+			result = annotateEmbedError(perr)
 		}
 		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-		c.log.DebugContext(ctx, "playability failure; trying next client", "client", profile.Name, "err", result)
+		c.log.DebugContext(ctx, "playability failure; trying next attempt", "client", profile.Name, "err", result)
 		return nil, result
 	}
 
 	video, raw, err := pr.toVideo(videoID)
 	if err != nil {
 		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
-		c.log.DebugContext(ctx, "no usable formats; trying next client", "client", profile.Name, "err", err)
+		c.log.DebugContext(ctx, "no usable formats; trying next attempt", "client", profile.Name, "err", err)
 		return nil, err
 	}
 
@@ -424,6 +441,28 @@ func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, 
 		c.log.WarnContext(ctx, "signature timestamp resolved to zero; omitting field (expect UNPLAYABLE)", "client", profile.Name)
 	}
 	return sts
+}
+
+// embedHint is appended to generic web_embedded errors.
+const embedHint = "video may not be embeddable; try --client web or android_vr"
+
+// isWebEmbedded reports whether profile is the WEB_EMBEDDED_PLAYER client.
+func isWebEmbedded(p ClientProfile) bool {
+	return p.InnerTubeName == profileWebEmbedded.InnerTubeName
+}
+
+// annotateEmbedError adds an embeddability hint to a generic web_embedded ERROR.
+// It preserves the playability status and sentinel.
+func annotateEmbedError(perr error) error {
+	pe, ok := errors.AsType[*waxerr.PlayabilityError](perr)
+	if !ok || pe.Status != "ERROR" {
+		return perr
+	}
+	reason := embedHint
+	if pe.Reason != "" {
+		reason = pe.Reason + " (" + embedHint + ")"
+	}
+	return &waxerr.PlayabilityError{Status: pe.Status, Reason: reason, Sentinel: pe.Sentinel}
 }
 
 // missingTimestampError turns an sts=0 UNPLAYABLE into an ExtractionError
@@ -574,6 +613,11 @@ func (c *Client) browseInitial(ctx context.Context, profile ClientProfile, sess 
 // Context errors and hard bad-id failures are surfaced as-is.
 func retryableBrowse(err error) bool {
 	return errors.Is(err, waxerr.ErrPlaylistParse)
+}
+
+// forcedNonWebSingle reports whether the chain contains one non-WEB client.
+func (c *Client) forcedNonWebSingle() bool {
+	return len(c.profiles) == 1 && c.profiles[0].InnerTubeName != profileWeb.InnerTubeName
 }
 
 // playlistProfile returns the first configured profile that supports browse

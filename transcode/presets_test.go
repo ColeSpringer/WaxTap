@@ -7,17 +7,18 @@ func TestPresetTable(t *testing.T) {
 		codec     Codec
 		encoder   string
 		extension string
+		muxer     string
 		lossless  bool
 		name      string
 	}{
-		{CodecCopy, "copy", "", true, "copy"},
-		{CodecFLAC, "flac", "flac", true, "flac"},
-		{CodecALAC, "alac", "m4a", true, "alac"},
-		{CodecWAV, "pcm_s16le", "wav", true, "wav"},
-		{CodecMP3, "libmp3lame", "mp3", false, "mp3"},
-		{CodecAAC, "aac", "m4a", false, "aac"},
-		{CodecOpus, "libopus", "opus", false, "opus"},
-		{CodecVorbis, "libvorbis", "ogg", false, "vorbis"},
+		{CodecCopy, "copy", "", "", true, "copy"},
+		{CodecFLAC, "flac", "flac", "flac", true, "flac"},
+		{CodecALAC, "alac", "m4a", "ipod", true, "alac"},
+		{CodecWAV, "pcm_s16le", "wav", "wav", true, "wav"},
+		{CodecMP3, "libmp3lame", "mp3", "mp3", false, "mp3"},
+		{CodecAAC, "aac", "m4a", "ipod", false, "aac"},
+		{CodecOpus, "libopus", "opus", "opus", false, "opus"},
+		{CodecVorbis, "libvorbis", "ogg", "ogg", false, "vorbis"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -27,6 +28,9 @@ func TestPresetTable(t *testing.T) {
 			}
 			if p.encoder != c.encoder {
 				t.Errorf("encoder = %q, want %q", p.encoder, c.encoder)
+			}
+			if p.muxer != c.muxer {
+				t.Errorf("muxer = %q, want %q", p.muxer, c.muxer)
 			}
 			if c.codec.Extension() != c.extension {
 				t.Errorf("Extension() = %q, want %q", c.codec.Extension(), c.extension)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -79,6 +80,9 @@ func New(opts Options) (*Client, error) {
 	if opts.Politeness.Cooldown < 0 {
 		return nil, configErr("invalid Cooldown %s: must be >= 0", opts.Politeness.Cooldown)
 	}
+	if q := opts.Politeness.PerHostQPS; math.IsNaN(q) || math.IsInf(q, 0) || q < 0 {
+		return nil, configErr("invalid PerHostQPS %v: must be a finite value >= 0", q)
+	}
 	// The WEB player-context path mints its GVS token during SABR setup. Reject a
 	// missing provider during construction instead of failing each download.
 	if opts.PlayerContextProvider != nil && opts.POTokenProvider == nil {
@@ -92,7 +96,8 @@ func New(opts Options) (*Client, error) {
 	case opts.Client != "":
 		var err error
 		if profiles, err = youtube.BuildClientChain(opts.Client, opts.ChromeMajor); err != nil {
-			return nil, err
+			// Preserve the parser detail while classifying the option for callers.
+			return nil, configErr("%v", err)
 		}
 	case opts.ProfileOverridePath != "":
 		var err error

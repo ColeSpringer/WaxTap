@@ -61,7 +61,8 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		return Result{}, err // spec error (e.g. copy + filters)
 	}
 	if _, err := r.Run(ctx, cmd); err != nil {
-		return Result{}, err
+		// ffmpeg's error names the staged temp; show the caller's output path.
+		return Result{}, RedactPath(err, staged.Path(), output)
 	}
 	if err := staged.Commit(); err != nil {
 		return Result{}, err

@@ -686,8 +686,8 @@ func TestWithChannels_AnyIsNeutral(t *testing.T) {
 	}
 }
 
-func TestWithChannels_NoNativeMatchFallsBack(t *testing.T) {
-	// No mono track exists; the preference is inert and the best available wins.
+func TestWithChannels_NoExactMatchPrefersFewerChannels(t *testing.T) {
+	// Without a mono track, stereo loses less information than 5.1 in a downmix.
 	cands := []Format{
 		audchan(258, "mp4a.40.2", 387000, 6),
 		audchan(140, "mp4a.40.2", 128000, 2),
@@ -696,8 +696,99 @@ func TestWithChannels_NoNativeMatchFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("no mono match chose itag %d, want 140 (fewest channels: stereo over 5.1)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_StereoNoMatchPrefersDownmixableSource(t *testing.T) {
+	// Only the 5.1 source can be downmixed to stereo.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(599, "mp4a.40.5", 32000, 1),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cands[idx].Itag != 258 {
-		t.Fatalf("no-native-match chose itag %d, want best available 258", cands[idx].Itag)
+		t.Fatalf("stereo request with mono+5.1 chose itag %d, want downmixable 5.1 itag 258", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_StereoNoMatchPrefersFewerDownmixableChannels(t *testing.T) {
+	// Both sources can satisfy stereo, but the 3-channel source discards less.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(257, "mp4a.40.2", 200000, 3),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 257 {
+		t.Fatalf("stereo request chose itag %d, want 3-channel itag 257", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_NonDRCOutranksFewerChannels(t *testing.T) {
+	// DRC status takes precedence over the fewer-channels preference.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6), // non-DRC (default)
+		audchan(257, "mp4a.40.2", 200000, 3),
+	}
+	cands[1].IsDRC = Yes
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 258 {
+		t.Fatalf("chose itag %d, want 258 (non-DRC outranks the fewer-channels tiebreak)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_PreferCodecOutranksFewerChannels(t *testing.T) {
+	// An explicit codec preference takes precedence over channel count.
+	cands := []Format{
+		audchan(251, "opus", 200000, 6),
+		audchan(257, "mp4a.40.2", 160000, 3),
+	}
+	idx, err := BestAudio().WithChannels(LayoutStereo).Select(cands, PreferCodec("opus"), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 251 {
+		t.Fatalf("chose itag %d, want 251 (prefer:opus outranks the fewer-channels tiebreak)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_FewerChannelsOutranksTierAndBitrate(t *testing.T) {
+	// With codec and DRC equal, fewer channels take precedence over bitrate.
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	idx, err := BestAudio().WithChannels(LayoutMono).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("chose itag %d, want 140 (fewer channels beats higher-bitrate 5.1)", cands[idx].Itag)
+	}
+}
+
+func TestWithChannels_UnknownChannelsDoNotOutrankKnown(t *testing.T) {
+	// Missing channel metadata must not outrank a known count.
+	cands := []Format{
+		audchan(251, "opus", 999000, 0),      // unknown channels, highest bitrate
+		audchan(140, "mp4a.40.2", 128000, 2), // known stereo
+	}
+	idx, err := BestAudio().WithChannels(LayoutMono).Select(cands, MinimizeLoss(), Target{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cands[idx].Itag != 140 {
+		t.Fatalf("unknown-channel candidate won (itag %d); want the known stereo 140", cands[idx].Itag)
 	}
 }
 

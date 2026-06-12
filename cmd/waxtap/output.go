@@ -247,6 +247,9 @@ func errorHint(err error) string {
 	if _, ok := errors.AsType[*sidecarError](err); ok {
 		return "start the provider sidecar or correct its URL (--potoken-url/--player-context-url/--session-url)"
 	}
+	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok && strings.Contains(pe.Reason, "embeddable") {
+		return "non-embeddable videos fail on web_embedded; use --client web or --client android_vr to avoid the embed restriction"
+	}
 	switch {
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
@@ -340,10 +343,15 @@ func exitCodeFor(err error) int {
 		// Incomplete delivery is an upstream or content-specific failure, not an
 		// extraction or cipher maintenance failure.
 		return 7
+	case errors.Is(err, waxtap.ErrNeedsPOToken):
+		// A missing or rejected PO token is a distinct precondition failure.
+		return 8
 	case errors.Is(err, waxtap.ErrInvalidVideoID),
 		errors.Is(err, waxtap.ErrVideoIDTooShort),
 		errors.Is(err, waxtap.ErrInvalidPlaylistID),
 		errors.Is(err, waxtap.ErrIncompatibleSpec),
+		errors.Is(err, waxtap.ErrUnsupportedInput),
+		errors.Is(err, waxtap.ErrIsPlaylist),
 		errors.Is(err, waxtap.ErrInvalidConfig):
 		// These errors describe requests the user can correct.
 		return 2

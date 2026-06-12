@@ -131,12 +131,14 @@ func bestAmong(candidates []Format, keep func(Format) bool, better func(a, b For
 // betterThan builds the audio-ranking comparator. Candidates are ranked by:
 //
 //  1. original track, because the wrong language is a content error
-//  2. requested channel layout, when one was requested
-//  3. preferred codec family, when one was requested
-//  4. non-DRC audio
-//  5. higher reported quality tier, when useTier is true
-//  6. Opus over other codecs, when useTier is true
-//  7. higher effective bitrate
+//  2. exact requested channel layout, when one was requested
+//  3. ability to downmix to a mono or stereo request
+//  4. preferred codec family, when one was requested
+//  5. non-DRC audio
+//  6. fewer channels among sources downmixable to mono or stereo
+//  7. higher reported quality tier, when useTier is true
+//  8. Opus over other codecs, when useTier is true
+//  9. higher effective bitrate
 //
 // Original-language selection takes precedence over layout, so a dubbed track
 // cannot win only because it matches the requested layout. If tier metadata is
@@ -152,6 +154,11 @@ func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b 
 			if am, bm := channelMatches(layout, a.Channels), channelMatches(layout, b.Channels); am != bm {
 				return am // a matches the requested layout and b does not
 			}
+			// Prefer a source that can be downmixed to the requested layout over
+			// one that would require upmixing.
+			if ra, rb := downmixRank(layout, a.Channels), downmixRank(layout, b.Channels); ra != rb {
+				return ra > rb
+			}
 		}
 		if prefCodec != "" {
 			if am, bm := codecMatches(prefCodec, a.Codec), codecMatches(prefCodec, b.Codec); am != bm {
@@ -160,6 +167,12 @@ func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b 
 		}
 		if ra, rb := nonDRCRank(a.IsDRC), nonDRCRank(b.IsDRC); ra != rb {
 			return ra > rb
+		}
+		// Among otherwise equal downmixable sources, prefer fewer channels.
+		if layout != LayoutAny {
+			if ra, rb := fewerChannelsRank(layout, a.Channels), fewerChannelsRank(layout, b.Channels); ra != rb {
+				return ra > rb
+			}
 		}
 		if useTier {
 			if ra, rb := int(a.AudioQuality), int(b.AudioQuality); ra != rb {
@@ -171,6 +184,47 @@ func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b 
 		}
 		return a.EffectiveBitrate() > b.EffectiveBitrate()
 	}
+}
+
+// layoutTarget returns the fixed channel count for mono and stereo requests.
+// Other layouts return 0 because they do not use downmix ranking.
+func layoutTarget(layout ChannelLayout) int {
+	switch layout {
+	case LayoutMono:
+		return 1
+	case LayoutStereo:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// downmixRank ranks sources by whether they can satisfy a mono or stereo
+// request without upmixing. A downmixable source ranks above one below the
+// requested count, and a known count ranks above an unknown count.
+func downmixRank(layout ChannelLayout, ch int) int {
+	target := layoutTarget(layout)
+	switch {
+	case target == 0:
+		return 0
+	case ch <= 0:
+		return -2
+	case ch < target:
+		return -1
+	default:
+		return 0
+	}
+}
+
+// fewerChannelsRank prefers fewer channels among sources that can satisfy a mono
+// or stereo request without upmixing. Other sources tie because downmixRank orders
+// them first. betterThan and tierUsable share both ranks to keep their orderings
+// aligned.
+func fewerChannelsRank(layout ChannelLayout, ch int) int {
+	if target := layoutTarget(layout); target == 0 || ch < target {
+		return 0
+	}
+	return -ch
 }
 
 // channelMatches reports whether a stream's channel count satisfies layout.
@@ -200,12 +254,11 @@ func codecPreferenceRank(codec string) int {
 	return 0
 }
 
-// tierUsable reports whether every eligible candidate tied on original track,
-// requested layout, requested codec, and DRC status has a known quality tier.
-// Lower-ranked candidates do not affect the decision. The key mirrors
-// betterThan's order so tiers compare within the layout-preferred group.
+// tierUsable reports whether every eligible candidate tied on all higher-priority
+// criteria has a known quality tier. Its key mirrors betterThan through
+// fewerChannelsRank; lower-ranked candidates do not affect the decision.
 func tierUsable(c []Format, keep func(Format) bool, prefCodec string, layout ChannelLayout) bool {
-	key := func(f Format) [4]int {
+	key := func(f Format) [6]int {
 		lm := 0
 		if channelMatches(layout, f.Channels) {
 			lm = 1
@@ -214,9 +267,9 @@ func tierUsable(c []Format, keep func(Format) bool, prefCodec string, layout Cha
 		if prefCodec != "" && codecMatches(prefCodec, f.Codec) {
 			cm = 1
 		}
-		return [4]int{originalRank(f.IsOriginal), lm, cm, nonDRCRank(f.IsDRC)}
+		return [6]int{originalRank(f.IsOriginal), lm, downmixRank(layout, f.Channels), cm, nonDRCRank(f.IsDRC), fewerChannelsRank(layout, f.Channels)}
 	}
-	var best [4]int
+	var best [6]int
 	have := false
 	for i := range c {
 		if !keep(c[i]) {
@@ -238,7 +291,7 @@ func tierUsable(c []Format, keep func(Format) bool, prefCodec string, layout Cha
 }
 
 // lessKey compares ranking keys lexicographically.
-func lessKey(a, b [4]int) bool {
+func lessKey(a, b [6]int) bool {
 	for i := range a {
 		if a[i] != b[i] {
 			return a[i] < b[i]

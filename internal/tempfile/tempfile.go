@@ -97,12 +97,17 @@ type External struct {
 //
 // The temp name preserves finalPath's extension (for example,
 // out.flac.*.flac), because tools like ffmpeg infer the output container from
-// the filename extension.
+// the filename extension. An extensionless final path uses a dash before the
+// random suffix so the staged path also remains extensionless.
 func NewExternal(finalPath string) (*External, error) {
 	dir := filepath.Dir(finalPath)
 	base := filepath.Base(finalPath)
 	ext := filepath.Ext(base) // includes the dot, or "" when there is none
-	f, err := os.CreateTemp(dir, base+".*"+ext)
+	pattern := base + ".*" + ext
+	if ext == "" {
+		pattern = base + "-*"
+	}
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return nil, err
 	}

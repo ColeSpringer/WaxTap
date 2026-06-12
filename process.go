@@ -189,6 +189,13 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	if spec.Format == FormatCopy {
 		return nil, fmt.Errorf("%w: album normalization requires an encode, not copy", waxerr.ErrIncompatibleSpec)
 	}
+	// Album processing always applies gain and does not build a ProcessSpec.
+	if err := validateLoudness(&LoudnessSpec{Mode: LoudnessApply, Target: target}); err != nil {
+		return nil, err
+	}
+	if err := validateBitrate(&spec); err != nil {
+		return nil, err
+	}
 	for _, t := range tracks {
 		if t.Input == "" || t.Output == "" {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: each track needs an input and an output path")

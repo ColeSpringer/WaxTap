@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// maxConcurrency bounds DownloadPlaylist's worker pool and matches the CLI limit.
+const maxConcurrency = 64
+
 // PlaylistDownloadOptions configures [Client.DownloadPlaylist]. Resolve is
 // required; counts and durations must not be negative.
 type PlaylistDownloadOptions struct {
@@ -83,6 +86,9 @@ func (c *Client) DownloadPlaylist(ctx context.Context, url string, o PlaylistDow
 	}
 	if conc <= 0 {
 		conc = 2
+	}
+	if conc > maxConcurrency {
+		conc = maxConcurrency
 	}
 
 	res := runPlaylist(ctx, pl.Entries, conc, o.MaxDownloads, pickSleepWait(o), o.Resolve, o.OnItem, c.Download)

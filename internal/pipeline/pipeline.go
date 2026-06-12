@@ -200,6 +200,13 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	// explicitly requested stream copy must fail.
 	if spec.Codec == transcode.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
+		// Stream copy requires an output path that identifies a container.
+		// containerAccepts treats empty and "copy" extensions as neutral, so reject
+		// them here before invoking ffmpeg. Downmix is excluded because it encodes
+		// and can use the preset's canonical muxer.
+		if (remux || effectiveCut) && fold == 0 && (ext == "" || ext == "copy") {
+			return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (.webm/.m4a/.ogg/.mka)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+		}
 		if !containerAccepts(ext, res.SourceCodec) {
 			if remux || spec.CutMode == cut.ModeCopy {
 				return Result{}, fmt.Errorf("%w: cannot stream-copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)

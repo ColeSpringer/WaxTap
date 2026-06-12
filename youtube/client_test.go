@@ -198,6 +198,38 @@ func TestExtractExcluding_WatchPageIsIndependentAttempt(t *testing.T) {
 	if ext.Attempt() != AttemptWatchPage {
 		t.Errorf("attempt = %q, want watch-page", ext.Attempt())
 	}
+	// The extraction records the forced client replaced by WEB.
+	if got := ext.SubstitutedFrom(); got != "ANDROID_VR" {
+		t.Errorf("SubstitutedFrom = %q, want ANDROID_VR", got)
+	}
+}
+
+func TestExtractExcluding_DefaultChainWatchPageIsNotSubstitution(t *testing.T) {
+	// A normal fallback through the default chain is not a client substitution.
+	login := readFixture(t, "player_login_required.json")
+	html := readFixture(t, "watch_page.html")
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/watch":
+			return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, login), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}))
+
+	ext, err := c.Extract(context.Background(), "testVideo01")
+	if err != nil {
+		t.Fatalf("default chain watch-page rescue: %v", err)
+	}
+	if ext.Attempt() != AttemptWatchPage {
+		t.Fatalf("attempt = %q, want watch-page", ext.Attempt())
+	}
+	if got := ext.SubstitutedFrom(); got != "" {
+		t.Errorf("SubstitutedFrom = %q, want empty for the default chain", got)
+	}
 }
 
 func TestExtractExcluding_AllSkippedReturnsChainExhausted(t *testing.T) {
@@ -491,6 +523,83 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	// streamingData scrape fallback (the same URL now that discovery sends bpctr).
 	if watchCalls != 2 {
 		t.Errorf("watchCalls = %d, want 2 (discovery + scrape)", watchCalls)
+	}
+}
+
+func TestIsWebEmbedded(t *testing.T) {
+	if !isWebEmbedded(profileWebEmbedded) {
+		t.Error("profileWebEmbedded should be recognized as web_embedded")
+	}
+	if isWebEmbedded(profileWeb) || isWebEmbedded(profileAndroidVR) {
+		t.Error("WEB and ANDROID_VR are not web_embedded")
+	}
+}
+
+func TestAnnotateEmbedError(t *testing.T) {
+	// The hint must preserve the playability classification.
+	base := &waxerr.PlayabilityError{Status: "ERROR", Reason: "", Sentinel: waxerr.ErrVideoUnavailable}
+	got := annotateEmbedError(base)
+	pe, ok := errors.AsType[*waxerr.PlayabilityError](got)
+	if !ok {
+		t.Fatalf("annotateEmbedError returned %T, want *PlayabilityError", got)
+	}
+	if !strings.Contains(pe.Reason, "embeddable") {
+		t.Errorf("reason = %q, want it to mention embeddability", pe.Reason)
+	}
+	if pe.Status != "ERROR" || !errors.Is(got, waxerr.ErrVideoUnavailable) {
+		t.Errorf("status/sentinel changed: status=%q unavailable=%v", pe.Status, errors.Is(got, waxerr.ErrVideoUnavailable))
+	}
+	unpl := &waxerr.PlayabilityError{Status: "UNPLAYABLE", Reason: "nope", Sentinel: waxerr.ErrVideoUnavailable}
+	if annotateEmbedError(unpl) != error(unpl) {
+		t.Error("a non-ERROR playability failure should be returned unchanged")
+	}
+}
+
+func TestForcedNonWebSingle(t *testing.T) {
+	single := func(p ClientProfile) *Client {
+		return newTestClientWith(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return fixtureResp(http.StatusNotFound, nil), nil
+		}), []ClientProfile{makeProfile(p)}, nil)
+	}
+	if !single(profileAndroidVR).forcedNonWebSingle() {
+		t.Error("a single forced ANDROID_VR chain should be a non-WEB substitution candidate")
+	}
+	if single(profileWeb).forcedNonWebSingle() {
+		t.Error("a single forced WEB chain is not a substitution (watch page is WEB)")
+	}
+	def := newTestClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}))
+	if def.forcedNonWebSingle() {
+		t.Error("the default chain must not be treated as a forced single client")
+	}
+}
+
+func TestExtract_ForcedClientSubstitutionNamesWEB(t *testing.T) {
+	// The terminal error names both attempts and preserves the underlying verdict.
+	login := readFixture(t, "player_login_required.json")
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/watch":
+			return fixtureResp(http.StatusNotFound, nil), nil // watch-page fallback fails
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, login), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileAndroidVR)}, nil)
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if err == nil {
+		t.Fatal("expected an error when the forced client and watch-page both fail")
+	}
+	if !strings.Contains(err.Error(), "ANDROID_VR") {
+		t.Errorf("error %q should name the forced client ANDROID_VR", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "watch-page") {
+		t.Errorf("error %q should name the WEB watch-page fallback", err)
+	}
+	if !errors.Is(err, waxerr.ErrLoginRequired) {
+		t.Errorf("err = %v, want it to still match ErrLoginRequired through the wrap", err)
 	}
 }
 

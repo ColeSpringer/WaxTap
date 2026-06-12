@@ -48,27 +48,30 @@ func (c Codec) String() string {
 type preset struct {
 	encoder     string   // -c:a value ("copy" for a stream copy)
 	extension   string   // canonical output extension without a dot ("" for copy)
-	muxer       string   // forced -f format, when the file extension has no muxer ("" = infer from extension)
+	muxer       string   // canonical -f format when the output path cannot identify a container
 	lossless    bool     // true for copy and the lossless re-encoders
 	defaultRate int      // default -b:a in bits/sec for lossy codecs (0 if N/A)
 	qualityArgs []string // VBR-quality args used for lossy codecs when no bitrate is given
 }
 
-// presets is the single source of truth for codec parameters. CodecCopy's
-// container follows the source, so it carries no extension.
+// presets is the single source of truth for codec parameters. CodecCopy follows
+// the source container, so it has no extension or muxer.
+//
+// Every encoding codec names a canonical muxer for extensionless output paths.
+// needsForcedMuxer decides whether to pass it to ffmpeg.
 var presets = map[Codec]preset{
 	CodecCopy: {encoder: "copy", lossless: true},
-	CodecFLAC: {encoder: "flac", extension: "flac", lossless: true},
+	CodecFLAC: {encoder: "flac", extension: "flac", muxer: "flac", lossless: true},
 	// A bare ".alac" extension does not identify a container, so use ffmpeg's
 	// MP4/M4A muxer when the output path cannot select one.
 	CodecALAC: {encoder: "alac", extension: "m4a", muxer: "ipod", lossless: true},
 	// CodecWAV uses pcm_s16le only as a fallback. Runner.Transcode probes the
 	// input and passes a depth-matched encoder when the source reports one.
-	CodecWAV:    {encoder: "pcm_s16le", extension: "wav", lossless: true},
-	CodecMP3:    {encoder: "libmp3lame", extension: "mp3", qualityArgs: []string{"-q:a", "0"}},
-	CodecAAC:    {encoder: "aac", extension: "m4a", defaultRate: 256000},
-	CodecOpus:   {encoder: "libopus", extension: "opus", defaultRate: 192000},
-	CodecVorbis: {encoder: "libvorbis", extension: "ogg", qualityArgs: []string{"-q:a", "6"}},
+	CodecWAV:    {encoder: "pcm_s16le", extension: "wav", muxer: "wav", lossless: true},
+	CodecMP3:    {encoder: "libmp3lame", extension: "mp3", muxer: "mp3", qualityArgs: []string{"-q:a", "0"}},
+	CodecAAC:    {encoder: "aac", extension: "m4a", muxer: "ipod", defaultRate: 256000},
+	CodecOpus:   {encoder: "libopus", extension: "opus", muxer: "opus", defaultRate: 192000},
+	CodecVorbis: {encoder: "libvorbis", extension: "ogg", muxer: "ogg", qualityArgs: []string{"-q:a", "6"}},
 }
 
 func presetFor(c Codec) (preset, error) {

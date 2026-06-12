@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -579,6 +580,53 @@ func TestValidateProcessSpec_Downmix(t *testing.T) {
 	}
 }
 
+func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
+	apply := func(target float64) ProcessSpec {
+		return ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: target}}
+	}
+	for _, target := range []float64{-4, -71, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if err := validateProcessSpec(apply(target)); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("apply target %v = %v, want ErrIncompatibleSpec", target, err)
+		}
+	}
+	for _, target := range []float64{-5, -70, -14} {
+		if err := validateProcessSpec(apply(target)); err != nil {
+			t.Errorf("apply target %v = %v, want nil", target, err)
+		}
+	}
+	// Measure-only mode does not use the target.
+	if err := validateProcessSpec(ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly, Target: 999}}); err != nil {
+		t.Errorf("measure-only target = %v, want nil", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: -1}}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("negative bitrate = %v, want ErrIncompatibleSpec", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: 0}}); err != nil {
+		t.Errorf("zero bitrate = %v, want nil", err)
+	}
+}
+
+func TestNew_RejectsInvalidQPS(t *testing.T) {
+	for _, q := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := New(Options{Politeness: Politeness{PerHostQPS: q}}); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("PerHostQPS %v: New err = %v, want ErrInvalidConfig", q, err)
+		}
+	}
+	if _, err := New(Options{Politeness: Politeness{PerHostQPS: 2}}); err != nil {
+		t.Errorf("PerHostQPS 2: New err = %v, want nil", err)
+	}
+}
+
+func TestNew_RejectsUnknownClient(t *testing.T) {
+	_, err := New(Options{Client: "bogus"})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("New(Client:bogus) err = %v, want ErrInvalidConfig", err)
+	}
+	if !strings.Contains(err.Error(), "want one of") {
+		t.Errorf("err = %q, want it to keep the 'want one of' client list", err)
+	}
+}
+
 func TestProcessRejectedCutPreservesExistingOutput(t *testing.T) {
 	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
@@ -629,6 +677,80 @@ func TestProcessExplicitCutOutOfRangeRejected(t *testing.T) {
 	}
 	if fileExists(out) {
 		t.Error("a rejected cut must not leave an output file")
+	}
+}
+
+func TestProcessRemuxWithoutContainerRejected(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 1, "flac")
+
+	// Stream copy cannot infer a muxer from these output paths.
+	for _, out := range []string{filepath.Join(dir, "out"), filepath.Join(dir, "out.copy")} {
+		_, err := c.Process(context.Background(), ProcessRequest{
+			Input: in,
+			ProcessSpec: ProcessSpec{
+				Output:    ToFile(out),
+				Transcode: &TranscodeSpec{Format: FormatCopy},
+			},
+		})
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("remux to %q = %v, want ErrIncompatibleSpec", out, err)
+		}
+		if fileExists(out) {
+			t.Errorf("rejected remux to %q wrote output", out)
+		}
+	}
+}
+
+func TestProcessCopyCutWithoutContainerRejected(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+
+	// The removal creates two copied segments and exercises the multi-range path.
+	for _, out := range []string{filepath.Join(dir, "mytrack"), filepath.Join(dir, "mytrack.copy")} {
+		_, err := c.Process(context.Background(), ProcessRequest{
+			Input: in,
+			ProcessSpec: ProcessSpec{
+				Output: ToFile(out),
+				Cut:    &CutSpec{Ranges: []TimeRange{{Start: 800 * time.Millisecond, End: 1200 * time.Millisecond}}},
+			},
+		})
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("copy cut to %q = %v, want ErrIncompatibleSpec", out, err)
+		}
+		if fileExists(out) {
+			t.Errorf("rejected copy cut to %q wrote output", out)
+		}
+	}
+}
+
+func TestProcessTranscodeExtensionlessOutput(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 1, "flac")
+	out := filepath.Join(dir, "track") // no extension
+
+	// The preset supplies the muxer when the output path has no extension.
+	res, err := c.Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(out),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	})
+	if err != nil {
+		t.Fatalf("extensionless transcode err = %v", err)
+	}
+	if !fileExists(out) || fileSize(out) == 0 {
+		t.Fatalf("no output written to extensionless path %q", out)
+	}
+	if res.OutputFormat.Codec != "flac" {
+		t.Errorf("output codec = %q, want flac", res.OutputFormat.Codec)
 	}
 }
 

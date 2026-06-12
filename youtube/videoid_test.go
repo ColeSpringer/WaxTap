@@ -39,6 +39,10 @@ func TestExtractVideoID(t *testing.T) {
 
 		{"too short", "abc", "", waxerr.ErrVideoIDTooShort},
 		{"empty", "   ", "", waxerr.ErrVideoIDTooShort},
+
+		// Eleven-character malformed tokens are invalid rather than too short.
+		{"eleven chars with stray symbol", "aaaaaaaaaa!", "", waxerr.ErrInvalidVideoID},
+		{"eleven symbol-heavy chars", "abc!@#=+;:_", "", waxerr.ErrInvalidVideoID},
 		{"bad id in watch param", "https://www.youtube.com/watch?v=short", "", waxerr.ErrInvalidVideoID},
 		{"overlong bare token not truncated", id + "x", "", waxerr.ErrInvalidVideoID},
 		{"overlong bare token plus more", id + "xy", "", waxerr.ErrInvalidVideoID},

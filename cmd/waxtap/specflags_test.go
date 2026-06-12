@@ -34,6 +34,35 @@ func TestParseTimestamp(t *testing.T) {
 	}
 }
 
+func TestParseClockStrict(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"0:01", time.Second, true},
+		{"0:59", 59 * time.Second, true},
+		{"1:30.5", 90500 * time.Millisecond, true},
+		{"1:02:03", time.Hour + 2*time.Minute + 3*time.Second, true},
+		{"100:00:00", 100 * time.Hour, true}, // a leading field may exceed 60
+		{"9:99", 0, false},                   // seconds must be < 60
+		{"0:60", 0, false},                   // seconds must be < 60
+		{"1:60:00", 0, false},                // minutes must be < 60
+		{"1.5:00", 0, false},                 // only the seconds field may be fractional
+		{"nan:00", 0, false},
+		{"1:inf", 0, false},
+	}
+	for _, tt := range tests {
+		got, err := parseClock(tt.in)
+		switch {
+		case tt.ok && (err != nil || got != tt.want):
+			t.Errorf("parseClock(%q) = %v, %v; want %v", tt.in, got, err, tt.want)
+		case !tt.ok && err == nil:
+			t.Errorf("parseClock(%q) expected error", tt.in)
+		}
+	}
+}
+
 func TestParseRanges(t *testing.T) {
 	got, err := parseRanges([]string{"1:00-1:30", "90-120,2:00-2:10"})
 	if err != nil {

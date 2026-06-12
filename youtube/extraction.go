@@ -43,6 +43,9 @@ type Extraction struct {
 	session *session
 	// attempt identifies the chain attempt that produced this extraction.
 	attempt AttemptID
+	// substitutedFrom names a forced non-WEB client replaced by the watch-page
+	// WEB fallback.
+	substitutedFrom string
 	// rawAudio stores the resolver input for each public Format. It is kept in
 	// the same order as Video.Formats because itag is not unique on videos with
 	// multiple languages or DRC variants.
@@ -105,6 +108,16 @@ func (e *Extraction) ClientName() string {
 		return ""
 	}
 	return e.profile.Name
+}
+
+// SubstitutedFrom returns the name of a forced non-WEB client replaced by the
+// watch-page WEB fallback. It returns an empty string when no substitution
+// occurred.
+func (e *Extraction) SubstitutedFrom() string {
+	if e == nil {
+		return ""
+	}
+	return e.substitutedFrom
 }
 
 // rawFormatByIndex returns the raw resolver input for Video.Formats[i].
