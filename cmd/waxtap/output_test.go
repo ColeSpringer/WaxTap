@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net"
 	"net/url"
@@ -119,12 +120,122 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrUnsupportedInput, 2}, // a correctable bad local input
 		{waxtap.ErrIsPlaylist, 2},       // user can select the playlist command
 		{waxtap.ErrInvalidConfig, 2},
+		{waxtap.ErrURLExpired, 7},                 // parity with incomplete-stream
+		{waxtap.ErrRequestedFormatUnavailable, 2}, // correctable request error
+		{waxtap.ErrDeliveryUnsupported, 2},        // forced-iOS byte delivery
+		{&waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("down")}, 9},
+		{&url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Err: errFake("refused")}}, 9},
+		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},
+		{&fs.PathError{Op: "mkdir", Path: "/root/x", Err: errFake("permission denied")}, 10},
 		{errFake("other"), 1},
 	}
 	for _, tt := range cases {
 		if got := exitCodeFor(tt.err); got != tt.want {
 			t.Errorf("exitCodeFor(%v) = %d, want %d", tt.err, got, tt.want)
 		}
+	}
+}
+
+// TestClassifyError_POTokenBeatsNetwork verifies that a PO-token failure keeps
+// its precondition classification when it wraps a network error.
+func TestClassifyError_POTokenBeatsNetwork(t *testing.T) {
+	se := &sidecarError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", err: &net.OpError{Op: "dial", Err: errFake("refused")}}
+	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
+	if got := exitCodeFor(wrapped); got != 8 {
+		t.Errorf("unreachable PO-token sidecar exit = %d, want 8 (precondition beats network)", got)
+	}
+	if got := errorCode(wrapped); got != "needs-po-token" {
+		t.Errorf("code = %q, want needs-po-token", got)
+	}
+}
+
+// TestClassifyError_NewCodesAndHints covers network, I/O, format, and cipher
+// classifications.
+func TestClassifyError_NewCodesAndHints(t *testing.T) {
+	if c := classifyError(&waxtap.ProviderError{Endpoint: "session", Cause: errFake("x")}); c.code != "network" || c.exitCode != 9 {
+		t.Errorf("provider error = %+v, want network/9", c)
+	}
+	if c := classifyError(&fs.PathError{Op: "open", Path: "/x", Err: errFake("x")}); c.code != "io" || c.exitCode != 10 {
+		t.Errorf("path error = %+v, want io/10", c)
+	}
+	cipher := fmt.Errorf("descramble: %w", waxtap.ErrCipherSolve)
+	if c := classifyError(cipher); c.code != "cipher-solve" || c.exitCode != 4 || !strings.Contains(c.hint, "attested identity") {
+		t.Errorf("cipher solve = %+v, want cipher-solve/4 with attested-identity hint", c)
+	}
+	rfe := &waxtap.RequestedFormatError{Selector: "itag(999)", Itags: []int{140, 251}}
+	c := classifyError(rfe)
+	if c.code != "format-unavailable" || c.exitCode != 2 || !strings.Contains(c.hint, "formats") {
+		t.Errorf("requested-format = %+v, want format-unavailable/2 with a formats hint", c)
+	}
+	if !strings.Contains(c.message, "140") {
+		t.Errorf("message = %q, want it to name the available itags", c.message)
+	}
+}
+
+// TestClassifyError_SentinelBeatsStructural verifies that domain sentinels
+// outrank wrapped transport and filesystem errors.
+func TestClassifyError_SentinelBeatsStructural(t *testing.T) {
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: errFake("connection reset by peer")}
+
+	// A stream truncated by a mid-download TCP reset stays incomplete (exit 7),
+	// not network (exit 9): scripts key on 7 for cross-client retry.
+	incomplete := fmt.Errorf("%w: stream stalled at offset 524288: %w", waxtap.ErrIncompleteStream, reset)
+	if c := classifyError(incomplete); c.exitCode != 7 || c.code != "incomplete-stream" {
+		t.Errorf("incomplete-over-OpError = %+v, want incomplete-stream/7", c)
+	}
+
+	// A ProviderError whose cause is a meaningful sentinel ranks on that sentinel.
+	rl := &waxtap.ProviderError{Endpoint: "session", Cause: waxtap.ErrRateLimited}
+	if c := classifyError(rl); c.exitCode != 5 || c.code != "rate-limited" {
+		t.Errorf("provider-over-rate-limited = %+v, want rate-limited/5", c)
+	}
+	unavail := &waxtap.ProviderError{Endpoint: "player-context", Cause: waxtap.ErrVideoUnavailable}
+	if c := classifyError(unavail); c.exitCode != 3 || c.code != "video-unavailable" {
+		t.Errorf("provider-over-unavailable = %+v, want video-unavailable/3", c)
+	}
+
+	// A ProviderError with no meaningful cause is still the network class.
+	netProvider := &waxtap.ProviderError{Endpoint: "player-context", Cause: reset}
+	if c := classifyError(netProvider); c.exitCode != 9 || c.code != "network" {
+		t.Errorf("provider-over-OpError = %+v, want network/9", c)
+	}
+}
+
+// TestClassifyError_TimeoutConsistentAcrossPhases verifies that dial and read
+// deadlines share the timeout classification.
+func TestClassifyError_TimeoutConsistentAcrossPhases(t *testing.T) {
+	dial := &url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "dial", Err: context.DeadlineExceeded}}
+	read := &url.Error{Op: "Get", URL: "x", Err: context.DeadlineExceeded}
+	for name, err := range map[string]error{"dial-phase": dial, "read-phase": read} {
+		c := classifyError(err)
+		if c.code != "timeout" || c.exitCode != 1 {
+			t.Errorf("%s timeout = %+v, want code timeout / exit 1", name, c)
+		}
+	}
+	// A connection failure with no deadline still classifies as the network class.
+	refused := &net.OpError{Op: "dial", Err: errFake("connection refused")}
+	if c := classifyError(refused); c.code != "network" || c.exitCode != 9 {
+		t.Errorf("refused dial = %+v, want network/9", c)
+	}
+}
+
+// TestNormalizeExecuteError_FlagOrder verifies that a Cobra unknown-command for a
+// YouTube-looking token becomes a usage error (exit 2) with the flag-order hint.
+func TestNormalizeExecuteError_FlagOrder(t *testing.T) {
+	err := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`))
+	if got := exitCodeFor(err); got != 2 {
+		t.Errorf("unknown-command exit = %d, want 2", got)
+	}
+	if hint := errorHint(err); !strings.Contains(hint, "waxtap download dQw4w9WgXcQ") {
+		t.Errorf("hint = %q, want a download suggestion", hint)
+	}
+	// A non-target unknown command becomes a plain usage error with no hint.
+	plain := normalizeExecuteError(errFake(`unknown command "boguscmd" for "waxtap"`))
+	if got := exitCodeFor(plain); got != 2 {
+		t.Errorf("bogus-command exit = %d, want 2", got)
+	}
+	if hint := errorHint(plain); hint != "" {
+		t.Errorf("hint = %q, want none for a non-target token", hint)
 	}
 }
 
@@ -187,6 +298,27 @@ func TestFriendlyError_SidecarUnreachableBeatsPOToken(t *testing.T) {
 	}
 	if strings.Contains(msg, "verified PO token") {
 		t.Errorf("friendlyError = %q, want the unreachable message to win over the generic PO-token text", msg)
+	}
+}
+
+// TestAlreadyRenderedMarker verifies that the marker suppresses rendering while
+// preserving the wrapped failure's exit code.
+func TestAlreadyRenderedMarker(t *testing.T) {
+	if alreadyRendered(nil) != nil {
+		t.Error("alreadyRendered(nil) must stay nil (success)")
+	}
+	wrapped := alreadyRendered(waxtap.ErrNeedsPOToken)
+	if _, ok := errors.AsType[*alreadyRenderedError](wrapped); !ok {
+		t.Error("alreadyRendered(err) must be recognizable as the marker")
+	}
+	if got := exitCodeFor(wrapped); got != 8 {
+		t.Errorf("exitCodeFor(alreadyRendered(needs-po-token)) = %d, want 8 (unwrapped cause drives the exit)", got)
+	}
+	// normalizeExecuteError must not strip the marker even when the cause's message
+	// begins with "unknown ..." (which would otherwise rewrap it as a usage error).
+	marker := alreadyRendered(errFake(`unknown subcommand "x" for "waxtap doctor"`))
+	if _, ok := errors.AsType[*alreadyRenderedError](normalizeExecuteError(marker)); !ok {
+		t.Error("normalizeExecuteError stripped the already-rendered marker")
 	}
 }
 

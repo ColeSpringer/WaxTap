@@ -225,7 +225,8 @@ func (c *Client) resolveAdoptedSession(ctx context.Context) (string, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
-		return "", fmt.Errorf("adopted session provider failed: %w", err)
+		// Preserve provider failures so callers can classify their causes.
+		return "", &waxerr.ProviderError{Endpoint: "session", Cause: err}
 	}
 	if sess.VisitorData == "" {
 		return "", errors.New("adopted session provider returned an empty visitorData")
@@ -261,6 +262,20 @@ func (c *Client) seedAdoptedCookies(cookies []*http.Cookie) error {
 	seedExternalCookies(c.http.Jar(), safe)
 	c.adoptSeeded = true
 	return nil
+}
+
+// bulkExtractionKey marks a bulk metadata operation.
+type bulkExtractionKey struct{}
+
+// WithBulkExtraction marks ctx as a bulk metadata operation. Expected per-item
+// fallback messages are logged at Debug instead of Warn.
+func WithBulkExtraction(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bulkExtractionKey{}, true)
+}
+
+func isBulkExtraction(ctx context.Context) bool {
+	v, _ := ctx.Value(bulkExtractionKey{}).(bool)
+	return v
 }
 
 // Extract fetches metadata and candidate audio formats for videoID, trying the
@@ -313,7 +328,12 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 		// forced non-WEB client.
 		substituting := c.forcedNonWebSingle()
 		if substituting {
-			c.log.WarnContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
+			// Bulk operations can make this fallback once per item.
+			if isBulkExtraction(ctx) {
+				c.log.DebugContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
+			} else {
+				c.log.WarnContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
+			}
 		}
 		ext, ferr := c.extractFromWatchPage(ctx, videoID)
 		if ferr == nil {
@@ -394,16 +414,20 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 		// context, and bot checks often report generic ERROR or UNPLAYABLE.
 		result := perr
 		switch {
+		// Preserve an embed restriction before considering a missing signature
+		// timestamp, which can fail during the same attempt.
+		case isWebEmbedded(profile):
+			if annotated := annotateEmbedError(perr); annotated != perr {
+				result = annotated
+			} else if profile.NeedsSignatureTimestamp && sts == 0 {
+				result = missingTimestampError(perr)
+			}
 		// sts==0 here means the timestamp lookup failed, so the resulting
 		// UNPLAYABLE is a maintenance problem, not an unavailable video. Reclassify
 		// it so the terminal error names that cause instead of a generic
 		// ErrVideoUnavailable.
 		case profile.NeedsSignatureTimestamp && sts == 0:
 			result = missingTimestampError(perr)
-		// web_embedded reports a bare ERROR for videos the owner blocked from
-		// embedding. Annotate the reason so the user knows to switch clients.
-		case isWebEmbedded(profile):
-			result = annotateEmbedError(perr)
 		}
 		c.dumpArtifact(ctx, "playerresponse-"+profile.Name+"-"+videoID+".json", body)
 		c.log.DebugContext(ctx, "playability failure; trying next attempt", "client", profile.Name, "err", result)
@@ -619,6 +643,18 @@ func retryableBrowse(err error) bool {
 func (c *Client) forcedNonWebSingle() bool {
 	return len(c.profiles) == 1 && c.profiles[0].InnerTubeName != profileWeb.InnerTubeName
 }
+
+// ForcedSingleClient returns the InnerTube name when exactly one client profile
+// is configured. It also returns true for a single profile override.
+func (c *Client) ForcedSingleClient() (string, bool) {
+	if len(c.profiles) != 1 {
+		return "", false
+	}
+	return c.profiles[0].InnerTubeName, true
+}
+
+// IsIOSClient reports whether name is the built-in iOS InnerTube client name.
+func IsIOSClient(name string) bool { return name == profileIOS.InnerTubeName }
 
 // playlistProfile returns the first configured profile that supports browse
 // requests, falling back to the built-in WEB profile.

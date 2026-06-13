@@ -115,8 +115,17 @@ func TestExtractWebContextErrors(t *testing.T) {
 	})
 	t.Run("provider error", func(t *testing.T) {
 		c := webContextClient(potoken.PlayerContext{}, errors.New("provider down"))
-		if _, err := c.ExtractWebContext(context.Background(), "v"); !errors.Is(err, waxerr.ErrExtractionFailed) {
-			t.Errorf("err = %v, want ErrExtractionFailed", err)
+		_, err := c.ExtractWebContext(context.Background(), "v")
+		pe, ok := errors.AsType[*waxerr.ProviderError](err)
+		if !ok {
+			t.Fatalf("err = %v, want *ProviderError (not flattened to ErrExtractionFailed)", err)
+		}
+		if pe.Endpoint != "player-context" {
+			t.Errorf("ProviderError.Endpoint = %q, want player-context", pe.Endpoint)
+		}
+		// A provider failure is not an extraction failure.
+		if errors.Is(err, waxerr.ErrExtractionFailed) {
+			t.Errorf("err = %v, must not classify as ErrExtractionFailed", err)
 		}
 	})
 	t.Run("missing url or visitor", func(t *testing.T) {
@@ -167,12 +176,16 @@ func TestExtractWebContextErrors(t *testing.T) {
 				},
 			),
 		})
-		_, err := c.ExtractWebContext(context.Background(), "v")
-		if !errors.Is(err, waxerr.ErrExtractionFailed) {
-			t.Errorf("err = %v, want ErrExtractionFailed (timeout must trigger fallback)", err)
+		parent, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := c.ExtractWebContext(parent, "v")
+		// An internal provider timeout remains eligible for fallback.
+		if _, ok := errors.AsType[*waxerr.ProviderError](err); !ok {
+			t.Errorf("err = %v, want *ProviderError (timeout must trigger fallback, not extractor breakage)", err)
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			t.Error("the provider budget must not surface as the caller's deadline")
+		// A provider-only timeout must not cancel the caller's context.
+		if parent.Err() != nil {
+			t.Errorf("caller context cancelled (%v); a provider-only timeout must not cancel it", parent.Err())
 		}
 	})
 }

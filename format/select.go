@@ -337,11 +337,11 @@ func eligibleAudio(candidates []Format) func(Format) bool {
 			return Format.IsAudio
 		}
 	}
-	return func(f Format) bool { return !isVideo(f) }
+	return func(f Format) bool { return !IsVideo(f) }
 }
 
-// isVideo reports whether MIMEType is explicitly video/*.
-func isVideo(f Format) bool {
+// IsVideo reports whether a format's MIMEType begins with "video/".
+func IsVideo(f Format) bool {
 	return strings.HasPrefix(f.MIMEType, "video/")
 }
 
@@ -352,6 +352,10 @@ func codecMatches(want, have string) bool {
 	wf := codecFamily(want)
 	return wf != "" && wf == codecFamily(have)
 }
+
+// CodecFamily normalizes a codec ID, container name, or alias to a coarse family.
+// For example, it maps "mp4a.40.2" to "aac".
+func CodecFamily(codec string) string { return codecFamily(codec) }
 
 // codecFamily normalizes a codec id, container name, or user-facing alias to a
 // coarse family. Unknown codecs pass through unchanged so exact ids still match.

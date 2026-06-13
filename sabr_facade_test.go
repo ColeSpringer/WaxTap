@@ -166,6 +166,71 @@ func TestFacade_IncompleteStreamFallsBackAcrossClients(t *testing.T) {
 	}
 }
 
+// TestFacade_ColdStartWebContextFallbackWarns verifies that a failed
+// player-context followed by a successful client emits one fallback warning.
+func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
+	happy := fSabrHappyBody([]byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA"))
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR delivers
+				return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.RawQuery, "c=android"):
+			return resp(http.StatusOK, happy), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+
+	// The failed provider forces the configured client chain.
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, errors.New("cold start: provider not ready")
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		POTokenProvider:       fProvider{},
+		PlayerContextProvider: pc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var eventWarnings int
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, err := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+					eventWarnings++
+				}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cold-start should fall back to android_vr: %v", err)
+	}
+	if res.Client != "ANDROID_VR" {
+		t.Errorf("Result.Client = %q, want ANDROID_VR", res.Client)
+	}
+	if eventWarnings != 1 {
+		t.Errorf("web-context-fallback warning events = %d, want exactly 1", eventWarnings)
+	}
+	inResult := 0
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnWebContextFallback {
+			inResult++
+		}
+	}
+	if inResult != 1 {
+		t.Errorf("Result.Warnings web-context-fallback = %d, want exactly 1 (visible in --json)", inResult)
+	}
+}
+
 func TestFacade_AllClientsCapReportsIncomplete(t *testing.T) {
 	capped := fSabrBody([]byte("INIT"), []byte("MEDIA"), 2) // declares 2 segs, sends 1
 	// The watch-page fallback extracts its own (capping) SABR context from the page.
@@ -220,6 +285,124 @@ func TestFacade_AllClientsCapReportsIncomplete(t *testing.T) {
 	}
 	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 		t.Error("no output file should remain when every client capped")
+	}
+}
+
+// TestFacade_InfoResultCarriesClient verifies the metadata client name.
+func TestFacade_InfoResultCarriesClient(t *testing.T) {
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR leads the chain
+				return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.InfoResult(context.Background(), "dummyVideo0", waxtap.InfoBasic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Client != "ANDROID_VR" {
+		t.Errorf("InfoResult.Client = %q, want ANDROID_VR", info.Client)
+	}
+	if info.Video == nil || info.Video.Title == "" {
+		t.Errorf("InfoResult.Video = %+v, want populated metadata", info.Video)
+	}
+}
+
+// iosPlayerContext returns a SABR context served by the test transport.
+func iosPlayerContext() potoken.PlayerContext {
+	return potoken.PlayerContext{
+		ServerAbrURL:    "https://r1.googlevideo.com/videoplayback?expire=9999999999", // no n, descramble is a no-op
+		UstreamerConfig: "Q0FFU0FnZ0I=",
+		VisitorData:     "CgtWSVNJVE9SXzAh",
+		ClientVersion:   "2.20260606.02.00",
+		Title:           "Forced iOS via WEB context", Author: "T", LengthSeconds: 1,
+		AudioFormats: []potoken.PlayerContextFormat{
+			{Itag: 251, LMT: "1700000000000001", MimeType: `audio/webm; codecs="opus"`, Bitrate: 130000, AudioChannels: 2, AudioSampleRate: 48000, ContentLength: 27, ApproxDurationMs: 1000},
+		},
+	}
+}
+
+// TestFacade_ForcedIOSDeliversViaPlayerContext verifies that a WEB
+// player-context can deliver before the forced iOS restriction applies.
+func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
+	initBytes, mediaBytes := []byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA")
+	umpBody := fSabrHappyBody(initBytes, mediaBytes)
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/videoplayback") {
+			return resp(http.StatusOK, umpBody), nil
+		}
+		return resp(http.StatusNotFound, nil), nil // /player is never called when web-context delivers
+	})
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return iosPlayerContext(), nil
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		Client:                "ios",
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, err := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if err != nil {
+		t.Fatalf("forced iOS + delivering player-context should stream via WEB_CONTEXT: %v", err)
+	}
+	if res.Client != "WEB_CONTEXT" {
+		t.Errorf("Result.Client = %q, want WEB_CONTEXT (iOS byte path bypassed by web-context)", res.Client)
+	}
+	want := append(append([]byte{}, initBytes...), mediaBytes...)
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// TestFacade_ForcedIOSPlayerContextFailureIsDeliveryUnsupported verifies that a
+// failed player-context does not fall back to iOS byte delivery.
+func TestFacade_ForcedIOSPlayerContextFailureIsDeliveryUnsupported(t *testing.T) {
+	var stray bool
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") || strings.Contains(r.URL.Path, "/videoplayback") {
+			stray = true // the iOS byte path must not be attempted
+		}
+		return resp(http.StatusNotFound, nil), nil
+	})
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, errors.New("player-context unavailable")
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		Client:                "ios",
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if !errors.Is(derr, waxtap.ErrDeliveryUnsupported) {
+		t.Errorf("forced iOS + failed player-context = %v, want ErrDeliveryUnsupported", derr)
+	}
+	if stray {
+		t.Error("the forced iOS byte path must not be attempted after the player-context fails")
 	}
 }
 

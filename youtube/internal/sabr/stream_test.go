@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -288,6 +289,35 @@ func TestOpenFollowsRedirectWithDescramble(t *testing.T) {
 	// The request number keeps counting across redirects (0-based per request).
 	if want := solved + "&rn=1"; d.urls[1] != want {
 		t.Errorf("redirect followed to %q, want %q", d.urls[1], want)
+	}
+}
+
+// TestOpenDescrambleFailurePreservesCipherSolve verifies that redirect
+// descrambling preserves ErrCipherSolve.
+func TestOpenDescrambleFailurePreservesCipherSolve(t *testing.T) {
+	const rawRedirect = "https://r2.example/videoplayback?n=RAWN"
+	resp1 := umpFrame(partSabrRedirect, marshalSabrRedirect(SabrRedirect{URL: rawRedirect}))
+	d := &scriptedDoer{t: t, responses: [][]byte{resp1}}
+
+	cfg := baseConfig(d)
+	cfg.DescrambleN = func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("%w: n solve found 0 valid results", waxerr.ErrCipherSolve)
+	}
+
+	err := func() error {
+		rc, _, oerr := Open(context.Background(), cfg, nil)
+		if oerr != nil {
+			return oerr
+		}
+		defer rc.Close()
+		_, rerr := io.ReadAll(rc)
+		return rerr
+	}()
+	if !errors.Is(err, waxerr.ErrCipherSolve) {
+		t.Errorf("err = %v, want it to preserve ErrCipherSolve", err)
+	}
+	if errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Errorf("err = %v, must not be flattened to ErrExtractionFailed", err)
 	}
 }
 

@@ -17,21 +17,17 @@ import (
 func (c *Client) WebContextConfigured() bool { return c.webContext != nil }
 
 // ExtractWebContext builds an Extraction from an attested /player streaming
-// context supplied by the configured PlayerContextProvider (WEB opt-in path).
-// The result looks like a normal SABR extraction, so Resolve and the SABR
-// download path consume it unchanged: buildSABRConfig descrambles the URL's n
-// and mints a GVS PO token bound to the context's visitorData. The serverAbrURL
-// carries an entitled (status-1) grade by provenance, so the stream runs to
-// completion rather than capping at the preview wall.
+// context supplied by the configured PlayerContextProvider. The result uses the
+// normal SABR resolution and download path: buildSABRConfig descrambles the
+// URL's n parameter and mints a GVS PO token bound to the context's visitorData.
 //
 // videoID identifies the video to the provider and is stored on the returned
 // Extraction so a mid-stream RELOAD can re-fetch a fresh context (see
 // SABRStream.reextract).
 //
-// The provider call is bounded by Config.WebContextTimeout here, so the bound
-// covers every context fetch, mid-stream re-fetches included. A provider
-// failure (timeouts included) is reported as ErrExtractionFailed so callers
-// fall back; cancellation of the caller's own context is propagated unwrapped.
+// Config.WebContextTimeout bounds every provider call, including mid-stream
+// refreshes. Provider failures return ProviderError so callers can fall back;
+// cancellation of the caller's own context is propagated unwrapped.
 func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extraction, error) {
 	if c.webContext == nil {
 		return nil, fmt.Errorf("%w: no player-context provider configured", waxerr.ErrExtractionFailed)
@@ -47,7 +43,8 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		if perr := parent.Err(); perr != nil {
 			return nil, perr // caller cancellation, not a provider failure
 		}
-		return nil, fmt.Errorf("%w: player-context provider failed: %v", waxerr.ErrExtractionFailed, err)
+		// Preserve the provider cause for transport and HTTP classification.
+		return nil, &waxerr.ProviderError{Endpoint: "player-context", Cause: err}
 	}
 	// UstreamerConfig is validated here with the other essentials: a SABR
 	// session cannot stream without it, and rejecting the context now lets the

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math"
 	"net"
@@ -158,6 +159,21 @@ func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
+// alreadyRenderedError marks a failure that a command has already written.
+// main uses the wrapped cause for the exit code without rendering it again.
+type alreadyRenderedError struct{ cause error }
+
+func (e *alreadyRenderedError) Error() string { return e.cause.Error() }
+func (e *alreadyRenderedError) Unwrap() error { return e.cause }
+
+// alreadyRendered wraps cause so main does not render it again.
+func alreadyRendered(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &alreadyRenderedError{cause: cause}
+}
+
 // jsonError is the --json error envelope.
 type jsonError struct {
 	SchemaVersion int `json:"schemaVersion"`
@@ -168,23 +184,25 @@ type jsonError struct {
 }
 
 // renderError writes the final command error as JSON or as a human-readable line.
+// Both forms use the same classification.
 func renderError(w io.Writer, jsonMode bool, err error) {
 	if err == nil {
 		return
 	}
+	c := classifyError(err)
 	if jsonMode {
 		var je jsonError
 		je.SchemaVersion = schemaVersion
-		je.Error.Code = errorCode(err)
-		je.Error.Message = cleanMessage(err.Error())
+		je.Error.Code = c.code
+		je.Error.Message = c.message
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(je)
 		return
 	}
-	fmt.Fprintf(w, "waxtap: %s\n", cleanMessage(friendlyError(err)))
-	if hint := errorHint(err); hint != "" {
-		fmt.Fprintf(w, "  hint: %s\n", hint)
+	fmt.Fprintf(w, "waxtap: %s\n", c.message)
+	if c.hint != "" {
+		fmt.Fprintf(w, "  hint: %s\n", c.hint)
 	}
 }
 
@@ -193,6 +211,100 @@ func renderError(w io.Writer, jsonMode bool, err error) {
 func cleanMessage(msg string) string {
 	return strings.TrimPrefix(msg, "waxtap: ")
 }
+
+// classifiedError contains every user-visible representation of a terminal error.
+type classifiedError struct {
+	exitCode int
+	code     string
+	message  string
+	hint     string
+}
+
+// classifyError maps a terminal error to its exit code, machine code, message,
+// and optional hint.
+//
+// Domain sentinels take precedence over wrapped transport and filesystem errors.
+// Structural checks therefore run after all sentinel checks.
+func classifyError(err error) classifiedError {
+	if err == nil {
+		return classifiedError{}
+	}
+	c := classifiedError{message: cleanMessage(friendlyError(err)), exitCode: 1, code: "error"}
+	switch {
+	case errors.Is(err, context.Canceled):
+		c.exitCode, c.code = 130, "canceled"
+
+	// Domain sentinels keep their classification even when they wrap another cause.
+	case errors.Is(err, waxtap.ErrNeedsPOToken):
+		c.exitCode, c.code, c.hint = 8, "needs-po-token", poTokenHint
+	case errors.Is(err, waxtap.ErrFFmpegNotFound):
+		c.exitCode, c.code, c.hint = 6, "ffmpeg-not-found", "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
+	case errors.Is(err, waxtap.ErrRateLimited):
+		c.exitCode, c.code = 5, "rate-limited"
+	case errors.Is(err, waxtap.ErrIncompleteStream):
+		c.exitCode, c.code, c.hint = 7, "incomplete-stream", incompleteStreamHint
+	case errors.Is(err, waxtap.ErrURLExpired):
+		// An expired, unrefreshable URL is an incomplete delivery; same exit class.
+		c.exitCode, c.code = 7, "url-expired"
+	case errors.Is(err, waxtap.ErrVideoUnavailable):
+		c.exitCode, c.code, c.hint = 3, "video-unavailable", embedHint(err)
+	case errors.Is(err, waxtap.ErrVideoRestricted):
+		c.exitCode, c.code = 3, "video-restricted"
+	case errors.Is(err, waxtap.ErrLoginRequired):
+		c.exitCode, c.code = 3, "login-required"
+	case errors.Is(err, waxtap.ErrLiveContent):
+		c.exitCode, c.code = 3, "live-content"
+	case errors.Is(err, waxtap.ErrNoAudioFormats):
+		c.exitCode, c.code = 3, "no-audio-formats"
+	case errors.Is(err, waxtap.ErrRequestedFormatUnavailable):
+		c.exitCode, c.code, c.hint = 2, "format-unavailable", "run `waxtap formats <url>` to list the available itags and codecs"
+	case errors.Is(err, waxtap.ErrDeliveryUnsupported):
+		c.exitCode, c.code = 2, "delivery-unsupported"
+	case errors.Is(err, waxtap.ErrPlaylistParse):
+		c.exitCode, c.code = 4, "stale-parser"
+	case errors.Is(err, waxtap.ErrCipherSolve):
+		c.exitCode, c.code, c.hint = 4, "cipher-solve", cipherSolveHint
+	case errors.Is(err, waxtap.ErrExtractionFailed):
+		c.exitCode, c.code = 4, "extraction-failed"
+	case errors.Is(err, waxtap.ErrIncompatibleSpec):
+		c.exitCode, c.code = 2, "incompatible-spec"
+	case errors.Is(err, waxtap.ErrUnsupportedInput):
+		c.exitCode, c.code = 2, "unsupported-input"
+	case errors.Is(err, waxtap.ErrIsPlaylist):
+		c.exitCode, c.code, c.hint = 2, "is-playlist", "the download command expands playlist URLs automatically; info/formats take a single video"
+	case errors.Is(err, waxtap.ErrInvalidVideoID),
+		errors.Is(err, waxtap.ErrVideoIDTooShort),
+		errors.Is(err, waxtap.ErrInvalidPlaylistID):
+		c.exitCode, c.code = 2, "invalid-input"
+	case errors.Is(err, waxtap.ErrInvalidConfig):
+		c.exitCode, c.code = 2, "invalid-config"
+	case isUsageError(err):
+		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err)
+
+	// A deadline is a timeout whether it occurred during dialing or reading.
+	case errors.Is(err, context.DeadlineExceeded):
+		c.code = "timeout"
+
+	// Structural fallbacks apply only when no domain sentinel or timeout matched.
+	case isProxyError(err):
+		c.exitCode, c.code, c.hint = 9, "network", "check the proxy is reachable and that --proxy is a correct URL"
+	case isProviderError(err):
+		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
+	case isConnectionError(err):
+		c.exitCode, c.code, c.hint = 9, "network", "check network connectivity and any configured provider URLs"
+	case isLocalIOError(err):
+		c.exitCode, c.code, c.hint = 10, "io", "check the output directory exists and is writable"
+	}
+	return c
+}
+
+const (
+	// poTokenHint covers a missing provider, a failed mint, or a token YouTube
+	// rejected. A status-2 cap is classified as ErrIncompleteStream instead.
+	poTokenHint          = "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
+	incompleteStreamHint = "another client may deliver the full stream; for forced WEB audio set --player-context-url or --session-url (both also require --potoken-url)"
+	cipherSolveHint      = "full WEB audio needs an attested identity; set --session-url or --player-context-url (both also require --potoken-url)"
+)
 
 // friendlyError returns a human message for an error, expanding common sentinels.
 func friendlyError(err error) string {
@@ -220,6 +332,8 @@ func friendlyError(err error) string {
 		return "rate limited by YouTube; back off and retry later"
 	case errors.Is(err, waxtap.ErrIncompleteStream):
 		return "the download ended before the full stream was received"
+	case errors.Is(err, waxtap.ErrURLExpired):
+		return "the stream URL expired and could not be refreshed"
 	case errors.Is(err, waxtap.ErrPlaylistParse):
 		return "YouTube returned a playlist shape WaxTap doesn't recognize; the parser may need updating"
 	}
@@ -239,125 +353,118 @@ func isProxyError(err error) bool {
 	return strings.Contains(err.Error(), "proxyconnect")
 }
 
-// errorHint returns an optional next-step hint for an error.
-func errorHint(err error) string {
-	if isProxyError(err) {
-		return "check the proxy is reachable and that --proxy is a correct URL"
+// isProviderError reports whether err came from a player-context or session
+// provider. PO-token provider failures use ErrNeedsPOToken instead.
+func isProviderError(err error) bool {
+	_, ok := errors.AsType[*waxtap.ProviderError](err)
+	return ok
+}
+
+// isConnectionError reports whether err is a dial or DNS failure.
+func isConnectionError(err error) bool {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return true
 	}
-	if _, ok := errors.AsType[*sidecarError](err); ok {
-		return "start the provider sidecar or correct its URL (--potoken-url/--player-context-url/--session-url)"
-	}
+	_, ok := errors.AsType[*net.DNSError](err)
+	return ok
+}
+
+// isLocalIOError reports whether err is a local filesystem failure.
+func isLocalIOError(err error) bool {
+	_, ok := errors.AsType[*fs.PathError](err)
+	return ok
+}
+
+// isUsageError reports whether err marks a bad-arguments failure.
+func isUsageError(err error) bool {
+	_, ok := errors.AsType[*usageError](err)
+	return ok
+}
+
+// embedHint surfaces the web_embedded embed-restriction guidance for a
+// non-embeddable playability error.
+func embedHint(err error) string {
 	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok && strings.Contains(pe.Reason, "embeddable") {
 		return "non-embeddable videos fail on web_embedded; use --client web or --client android_vr to avoid the embed restriction"
-	}
-	switch {
-	case errors.Is(err, waxtap.ErrFFmpegNotFound):
-		return "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
-	case errors.Is(err, waxtap.ErrIsPlaylist):
-		return "the download command expands playlist URLs automatically; info/formats take a single video"
-	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		// This error means no provider is configured, the mint failed, or
-		// YouTube rejected the token (SABR attestation status 3). A status-2 cap
-		// is a different failure: it classifies token-neutrally and must not be
-		// blamed on the token (see MAINTENANCE.md).
-		return "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
-	case errors.Is(err, waxtap.ErrIncompleteStream):
-		return "configure --potoken-url and --player-context-url when full WEB audio is required"
 	}
 	return ""
 }
 
-// errorCode returns a stable machine code for the --json error envelope.
-func errorCode(err error) string {
-	switch {
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
-	case errors.Is(err, waxtap.ErrFFmpegNotFound):
-		return "ffmpeg-not-found"
-	case errors.Is(err, waxtap.ErrIsPlaylist):
-		return "is-playlist"
-	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		return "needs-po-token"
-	case errors.Is(err, waxtap.ErrRateLimited):
-		return "rate-limited"
-	case errors.Is(err, waxtap.ErrIncompleteStream):
-		return "incomplete-stream"
-	case errors.Is(err, waxtap.ErrVideoUnavailable):
-		return "video-unavailable"
-	case errors.Is(err, waxtap.ErrVideoRestricted):
-		return "video-restricted"
-	case errors.Is(err, waxtap.ErrLoginRequired):
-		return "login-required"
-	case errors.Is(err, waxtap.ErrLiveContent):
-		return "live-content"
-	case errors.Is(err, waxtap.ErrNoAudioFormats):
-		return "no-audio-formats"
-	case errors.Is(err, waxtap.ErrPlaylistParse):
-		return "stale-parser"
-	case errors.Is(err, waxtap.ErrExtractionFailed):
-		return "extraction-failed"
-	case errors.Is(err, waxtap.ErrCipherSolve):
-		return "cipher-solve"
-	case errors.Is(err, waxtap.ErrIncompatibleSpec):
-		return "incompatible-spec"
-	case errors.Is(err, waxtap.ErrUnsupportedInput):
-		return "unsupported-input"
-	case errors.Is(err, waxtap.ErrInvalidVideoID),
-		errors.Is(err, waxtap.ErrVideoIDTooShort),
-		errors.Is(err, waxtap.ErrInvalidPlaylistID):
-		return "invalid-input"
-	case errors.Is(err, waxtap.ErrInvalidConfig):
-		return "invalid-config"
-	}
-	if _, ok := errors.AsType[*usageError](err); ok {
-		return "usage"
-	}
-	return "error"
-}
+// errorCode returns the stable machine code for the --json error envelope.
+func errorCode(err error) string { return classifyError(err).code }
+
+// errorHint returns an optional next-step hint for an error.
+func errorHint(err error) string { return classifyError(err).hint }
 
 // exitCodeFor maps an error to a process exit code so scripts can branch on the
 // failure class without parsing messages.
-func exitCodeFor(err error) int {
-	switch {
-	case err == nil:
-		return 0
-	case errors.Is(err, context.Canceled):
-		return 130
-	case errors.Is(err, waxtap.ErrVideoUnavailable),
-		errors.Is(err, waxtap.ErrVideoRestricted),
-		errors.Is(err, waxtap.ErrLoginRequired),
-		errors.Is(err, waxtap.ErrLiveContent),
-		errors.Is(err, waxtap.ErrNoAudioFormats):
-		return 3
-	case errors.Is(err, waxtap.ErrExtractionFailed),
-		errors.Is(err, waxtap.ErrCipherSolve),
-		errors.Is(err, waxtap.ErrPlaylistParse):
-		return 4
-	case errors.Is(err, waxtap.ErrRateLimited):
-		return 5
-	case errors.Is(err, waxtap.ErrFFmpegNotFound):
-		return 6
-	case errors.Is(err, waxtap.ErrIncompleteStream):
-		// Incomplete delivery is an upstream or content-specific failure, not an
-		// extraction or cipher maintenance failure.
-		return 7
-	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		// A missing or rejected PO token is a distinct precondition failure.
-		return 8
-	case errors.Is(err, waxtap.ErrInvalidVideoID),
-		errors.Is(err, waxtap.ErrVideoIDTooShort),
-		errors.Is(err, waxtap.ErrInvalidPlaylistID),
-		errors.Is(err, waxtap.ErrIncompatibleSpec),
-		errors.Is(err, waxtap.ErrUnsupportedInput),
-		errors.Is(err, waxtap.ErrIsPlaylist),
-		errors.Is(err, waxtap.ErrInvalidConfig):
-		// These errors describe requests the user can correct.
-		return 2
+func exitCodeFor(err error) int { return classifyError(err).exitCode }
+
+// normalizeExecuteError converts Cobra's untyped unknown-command errors into
+// usage errors.
+func normalizeExecuteError(err error) error {
+	if err == nil {
+		return nil
 	}
-	if _, ok := errors.AsType[*usageError](err); ok {
-		return 2
+	if isUsageError(err) {
+		return err
 	}
-	return 1
+	// Preserve the marker even if its cause resembles an unknown-command error.
+	if _, ok := errors.AsType[*alreadyRenderedError](err); ok {
+		return err
+	}
+	if msg := err.Error(); strings.HasPrefix(msg, "unknown command") || strings.HasPrefix(msg, "unknown subcommand") {
+		return &usageError{msg: msg}
+	}
+	return err
+}
+
+// flagOrderHint explains Cobra's flag-order trap when the unknown command looks
+// like a YouTube target.
+func flagOrderHint(err error) string {
+	ue, ok := errors.AsType[*usageError](err)
+	if !ok {
+		return ""
+	}
+	tok, ok := unknownCommandToken(ue.msg)
+	if !ok || !looksLikeYouTubeTarget(tok) {
+		return ""
+	}
+	return fmt.Sprintf("did you mean `waxtap download %s`? global flags go before the subcommand, command flags after it", tok)
+}
+
+// unknownCommandToken extracts the quoted token from a cobra "unknown command"
+// message.
+func unknownCommandToken(msg string) (string, bool) {
+	if !strings.HasPrefix(msg, "unknown command") {
+		return "", false
+	}
+	_, after, ok := strings.Cut(msg, `"`)
+	if !ok {
+		return "", false
+	}
+	tok, _, ok := strings.Cut(after, `"`)
+	if !ok {
+		return "", false
+	}
+	return tok, true
+}
+
+// looksLikeYouTubeTarget reports whether s resembles a YouTube URL or bare video
+// ID.
+func looksLikeYouTubeTarget(s string) bool {
+	if strings.Contains(s, "youtube.com") || strings.Contains(s, "youtu.be") {
+		return true
+	}
+	if len(s) != 11 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }

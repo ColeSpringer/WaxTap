@@ -254,7 +254,7 @@ func (rf rawFormat) toFormat() format.Format {
 		AudioQuality:   parseAudioQualityTier(rf.AudioQuality),
 		ContentLength:  atoi64(rf.ContentLength),
 		Duration:       parseMillis(rf.ApproxDurationMs),
-		IsDRC:          triFromPtr(rf.IsDrc),
+		IsDRC:          drcFromPtr(rf.IsDrc),
 	}
 	if rf.AudioTrack != nil {
 		f.Language = rf.AudioTrack.ID
@@ -320,6 +320,15 @@ func triFromPtr(b *bool) format.Tri {
 	default:
 		return format.No
 	}
+}
+
+// drcFromPtr maps YouTube's presence-based isDrc flag. The field is true for DRC
+// variants and omitted for non-DRC variants.
+func drcFromPtr(b *bool) format.Tri {
+	if b != nil && *b {
+		return format.Yes
+	}
+	return format.No
 }
 
 func parseSeconds(s string) time.Duration {

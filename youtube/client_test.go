@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,25 @@ import (
 	"github.com/colespringer/waxtap/potoken"
 	"github.com/colespringer/waxtap/waxerr"
 )
+
+// levelCaptureHandler records levels for matching log messages.
+type levelCaptureHandler struct {
+	mu     sync.Mutex
+	match  string
+	levels []slog.Level
+}
+
+func (h *levelCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *levelCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, h.match) {
+		h.mu.Lock()
+		h.levels = append(h.levels, r.Level)
+		h.mu.Unlock()
+	}
+	return nil
+}
+func (h *levelCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelCaptureHandler) WithGroup(string) slog.Handler      { return h }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -490,6 +511,83 @@ func TestExtract_MissingTimestampAttributed(t *testing.T) {
 	if ee, ok := errors.AsType[*waxerr.ExtractionError](err); !ok || ee.Stage != "signature-timestamp" {
 		t.Errorf("err = %#v, want *waxerr.ExtractionError at stage %q", err, "signature-timestamp")
 	}
+}
+
+// TestExtract_WebEmbeddedEmbedRestrictionNotMaskedBySTS verifies that an embed
+// restriction outranks a signature-timestamp failure from the same attempt.
+func TestExtract_WebEmbeddedEmbedRestrictionNotMaskedBySTS(t *testing.T) {
+	errResp := readFixture(t, "player_unavailable.json") // status ERROR
+	const noSTS = `var Xq={sp:function(a,b){a.splice(0,b)}};` +
+		`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +
+		`;s&&(s=dcr(decodeURIComponent(s)));`
+	c := newTestClientWith(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/watch":
+			return fixtureResp(http.StatusOK, []byte(`<script src="/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"></script>`)), nil
+		case strings.HasSuffix(r.URL.Path, "/base.js"):
+			return fixtureResp(http.StatusOK, []byte(noSTS)), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return fixtureResp(http.StatusOK, errResp), nil
+		}
+		t.Errorf("unexpected request: %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), []ClientProfile{makeProfile(profileWebEmbedded)}, &fakeProvider{resp: potoken.Response{Token: "TOK"}})
+
+	_, err := c.Extract(context.Background(), "testVideo01")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	// The message should identify the embed restriction.
+	if msg := err.Error(); !strings.Contains(msg, "embeddable") {
+		t.Errorf("err = %q, want it to name the embed restriction (not the masked sts cause)", err)
+	}
+	if errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Errorf("err = %v, must not be reclassified to ErrExtractionFailed (sts masking)", err)
+	}
+}
+
+// TestExtract_BulkSubstitutionLogsAtDebug verifies that bulk extraction lowers
+// expected fallback messages from Warn to Debug.
+func TestExtract_BulkSubstitutionLogsAtDebug(t *testing.T) {
+	html := readFixture(t, "watch_page.html")
+	errResp := readFixture(t, "player_unavailable.json") // status ERROR
+	newClient := func(h slog.Handler) *Client {
+		return New(Config{
+			Logger:   slog.New(h),
+			Profiles: []ClientProfile{makeProfile(profileAndroidVR)}, // forced, non-playlist
+			HTTP: httpx.New(httpx.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch {
+				case r.URL.Path == "/watch":
+					return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+				case strings.HasSuffix(r.URL.Path, "/base.js"):
+					return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
+				case strings.HasSuffix(r.URL.Path, "/v1/player"):
+					return fixtureResp(http.StatusOK, errResp), nil // forced client fails -> watch-page fallback
+				}
+				return fixtureResp(http.StatusNotFound, nil), nil
+			})}}),
+		})
+	}
+
+	const msg = "forced client failed; trying watch-page WEB fallback"
+	t.Run("single extraction warns", func(t *testing.T) {
+		h := &levelCaptureHandler{match: msg}
+		if _, err := newClient(h).Extract(context.Background(), "testVideo01"); err != nil {
+			t.Fatal(err)
+		}
+		if len(h.levels) != 1 || h.levels[0] != slog.LevelWarn {
+			t.Errorf("levels = %v, want exactly one Warn", h.levels)
+		}
+	})
+	t.Run("bulk extraction debugs", func(t *testing.T) {
+		h := &levelCaptureHandler{match: msg}
+		if _, err := newClient(h).Extract(WithBulkExtraction(context.Background()), "testVideo01"); err != nil {
+			t.Fatal(err)
+		}
+		if len(h.levels) != 1 || h.levels[0] != slog.LevelDebug {
+			t.Errorf("levels = %v, want exactly one Debug", h.levels)
+		}
+	})
 }
 
 func TestExtract_WatchPageFallback(t *testing.T) {

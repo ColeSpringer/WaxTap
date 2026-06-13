@@ -177,9 +177,35 @@ func TestSelectIndex(t *testing.T) {
 	if _, err := selectIndex(BestAudio(), MinimizeLoss(), format.Target{}, nil); !errors.Is(err, waxerr.ErrNoAudioFormats) {
 		t.Errorf("empty list err = %v, want ErrNoAudioFormats", err)
 	}
-	// Itag miss -> ErrNoAudioFormats (translated from ErrNoMatch).
-	if _, err := selectIndex(Itag(99), MinimizeLoss(), format.Target{}, formats); !errors.Is(err, waxerr.ErrNoAudioFormats) {
-		t.Errorf("itag miss err = %v, want ErrNoAudioFormats", err)
+	// An explicit itag miss names the available itags.
+	_, err = selectIndex(Itag(99), MinimizeLoss(), format.Target{}, formats)
+	if !errors.Is(err, waxerr.ErrRequestedFormatUnavailable) {
+		t.Errorf("itag miss err = %v, want ErrRequestedFormatUnavailable", err)
+	}
+	if errors.Is(err, waxerr.ErrNoAudioFormats) {
+		t.Errorf("itag miss err = %v, must not be ErrNoAudioFormats (formats exist)", err)
+	}
+	if rfe, ok := errors.AsType[*waxerr.RequestedFormatError](err); !ok {
+		t.Errorf("itag miss err = %v, want *RequestedFormatError", err)
+	} else if len(rfe.Itags) != 2 || len(rfe.Codecs) != 0 {
+		t.Errorf("RequestedFormatError = %+v, want the two available itags named (no codecs for an itag miss)", rfe)
+	}
+	// An explicit codec miss names the available codecs, not itags.
+	_, err = selectIndex(Codec("flac"), MinimizeLoss(), format.Target{}, formats)
+	rfe, ok := errors.AsType[*waxerr.RequestedFormatError](err)
+	if !ok {
+		t.Fatalf("codec miss err = %v, want *RequestedFormatError", err)
+	}
+	if len(rfe.Codecs) == 0 || len(rfe.Itags) != 0 {
+		t.Errorf("RequestedFormatError = %+v, want available codecs named (no itags for a codec miss)", rfe)
+	}
+	if msg := rfe.Error(); !strings.Contains(msg, "available codecs") {
+		t.Errorf("codec miss message = %q, want it to list available codecs", msg)
+	}
+	// A best-audio miss on a non-empty but ineligible list stays ErrNoAudioFormats.
+	videoOnly := []Format{{Itag: 137, MIMEType: `video/mp4; codecs="avc1.640028"`, Codec: "avc1.640028"}}
+	if _, err := selectIndex(BestAudio(), MinimizeLoss(), format.Target{}, videoOnly); !errors.Is(err, waxerr.ErrNoAudioFormats) {
+		t.Errorf("best-audio miss err = %v, want ErrNoAudioFormats", err)
 	}
 }
 

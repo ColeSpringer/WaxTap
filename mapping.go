@@ -449,8 +449,9 @@ func moveFile(src, dst string) error {
 	return nil
 }
 
-// selectIndex resolves an audio selector against the candidate formats, mapping a
-// no-match to ErrNoAudioFormats.
+// selectIndex resolves an audio selector against the candidate formats. An
+// explicit selector with no match returns ErrRequestedFormatUnavailable and
+// lists alternatives. A best-audio miss returns ErrNoAudioFormats.
 func selectIndex(sel AudioSelector, policy SourcePolicy, target format.Target, formats []Format) (int, error) {
 	if len(formats) == 0 {
 		return -1, waxerr.ErrNoAudioFormats
@@ -458,9 +459,41 @@ func selectIndex(sel AudioSelector, policy SourcePolicy, target format.Target, f
 	idx, err := sel.Select(formats, policy, target)
 	if err != nil {
 		if errors.Is(err, format.ErrNoMatch) {
+			if sel.Explicit() {
+				itags, codecs := availableAudio(formats)
+				rfe := &waxerr.RequestedFormatError{Selector: sel.String()}
+				// Report alternatives of the same kind as the selector.
+				if sel.IsCodec() {
+					rfe.Codecs = codecs
+				} else {
+					rfe.Itags = itags
+				}
+				return -1, rfe
+			}
 			return -1, fmt.Errorf("%w: %v", waxerr.ErrNoAudioFormats, err)
 		}
 		return -1, err
 	}
 	return idx, nil
+}
+
+// availableAudio returns the distinct audio itags and codec families among the
+// candidates, for naming alternatives when a requested format is unavailable.
+func availableAudio(formats []Format) (itags []int, codecs []string) {
+	seenItag := map[int]bool{}
+	seenCodec := map[string]bool{}
+	for _, f := range formats {
+		if format.IsVideo(f) {
+			continue // explicit video/* streams are not audio candidates
+		}
+		if f.Itag != 0 && !seenItag[f.Itag] {
+			seenItag[f.Itag] = true
+			itags = append(itags, f.Itag)
+		}
+		if fam := format.CodecFamily(f.Codec); fam != "" && !seenCodec[fam] {
+			seenCodec[fam] = true
+			codecs = append(codecs, fam)
+		}
+	}
+	return itags, codecs
 }

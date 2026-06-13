@@ -101,8 +101,8 @@ func renderFormatsTable(env *appEnv, formats []waxtap.Format) {
 			intOrDash(f.SampleRate),
 			intOrDash(f.Channels),
 			dash(f.Language),
-			f.IsOriginal.String(),
-			f.IsDRC.String(),
+			triOrDash(f.IsOriginal),
+			triOrDash(f.IsDRC),
 			sizeOrDash(f.ContentLength),
 		)
 	}
@@ -151,6 +151,15 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// triOrDash renders an unknown tri-state value as a dash, consistent with the
+// other optional table columns.
+func triOrDash(t waxtap.Tri) string {
+	if t == waxtap.Unknown {
+		return "-"
+	}
+	return t.String()
 }
 
 func intOrDash(n int) string {

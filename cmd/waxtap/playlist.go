@@ -3,11 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"text/tabwriter"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/internal/tempfile"
 	"github.com/colespringer/waxtap/youtube"
 )
 
@@ -172,14 +172,41 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	return nil
 }
 
-// writeInfoSidecar writes a <output>.info.json metadata sidecar next to a download.
+// infoSidecarJSON extends the schema-v3 result document with metadata requested
+// by --write-info-json. Embedding resultJSON preserves the existing result fields.
+type infoSidecarJSON struct {
+	resultJSON
+	Author          string       `json:"author,omitempty"`
+	DurationSeconds float64      `json:"durationSeconds,omitempty"`
+	PublishDate     string       `json:"publishDate,omitempty"`
+	Description     string       `json:"description,omitempty"`
+	Formats         []formatJSON `json:"formats,omitempty"`
+}
+
+// writeInfoSidecar atomically writes <output>.info.json next to a download.
 func writeInfoSidecar(outputPath string, res *waxtap.Result) error {
-	f, err := os.Create(outputPath + ".info.json")
+	doc := infoSidecarJSON{resultJSON: resultToJSON(res)}
+	if m := res.Metadata; m != nil {
+		doc.Author = m.Author
+		doc.DurationSeconds = m.Duration.Seconds()
+		doc.Description = m.Description
+		if !m.PublishDate.IsZero() {
+			doc.PublishDate = m.PublishDate.Format("2006-01-02")
+		}
+		for _, f := range m.Formats {
+			doc.Formats = append(doc.Formats, formatToJSON(f))
+		}
+	}
+
+	tf, err := tempfile.New(outputPath + ".info.json")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
+	defer tf.Discard() // no-op after Commit
+	enc := json.NewEncoder(tf)
 	enc.SetIndent("", "  ")
-	return enc.Encode(resultToJSON(res))
+	if err := enc.Encode(doc); err != nil {
+		return err
+	}
+	return tf.Commit()
 }

@@ -10,6 +10,32 @@ import (
 	"github.com/colespringer/waxtap/waxerr"
 )
 
+// TestToFormat_DRCPresenceMapsAbsentToNo verifies YouTube's presence-based DRC
+// flag while preserving the separate unknown state for IsOriginal.
+func TestToFormat_DRCPresenceMapsAbsentToNo(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name string
+		drc  *bool
+		want format.Tri
+	}{
+		{"absent -> No (non-DRC)", nil, format.No},
+		{"explicit true -> Yes", &yes, format.Yes},
+		{"explicit false -> No", &no, format.No},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := rawFormat{Itag: 251, MimeType: `audio/webm; codecs="opus"`, IsDrc: tc.drc}.toFormat()
+			if f.IsDRC != tc.want {
+				t.Errorf("IsDRC = %v, want %v", f.IsDRC, tc.want)
+			}
+		})
+	}
+	if f := (rawFormat{Itag: 251, MimeType: "audio/webm"}).toFormat(); f.IsOriginal != format.Unknown {
+		t.Errorf("IsOriginal = %v, want Unknown for an absent default-track flag", f.IsOriginal)
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/" + name)

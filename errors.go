@@ -28,6 +28,10 @@ var (
 	ErrLoginRequired    = waxerr.ErrLoginRequired
 	ErrLiveContent      = waxerr.ErrLiveContent
 	ErrNoAudioFormats   = waxerr.ErrNoAudioFormats
+	// ErrRequestedFormatUnavailable indicates an explicit itag/codec selector
+	// matched none of the available audio formats. It is distinct from
+	// ErrNoAudioFormats, which means no usable audio formats exist.
+	ErrRequestedFormatUnavailable = waxerr.ErrRequestedFormatUnavailable
 
 	// Throttling.
 	ErrRateLimited = waxerr.ErrRateLimited
@@ -48,6 +52,10 @@ var (
 
 	// ErrInvalidConfig indicates invalid or conflicting library configuration.
 	ErrInvalidConfig = waxerr.ErrInvalidConfig
+
+	// ErrDeliveryUnsupported indicates the selected client can extract metadata and
+	// formats but cannot deliver media bytes in the current configuration.
+	ErrDeliveryUnsupported = waxerr.ErrDeliveryUnsupported
 )
 
 // Re-exported structured error types. Use errors.AsType to inspect them.
@@ -56,4 +64,9 @@ type (
 	ExtractionError  = waxerr.ExtractionError
 	PlayabilityError = waxerr.PlayabilityError
 	HTTPStatusError  = waxerr.HTTPStatusError
+	// ProviderError reports a failed player-context or session provider call.
+	ProviderError = waxerr.ProviderError
+	// RequestedFormatError reports that an explicit itag/codec selector matched no
+	// available audio format and lists the available alternatives.
+	RequestedFormatError = waxerr.RequestedFormatError
 )

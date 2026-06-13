@@ -75,6 +75,7 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 
 	// Try the optional WEB player context before the configured client chain.
 	// Caller cancellation and NoFallback stop before the chain is attempted.
+	webCtxReason := c.initialWebContextReason()
 	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() {
 		a, err := c.acquireWebContext(ctx, req, id, target, em, 0)
 		if err == nil {
@@ -86,7 +87,12 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 		if req.NoFallback {
 			return nil, err
 		}
-		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
+		webCtxReason = "failed: " + err.Error()
+	}
+
+	// Web-context did not deliver; a forced iOS chain cannot deliver bytes.
+	if err := c.forcedIOSDelivery(); err != nil {
+		return nil, err
 	}
 
 	em.stage(StageExtracting)
@@ -96,7 +102,33 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	if err != nil {
 		return nil, err
 	}
-	return c.buildTransfer(ctx, req, id, target, ext, em, 0)
+	a, err := c.buildTransfer(ctx, req, id, target, ext, em, 0)
+	if err != nil {
+		return nil, err
+	}
+	c.warnWebContextFallback(em, a, webCtxReason)
+	return a, nil
+}
+
+// initialWebContextReason reports why a configured player-context was skipped
+// before extraction starts.
+func (c *Client) initialWebContextReason() string {
+	if c.yt.WebContextConfigured() && c.webContextCoolingDown() {
+		return "in cooldown after a recent failure"
+	}
+	return ""
+}
+
+// warnWebContextFallback emits one warning when a configured player-context did
+// not deliver and another client did.
+func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason string) {
+	if !c.yt.WebContextConfigured() || delivered.attempt == youtube.AttemptWebContext {
+		return
+	}
+	if reason == "" {
+		reason = "unavailable"
+	}
+	em.warn(WarnWebContextFallback, fmt.Sprintf("web player-context did not deliver (%s); served via %s", reason, delivered.client))
 }
 
 // buildTransfer selects and resolves a format from ext. When pinnedItag is
@@ -263,12 +295,13 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 		if ctx.Err() != nil {
 			return nil, youtube.AttemptWebContext, ctx.Err()
 		}
-		// NoFallback returns the WEB player-context error directly.
-		if req.NoFallback {
-			return nil, youtube.AttemptWebContext, err
-		}
-		em.warn(WarnWebContextFallback, "WEB player-context failed: "+err.Error()+"; trying the configured client chain")
+		// The caller records this reason and warns after another client delivers.
 		return nil, youtube.AttemptWebContext, err
+	}
+
+	// An empty attempt ID makes the loop surface this error directly.
+	if err := c.forcedIOSDelivery(); err != nil {
+		return nil, "", err
 	}
 
 	em.stage(StageExtracting)
@@ -295,6 +328,8 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	var causes attemptErrors
 	pinnedItag := 0
 	firstClient := ""
+	firstFromWebContext := false
+	webCtxReason := c.initialWebContextReason()
 	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
 
 	for {
@@ -305,6 +340,13 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			}
 			if errors.Is(err, ErrRateLimited) {
 				return nil, download.Result{}, "", err
+			}
+			// Do not aggregate a configuration error with prior attempt failures.
+			if errors.Is(err, ErrDeliveryUnsupported) {
+				return nil, download.Result{}, "", err
+			}
+			if attempt == youtube.AttemptWebContext {
+				webCtxReason = "failed: " + err.Error()
 			}
 			if attempt == "" {
 				// ErrChainExhausted only marks the end of the chain. The recorded
@@ -328,14 +370,17 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 		}
 		if firstClient == "" {
 			firstClient = a.client
+			firstFromWebContext = a.attempt == youtube.AttemptWebContext
 		}
 		path := dest(a)
 		em.stage(StageDownloading)
 		res, derr := a.transfer.toFile(ctx, path, progress)
 		if derr == nil {
-			if a.client != firstClient {
+			// Use the more specific web-context fallback warning below.
+			if a.client != firstClient && !firstFromWebContext {
 				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
 			}
+			c.warnWebContextFallback(em, a, webCtxReason)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -355,11 +400,17 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			return nil, download.Result{}, "", derr
 		}
 		causes.add(a.attempt, derr)
+		if a.attempt == youtube.AttemptWebContext {
+			webCtxReason = "stream capped before completion"
+		}
 		if req.NoFallback {
 			break // do not switch clients after an incomplete delivery
 		}
 		skip[a.attempt] = true
-		em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
+		// A later web-context fallback warning covers this transition.
+		if a.attempt != youtube.AttemptWebContext {
+			em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
+		}
 	}
 	return nil, download.Result{}, "", causes.aggregate()
 }
@@ -513,6 +564,21 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 	return func(bw, total int64) { p(download.Progress{BytesWritten: bw, Total: total}) }
 }
 
+// forcedIOSDelivery rejects byte delivery through a forced built-in iOS client.
+// iOS metadata and format extraction still work, and a preceding WEB
+// player-context attempt may still deliver. The default chain and profile
+// overrides are not restricted.
+func (c *Client) forcedIOSDelivery() error {
+	if c.opts.Client == "" {
+		return nil
+	}
+	name, ok := c.yt.ForcedSingleClient()
+	if !ok || !youtube.IsIOSClient(name) {
+		return nil
+	}
+	return fmt.Errorf("%w: client \"ios\" provides metadata and formats only; use --client android_vr or web, or configure --player-context-url", ErrDeliveryUnsupported)
+}
+
 // Download acquires and processes a single YouTube video to the configured sink.
 // It is strictly single-video: a playlist URL returns ErrIsPlaylist (use
 // Enumerate and loop).
@@ -576,6 +642,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			OutputPath:   req.Output.path,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
+			Metadata:     videoMetadataFor(req, a.video),
 		}, nil
 	case outputWriter:
 		a, err := c.acquire(ctx, req, id, em)
@@ -601,6 +668,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			OutputFormat: a.fmtSel,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
+			Metadata:     videoMetadataFor(req, a.video),
 		}, nil
 	}
 	return nil, fmt.Errorf("waxtap: unsupported output kind for keep-source delivery")
@@ -680,6 +748,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 			SourceFormat: a.fmtSel,
 			OutputFormat: a.fmtSel,
 			SourceBytes:  dlRes.BytesWritten,
+			Metadata:     videoMetadataFor(req, a.video),
 		}
 		return srcPath, res, nil
 	}
@@ -715,6 +784,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	res.Client = a.client
 	res.SourceBytes = dlRes.BytesWritten
 	res.SponsorBlockApplied = sponsorBlockContributed(explicit, sbRanges, pres)
+	res.Metadata = videoMetadataFor(req, a.video)
 	return deliver, res, nil
 }
 
@@ -837,6 +907,21 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em
 	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver), Client: res.Client}
 	ok = true
 	return &dirCleanupReader{File: f, dir: jobDir, em: em}, info, nil
+}
+
+// videoMetadataFor returns the requested result metadata, or nil when metadata
+// was not requested.
+func videoMetadataFor(req Request, v *youtube.Video) *VideoMetadata {
+	if !req.IncludeMetadata || v == nil {
+		return nil
+	}
+	return &VideoMetadata{
+		Author:      v.Author,
+		Duration:    v.Duration,
+		PublishDate: v.PublishDate,
+		Description: v.Description,
+		Formats:     v.Formats,
+	}
 }
 
 // loudnessTarget returns the target LUFS, or 0 when no loudness work is requested.

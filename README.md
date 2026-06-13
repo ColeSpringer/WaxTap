@@ -18,10 +18,13 @@ keeps the selected source stream and does not re-encode.
 - **Library and CLI over one core.** `github.com/colespringer/waxtap` is the stable
   facade; `cmd/waxtap` is a real CLI built on the same packages.
 - **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
-  default ANDROID_VR and iOS clients return playable audio for public videos with
-  no PO token. Full WEB audio over SABR/UMP is opt-in: it needs a GVS
-  `potoken.Provider` plus an attested `/player-context` handoff (WaxTap's own WEB
-  `/player` only earns a ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
+  default ANDROID_VR client returns playable audio for public videos with no PO
+  token; iOS extracts metadata and formats only (its googlevideo URLs reject
+  WaxTap's ranged requests, so `--client ios` serves `info`/`formats`, not
+  downloads). Full WEB audio over SABR/UMP is opt-in: it needs a GVS
+  `potoken.Provider` **plus** an attested identity, either a `/player-context`
+  handoff or `/session` adoption (WaxTap's own WEB `/player` only earns a
+  ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
 - **YouTube-specific code is isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so most upstream changes stay in a few files.
 - **Operational behavior:** concurrency-safe, context-cancelable, bounded memory,
@@ -175,16 +178,18 @@ without parsing messages (`--json` carries the same class in `error.code`):
 |---|---|
 | 0 | success |
 | 1 | unclassified error |
-| 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported local input, unknown `--client`, or invalid config |
+| 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported local input, requested format (`--itag`/`--codec`) unavailable, unknown `--client`, or invalid config |
 | 3 | video unavailable, restricted, login required, live, or no audio formats |
 | 4 | extraction, cipher, or playlist parsing failure (often indicates WaxTap needs an update) |
 | 5 | rate limited |
 | 6 | ffmpeg/ffprobe not found |
-| 7 | incomplete stream (delivery ended early; another client may work) |
+| 7 | incomplete stream or expired stream URL (delivery ended early; another client may work) |
 | 8 | PO token required (none configured, mint failed, or YouTube rejected it) |
+| 9 | network failure (dead `--proxy`, unreachable player-context/session sidecar, or connection error) |
+| 10 | local I/O failure (e.g. an unwritable output directory) |
 | 130 | canceled (SIGINT) |
 
-Scripts may rely on these codes.
+Scripts may rely on these codes. Run `waxtap exit-codes` to print this table.
 
 ### Library
 
@@ -251,6 +256,8 @@ Useful operational knobs:
   own user agents.
 - Single client / session adoption: `--client web|ios|android_vr|web_embedded`
   forces one built-in client as the whole chain (conflicts with `--profile-override`).
+  `--client ios` is metadata/formats-only: it serves `info`/`formats` but cannot
+  download bytes (configure `--player-context-url` for forced-WEB audio instead).
   `--visitor-data` (+ optional `--cookies`) or `--session-url` adopt an external
   guest session for byte-exact coherence with a token minter; see
   [PO tokens & WEB](#po-tokens--web).
@@ -297,12 +304,16 @@ metadata, stream resolution, and keep-source downloads do not need them.
 
 ## PO tokens & WEB
 
-ANDROID_VR and iOS return playable audio for public videos with **no PO token**,
-and they are WaxTap's zero-dependency default. Everything below is opt-in, for
-callers who specifically want the WEB path.
+ANDROID_VR returns playable audio for public videos with **no PO token** and is
+WaxTap's zero-dependency default. iOS extracts metadata and formats only; its
+googlevideo URLs reject WaxTap's ranged requests, so it cannot deliver bytes.
+Everything below is opt-in, for callers who specifically want the WEB path.
 
-The WEB-family clients serve URL-less audio over SABR/UMP and need a GVS-scope
-`potoken.Provider`; WaxTap ships no token generator (supply one via
+The WEB-family clients serve URL-less audio over SABR/UMP. **Full WEB audio needs
+the GVS-scope `potoken.Provider` plus an attested identity, either the attested
+`/player-context` handoff or `/session` adoption (both below).** The token alone
+is not enough: a WEB `/player` call WaxTap makes itself earns only a ~1-minute
+preview. WaxTap ships no token generator (supply one via
 `Options.POTokenProvider`, or the CLI's `--potoken-url` for a bgutil server).
 
 ### Full WEB audio: the attested `/player-context` handoff

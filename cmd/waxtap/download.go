@@ -277,10 +277,16 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		enumErrors:     len(res.EnumErrors),
 		capReached:     res.CapReached,
 	})
+	// JSON mode has already written the item records and summary. Preserve the
+	// failure exit code without appending another JSON document.
+	err := sumErr
 	if runErr != nil {
-		return runErr // the partial-run summary has already been written
+		err = runErr // the partial-run summary has already been written
 	}
-	return sumErr
+	if env.jsonMode() {
+		return alreadyRendered(err)
+	}
+	return err
 }
 
 // runSingleDownload downloads one video with a live progress bar.
@@ -387,7 +393,7 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from
 // the flags, without an Output.
 func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
-	spec := waxtap.ProcessSpec{SkipIfExists: df.skipExisting, Channels: df.layout, Downmix: df.downmix}
+	spec := waxtap.ProcessSpec{SkipIfExists: df.skipExisting, Channels: df.layout, Downmix: df.downmix, IncludeMetadata: df.writeInfoJSON}
 	tf, hasTranscode, err := df.transcodeFormat()
 	if err != nil {
 		return spec, err
@@ -429,13 +435,15 @@ func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	sbSet := df.sbCats != ""
-	if len(ranges) == 0 && !sbSet {
-		return nil, nil
-	}
+	// Validate --cut-mode even when no ranges were supplied, so bad input fails
+	// before extraction.
 	mode, err := parseCutMode(df.cutMode)
 	if err != nil {
 		return nil, err
+	}
+	sbSet := df.sbCats != ""
+	if len(ranges) == 0 && !sbSet {
+		return nil, nil
 	}
 	cs := &waxtap.CutSpec{Ranges: ranges, Mode: mode, Crossfade: df.crossfade}
 	if sbSet {

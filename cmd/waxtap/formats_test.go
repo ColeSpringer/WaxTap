@@ -12,6 +12,19 @@ func TestSchemaVersionIsThree(t *testing.T) {
 	}
 }
 
+func TestTriOrDash(t *testing.T) {
+	cases := map[waxtap.Tri]string{
+		waxtap.Yes:     "yes",
+		waxtap.No:      "no",
+		waxtap.Unknown: "-",
+	}
+	for in, want := range cases {
+		if got := triOrDash(in); got != want {
+			t.Errorf("triOrDash(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestDedupFormats(t *testing.T) {
 	// Preserve language and DRC variants while removing exact display duplicates.
 	in := []waxtap.Format{

@@ -153,6 +153,10 @@ type ProcessSpec struct {
 	// SkipIfExists skips work when the exact output path already exists. This is
 	// only a path check; callers remain responsible for library-level deduping.
 	SkipIfExists bool
+
+	// IncludeMetadata attaches extended video metadata to Result.Metadata for
+	// YouTube downloads. It has no effect on local-file processing.
+	IncludeMetadata bool
 }
 
 // Request is a YouTube acquisition + processing request.
@@ -372,6 +376,20 @@ type Result struct {
 	Loudness            *LoudnessResult // nil unless measured
 
 	Warnings []Warning // non-fatal conditions encountered during processing
+
+	// Metadata contains extended video metadata when ProcessSpec.IncludeMetadata
+	// is set. It is nil otherwise.
+	Metadata *VideoMetadata
+}
+
+// VideoMetadata contains optional YouTube metadata that is not stored directly
+// on Result.
+type VideoMetadata struct {
+	Author      string        // channel / uploader name
+	Duration    time.Duration // video duration, 0 if unknown
+	PublishDate time.Time     // publication date, zero if unknown
+	Description string        // video description
+	Formats     []Format      // full candidate audio (and incidental video) formats
 }
 
 // StreamInfo is the initial metadata returned by Client.Stream alongside the

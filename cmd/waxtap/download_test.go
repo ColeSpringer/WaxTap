@@ -31,6 +31,19 @@ func TestResolveValidatesProcessSpec(t *testing.T) {
 	}
 }
 
+// TestBuildCutSpecValidatesCutModeWithoutRanges ensures invalid input fails
+// before extraction, even when no cut ranges are configured.
+func TestBuildCutSpecValidatesCutModeWithoutRanges(t *testing.T) {
+	df := &downloadFlags{cutMode: "bogus"} // no ranges, no SponsorBlock
+	if _, err := df.buildCutSpec(); err == nil {
+		t.Fatal("buildCutSpec err = nil, want a cut-mode validation error before the no-cut early return")
+	}
+	// No cut work still yields a nil spec.
+	if cs, err := (&downloadFlags{}).buildCutSpec(); err != nil || cs != nil {
+		t.Errorf("buildCutSpec(empty) = (%v, %v), want (nil, nil)", cs, err)
+	}
+}
+
 // TestBuildProcessSpecNormalizeRequiresEncode covers flag combinations before
 // any download starts.
 func TestBuildProcessSpecNormalizeRequiresEncode(t *testing.T) {

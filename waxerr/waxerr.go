@@ -10,6 +10,8 @@ package waxerr
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,6 +44,10 @@ var (
 	ErrLoginRequired    = errors.New("waxtap: login required")
 	ErrLiveContent      = errors.New("waxtap: live/upcoming content is not supported")
 	ErrNoAudioFormats   = errors.New("waxtap: no audio formats available")
+	// ErrRequestedFormatUnavailable indicates an explicit --itag/--codec selector
+	// matched none of the available audio formats. Unlike ErrNoAudioFormats, it
+	// means usable audio exists but not in the requested format.
+	ErrRequestedFormatUnavailable = errors.New("waxtap: requested format unavailable")
 )
 
 // Throttling.
@@ -77,6 +83,9 @@ var (
 	// ErrInvalidConfig indicates invalid or conflicting configuration or option
 	// values.
 	ErrInvalidConfig = errors.New("waxtap: invalid configuration")
+	// ErrDeliveryUnsupported indicates the selected client can extract metadata and
+	// formats but cannot deliver media bytes in the current configuration.
+	ErrDeliveryUnsupported = errors.New("waxtap: byte delivery not supported for this client")
 )
 
 // RateLimitError carries backoff context for an HTTP 429 (or a 403 that the
@@ -123,6 +132,47 @@ func (e *ExtractionError) Unwrap() []error {
 	}
 	return []error{ErrExtractionFailed}
 }
+
+// ProviderError reports a failed call to a player-context or session provider.
+// It unwraps to the underlying cause, allowing transport and HTTP errors to keep
+// their own classification.
+type ProviderError struct {
+	Endpoint string // provider that failed, e.g. "player-context", "session"
+	Cause    error  // underlying transport or HTTP failure
+}
+
+func (e *ProviderError) Error() string {
+	return fmt.Sprintf("waxtap: %s provider failed: %v", e.Endpoint, e.Cause)
+}
+
+func (e *ProviderError) Unwrap() error { return e.Cause }
+
+// RequestedFormatError reports that an explicit itag/codec selector matched no
+// available audio format. It lists the available alternatives and unwraps to
+// [ErrRequestedFormatUnavailable].
+type RequestedFormatError struct {
+	Selector string   // the selector that found no match, e.g. "itag(999)"
+	Itags    []int    // available audio itags
+	Codecs   []string // available audio codec families
+}
+
+func (e *RequestedFormatError) Error() string {
+	msg := fmt.Sprintf("waxtap: requested format %s is not available", e.Selector)
+	switch {
+	case len(e.Itags) > 0:
+		parts := make([]string, len(e.Itags))
+		for i, it := range e.Itags {
+			parts[i] = strconv.Itoa(it)
+		}
+		return msg + " (available itags: " + strings.Join(parts, ", ") + ")"
+	case len(e.Codecs) > 0:
+		return msg + " (available codecs: " + strings.Join(e.Codecs, ", ") + ")"
+	default:
+		return msg
+	}
+}
+
+func (e *RequestedFormatError) Unwrap() error { return ErrRequestedFormatUnavailable }
 
 // PlayabilityError carries YouTube's playabilityStatus. It unwraps to the
 // classified sentinel (e.g. [ErrVideoRestricted], [ErrLoginRequired],
@@ -199,7 +249,10 @@ func errRank(err error) int {
 		errors.Is(err, ErrVideoRestricted),
 		errors.Is(err, ErrLoginRequired),
 		errors.Is(err, ErrLiveContent),
-		errors.Is(err, ErrNoAudioFormats):
+		errors.Is(err, ErrNoAudioFormats),
+		// A requested-format miss proves that extraction succeeded, so it outranks
+		// availability errors from other clients.
+		errors.Is(err, ErrRequestedFormatUnavailable):
 		return 5
 	case errors.Is(err, ErrExtractionFailed),
 		errors.Is(err, ErrCipherSolve),

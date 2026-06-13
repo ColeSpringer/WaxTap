@@ -66,9 +66,11 @@ func newDoctorCmd() *cobra.Command {
 				if err := emitDoctorJSON(env, rep, lastErr); err != nil {
 					return err
 				}
-			} else {
-				renderDoctorHuman(env, rep, lastErr)
+				// The JSON report already includes the failure. Preserve its exit
+				// code without writing a second document.
+				return alreadyRendered(lastErr)
 			}
+			renderDoctorHuman(env, rep, lastErr)
 			return lastErr
 		},
 	}

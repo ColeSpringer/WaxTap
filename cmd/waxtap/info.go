@@ -32,10 +32,11 @@ func newInfoCmd() *cobra.Command {
 			if probe {
 				depth = waxtap.InfoProbe
 			}
-			video, err := env.client.Info(cmd.Context(), args[0], depth)
+			info, err := env.client.InfoResult(cmd.Context(), args[0], depth)
 			if err != nil {
 				return err
 			}
+			video := info.Video
 
 			var resolved *waxtap.ResolvedStream
 			if showURLs {
@@ -49,9 +50,9 @@ func newInfoCmd() *cobra.Command {
 			bestIdx, bestErr := sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
 
 			if env.jsonMode() {
-				return emitInfoJSON(env, video, bestIdx, bestErr, resolved)
+				return emitInfoJSON(env, info, bestIdx, bestErr, resolved)
 			}
-			renderInfoHuman(env, video, bestIdx, bestErr, resolved, showURLs)
+			renderInfoHuman(env, info, bestIdx, bestErr, resolved, showURLs)
 			return nil
 		},
 	}
@@ -61,10 +62,14 @@ func newInfoCmd() *cobra.Command {
 	return cmd
 }
 
-func renderInfoHuman(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *waxtap.ResolvedStream, showURLs bool) {
+func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr error, rs *waxtap.ResolvedStream, showURLs bool) {
+	v := info.Video
 	env.printf("Title:     %s\n", v.Title)
 	env.printf("Author:    %s\n", v.Author)
 	env.printf("Video ID:  %s\n", v.ID)
+	if info.Client != "" {
+		env.printf("Client:    %s\n", info.Client)
+	}
 	env.printf("Duration:  %s\n", humanDuration(v.Duration))
 	if !v.PublishDate.IsZero() {
 		env.printf("Published: %s\n", v.PublishDate.Format("2006-01-02"))
@@ -108,7 +113,8 @@ func renderInfoHuman(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, r
 	}
 }
 
-func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *waxtap.ResolvedStream) error {
+func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr error, rs *waxtap.ResolvedStream) error {
+	v := info.Video
 	// Match the human display without changing the selection indexed by bestIdx.
 	deduped := dedupFormats(v.Formats)
 	formats := make([]formatJSON, len(deduped))
@@ -120,6 +126,7 @@ func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *
 		VideoID       string        `json:"videoId"`
 		Title         string        `json:"title"`
 		Author        string        `json:"author"`
+		Client        string        `json:"client,omitempty"`
 		ChannelID     string        `json:"channelId,omitempty"`
 		DurationSecs  float64       `json:"durationSeconds"`
 		PublishDate   string        `json:"publishDate,omitempty"`
@@ -134,6 +141,7 @@ func emitInfoJSON(env *appEnv, v *waxtap.Video, bestIdx int, bestErr error, rs *
 		VideoID:       v.ID,
 		Title:         v.Title,
 		Author:        v.Author,
+		Client:        info.Client,
 		ChannelID:     v.ChannelID,
 		DurationSecs:  v.Duration.Seconds(),
 		IsLive:        v.IsLive,

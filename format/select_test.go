@@ -100,6 +100,35 @@ func TestBestAudio_PrefersNonDRC(t *testing.T) {
 	}
 }
 
+// TestBestAudio_NonDRCUniformMovePreservesOrder verifies that mapping all non-DRC
+// formats from Unknown to No does not change their relative order.
+func TestBestAudio_NonDRCUniformMovePreservesOrder(t *testing.T) {
+	build := func(drc Tri) []Format {
+		return []Format{
+			{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000, IsDRC: drc},
+			{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, IsDRC: drc},
+		}
+	}
+	for _, drc := range []Tri{Unknown, No} {
+		cands := build(drc)
+		idx, err := BestForTarget(cands, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatalf("IsDRC=%v: %v", drc, err)
+		}
+		if cands[idx].Itag != 251 {
+			t.Errorf("IsDRC=%v: chose itag %d, want 251 (higher bitrate; order unchanged by the uniform move)", drc, cands[idx].Itag)
+		}
+	}
+	// A DRC variant still ranks below a non-DRC variant.
+	mixed := []Format{
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, IsDRC: Yes},
+		{Itag: 250, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 140000, IsDRC: No},
+	}
+	if idx, _ := BestForTarget(mixed, MinimizeLoss(), Target{}); mixed[idx].Itag != 250 {
+		t.Errorf("chose itag %d, want 250 (non-DRC still preferred)", mixed[idx].Itag)
+	}
+}
+
 func TestBestAudio_OriginalOutranksNonDRC(t *testing.T) {
 	// Original-but-DRC must beat a non-DRC dub: language correctness first.
 	cands := []Format{

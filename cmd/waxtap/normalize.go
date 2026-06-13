@@ -33,7 +33,10 @@ func newNormalizeCmd() *cobra.Command {
 		Long: "Measure integrated loudness (default) or normalize to a target LUFS with\n" +
 			"--apply (or by setting --target), fused into a transcode. With --album,\n" +
 			"measure a set of files as one album, or with --apply bake the shared album\n" +
-			"gain into each track (preserving track-to-track differences).",
+			"gain into each track (preserving track-to-track differences).\n\n" +
+			"Applying normalization uses one ffmpeg loudnorm pass with true-peak\n" +
+			"limiting. A loud source may therefore land slightly below the target\n" +
+			"(for example, -14.9 for -14).",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)

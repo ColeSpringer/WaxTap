@@ -969,7 +969,9 @@ func (s *stream) descramble(rawURL string) (string, error) {
 	}
 	out, err := s.cfg.DescrambleN(s.ctx, rawURL)
 	if err != nil {
-		return "", fmt.Errorf("%w: descramble SABR redirect: %v", waxerr.ErrExtractionFailed, err)
+		// Preserve ErrCipherSolve so callers can distinguish it from extraction
+		// failures.
+		return "", fmt.Errorf("descramble SABR redirect: %w", err)
 	}
 	return out, nil
 }

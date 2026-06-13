@@ -18,10 +18,14 @@ profiles, and verify fixes.
    availability/restriction, and exit `5` means rate limiting; both are often
    environmental, especially from datacenter IPs. Exit `7` (`incomplete-stream`)
    means WaxTap could not obtain a complete stream from the attempted clients,
-   for example because of an iOS range limit or a WEB SABR preview limit. This is
-   not a WaxTap maintenance signal, so it remains distinct from exit `4`.
-   Configure `--potoken-url` and `--player-context-url` when full WEB audio is
-   required.
+   for example because of a WEB SABR preview limit. This is not a WaxTap
+   maintenance signal, so it remains distinct from exit `4`. Exit `9` is a
+   network/connection failure (dead `--proxy` or unreachable sidecar) and exit
+   `10` is a local I/O failure; neither is a maintenance signal. Full WEB audio
+   needs the GVS token (`--potoken-url`) **plus** an attested identity, either
+   `--player-context-url` or `--session-url`. `--client ios` is metadata/formats
+   only and rejects downloads before extraction with exit `2`
+   (`delivery-unsupported`).
 
 2. **Capture what YouTube returned.** Set the dump directory and reproduce:
    ```
@@ -370,8 +374,9 @@ rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
   setup). Status 2 still caps WEB SABR at a ~1-minute preview for automated
   clients, and a better token does not lift it (see [Diagnosing a SABR
   stall](#diagnosing-a-sabr-stall)); full WEB audio comes from an attested
-  `/player-context` handoff (status-1 URL), and ANDROID_VR (which does not use
-  WEB SABR) remains the zero-dependency default.
+  identity, either a `/player-context` handoff (status-1 URL) or `/session`
+  adoption. ANDROID_VR (which does not use WEB SABR) remains the
+  zero-dependency default.
 
 ### When SABR breaks
 
@@ -446,7 +451,8 @@ re-chase either. The evidence:
 - A warmed, residential, genuine-Chromium (Playwright) session playing the same
   video in YouTube's **own** web player hits the **identical** cap (itag 251:
   `duration_ms = 60001`, 6 segments) and then errors "Something went wrong." Its
-  request is far richer than ours, so matching the shape would not help.
+  request contains many more fields than ours, so matching the shape would not
+  help.
 - Also ruled out: video (a concurrent video track does not lift the audio cap),
   anonymous cookies (googlevideo is a different eTLD+1; the browser sends none),
   egress IP (residential, still capped), wall-clock pacing (capping reported
@@ -478,11 +484,11 @@ full `634.624s`, itag 258, `status 1` every round, cold start.
 
 The dead ends still hold: a WEB `/player` WaxTap calls itself (or any **bare**
 in-page `/player` fetch) earns only the status-2 preview, and no token or
-request-shape tweak lifts it. The lever is the attested-**playback** provenance of
-the URL: the minting browser must actually begin playback (establish the session)
-before its `serverAbrStreamingUrl` carries the status-1 grade; the load-time URL
-is status-2. WaxTap classifies an un-handed-off status-2 stall token-neutrally as
-`ErrExtractionFailed` ("...under attestation-pending (status 2); cause is upstream
+request-shape tweak lifts it. The difference is whether the attested browser has
+begun playback: the minting browser must establish the playback session before
+its `serverAbrStreamingUrl` carries the status-1 grade. The load-time URL is
+status-2. WaxTap classifies an un-handed-off status-2 stall token-neutrally as
+`ErrIncompleteStream` ("...under attestation-pending (status 2); cause is upstream
 of the PO token").
 
 **ANDROID_VR remains the default** (no gate, no GVS pot, direct signed URLs):

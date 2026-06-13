@@ -199,6 +199,15 @@ func (s AudioSelector) String() string {
 	}
 }
 
+// Explicit reports whether the selector names an exact itag or codec rather than
+// best-audio.
+func (s AudioSelector) Explicit() bool {
+	return s.kind == selItag || s.kind == selCodec
+}
+
+// IsCodec reports whether the selector matches by codec family.
+func (s AudioSelector) IsCodec() bool { return s.kind == selCodec }
+
 type policyKind uint8
 
 const (

@@ -254,8 +254,25 @@ func (c *Client) ffmpeg() (*transcode.Runner, error) {
 	return c.runner, c.runnerErr
 }
 
+// InfoResult contains extracted video metadata and the client that produced it.
+// A later Resolve call may use a different client.
+type InfoResult struct {
+	Video  *Video // extracted metadata and candidate formats
+	Client string // YouTube client that produced the metadata
+}
+
 // Info returns video metadata and candidate audio formats at the requested depth,
 // without downloading.
+func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video, error) {
+	r, err := c.InfoResult(ctx, url, depth)
+	if err != nil {
+		return nil, err
+	}
+	return r.Video, nil
+}
+
+// InfoResult returns video metadata, candidate audio formats, and the extraction
+// client at the requested depth, without downloading.
 //
 // InfoBasic returns extracted metadata and candidate formats. InfoResolved
 // additionally resolves the best-audio format, surfacing resolution errors (such
@@ -264,7 +281,7 @@ func (c *Client) ffmpeg() (*transcode.Runner, error) {
 // channel count, bitrate, and duration (network-expensive, and requires ffmpeg).
 // The signed stream URLs themselves are not returned through Video; use Download
 // or Stream to fetch bytes.
-func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video, error) {
+func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth) (*InfoResult, error) {
 	id, err := youtube.ExtractVideoID(url)
 	if err != nil {
 		return nil, err
@@ -277,13 +294,14 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 		return nil, err
 	}
 	video := ext.Video()
+	res := &InfoResult{Video: video, Client: ext.ClientName()}
 	if depth < InfoResolved {
-		return video, nil
+		return res, nil
 	}
 
 	idx, serr := format.BestForTarget(video.Formats, format.MinimizeLoss(), format.Target{})
 	if serr != nil {
-		return video, nil // nothing resolvable; return the basic metadata
+		return res, nil // nothing resolvable; return the basic metadata
 	}
 	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
 	defer rcancel()
@@ -298,6 +316,10 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 
 	// ffprobe cannot inspect SABR streams because they have no direct URL.
 	if depth >= InfoProbe && rs.Probeable() {
+		// Probing reads media bytes, so a forced iOS client cannot perform it.
+		if err := c.forcedIOSDelivery(); err != nil {
+			return nil, err
+		}
 		runner, ferr := c.ffmpeg()
 		if ferr != nil {
 			return nil, ferr
@@ -308,7 +330,7 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 		}
 		applyProbe(&video.Formats[idx], probe)
 	}
-	return video, nil
+	return res, nil
 }
 
 // Enumerate expands a playlist URL into entries without downloading media.
@@ -355,7 +377,8 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
+			// Avoid warning once per item when the forced client needs WEB fallback.
+			v, err := c.Info(youtube.WithBulkExtraction(ctx), pl.Entries[i].VideoID, InfoBasic)
 			if err != nil {
 				// Return cancellation through ctx.Err(), not as an item error.
 				if ctx.Err() == nil {
