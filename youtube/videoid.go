@@ -57,7 +57,9 @@ func ExtractVideoID(input string) (string, error) {
 		if q.Get("list") != "" || firstSegment(u.Path) == "playlist" {
 			return "", waxerr.ErrIsPlaylist
 		}
-		return "", waxerr.ErrInvalidVideoID
+		// Report a recognized YouTube URL without a video separately from malformed
+		// input.
+		return "", errNoVideoInURL
 	}
 
 	// No recognizable host: accept a bounded, exactly-11-character ID token from
@@ -66,6 +68,11 @@ func ExtractVideoID(input string) (string, error) {
 	// into a different valid video ID.
 	if id, ok := idFromLooseText(s); ok {
 		return id, nil
+	}
+	// Route bare playlist IDs to Enumerate instead of treating them as malformed
+	// video IDs.
+	if playlistID.MatchString(s) {
+		return "", waxerr.ErrIsPlaylist
 	}
 	// Length determines whether malformed input is too short or invalid. A token
 	// with 11 characters and an invalid symbol is long enough but malformed.
@@ -127,6 +134,17 @@ type notYouTubeURLError struct{}
 
 func (notYouTubeURLError) Error() string { return "waxtap: not a recognized YouTube URL or video ID" }
 func (notYouTubeURLError) Unwrap() error { return waxerr.ErrInvalidVideoID }
+
+// errNoVideoInURL reports a recognized YouTube URL without a video or playlist
+// reference while retaining the ErrInvalidVideoID classification.
+var errNoVideoInURL error = noVideoInURLError{}
+
+type noVideoInURLError struct{}
+
+func (noVideoInURLError) Error() string {
+	return "waxtap: not a recognized YouTube video URL or video ID"
+}
+func (noVideoInURLError) Unwrap() error { return waxerr.ErrInvalidVideoID }
 
 // isYouTubeHost reports whether host is a YouTube domain WaxTap recognizes.
 func isYouTubeHost(host string) bool {

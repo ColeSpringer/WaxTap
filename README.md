@@ -179,7 +179,7 @@ without parsing messages (`--json` carries the same class in `error.code`):
 | 0 | success |
 | 1 | unclassified error |
 | 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported local input, requested format (`--itag`/`--codec`) unavailable, unknown `--client`, or invalid config |
-| 3 | video unavailable, restricted, login required, live, or no audio formats |
+| 3 | unavailable or restricted video, login required, live content, no audio formats, unavailable playlist, or empty playlist |
 | 4 | extraction, cipher, or playlist parsing failure (often indicates WaxTap needs an update) |
 | 5 | rate limited |
 | 6 | ffmpeg/ffprobe not found |
@@ -258,6 +258,8 @@ Useful operational knobs:
   forces one built-in client as the whole chain (conflicts with `--profile-override`).
   `--client ios` is metadata/formats-only: it serves `info`/`formats` but cannot
   download bytes (configure `--player-context-url` for forced-WEB audio instead).
+  `--client web_embedded` currently falls back to `web` for most videos.
+  Use `--client web` or `--client android_vr` to select either client directly.
   `--visitor-data` (+ optional `--cookies`) or `--session-url` adopt an external
   guest session for byte-exact coherence with a token minter; see
   [PO tokens & WEB](#po-tokens--web).

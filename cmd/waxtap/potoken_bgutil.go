@@ -60,7 +60,7 @@ func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request
 		return potoken.Response{}, err
 	}
 	if out.POToken == "" {
-		return potoken.Response{}, fmt.Errorf("bgutil PO-token server returned an empty token")
+		return potoken.Response{}, &sidecarResponseError{label: "bgutil PO-token server", endpoint: p.endpoint, reason: "empty token"}
 	}
 	return potoken.Response{
 		Token:     out.POToken,

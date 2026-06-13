@@ -134,6 +134,14 @@ func (s *syncWriter) emitSummary(sum playlistSummary) error {
 	}
 }
 
+// itemCount formats n with the correct singular or plural unit.
+func itemCount(n int) string {
+	if n == 1 {
+		return "1 item"
+	}
+	return fmt.Sprintf("%d items", n)
+}
+
 // emitPlaylistList prints enumerated entries without downloading (the --list flag).
 func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	if env.jsonMode() {
@@ -158,7 +166,7 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	}
 
 	if pl.Title != "" {
-		env.printf("%s (%d items)\n\n", pl.Title, len(pl.Entries))
+		env.printf("%s (%s)\n\n", pl.Title, itemCount(len(pl.Entries)))
 	}
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tID\tDURATION\tTITLE")

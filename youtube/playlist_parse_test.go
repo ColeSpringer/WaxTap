@@ -94,14 +94,14 @@ func TestParseBrowseInitial_UnknownShapeIsParseError(t *testing.T) {
 // parser.
 func TestParseBrowseInitial_EmptyPlaylist(t *testing.T) {
 	_, _, _, err := parseBrowseInitial(readFixture(t, "playlist_browse_empty.json"))
-	if !errors.Is(err, waxerr.ErrInvalidPlaylistID) {
-		t.Fatalf("err = %v, want ErrInvalidPlaylistID", err)
+	if !errors.Is(err, waxerr.ErrPlaylistEmpty) {
+		t.Fatalf("err = %v, want ErrPlaylistEmpty", err)
 	}
 	if errors.Is(err, waxerr.ErrPlaylistParse) {
 		t.Error("an empty playlist must not read as a stale parser")
 	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("err = %q, want it to say the playlist is empty", err)
+	if errors.Is(err, waxerr.ErrInvalidPlaylistID) {
+		t.Error("an empty playlist must not read as an invalid playlist id")
 	}
 }
 
@@ -117,8 +117,27 @@ func TestParseBrowseInitial_MessageOnlyIsEmpty(t *testing.T) {
 		]}}}}]}}
 	}`)
 	_, _, _, err := parseBrowseInitial(body)
-	if !errors.Is(err, waxerr.ErrInvalidPlaylistID) || errors.Is(err, waxerr.ErrPlaylistParse) {
-		t.Fatalf("err = %v, want empty-playlist (ErrInvalidPlaylistID, not ErrPlaylistParse)", err)
+	if !errors.Is(err, waxerr.ErrPlaylistEmpty) || errors.Is(err, waxerr.ErrPlaylistParse) {
+		t.Fatalf("err = %v, want ErrPlaylistEmpty without ErrPlaylistParse", err)
+	}
+}
+
+func TestParseBrowseInitial_ErrorAlertIsUnavailable(t *testing.T) {
+	body := []byte(`{
+		"alerts": [{"alertRenderer": {"type": "ERROR", "text": {"simpleText": "This playlist does not exist."}}}]
+	}`)
+	_, _, _, err := parseBrowseInitial(body)
+	if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
+		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+	}
+	if errors.Is(err, waxerr.ErrInvalidPlaylistID) || errors.Is(err, waxerr.ErrPlaylistEmpty) {
+		t.Error("a private or deleted playlist must not read as an invalid or empty ID")
+	}
+	if _, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err); !ok {
+		t.Fatalf("err = %#v, want *PlaylistUnavailableError", err)
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("err = %q, want YouTube's reason preserved", err)
 	}
 }
 

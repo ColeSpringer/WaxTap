@@ -67,6 +67,11 @@ var (
 	// maintenance signal in the ErrExtractionFailed class: YouTube likely
 	// changed the playlist page and the parser needs updating.
 	ErrPlaylistParse = errors.New("waxtap: playlist response shape not recognized (parser may be stale)")
+	// ErrPlaylistUnavailable indicates that YouTube reports a playlist as private,
+	// deleted, or otherwise inaccessible. See [PlaylistUnavailableError].
+	ErrPlaylistUnavailable = errors.New("waxtap: playlist unavailable")
+	// ErrPlaylistEmpty indicates a valid playlist that contains no videos.
+	ErrPlaylistEmpty = errors.New("waxtap: playlist has no videos")
 )
 
 // Processing / local files.
@@ -181,6 +186,9 @@ type PlayabilityError struct {
 	Status   string // YouTube status, e.g. "LOGIN_REQUIRED", "UNPLAYABLE"
 	Reason   string // human-readable reason from YouTube
 	Sentinel error  // classified sentinel for errors.Is; required
+	// Embed reports that the WEB_EMBEDDED client returned the error. Callers can use
+	// it to provide fallback guidance without interpreting Reason.
+	Embed bool
 }
 
 func (e *PlayabilityError) Error() string {
@@ -191,6 +199,21 @@ func (e *PlayabilityError) Error() string {
 }
 
 func (e *PlayabilityError) Unwrap() error { return e.Sentinel }
+
+// PlaylistUnavailableError reports YouTube's reason for an inaccessible
+// playlist. It unwraps to [ErrPlaylistUnavailable].
+type PlaylistUnavailableError struct {
+	Reason string // human-readable reason from YouTube's alert
+}
+
+func (e *PlaylistUnavailableError) Error() string {
+	if e.Reason != "" {
+		return "waxtap: " + e.Reason
+	}
+	return ErrPlaylistUnavailable.Error()
+}
+
+func (e *PlaylistUnavailableError) Unwrap() error { return ErrPlaylistUnavailable }
 
 // HTTPStatusError reports an unexpected HTTP status from a YouTube,
 // googlevideo, or SponsorBlock endpoint.

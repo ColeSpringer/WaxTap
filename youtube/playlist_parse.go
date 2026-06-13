@@ -126,7 +126,7 @@ type playlistItem struct {
 	// level deeper; it appears only among an initial page's section contents.
 	PlaylistVideoListRenderer *playlistVideoList `json:"playlistVideoListRenderer"`
 	// MessageRenderer is YouTube's "no videos in this playlist" notice. Its
-	// presence marks a valid-but-empty playlist rather than a parse failure.
+	// presence confirms an empty playlist rather than a parse failure.
 	MessageRenderer *struct {
 		Text textRuns `json:"text"`
 	} `json:"messageRenderer"`
@@ -349,7 +349,9 @@ func parseBrowseInitial(body []byte) (playlistMeta, []playlistItem, string, erro
 
 	for _, a := range br.Alerts {
 		if strings.EqualFold(a.AlertRenderer.Type, "ERROR") {
-			return playlistMeta{}, nil, "", fmt.Errorf("playlist unavailable: %s: %w", a.AlertRenderer.Text.String(), waxerr.ErrInvalidPlaylistID)
+			// Preserve YouTube's reason while distinguishing an unavailable playlist
+			// from a malformed ID.
+			return playlistMeta{}, nil, "", &waxerr.PlaylistUnavailableError{Reason: a.AlertRenderer.Text.String()}
 		}
 	}
 
@@ -382,17 +384,13 @@ func parseBrowseInitial(body []byte) (playlistMeta, []playlistItem, string, erro
 	return meta, entries, token, nil
 }
 
-// zeroItemsError classifies a parsed, alert-free page with no items. An empty
-// playlist must not read as a stale parser, and a YouTube shape change must
-// not read as a bad id. Only explicit evidence marks a valid-but-empty
-// playlist: an empty legacy wrapper or a "no videos" notice. Anything else
-// (including a page with no recognizable item section at all, the likeliest
-// result of a renamed or moved container) means the parser is stale, so the
-// retry and maintainer signals fire instead of a false "playlist is empty".
+// zeroItemsError classifies an alert-free page with no parsed items. An empty
+// legacy wrapper or a "no videos" notice confirms an empty playlist. Any other
+// shape indicates that the parser may be stale.
 func zeroItemsError(isr []playlistItem) error {
 	for _, it := range isr {
 		if it.PlaylistVideoListRenderer != nil || it.MessageRenderer != nil {
-			return fmt.Errorf("playlist is empty: %w", waxerr.ErrInvalidPlaylistID)
+			return waxerr.ErrPlaylistEmpty
 		}
 	}
 	return fmt.Errorf("no recognized playlist contents: %w", waxerr.ErrPlaylistParse)

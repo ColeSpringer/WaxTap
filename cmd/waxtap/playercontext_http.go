@@ -86,10 +86,10 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 	// match them against their payload. video_playback_ustreamer_config is
 	// validated again in the library, which covers non-CLI providers too.
 	if out.Status != "" && !strings.EqualFold(out.Status, "OK") {
-		return potoken.PlayerContext{}, fmt.Errorf("player-context server returned status %q", out.Status)
+		return potoken.PlayerContext{}, &sidecarResponseError{label: "player-context server", endpoint: p.endpoint, reason: fmt.Sprintf("status %q", out.Status)}
 	}
 	if out.ServerAbrStreamingURL == "" || out.VisitorData == "" || out.VideoPlaybackUstreamerConfig == "" || len(out.AudioFormats) == 0 {
-		return potoken.PlayerContext{}, fmt.Errorf("player-context response missing server_abr_streaming_url, visitor_data, video_playback_ustreamer_config, or audio_formats")
+		return potoken.PlayerContext{}, &sidecarResponseError{label: "player-context server", endpoint: p.endpoint, reason: "missing server_abr_streaming_url, visitor_data, video_playback_ustreamer_config, or audio_formats"}
 	}
 
 	formats := make([]potoken.PlayerContextFormat, 0, len(out.AudioFormats))

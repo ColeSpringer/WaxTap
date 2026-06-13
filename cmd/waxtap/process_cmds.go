@@ -127,7 +127,9 @@ func newCutCmd() *cobra.Command {
 				explicit = args[1]
 			}
 
-			rangeList, err := parseRanges(ranges)
+			// Parse every shared cut flag before the early returns so cut and
+			// download apply the same validation.
+			rangeList, mode, pol, err := parseCutInputs(ranges, cutMode, sbOnError)
 			if err != nil {
 				return err
 			}
@@ -139,10 +141,6 @@ func newCutCmd() *cobra.Command {
 				return usagef("--cut-sponsorblock needs a YouTube source (no video ID for a local file)")
 			}
 
-			mode, err := parseCutMode(cutMode)
-			if err != nil {
-				return err
-			}
 			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
 			if err != nil {
 				return err
@@ -150,10 +148,6 @@ func newCutCmd() *cobra.Command {
 			cs := &waxtap.CutSpec{Ranges: rangeList, Mode: mode, Crossfade: crossfade}
 			if sbSet {
 				cats, err := parseCategories(sbCats)
-				if err != nil {
-					return err
-				}
-				pol, err := parseSponsorErrorPolicy(sbOnError)
 				if err != nil {
 					return err
 				}

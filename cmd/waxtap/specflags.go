@@ -110,6 +110,24 @@ func parseSponsorErrorPolicy(s string) (waxtap.SponsorBlockErrorPolicy, error) {
 	}
 }
 
+// parseCutInputs validates the ranges, render mode, and SponsorBlock error policy
+// shared by the download and cut commands.
+func parseCutInputs(ranges []string, cutMode, sbOnError string) ([]waxtap.TimeRange, waxtap.CutMode, waxtap.SponsorBlockErrorPolicy, error) {
+	rangeList, err := parseRanges(ranges)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	mode, err := parseCutMode(cutMode)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	pol, err := parseSponsorErrorPolicy(sbOnError)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return rangeList, mode, pol, nil
+}
+
 // audioSelector builds an AudioSelector from --itag, --codec, and the preferred
 // channel layout. An itag identifies an exact encoding and ignores layout.
 func audioSelector(itag int, codec string, layout waxtap.ChannelLayout) (waxtap.AudioSelector, error) {

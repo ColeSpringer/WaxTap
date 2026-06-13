@@ -44,6 +44,11 @@ var (
 	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
 	// response parsed but matched no known shape.
 	ErrPlaylistParse = waxerr.ErrPlaylistParse
+	// ErrPlaylistUnavailable indicates that a playlist is private, deleted, or
+	// otherwise inaccessible. See [PlaylistUnavailableError].
+	ErrPlaylistUnavailable = waxerr.ErrPlaylistUnavailable
+	// ErrPlaylistEmpty indicates that a valid playlist contains no videos.
+	ErrPlaylistEmpty = waxerr.ErrPlaylistEmpty
 
 	// Processing / local files.
 	ErrIncompatibleSpec = waxerr.ErrIncompatibleSpec
@@ -69,4 +74,7 @@ type (
 	// RequestedFormatError reports that an explicit itag/codec selector matched no
 	// available audio format and lists the available alternatives.
 	RequestedFormatError = waxerr.RequestedFormatError
+	// PlaylistUnavailableError reports why YouTube considers a playlist
+	// inaccessible.
+	PlaylistUnavailableError = waxerr.PlaylistUnavailableError
 )

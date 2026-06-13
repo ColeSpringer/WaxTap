@@ -83,18 +83,21 @@ func TestCleanMessage(t *testing.T) {
 	}
 }
 
-func TestErrorHint_WebEmbeddedNotEmbeddable(t *testing.T) {
+func TestErrorHint_WebEmbeddedFallback(t *testing.T) {
 	err := &waxtap.PlayabilityError{
 		Status:   "ERROR",
-		Reason:   "video may not be embeddable; try --client web or android_vr",
+		Reason:   "Video unavailable",
 		Sentinel: waxtap.ErrVideoUnavailable,
+		Embed:    true,
 	}
 	hint := errorHint(err)
 	if !strings.Contains(hint, "--client web") {
-		t.Errorf("errorHint = %q, want it to suggest --client web for a non-embeddable video", hint)
+		t.Errorf("errorHint = %q, want it to suggest --client web for a web_embedded fallback", hint)
 	}
-	if h := errorHint(waxtap.ErrVideoUnavailable); strings.Contains(h, "embed") {
-		t.Errorf("errorHint(ErrVideoUnavailable) = %q, should not mention embedding", h)
+	// A regular unavailable video does not get web_embedded guidance.
+	plain := &waxtap.PlayabilityError{Status: "ERROR", Reason: "Video unavailable", Sentinel: waxtap.ErrVideoUnavailable}
+	if h := errorHint(plain); strings.Contains(h, "web_embedded") {
+		t.Errorf("errorHint(non-embed) = %q, should not mention web_embedded", h)
 	}
 }
 
@@ -136,16 +139,22 @@ func TestExitCodeFor(t *testing.T) {
 	}
 }
 
-// TestClassifyError_POTokenBeatsNetwork verifies that a PO-token failure keeps
-// its precondition classification when it wraps a network error.
-func TestClassifyError_POTokenBeatsNetwork(t *testing.T) {
+func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
 	se := &sidecarError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", err: &net.OpError{Op: "dial", Err: errFake("refused")}}
 	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
-	if got := exitCodeFor(wrapped); got != 8 {
-		t.Errorf("unreachable PO-token sidecar exit = %d, want 8 (precondition beats network)", got)
+	if got := exitCodeFor(wrapped); got != 9 {
+		t.Errorf("unreachable PO-token sidecar exit = %d, want 9 (a dead sidecar is a network failure)", got)
 	}
-	if got := errorCode(wrapped); got != "needs-po-token" {
-		t.Errorf("code = %q, want needs-po-token", got)
+	if got := errorCode(wrapped); got != "network" {
+		t.Errorf("code = %q, want network", got)
+	}
+	// A missing provider remains a token precondition failure.
+	unconfigured := fmt.Errorf("%w: client %q requires a player PO token but no provider is configured", waxtap.ErrNeedsPOToken, "WEB")
+	if got := exitCodeFor(unconfigured); got != 8 {
+		t.Errorf("unconfigured PO-token exit = %d, want 8", got)
+	}
+	if got := errorCode(unconfigured); got != "needs-po-token" {
+		t.Errorf("unconfigured code = %q, want needs-po-token", got)
 	}
 }
 
@@ -208,14 +217,73 @@ func TestClassifyError_TimeoutConsistentAcrossPhases(t *testing.T) {
 	read := &url.Error{Op: "Get", URL: "x", Err: context.DeadlineExceeded}
 	for name, err := range map[string]error{"dial-phase": dial, "read-phase": read} {
 		c := classifyError(err)
-		if c.code != "timeout" || c.exitCode != 1 {
-			t.Errorf("%s timeout = %+v, want code timeout / exit 1", name, c)
+		if c.code != "timeout" || c.exitCode != 9 {
+			t.Errorf("%s timeout = %+v, want code timeout and exit 9", name, c)
 		}
 	}
 	// A connection failure with no deadline still classifies as the network class.
 	refused := &net.OpError{Op: "dial", Err: errFake("connection refused")}
 	if c := classifyError(refused); c.code != "network" || c.exitCode != 9 {
 		t.Errorf("refused dial = %+v, want network/9", c)
+	}
+}
+
+func TestClassifyError_SidecarResponse(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		exit   int
+		code   string
+	}{
+		{"bad request", 400, 2, "invalid-config"},
+		{"unauthorized", 401, 2, "invalid-config"},
+		{"too many requests", 429, 5, "rate-limited"},
+		{"request timeout", 408, 9, "network"},
+		{"server error", 500, 9, "network"},
+		{"invalid 200 response", 0, 9, "network"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sre := &sidecarResponseError{label: "session endpoint", endpoint: "http://127.0.0.1:4416/session", statusCode: tc.status, reason: "x"}
+			prov := &waxtap.ProviderError{Endpoint: "session", Cause: sre}
+			if c := classifyError(prov); c.exitCode != tc.exit || c.code != tc.code {
+				t.Errorf("provider %s = %+v, want exit %d and code %s", tc.name, c, tc.exit, tc.code)
+			}
+			po := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, sre)
+			if c := classifyError(po); c.exitCode != tc.exit || c.code != tc.code {
+				t.Errorf("po-token %s = %+v, want exit %d and code %s", tc.name, c, tc.exit, tc.code)
+			}
+		})
+	}
+}
+
+func TestFriendlyError_Sidecar429NamesSidecar(t *testing.T) {
+	sre := &sidecarResponseError{label: "bgutil PO-token server", endpoint: "http://user:pass@127.0.0.1:4417/get_pot?key=secret", statusCode: 429}
+	msg := friendlyError(sre)
+	if !strings.Contains(msg, "sidecar") {
+		t.Errorf("msg = %q, want it to attribute throttling to the sidecar", msg)
+	}
+	if strings.Contains(msg, "secret") || strings.Contains(msg, "user:pass") {
+		t.Errorf("msg = %q, want the endpoint redacted without query or user info", msg)
+	}
+	if yt := friendlyError(waxtap.ErrRateLimited); !strings.Contains(yt, "YouTube") {
+		t.Errorf("YouTube rate-limit msg = %q, want it to name YouTube", yt)
+	}
+}
+
+func TestClassifyError_PlaylistAvailability(t *testing.T) {
+	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "This playlist does not exist."}); c.exitCode != 3 || c.code != "playlist-unavailable" {
+		t.Errorf("unavailable = %+v, want code playlist-unavailable and exit 3", c)
+	}
+	if c := classifyError(waxtap.ErrPlaylistEmpty); c.exitCode != 3 || c.code != "playlist-empty" {
+		t.Errorf("empty = %+v, want code playlist-empty and exit 3", c)
+	}
+	if c := classifyError(waxtap.ErrInvalidPlaylistID); c.exitCode != 2 {
+		t.Errorf("malformed ID exit = %d, want 2", c.exitCode)
+	}
+	// Preserve YouTube's reason in the user-facing message.
+	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "This playlist does not exist."}); !strings.Contains(c.message, "does not exist") {
+		t.Errorf("message = %q, want YouTube's reason preserved", c.message)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,47 @@ func TestReadConfigFileMissingExplicitErrors(t *testing.T) {
 	}
 	if _, err := readConfigFile(cmd); err == nil {
 		t.Error("explicitly named missing config should error")
+	}
+}
+
+func TestReadConfigFileMissingEnvIsSoft(t *testing.T) {
+	t.Setenv("WAXTAP_CONFIG", filepath.Join(t.TempDir(), "nonexistent.json"))
+	cmd := newConfigTestCmd()
+	fc, err := readConfigFile(cmd)
+	if err != nil {
+		t.Fatalf("missing WAXTAP_CONFIG should be soft, got err = %v", err)
+	}
+	if fc.HL != nil {
+		t.Errorf("expected an empty fileConfig, got %+v", fc)
+	}
+}
+
+func TestReadConfigFileMalformedEnvErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXTAP_CONFIG", path)
+	cmd := newConfigTestCmd()
+	if _, err := readConfigFile(cmd); err == nil {
+		t.Error("malformed WAXTAP_CONFIG should error")
+	}
+}
+
+func TestExternalSessionBadCookiesIsUsageError(t *testing.T) {
+	a := &appConfig{visitorData: "VD", cookiesPath: filepath.Join(t.TempDir(), "nope.txt")}
+	_, _, err := a.externalSession()
+	if err == nil {
+		t.Fatal("a missing --cookies file should error")
+	}
+	if !isUsageError(err) {
+		t.Errorf("err = %#v, want a usageError", err)
+	}
+	if got := exitCodeFor(err); got != 2 {
+		t.Errorf("exit = %d, want 2", got)
+	}
+	if !strings.Contains(err.Error(), "read cookies") {
+		t.Errorf("err = %q, want it to identify the cookie read failure", err)
 	}
 }
 

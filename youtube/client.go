@@ -178,13 +178,11 @@ func New(cfg Config) *Client {
 	if jar := c.http.Jar(); jar != nil {
 		seedConsentCookie(jar)
 	}
-	// A static session is pre-resolved: seed its cookies now and store its
-	// visitorData so extraction needs no network for adoption. New returns no
-	// error, so an empty visitorData or a cookies/no-jar mismatch is held in
-	// adoptErr and surfaced when Extract resolves the session (the facade also
-	// rejects an empty visitorData up front). An empty visitorData must fail, not
-	// be silently adopted: it would break GVS content_binding coherence and, once
-	// the source is "adopted", block learnVisitorData from recovering.
+	// A static session is already resolved, so seed its cookies and store its
+	// visitorData now. New cannot return an error, so adoption failures are stored
+	// in adoptErr and surfaced by Extract. An empty visitorData must fail because
+	// it breaks GVS content_binding coherence and prevents learnVisitorData from
+	// recovering after the source is marked as adopted.
 	if c.staticSession != nil {
 		switch {
 		case c.staticSession.VisitorData == "":
@@ -328,8 +326,9 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 		// forced non-WEB client.
 		substituting := c.forcedNonWebSingle()
 		if substituting {
-			// Bulk operations can make this fallback once per item.
-			if isBulkExtraction(ctx) {
+			// web_embedded and bulk operations commonly reach this fallback, so log
+			// them at debug level. Other forced-client failures remain warnings.
+			if isWebEmbedded(c.profiles[0]) || isBulkExtraction(ctx) {
 				c.log.DebugContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
 			} else {
 				c.log.WarnContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
@@ -467,26 +466,20 @@ func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, 
 	return sts
 }
 
-// embedHint is appended to generic web_embedded errors.
-const embedHint = "video may not be embeddable; try --client web or android_vr"
-
 // isWebEmbedded reports whether profile is the WEB_EMBEDDED_PLAYER client.
 func isWebEmbedded(p ClientProfile) bool {
 	return p.InnerTubeName == profileWebEmbedded.InnerTubeName
 }
 
-// annotateEmbedError adds an embeddability hint to a generic web_embedded ERROR.
-// It preserves the playability status and sentinel.
+// annotateEmbedError marks a generic web_embedded error so callers can provide
+// fallback guidance without changing YouTube's reason or the error
+// classification.
 func annotateEmbedError(perr error) error {
 	pe, ok := errors.AsType[*waxerr.PlayabilityError](perr)
 	if !ok || pe.Status != "ERROR" {
 		return perr
 	}
-	reason := embedHint
-	if pe.Reason != "" {
-		reason = pe.Reason + " (" + embedHint + ")"
-	}
-	return &waxerr.PlayabilityError{Status: pe.Status, Reason: reason, Sentinel: pe.Sentinel}
+	return &waxerr.PlayabilityError{Status: pe.Status, Reason: pe.Reason, Sentinel: pe.Sentinel, Embed: true}
 }
 
 // missingTimestampError turns an sts=0 UNPLAYABLE into an ExtractionError

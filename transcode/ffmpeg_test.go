@@ -109,9 +109,8 @@ func TestRedactPath(t *testing.T) {
 		t.Errorf("redacted message missing the final path: %q", red.Error())
 	}
 	// Redaction must preserve the error chain.
-	var re *RunError
-	if !errors.As(red, &re) {
-		t.Error("errors.As lost the *RunError after redaction")
+	if _, ok := errors.AsType[*RunError](red); !ok {
+		t.Error("errors.AsType lost the *RunError after redaction")
 	}
 
 	// Inputs that cannot or need not be rewritten pass through unchanged.

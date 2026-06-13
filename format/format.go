@@ -147,6 +147,37 @@ func (l ChannelLayout) String() string {
 	}
 }
 
+// Matches reports whether a channel count satisfies the layout. Unknown channel
+// counts and LayoutAny do not match.
+func (l ChannelLayout) Matches(channels int) bool {
+	if channels <= 0 {
+		return false
+	}
+	switch l {
+	case LayoutMono:
+		return channels == 1
+	case LayoutStereo:
+		return channels == 2
+	case LayoutSurround:
+		return channels > 2
+	default: // LayoutAny
+		return false
+	}
+}
+
+// ChannelCount returns 1 for mono, 2 for stereo, and 0 for layouts without a
+// fixed channel count.
+func (l ChannelLayout) ChannelCount() int {
+	switch l {
+	case LayoutMono:
+		return 1
+	case LayoutStereo:
+		return 2
+	default:
+		return 0
+	}
+}
+
 type selectorKind uint8
 
 const (

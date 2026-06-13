@@ -35,6 +35,14 @@ func TestExtractVideoID(t *testing.T) {
 		{"playlist only url", "https://www.youtube.com/playlist?list=PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
 		{"list param no video", "https://www.youtube.com/watch?list=PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
 
+		// Bare playlist IDs are not malformed video IDs.
+		{"bare playlist id", "PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
+		{"bare radio playlist id", "RDabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
+
+		// Recognized YouTube URLs can still lack a video reference.
+		{"youtube homepage", "https://www.youtube.com/", "", waxerr.ErrInvalidVideoID},
+		{"youtube host bare", "youtube.com", "", waxerr.ErrInvalidVideoID},
+
 		{"hostless id with trailing junk", id + "&feature=share", id, nil},
 
 		{"too short", "abc", "", waxerr.ErrVideoIDTooShort},
@@ -80,6 +88,16 @@ func TestExtractVideoID_NonYouTubeHostMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not a recognized YouTube URL") {
 		t.Errorf("message = %q, want it to mention an unrecognized YouTube URL", err)
+	}
+}
+
+func TestExtractVideoID_NoVideoInURLMessage(t *testing.T) {
+	_, err := ExtractVideoID("https://www.youtube.com/")
+	if !errors.Is(err, waxerr.ErrInvalidVideoID) {
+		t.Fatalf("err = %v, want ErrInvalidVideoID", err)
+	}
+	if !strings.Contains(err.Error(), "not a recognized YouTube video URL or video ID") {
+		t.Errorf("message = %q, want the no-video-in-URL message", err)
 	}
 }
 

@@ -44,6 +44,17 @@ func TestBuildCutSpecValidatesCutModeWithoutRanges(t *testing.T) {
 	}
 }
 
+func TestBuildCutSpecValidatesSponsorErrorWithoutRanges(t *testing.T) {
+	df := &downloadFlags{cutMode: "smart", sbOnError: "bogus"}
+	_, err := df.buildCutSpec()
+	if err == nil {
+		t.Fatal("buildCutSpec err = nil, want a --sponsorblock-onerror validation error before the no-cut early return")
+	}
+	if !isUsageError(err) {
+		t.Errorf("err = %#v, want a usageError (exit 2)", err)
+	}
+}
+
 // TestBuildProcessSpecNormalizeRequiresEncode covers flag combinations before
 // any download starts.
 func TestBuildProcessSpecNormalizeRequiresEncode(t *testing.T) {

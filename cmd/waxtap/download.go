@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -55,9 +56,10 @@ type downloadFlags struct {
 	maxSleepInterval time.Duration
 	listOnly         bool
 
-	collision collisionMode        // resolved in RunE
-	layout    waxtap.ChannelLayout // resolved in RunE from --channels
-	archive   *downloadArchive
+	collision        collisionMode        // resolved in RunE
+	layout           waxtap.ChannelLayout // resolved in RunE from --channels
+	channelsExplicit bool                 // true when a flag or config value requested a layout
+	archive          *downloadArchive
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -99,7 +101,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.DurationVar(&df.crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
 	f.StringVar(&df.sbOnError, "sponsorblock-onerror", "proceed", "on SponsorBlock fetch failure: proceed|fail")
 	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode)")
-	f.BoolVar(&df.measure, "measure", false, "measure loudness without altering audio")
+	f.BoolVar(&df.measure, "measure", false, "measure loudness without altering the audio (still writes the file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
 	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source tradeoff: minimize-loss|best-native|prefer:<codec>")
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
@@ -189,6 +191,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 		return err
 	}
 	df.layout, df.downmix = layout, downmix
+	// Track whether the user requested a layout so the CLI can report a mismatch
+	// after delivery.
+	df.channelsExplicit = cmd.Flags().Changed("channels") || cfg.channels != ""
 
 	// Validate playlist pacing before starting network work.
 	if df.sleepInterval < 0 || df.maxSleepInterval < 0 {
@@ -255,6 +260,8 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 			// Write sidecars and the archive before the result line.
 			if o.Attempted && o.Err == nil && o.Result != nil {
 				finishItem(env, df, o.Entry.VideoID, o.Result)
+				warnChannelLayout(env, df, o.Result)
+				measureNote(env, o.Result)
 			}
 			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
 		},
@@ -316,7 +323,12 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 
 	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
 	finishItem(env, df, id, res)
-	return emitResult(env, res)
+	if err := emitResult(env, res); err != nil {
+		return err
+	}
+	warnChannelLayout(env, df, res)
+	measureNote(env, res)
+	return nil
 }
 
 // resolveItem builds a request for one item, or returns a skip reason. Playlist
@@ -369,6 +381,49 @@ func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 		if aerr := df.archive.Add(id); aerr != nil {
 			env.info("warning: could not update download archive: %v\n", aerr)
 		}
+	}
+}
+
+// warnChannelLayout reports when the delivered audio does not satisfy an
+// explicitly requested layout. Exact itag selections, LayoutAny, and unknown
+// channel counts do not produce a warning.
+func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
+	if !df.channelsExplicit || df.itag > 0 || df.layout == waxtap.LayoutAny {
+		return
+	}
+	delivered := res.OutputFormat.Channels
+	if delivered <= 0 {
+		// Transcoded results do not record an output channel count. Use the source
+		// count, adjusted for an applied downmix.
+		delivered = res.SourceFormat.Channels
+		if target := df.layout.ChannelCount(); df.downmix && target > 0 && delivered > target {
+			delivered = target
+		}
+	}
+	if delivered <= 0 || df.layout.Matches(delivered) {
+		return
+	}
+	env.info("note: requested %s; delivered %s\n", df.layout, channelCountLabel(delivered))
+}
+
+// channelCountLabel names mono and stereo and renders other layouts as a channel
+// count.
+func channelCountLabel(ch int) string {
+	switch ch {
+	case 1:
+		return "mono (1ch)"
+	case 2:
+		return "stereo (2ch)"
+	default:
+		return fmt.Sprintf("%dch", ch)
+	}
+}
+
+// measureNote reports the output path for a measure-only run. Processing
+// operations suppress the note because the output is no longer an unaltered copy.
+func measureNote(env *appEnv, res *waxtap.Result) {
+	if res.LoudnessMeasured && !res.Transcoded && !res.CutApplied && !res.LoudnessApplied && res.OutputPath != "" {
+		env.info("note: wrote unaltered copy to %s\n", res.OutputPath)
 	}
 }
 
@@ -431,13 +486,9 @@ func (df *downloadFlags) transcodeFormat() (waxtap.TranscodeFormat, bool, error)
 // sbSet reports whether the SponsorBlock flag was present (so the bare form, which
 // yields the default category, still enables SponsorBlock).
 func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
-	ranges, err := parseRanges(df.ranges)
-	if err != nil {
-		return nil, err
-	}
-	// Validate --cut-mode even when no ranges were supplied, so bad input fails
-	// before extraction.
-	mode, err := parseCutMode(df.cutMode)
+	// Parse every shared cut flag before extraction, even when there is nothing to
+	// cut.
+	ranges, mode, pol, err := parseCutInputs(df.ranges, df.cutMode, df.sbOnError)
 	if err != nil {
 		return nil, err
 	}
@@ -448,10 +499,6 @@ func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
 	cs := &waxtap.CutSpec{Ranges: ranges, Mode: mode, Crossfade: df.crossfade}
 	if sbSet {
 		cats, err := parseCategories(df.sbCats)
-		if err != nil {
-			return nil, err
-		}
-		pol, err := parseSponsorErrorPolicy(df.sbOnError)
 		if err != nil {
 			return nil, err
 		}

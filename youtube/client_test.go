@@ -537,9 +537,14 @@ func TestExtract_WebEmbeddedEmbedRestrictionNotMaskedBySTS(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	// The message should identify the embed restriction.
-	if msg := err.Error(); !strings.Contains(msg, "embeddable") {
-		t.Errorf("err = %q, want it to name the embed restriction (not the masked sts cause)", err)
+	// The embed restriction must not be masked by the signature-timestamp failure.
+	pe, ok := errors.AsType[*waxerr.PlayabilityError](err)
+	if !ok || !pe.Embed {
+		t.Errorf("err = %#v, want a *PlayabilityError with Embed=true", err)
+	}
+	// Do not add an embeddability claim to YouTube's reason.
+	if strings.Contains(err.Error(), "embeddable") {
+		t.Errorf("err = %q, should not fold in a 'may not be embeddable' claim", err)
 	}
 	if errors.Is(err, waxerr.ErrExtractionFailed) {
 		t.Errorf("err = %v, must not be reclassified to ErrExtractionFailed (sts masking)", err)
@@ -634,15 +639,18 @@ func TestIsWebEmbedded(t *testing.T) {
 }
 
 func TestAnnotateEmbedError(t *testing.T) {
-	// The hint must preserve the playability classification.
-	base := &waxerr.PlayabilityError{Status: "ERROR", Reason: "", Sentinel: waxerr.ErrVideoUnavailable}
+	// The marker must preserve the original reason and classification.
+	base := &waxerr.PlayabilityError{Status: "ERROR", Reason: "Video unavailable", Sentinel: waxerr.ErrVideoUnavailable}
 	got := annotateEmbedError(base)
 	pe, ok := errors.AsType[*waxerr.PlayabilityError](got)
 	if !ok {
 		t.Fatalf("annotateEmbedError returned %T, want *PlayabilityError", got)
 	}
-	if !strings.Contains(pe.Reason, "embeddable") {
-		t.Errorf("reason = %q, want it to mention embeddability", pe.Reason)
+	if !pe.Embed {
+		t.Error("Embed = false, want true")
+	}
+	if pe.Reason != "Video unavailable" {
+		t.Errorf("reason = %q, want YouTube's verbatim reason preserved", pe.Reason)
 	}
 	if pe.Status != "ERROR" || !errors.Is(got, waxerr.ErrVideoUnavailable) {
 		t.Errorf("status/sentinel changed: status=%q unavailable=%v", pe.Status, errors.Is(got, waxerr.ErrVideoUnavailable))

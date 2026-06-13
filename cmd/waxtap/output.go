@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -230,13 +231,25 @@ func classifyError(err error) classifiedError {
 		return classifiedError{}
 	}
 	c := classifiedError{message: cleanMessage(friendlyError(err)), exitCode: 1, code: "error"}
+	// Classify invalid sidecar responses by status, including responses wrapped in
+	// ErrNeedsPOToken.
+	sre, hasSidecarResp := errors.AsType[*sidecarResponseError](err)
 	switch {
 	case errors.Is(err, context.Canceled):
 		c.exitCode, c.code = 130, "canceled"
 
 	// Domain sentinels keep their classification even when they wrap another cause.
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
-		c.exitCode, c.code, c.hint = 8, "needs-po-token", poTokenHint
+		switch {
+		case hasSidecarResp:
+			// The sidecar responded, so classify the failure by its HTTP status or
+			// response content.
+			c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
+		case isSidecarConnection(err):
+			c.exitCode, c.code, c.hint = 9, "network", "start the PO-token sidecar or correct --potoken-url"
+		default:
+			c.exitCode, c.code, c.hint = 8, "needs-po-token", poTokenHint
+		}
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		c.exitCode, c.code, c.hint = 6, "ffmpeg-not-found", "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
 	case errors.Is(err, waxtap.ErrRateLimited):
@@ -256,6 +269,10 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 3, "live-content"
 	case errors.Is(err, waxtap.ErrNoAudioFormats):
 		c.exitCode, c.code = 3, "no-audio-formats"
+	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
+		c.exitCode, c.code = 3, "playlist-unavailable"
+	case errors.Is(err, waxtap.ErrPlaylistEmpty):
+		c.exitCode, c.code = 3, "playlist-empty"
 	case errors.Is(err, waxtap.ErrRequestedFormatUnavailable):
 		c.exitCode, c.code, c.hint = 2, "format-unavailable", "run `waxtap formats <url>` to list the available itags and codecs"
 	case errors.Is(err, waxtap.ErrDeliveryUnsupported):
@@ -281,13 +298,16 @@ func classifyError(err error) classifiedError {
 	case isUsageError(err):
 		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err)
 
-	// A deadline is a timeout whether it occurred during dialing or reading.
+	// Deadlines during dialing and reading are both network timeouts.
 	case errors.Is(err, context.DeadlineExceeded):
-		c.code = "timeout"
+		c.exitCode, c.code = 9, "timeout"
 
 	// Structural fallbacks apply only when no domain sentinel or timeout matched.
 	case isProxyError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "check the proxy is reachable and that --proxy is a correct URL"
+	// Classify a sidecar response before checking for provider connection errors.
+	case hasSidecarResp:
+		c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
 	case isConnectionError(err):
@@ -317,7 +337,14 @@ func friendlyError(err error) string {
 		return "proxy connection failed (check --proxy)"
 	}
 	if se, ok := errors.AsType[*sidecarError](err); ok {
-		return fmt.Sprintf("%s unreachable at %s", se.label, se.endpoint)
+		return fmt.Sprintf("%s unreachable at %s", se.label, redactURL(se.endpoint))
+	}
+	if sre, ok := errors.AsType[*sidecarResponseError](err); ok {
+		// Name the sidecar so this is distinguishable from YouTube rate limiting.
+		if sre.statusCode == http.StatusTooManyRequests {
+			return fmt.Sprintf("%s at %s returned HTTP 429; check the sidecar's rate limits", sre.label, redactURL(sre.endpoint))
+		}
+		return sre.Error()
 	}
 	switch {
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
@@ -326,6 +353,8 @@ func friendlyError(err error) string {
 		return "that is a playlist URL, not a single video"
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
+	case errors.Is(err, waxtap.ErrPlaylistEmpty):
+		return "this playlist has no videos"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrRateLimited):
@@ -360,6 +389,27 @@ func isProviderError(err error) bool {
 	return ok
 }
 
+// isSidecarConnection reports whether err contains a sidecar connection failure.
+func isSidecarConnection(err error) bool {
+	_, ok := errors.AsType[*sidecarError](err)
+	return ok
+}
+
+// sidecarResponseExit maps a sidecar response to its CLI exit code and machine
+// code. Client errors indicate invalid configuration, 429 indicates rate
+// limiting, and timeouts, server errors, and invalid HTTP 200 responses indicate
+// network or provider failures.
+func sidecarResponseExit(status int) (int, string) {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return 5, "rate-limited"
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return 2, "invalid-config"
+	default:
+		return 9, "network"
+	}
+}
+
 // isConnectionError reports whether err is a dial or DNS failure.
 func isConnectionError(err error) bool {
 	if _, ok := errors.AsType[*net.OpError](err); ok {
@@ -381,11 +431,10 @@ func isUsageError(err error) bool {
 	return ok
 }
 
-// embedHint surfaces the web_embedded embed-restriction guidance for a
-// non-embeddable playability error.
+// embedHint returns fallback guidance for a web_embedded playability error.
 func embedHint(err error) string {
-	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok && strings.Contains(pe.Reason, "embeddable") {
-		return "non-embeddable videos fail on web_embedded; use --client web or --client android_vr to avoid the embed restriction"
+	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok && pe.Embed {
+		return "web_embedded currently falls back to web; use --client web or --client android_vr"
 	}
 	return ""
 }

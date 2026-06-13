@@ -139,14 +139,7 @@ func downmixChannels(layout ChannelLayout, downmix bool) int {
 	if !downmix {
 		return 0
 	}
-	switch layout {
-	case LayoutMono:
-		return 1
-	case LayoutStereo:
-		return 2
-	default:
-		return 0
-	}
+	return layout.ChannelCount()
 }
 
 // cutMode maps a public CutMode to a cut.Mode.

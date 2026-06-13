@@ -181,10 +181,13 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	var fc fileConfig
 	path := rootFlagsValue.config
-	explicit := cmd.Flags().Changed("config")
+	// Only --config requires the named file to exist. Missing environment and
+	// default paths use built-in defaults, while malformed files still return an
+	// error.
+	flagExplicit := cmd.Flags().Changed("config")
 	if path == "" {
 		if env := os.Getenv("WAXTAP_CONFIG"); env != "" {
-			path, explicit = env, true
+			path = env
 		} else if dir, err := os.UserConfigDir(); err == nil {
 			path = filepath.Join(dir, cacheSubdir, "config.json")
 		}
@@ -194,8 +197,8 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) && !explicit {
-			return fc, nil // no default file present; fine
+		if errors.Is(err, fs.ErrNotExist) && !flagExplicit {
+			return fc, nil // optional file is absent; use defaults
 		}
 		return fc, usagef("read config %s: %v", path, err)
 	}
@@ -411,7 +414,9 @@ func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSes
 		if a.cookiesPath != "" {
 			parsed, err := parseNetscapeCookies(a.cookiesPath)
 			if err != nil {
-				return nil, nil, err
+				// An unreadable --cookies file is invalid CLI input. The underlying
+				// error already identifies the file.
+				return nil, nil, usagef("%s", err)
 			}
 			cookies = parsed
 		}

@@ -151,7 +151,7 @@ func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b 
 			return ra > rb
 		}
 		if layout != LayoutAny {
-			if am, bm := channelMatches(layout, a.Channels), channelMatches(layout, b.Channels); am != bm {
+			if am, bm := layout.Matches(a.Channels), layout.Matches(b.Channels); am != bm {
 				return am // a matches the requested layout and b does not
 			}
 			// Prefer a source that can be downmixed to the requested layout over
@@ -186,24 +186,11 @@ func betterThan(prefCodec string, layout ChannelLayout, useTier bool) func(a, b 
 	}
 }
 
-// layoutTarget returns the fixed channel count for mono and stereo requests.
-// Other layouts return 0 because they do not use downmix ranking.
-func layoutTarget(layout ChannelLayout) int {
-	switch layout {
-	case LayoutMono:
-		return 1
-	case LayoutStereo:
-		return 2
-	default:
-		return 0
-	}
-}
-
 // downmixRank ranks sources by whether they can satisfy a mono or stereo
 // request without upmixing. A downmixable source ranks above one below the
 // requested count, and a known count ranks above an unknown count.
 func downmixRank(layout ChannelLayout, ch int) int {
-	target := layoutTarget(layout)
+	target := layout.ChannelCount()
 	switch {
 	case target == 0:
 		return 0
@@ -221,29 +208,10 @@ func downmixRank(layout ChannelLayout, ch int) int {
 // them first. betterThan and tierUsable share both ranks to keep their orderings
 // aligned.
 func fewerChannelsRank(layout ChannelLayout, ch int) int {
-	if target := layoutTarget(layout); target == 0 || ch < target {
+	if target := layout.ChannelCount(); target == 0 || ch < target {
 		return 0
 	}
 	return -ch
-}
-
-// channelMatches reports whether a stream's channel count satisfies layout.
-// Unknown counts and LayoutAny do not match, leaving the layout ranking step
-// inactive when there is no usable preference.
-func channelMatches(layout ChannelLayout, ch int) bool {
-	if ch <= 0 {
-		return false
-	}
-	switch layout {
-	case LayoutMono:
-		return ch == 1
-	case LayoutStereo:
-		return ch == 2
-	case LayoutSurround:
-		return ch > 2
-	default: // LayoutAny
-		return false
-	}
 }
 
 // codecPreferenceRank prefers Opus when candidates share a reported tier.
@@ -260,7 +228,7 @@ func codecPreferenceRank(codec string) int {
 func tierUsable(c []Format, keep func(Format) bool, prefCodec string, layout ChannelLayout) bool {
 	key := func(f Format) [6]int {
 		lm := 0
-		if channelMatches(layout, f.Channels) {
+		if layout.Matches(f.Channels) {
 			lm = 1
 		}
 		cm := 0

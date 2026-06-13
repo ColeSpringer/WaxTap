@@ -104,7 +104,7 @@ func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error
 	}
 	vd := doc.visitorData()
 	if vd == "" {
-		return potoken.Session{}, fmt.Errorf("session endpoint returned an empty visitorData")
+		return potoken.Session{}, &sidecarResponseError{label: "session endpoint", endpoint: p.endpoint, reason: "empty visitorData"}
 	}
 
 	cookies := make([]*http.Cookie, 0, len(doc.Cookies))
