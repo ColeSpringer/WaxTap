@@ -609,14 +609,17 @@ func (r *pathReserver) reserveOr(path string, mode collisionMode) (string, bool,
 	if r == nil {
 		return resolveCollision(path, mode)
 	}
-	if derr := rejectDirOutput(path); derr != nil {
-		return "", false, derr
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Use one stat for both the directory guard and the first collision check,
+	// matching resolveCollision's handling of the candidate path.
+	exists, isDir := statOutputPath(path)
+	if isDir {
+		return "", false, dirOutputError(path)
+	}
 	taken := func(p string) bool { return r.claimed[p] || pathExists(p) }
-	if !taken(path) {
+	if !r.claimed[path] && !exists {
 		r.claimed[path] = true
 		return path, false, nil
 	}

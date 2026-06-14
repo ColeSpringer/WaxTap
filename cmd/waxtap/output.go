@@ -374,6 +374,8 @@ func friendlyError(err error) string {
 		return "invalid or missing playlist ID"
 	case errors.Is(err, waxtap.ErrPlaylistEmpty):
 		return "this playlist has no videos"
+	case errors.Is(err, waxtap.ErrShortsPlaylist):
+		return "Shorts shelf playlists aren't supported because YouTube doesn't expose them as a complete list; use the channel's uploads playlist instead (replace the leading UUSH with UU)"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrRateLimited):
@@ -388,20 +390,21 @@ func friendlyError(err error) string {
 	return err.Error()
 }
 
-// configSymbolReplacer maps Go option field names in ErrInvalidConfig messages
-// to the corresponding CLI flags. config_symbols_test.go detects message changes
-// that would stop a replacement from matching.
+// configSymbolReplacer maps Go option field names in ErrInvalidConfig templates
+// to the corresponding CLI flags. Each key includes fixed template text so a
+// user-supplied path or value that contains a field name remains unchanged.
+// config_symbols_test.go checks that the keys still match reachable templates.
 var configSymbolReplacer = strings.NewReplacer(
-	"ProfileOverridePath", "--profile-override",
-	"ChromeMajor", "--chrome-major",
-	"Options.Client", "--client",
-	"Client and", "--client and",
-	"PerHostQPS", "--qps",
-	"Cooldown", "--cooldown",
+	"invalid ChromeMajor", "invalid --chrome-major",
+	"ChromeMajor and ProfileOverridePath", "--chrome-major and --profile-override",
+	"Client and ProfileOverridePath", "--client and --profile-override",
+	"invalid Cooldown", "invalid --cooldown",
+	"invalid PerHostQPS", "invalid --qps",
+	"set Options.Client", "set --client",
+	"single-client ProfileOverridePath", "single-client --profile-override",
 	// config.go currently catches these conflicts before waxtap.New does.
-	"PlayerContextProvider", "--player-context-url",
-	"POTokenProvider", "--potoken-url",
-	"VisitorData", "--visitor-data",
+	"PlayerContextProvider requires a POTokenProvider", "--player-context-url requires --potoken-url",
+	"non-empty VisitorData", "non-empty --visitor-data",
 )
 
 // translateConfigSymbols rewrites Go option field names in a config error message

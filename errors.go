@@ -49,6 +49,9 @@ var (
 	ErrPlaylistUnavailable = waxerr.ErrPlaylistUnavailable
 	// ErrPlaylistEmpty indicates that a valid playlist contains no videos.
 	ErrPlaylistEmpty = waxerr.ErrPlaylistEmpty
+	// ErrShortsPlaylist indicates that WaxTap cannot enumerate a channel's Shorts
+	// shelf playlist. It wraps [ErrUnsupportedInput].
+	ErrShortsPlaylist = waxerr.ErrShortsPlaylist
 
 	// Processing / local files.
 	ErrIncompatibleSpec = waxerr.ErrIncompatibleSpec

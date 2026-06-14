@@ -206,6 +206,17 @@ func dirOutputError(path string) error {
 	return usagef("output path is an existing directory: %s (give a file path)", path)
 }
 
+// statOutputPath reports whether path exists and, if so, whether it is a
+// directory. Like pathExists and resolveCollision, it treats any stat error as
+// absence so the eventual write can report the error.
+func statOutputPath(path string) (exists, isDir bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, false
+	}
+	return true, fi.IsDir()
+}
+
 // rejectDirOutput rejects an existing directory before collision handling can
 // attempt to replace it with a staged file.
 func rejectDirOutput(path string) error {

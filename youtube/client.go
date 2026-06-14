@@ -610,7 +610,9 @@ func (c *Client) browseInitial(ctx context.Context, profile ClientProfile, sess 
 			if perr == nil {
 				return meta, items, token, nil
 			}
-			err = perr
+			// Shorts shelf responses use a known unsupported shape. Reclassify the
+			// parse error so it is not reported or retried as an unrecognized shape.
+			err = shortsOrParseError(playlistID, perr)
 		}
 		if attempt >= browseRetries || !retryableBrowse(err) {
 			return playlistMeta{}, nil, "", err
@@ -629,6 +631,15 @@ func (c *Client) browseInitial(ctx context.Context, profile ClientProfile, sess 
 // Context errors and hard bad-id failures are surfaced as-is.
 func retryableBrowse(err error) bool {
 	return errors.Is(err, waxerr.ErrPlaylistParse)
+}
+
+// shortsOrParseError maps parse failures for Shorts shelf playlists to
+// ErrShortsPlaylist. Other playlist IDs and non-parse errors pass through.
+func shortsOrParseError(playlistID string, perr error) error {
+	if errors.Is(perr, waxerr.ErrPlaylistParse) && isShortsPlaylistID(playlistID) {
+		return waxerr.ErrShortsPlaylist
+	}
+	return perr
 }
 
 // forcedNonWebSingle reports whether the chain contains one non-WEB client.

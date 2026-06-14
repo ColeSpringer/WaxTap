@@ -202,7 +202,7 @@ without parsing messages (`--json` carries the same class in `error.code`):
 |---|---|
 | 0 | success |
 | 1 | unclassified error |
-| 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported local input, requested format (`--itag`/`--codec`) unavailable, unknown `--client`, or invalid config |
+| 2 | invalid request: usage error, invalid ID, playlist URL passed to a video command, incompatible spec, unsupported input (such as an unreadable local file or a channel's Shorts shelf playlist), requested format (`--itag`/`--codec`) unavailable, unknown `--client`, or invalid config |
 | 3 | unavailable or restricted video, login required, live content, no audio formats, unavailable playlist, or empty playlist |
 | 4 | extraction, cipher, or playlist parsing failure (often indicates WaxTap needs an update) |
 | 5 | rate limited |

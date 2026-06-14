@@ -26,7 +26,11 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 		want argsOutcome
 	}{
 		{"download space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor,intro"}, wantHint},
-		{"download typo token", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "blah"}, wantHint},
+		{"download single category space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor"}, wantHint},
+		// A surplus token that is not a category list belongs to the normal arity
+		// error. Suggesting the "=" form would be incorrect.
+		{"download non-category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "blah"}, wantReject},
+		{"download two urls bare flag", newDownloadCmd, []string{"dummyVideo0", "dummyVideo1", "--sponsorblock"}, wantReject},
 		{"download equals form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock=sponsor,intro"}, wantOK},
 		{"download bare", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock"}, wantOK},
 		{"download no flag", newDownloadCmd, []string{"dummyVideo0"}, wantOK},

@@ -42,6 +42,22 @@ func TestTranslateConfigSymbols(t *testing.T) {
 	}
 }
 
+// TestTranslateConfigSymbols_PreservesUserText verifies that replacements are
+// limited to known error templates and do not alter user-supplied paths or
+// values.
+func TestTranslateConfigSymbols_PreservesUserText(t *testing.T) {
+	for _, in := range []string{
+		"open /home/me/Cooldown.json: no such file or directory",
+		`unknown client "ChromeMajor": choose web|ios|android_vr|web_embedded`,
+		"open /etc/VisitorData/profile.json: permission denied",
+		"parse /tmp/PerHostQPS.json: unexpected end of JSON input",
+	} {
+		if got := translateConfigSymbols(in); got != in {
+			t.Errorf("translateConfigSymbols(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
 // TestConfigSymbolTranslation verifies that reachable waxtap.New configuration
 // errors use CLI flag names when rendered.
 func TestConfigSymbolTranslation(t *testing.T) {

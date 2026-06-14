@@ -72,6 +72,14 @@ var (
 	ErrPlaylistUnavailable = errors.New("waxtap: playlist unavailable")
 	// ErrPlaylistEmpty indicates a valid playlist that contains no videos.
 	ErrPlaylistEmpty = errors.New("waxtap: playlist has no videos")
+	// ErrShortsPlaylist indicates an attempt to enumerate a channel's Shorts
+	// shelf playlist. The browse response uses a distinct item shape and has no
+	// continuation token, so WaxTap cannot enumerate it completely.
+	//
+	// It wraps [ErrUnsupportedInput]. Unlike [ErrPlaylistParse], it identifies a
+	// known unsupported playlist type rather than an unrecognized response
+	// shape.
+	ErrShortsPlaylist = fmt.Errorf("%w: youtube shorts playlist", ErrUnsupportedInput)
 )
 
 // Processing / local files.

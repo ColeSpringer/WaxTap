@@ -140,3 +140,27 @@ func TestExtractPlaylistID(t *testing.T) {
 		})
 	}
 }
+
+func TestIsShortsPlaylistID(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"shorts shelf", "UUSHabcdefghijklmnopqrstuv", true},
+		// Replacing UC with UU for a UCSH... channel also produces a UUSH prefix,
+		// but the resulting uploads playlist ID is two characters shorter.
+		{"uploads of a UCSH channel", "UUSHabcdefghijklmnopqrst", false},
+		{"regular uploads", "UUabcdefghijklmnopqrstuv", false},
+		{"PL playlist", "PLabcdefghijklmnopqrst", false},
+		{"too long", "UUSHabcdefghijklmnopqrstuvw", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isShortsPlaylistID(tc.id); got != tc.want {
+				t.Errorf("isShortsPlaylistID(%q) = %v, want %v (len %d)", tc.id, got, tc.want, len(tc.id))
+			}
+		})
+	}
+}

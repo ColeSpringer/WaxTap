@@ -3,6 +3,7 @@ package youtube
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,39 @@ func TestParseBadgeDuration(t *testing.T) {
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("parseBadgeDuration(%q) = (%v, %v), want (%v, %v)", tc.in, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+func TestShortsOrParseError(t *testing.T) {
+	const (
+		shortsID  = "UUSHabcdefghijklmnopqrstuv" // UUSH + 22-char body (26 chars)
+		uploadsID = "UUabcdefghijklmnopqrstuv"   // UU + 22-char body (24 chars)
+	)
+	parseErr := func() error {
+		return fmt.Errorf("no recognized playlist contents: %w", waxerr.ErrPlaylistParse)
+	}
+
+	// Parse failures for Shorts shelf IDs map to ErrShortsPlaylist and are not
+	// retried.
+	got := shortsOrParseError(shortsID, parseErr())
+	if !errors.Is(got, waxerr.ErrShortsPlaylist) {
+		t.Fatalf("shortsOrParseError(shorts, parse) = %v, want ErrShortsPlaylist", got)
+	}
+	if !errors.Is(got, waxerr.ErrUnsupportedInput) {
+		t.Errorf("ErrShortsPlaylist must unwrap to ErrUnsupportedInput")
+	}
+	if retryableBrowse(got) {
+		t.Errorf("a Shorts playlist error must not be retried")
+	}
+
+	// Other playlist IDs retain ErrPlaylistParse and remain retryable.
+	if got := shortsOrParseError(uploadsID, parseErr()); !errors.Is(got, waxerr.ErrPlaylistParse) || errors.Is(got, waxerr.ErrShortsPlaylist) {
+		t.Errorf("shortsOrParseError(uploads, parse) = %v, want unchanged ErrPlaylistParse", got)
+	}
+
+	// Non-parse errors pass through unchanged, even for a Shorts shelf ID.
+	other := fmt.Errorf("boom: %w", waxerr.ErrPlaylistUnavailable)
+	if got := shortsOrParseError(shortsID, other); !errors.Is(got, waxerr.ErrPlaylistUnavailable) || errors.Is(got, waxerr.ErrShortsPlaylist) {
+		t.Errorf("shortsOrParseError(shorts, unavailable) = %v, want unchanged", got)
 	}
 }

@@ -24,6 +24,21 @@ var (
 	playlistID = regexp.MustCompile(`^(?:PL|OL|RD|UU|UL|LL|FL|TL|WL|EC|PU)[A-Za-z0-9_-]{10,}$`)
 )
 
+// shortsPlaylistPrefix is the prefix for a channel's Shorts shelf playlist. The
+// remaining 22 characters are the channel ID without its UC prefix.
+const shortsPlaylistPrefix = "UUSH"
+
+// shortsPlaylistIDLen distinguishes a Shorts shelf playlist from the uploads
+// playlist for a UCSH... channel. Both IDs begin with UUSH, but the uploads
+// playlist ID is two characters shorter.
+const shortsPlaylistIDLen = len(shortsPlaylistPrefix) + 22
+
+// isShortsPlaylistID reports whether id has the prefix and length of a channel's
+// Shorts shelf playlist.
+func isShortsPlaylistID(id string) bool {
+	return len(id) == shortsPlaylistIDLen && strings.HasPrefix(id, shortsPlaylistPrefix)
+}
+
 // ExtractVideoID extracts an 11-character video ID from a bare ID or any common
 // YouTube URL form (watch?v=, youtu.be/, /embed/, /shorts/, /v/, /live/),
 // including scheme-less inputs.

@@ -130,6 +130,25 @@ func TestErrorHint_WebEmbeddedFallback(t *testing.T) {
 	}
 }
 
+func TestShortsPlaylistError(t *testing.T) {
+	// Shorts shelf playlists are classified as unsupported input, not parser
+	// failures.
+	c := classifyError(waxtap.ErrShortsPlaylist)
+	if c.exitCode != 2 || c.code != "unsupported-input" {
+		t.Errorf("classifyError(ErrShortsPlaylist) = {exit %d, code %q}, want {2, unsupported-input}", c.exitCode, c.code)
+	}
+	msg := friendlyError(waxtap.ErrShortsPlaylist)
+	if strings.HasPrefix(msg, "waxtap:") {
+		t.Errorf("friendlyError leaked the wrapped sentinel prefix: %q", msg)
+	}
+	if !strings.Contains(msg, "Shorts") || !strings.Contains(msg, "uploads playlist") || !strings.Contains(msg, "with UU") {
+		t.Errorf("friendlyError = %q, want it to name Shorts and explain how to select the uploads playlist", msg)
+	}
+	if strings.Contains(strings.ToLower(msg), "parser") || strings.Contains(strings.ToLower(msg), "stale") {
+		t.Errorf("friendlyError = %q, must not describe Shorts playlists as a stale parser", msg)
+	}
+}
+
 func TestExitCodeFor(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -150,6 +169,7 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrInvalidPlaylistID, 2},
 		{waxtap.ErrIncompatibleSpec, 2},
 		{waxtap.ErrUnsupportedInput, 2}, // a correctable bad local input
+		{waxtap.ErrShortsPlaylist, 2},   // known unsupported playlist type
 		{waxtap.ErrIsPlaylist, 2},       // user can select the playlist command
 		{waxtap.ErrInvalidConfig, 2},
 		{waxtap.ErrURLExpired, 7},                 // parity with incomplete-stream

@@ -85,10 +85,13 @@ func sponsorblockArgs(base cobra.PositionalArgs, hasOutputPositional bool) cobra
 // the --sponsorblock value.
 func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional bool) (string, bool) {
 	if !hasOutputPositional {
-		// Download and preview accept exactly one positional argument. Anything
-		// after the source is therefore the likely flag value.
-		if len(args) > 1 {
-			return args[1], true
+		// Download and preview accept one positional argument. Only report a
+		// misplaced value when a surplus argument is a valid category list. Other
+		// surplus arguments belong to the command's normal arity error.
+		for _, a := range args[1:] {
+			if isCategoryList(a) {
+				return a, true
+			}
 		}
 		return "", false
 	}
@@ -110,7 +113,7 @@ func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional
 	}
 	// Treat a comma-separated category list in the output slot as a misplaced
 	// value. A single category could be a legitimate output filename.
-	if len(args) == 2 && budget == 2 && strings.Contains(args[1], ",") && isCategoryList(args[1]) {
+	if len(args) == 2 && strings.Contains(args[1], ",") && isCategoryList(args[1]) {
 		return args[1], true
 	}
 	return "", false
