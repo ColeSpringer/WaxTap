@@ -185,7 +185,7 @@ func renderCopy(ctx context.Context, r *transcode.Runner, input, output string, 
 		return err
 	}
 
-	staged, err := tempfile.NewExternal(output)
+	staged, err := tempfile.NewExternal(output, "")
 	if err != nil {
 		return err
 	}

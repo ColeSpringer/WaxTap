@@ -9,11 +9,13 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/internal/tempfile"
 )
 
 func TestJSONFloatNonFinite(t *testing.T) {
@@ -125,7 +127,7 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrInvalidConfig, 2},
 		{waxtap.ErrURLExpired, 7},                 // parity with incomplete-stream
 		{waxtap.ErrRequestedFormatUnavailable, 2}, // correctable request error
-		{waxtap.ErrDeliveryUnsupported, 2},        // forced-iOS byte delivery
+		{waxtap.ErrDeliveryUnsupported, 2},        // compatibility sentinel
 		{&waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("down")}, 9},
 		{&url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Err: errFake("refused")}}, 9},
 		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},
@@ -158,6 +160,24 @@ func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
 	}
 }
 
+func TestClassifyError_SidecarAuth(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		sre := &sidecarResponseError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", statusCode: status}
+		c := classifyError(sre)
+		if c.exitCode != 2 || c.code != "invalid-config" {
+			t.Errorf("status %d = %+v, want invalid-config/2", status, c)
+		}
+		if !strings.Contains(c.hint, "--api-key") {
+			t.Errorf("status %d hint = %q, want it to mention --api-key", status, c.hint)
+		}
+	}
+	// Wrapped sidecar responses retain the authentication hint.
+	wrapped := fmt.Errorf("%w: %w", waxtap.ErrNeedsPOToken, &sidecarResponseError{label: "bgutil", endpoint: "http://h/get_pot", statusCode: 401})
+	if c := classifyError(wrapped); !strings.Contains(c.hint, "--api-key") {
+		t.Errorf("wrapped 401 hint = %q, want it to mention --api-key", c.hint)
+	}
+}
+
 // TestClassifyError_NewCodesAndHints covers network, I/O, format, and cipher
 // classifications.
 func TestClassifyError_NewCodesAndHints(t *testing.T) {
@@ -166,6 +186,20 @@ func TestClassifyError_NewCodesAndHints(t *testing.T) {
 	}
 	if c := classifyError(&fs.PathError{Op: "open", Path: "/x", Err: errFake("x")}); c.code != "io" || c.exitCode != 10 {
 		t.Errorf("path error = %+v, want io/10", c)
+	}
+	// Input errors do not receive output-directory guidance.
+	if c := classifyError(&fs.PathError{Op: "read", Path: "/in.flac", Err: errFake("x")}); c.hint != "" {
+		t.Errorf("input read error hint = %q, want none (it is not an output failure)", c.hint)
+	}
+	// Output errors receive output-directory guidance.
+	oe := tempfile.WrapOutput("create", &fs.PathError{Op: "open", Path: "/ro/out.flac", Err: errFake("permission denied")})
+	if c := classifyError(oe); c.code != "io" || c.exitCode != 10 || !strings.Contains(c.hint, "output directory") {
+		t.Errorf("output error = %+v, want io/10 with the output-directory hint", c)
+	}
+	// Rename failures remain classified as output I/O errors.
+	re := tempfile.WrapOutput("rename", &os.LinkError{Op: "rename", Old: "/t/a", New: "/ro/b", Err: errFake("permission denied")})
+	if c := classifyError(re); c.code != "io" || c.exitCode != 10 || !strings.Contains(c.hint, "output directory") {
+		t.Errorf("rename output error = %+v, want io/10 with the output-directory hint", c)
 	}
 	cipher := fmt.Errorf("descramble: %w", waxtap.ErrCipherSolve)
 	if c := classifyError(cipher); c.code != "cipher-solve" || c.exitCode != 4 || !strings.Contains(c.hint, "attested identity") {

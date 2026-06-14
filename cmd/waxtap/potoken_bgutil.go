@@ -25,15 +25,17 @@ import (
 // stream egress the same IP (the token is bound to the minting host).
 type bgutilProvider struct {
 	endpoint string
+	apiKey   string
 	http     *http.Client
 }
 
-// newBgutilProvider builds a provider that talks to the bgutil server at baseURL
-// (e.g. "http://127.0.0.1:4417").
-func newBgutilProvider(baseURL string) *bgutilProvider {
+// newBgutilProvider builds a provider for a bgutil endpoint that has already
+// been validated by buildSidecarURL.
+func newBgutilProvider(endpoint, apiKey string) *bgutilProvider {
 	return &bgutilProvider{
-		endpoint: strings.TrimRight(baseURL, "/") + "/get_pot",
-		http:     &http.Client{Timeout: 30 * time.Second},
+		endpoint: endpoint,
+		apiKey:   apiKey,
+		http:     newSidecarClient(30 * time.Second),
 	}
 }
 
@@ -55,7 +57,7 @@ func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request
 		return potoken.Response{}, err
 	}
 	var out bgutilResponse
-	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server",
+	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server", p.apiKey,
 		bgutilRequest{ContentBinding: binding}, &out); err != nil {
 		return potoken.Response{}, err
 	}

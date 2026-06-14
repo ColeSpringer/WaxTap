@@ -7,9 +7,10 @@ import (
 
 func newInfoCmd() *cobra.Command {
 	var (
-		showURLs bool
-		probe    bool
-		channels string
+		showURLs   bool
+		probe      bool
+		channels   string
+		noFallback bool
 	)
 	cmd := &cobra.Command{
 		Use:   "info <url>",
@@ -32,7 +33,11 @@ func newInfoCmd() *cobra.Command {
 			if probe {
 				depth = waxtap.InfoProbe
 			}
-			info, err := env.client.InfoResult(cmd.Context(), args[0], depth)
+			var ropts []waxtap.ReadOption
+			if noFallback {
+				ropts = append(ropts, waxtap.WithNoFallback())
+			}
+			info, err := env.client.InfoResult(cmd.Context(), args[0], depth, ropts...)
 			if err != nil {
 				return err
 			}
@@ -40,7 +45,7 @@ func newInfoCmd() *cobra.Command {
 
 			var resolved *waxtap.ResolvedStream
 			if showURLs {
-				rs, rerr := env.client.Resolve(cmd.Context(), args[0], sel)
+				rs, rerr := env.client.Resolve(cmd.Context(), args[0], sel, ropts...)
 				if rerr != nil {
 					return rerr
 				}
@@ -59,6 +64,7 @@ func newInfoCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&showURLs, "show-urls", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "ffprobe the selected stream for authoritative rate/channels/bitrate (requires ffmpeg)")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
+	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
 	return cmd
 }
 

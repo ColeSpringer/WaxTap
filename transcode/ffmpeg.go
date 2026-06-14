@@ -47,6 +47,11 @@ type Spec struct {
 	// graphs such as concat/acrossfade. It is mutually exclusive with Filters and
 	// cannot be used with CodecCopy.
 	FilterComplex string
+	// StageExt sets the staged file's extension, with or without a leading dot.
+	// An empty value derives the extension from the output path.
+	StageExt string
+	// Threads limits ffmpeg's worker threads when positive. Zero lets ffmpeg choose.
+	Threads int
 }
 
 // buildCommand assembles the ffmpeg arguments to read input, apply spec's
@@ -83,6 +88,9 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 	}
 
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input}
+	if spec.Threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(spec.Threads))
+	}
 	switch {
 	case hasFC:
 		// The graph owns audio selection and writes [out]. Mapping only [out]

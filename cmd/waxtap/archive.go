@@ -11,7 +11,7 @@ import (
 )
 
 // downloadArchive records fetched video IDs across runs. It is separate from
-// --skip-existing, which checks paths; the archive keys on video ID only.
+// --collision skip, which checks output paths; the archive keys on video ID only.
 //
 // Appends are serialized with a process mutex and, on Unix, an advisory file
 // lock. The archive is intended for one machine sharing one filesystem.

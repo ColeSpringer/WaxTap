@@ -59,13 +59,26 @@ func isIncompleteDelivery(err error) bool {
 	return errors.Is(err, ErrIncompleteStream) || errors.Is(err, ErrURLExpired)
 }
 
-// baseSkip returns the extraction attempts disabled before a request starts.
-func baseSkip(req Request) map[youtube.AttemptID]bool {
+// watchPageSkip returns the extraction attempts disabled when watch-page
+// fallback is not allowed.
+func watchPageSkip(noFallback bool) map[youtube.AttemptID]bool {
 	skip := map[youtube.AttemptID]bool{}
-	if req.NoFallback {
+	if noFallback {
 		skip[youtube.AttemptWatchPage] = true
 	}
 	return skip
+}
+
+// baseSkip returns the extraction attempts disabled before a request starts.
+func baseSkip(req Request) map[youtube.AttemptID]bool {
+	return watchPageSkip(req.NoFallback)
+}
+
+// forcedSingleWeb reports whether the configured chain contains only the
+// built-in WEB client.
+func (c *Client) forcedSingleWeb() bool {
+	name, ok := c.yt.ForcedSingleClient()
+	return ok && youtube.IsWebClient(name)
 }
 
 // acquire extracts, selects, and resolves a single transfer. It is used for sinks
@@ -90,11 +103,6 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 		webCtxReason = "failed: " + err.Error()
 	}
 
-	// Web-context did not deliver; a forced iOS chain cannot deliver bytes.
-	if err := c.forcedIOSDelivery(); err != nil {
-		return nil, err
-	}
-
 	em.stage(StageExtracting)
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
@@ -107,6 +115,7 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 		return nil, err
 	}
 	c.warnWebContextFallback(em, a, webCtxReason)
+	c.warnSessionDowngrade(em, a)
 	return a, nil
 }
 
@@ -128,7 +137,35 @@ func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason
 	if reason == "" {
 		reason = "unavailable"
 	}
-	em.warn(WarnWebContextFallback, fmt.Sprintf("web player-context did not deliver (%s); served via %s", reason, delivered.client))
+	detail := fmt.Sprintf("web player-context did not deliver (%s); served via %s", reason, delivered.client)
+	if authFailureInReason(reason) {
+		detail += "; set or verify --api-key"
+	}
+	em.warn(WarnWebContextFallback, detail)
+}
+
+// isWebFamily reports whether a client display name belongs to the WEB family.
+func isWebFamily(client string) bool {
+	return strings.Contains(strings.ToUpper(client), "WEB")
+}
+
+// authFailureInReason reports whether a fallback reason contains an HTTP
+// authentication rejection.
+func authFailureInReason(reason string) bool {
+	return strings.Contains(reason, "HTTP 401") || strings.Contains(reason, "HTTP 403")
+}
+
+// warnSessionDowngrade warns when a request configured for WEB audio is delivered
+// by a non-WEB client. Player-context fallback is reported separately.
+func (c *Client) warnSessionDowngrade(em *emitter, a *acquired) {
+	if c.yt.WebContextConfigured() {
+		return
+	}
+	expectsWeb := c.opts.Session != nil || c.opts.SessionProvider != nil || c.forcedSingleWeb()
+	if !expectsWeb || isWebFamily(a.client) {
+		return
+	}
+	em.warn(WarnFallbackProfile, fmt.Sprintf("expected full WEB audio but the %s client delivered the stream", a.client))
 }
 
 // buildTransfer selects and resolves a format from ext. When pinnedItag is
@@ -299,11 +336,6 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 		return nil, youtube.AttemptWebContext, err
 	}
 
-	// An empty attempt ID makes the loop surface this error directly.
-	if err := c.forcedIOSDelivery(); err != nil {
-		return nil, "", err
-	}
-
 	em.stage(StageExtracting)
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	ext, err := c.yt.ExtractExcluding(ectx, id, skip)
@@ -339,10 +371,6 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 				return nil, download.Result{}, "", ctx.Err()
 			}
 			if errors.Is(err, ErrRateLimited) {
-				return nil, download.Result{}, "", err
-			}
-			// Do not aggregate a configuration error with prior attempt failures.
-			if errors.Is(err, ErrDeliveryUnsupported) {
 				return nil, download.Result{}, "", err
 			}
 			if attempt == youtube.AttemptWebContext {
@@ -381,6 +409,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
 			}
 			c.warnWebContextFallback(em, a, webCtxReason)
+			c.warnSessionDowngrade(em, a)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -407,6 +436,12 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			break // do not switch clients after an incomplete delivery
 		}
 		skip[a.attempt] = true
+		// The watch-page fallback also uses WEB, so it is not a distinct retry for a
+		// forced WEB client.
+		if c.forcedSingleWeb() && a.attempt != youtube.AttemptWebContext {
+			skip[youtube.AttemptWatchPage] = true
+			continue
+		}
 		// A later web-context fallback warning covers this transition.
 		if a.attempt != youtube.AttemptWebContext {
 			em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
@@ -562,21 +597,6 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 		return nil
 	}
 	return func(bw, total int64) { p(download.Progress{BytesWritten: bw, Total: total}) }
-}
-
-// forcedIOSDelivery rejects byte delivery through a forced built-in iOS client.
-// iOS metadata and format extraction still work, and a preceding WEB
-// player-context attempt may still deliver. The default chain and profile
-// overrides are not restricted.
-func (c *Client) forcedIOSDelivery() error {
-	if c.opts.Client == "" {
-		return nil
-	}
-	name, ok := c.yt.ForcedSingleClient()
-	if !ok || !youtube.IsIOSClient(name) {
-		return nil
-	}
-	return fmt.Errorf("%w: client \"ios\" provides metadata and formats only; use --client android_vr or web, or configure --player-context-url", ErrDeliveryUnsupported)
 }
 
 // Download acquires and processes a single YouTube video to the configured sink.

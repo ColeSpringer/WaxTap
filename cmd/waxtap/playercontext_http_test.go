@@ -38,7 +38,7 @@ func TestPlayerContextProviderDecode(t *testing.T) {
 	srv := newTestServer(t, http.StatusOK, validPlayerContextJSON)
 	defer srv.Close()
 
-	pc, err := newPlayerContextProvider(srv.URL).ProvidePlayerContext(context.Background(), "aqz-KE-bpKQ")
+	pc, err := newPlayerContextProvider(srv.URL+"/player-context", "").ProvidePlayerContext(context.Background(), "aqz-KE-bpKQ")
 	if err != nil {
 		t.Fatalf("ProvidePlayerContext: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestPlayerContextProviderErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newTestServer(t, tc.status, tc.body)
 			defer srv.Close()
-			_, err := newPlayerContextProvider(srv.URL).ProvidePlayerContext(context.Background(), "v")
+			_, err := newPlayerContextProvider(srv.URL+"/player-context", "").ProvidePlayerContext(context.Background(), "v")
 			if err == nil {
 				t.Fatal("expected an error")
 			}

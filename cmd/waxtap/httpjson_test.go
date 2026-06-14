@@ -25,6 +25,38 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+func TestBuildSidecarURL(t *testing.T) {
+	cases := []struct {
+		base, def, want string
+	}{
+		// A base with no path (or just "/") gets the default path appended.
+		{"http://127.0.0.1:4417", "/get_pot", "http://127.0.0.1:4417/get_pot"},
+		{"http://127.0.0.1:4417/", "/get_pot", "http://127.0.0.1:4417/get_pot"},
+		// A full endpoint URL is preserved.
+		{"http://host:4417/session", "/session", "http://host:4417/session"},
+		{"http://host:4417/custom", "/get_pot", "http://host:4417/custom"},
+		// Existing query parameters are retained.
+		{"http://host:4417?key=K", "/get_pot", "http://host:4417/get_pot?key=K"},
+		{"https://host/session?key=K", "/session", "https://host/session?key=K"},
+	}
+	for _, tc := range cases {
+		got, err := buildSidecarURL(tc.base, tc.def)
+		if err != nil {
+			t.Errorf("buildSidecarURL(%q,%q) error: %v", tc.base, tc.def, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("buildSidecarURL(%q,%q) = %q, want %q", tc.base, tc.def, got, tc.want)
+		}
+	}
+	// Non-HTTP and unparseable bases are rejected so a misconfiguration surfaces.
+	for _, bad := range []string{"", "ftp://host/x", "not-a-url", "http://%zz"} {
+		if _, err := buildSidecarURL(bad, "/get_pot"); err == nil {
+			t.Errorf("buildSidecarURL(%q) = nil error, want a validation error", bad)
+		}
+	}
+}
+
 func TestCapRunes(t *testing.T) {
 	if got := capRunes("short", 10); got != "short" {
 		t.Errorf("capRunes short = %q", got)

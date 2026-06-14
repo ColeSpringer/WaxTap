@@ -9,7 +9,8 @@ import (
 )
 
 func newFormatsCmd() *cobra.Command {
-	return &cobra.Command{
+	var noFallback bool
+	cmd := &cobra.Command{
 		Use:   "formats <url>",
 		Short: "List the candidate audio formats for a video",
 		Args:  cobra.ExactArgs(1),
@@ -18,7 +19,11 @@ func newFormatsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			video, err := env.client.Info(cmd.Context(), args[0], waxtap.InfoBasic)
+			var ropts []waxtap.ReadOption
+			if noFallback {
+				ropts = append(ropts, waxtap.WithNoFallback())
+			}
+			video, err := env.client.Info(cmd.Context(), args[0], waxtap.InfoBasic, ropts...)
 			if err != nil {
 				return err
 			}
@@ -43,6 +48,8 @@ func newFormatsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
+	return cmd
 }
 
 // audioFormats keeps the audio candidates, falling back to all formats when none
@@ -107,6 +114,22 @@ func renderFormatsTable(env *appEnv, formats []waxtap.Format) {
 		)
 	}
 	tw.Flush()
+
+	// An itag may appear once for each DRC variant.
+	if hasDRCVariant(formats) {
+		env.printf("\nDRC=yes marks the dynamic-range-compressed variant; the same itag may also appear with DRC=no.\n")
+		env.printf("Best-audio selection and --itag both prefer the original track and the full-range (DRC=no) variant when present.\n")
+	}
+}
+
+// hasDRCVariant reports whether the format list includes a DRC variant.
+func hasDRCVariant(formats []waxtap.Format) bool {
+	for _, f := range formats {
+		if f.IsDRC == waxtap.Yes {
+			return true
+		}
+	}
+	return false
 }
 
 // formatJSON is the --json view of a format, using explicit CLI field names.

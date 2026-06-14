@@ -167,7 +167,7 @@ func resolveCollision(path string, mode collisionMode) (out string, skip bool, e
 	case collisionAutoNumber:
 		return nextAvailable(path), false, nil
 	default: // collisionFail
-		return "", false, usagef("output file already exists: %s (use --collision to change behavior)", path)
+		return "", false, usagef("output file already exists: %s (set --collision to auto-number, overwrite, or skip)", path)
 	}
 }
 

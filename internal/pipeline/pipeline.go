@@ -91,6 +91,9 @@ type Spec struct {
 
 	// Loudness controls measurement/normalization. Nil means no loudness work.
 	Loudness *Loudness
+
+	// Threads limits ffmpeg's worker threads. Zero lets ffmpeg choose.
+	Threads int
 }
 
 // Result reports what the pipeline did.
@@ -198,14 +201,19 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	// Resolve container compatibility before choosing an encoder for downmixing.
 	// Automatic processing may select the container's default codec, while an
 	// explicitly requested stream copy must fail.
+	//
+	// stageExt gives ffmpeg a muxer hint when the final path has no usable
+	// extension.
+	stageExt := ""
 	if spec.Codec == transcode.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
-		// Stream copy requires an output path that identifies a container.
-		// containerAccepts treats empty and "copy" extensions as neutral, so reject
-		// them here before invoking ffmpeg. Downmix is excluded because it encodes
-		// and can use the preset's canonical muxer.
+		// A remux can infer a container from the source codec. Copy cuts still need
+		// an explicit container because they create intermediate concat segments.
 		if (remux || effectiveCut) && fold == 0 && (ext == "" || ext == "copy") {
-			return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (.webm/.m4a/.ogg/.mka)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+			if effectiveCut {
+				return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (.webm/.m4a/.ogg/.mka)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+			}
+			stageExt = copyContainerExt(res.SourceCodec)
 		}
 		if !containerAccepts(ext, res.SourceCodec) {
 			if remux || spec.CutMode == cut.ModeCopy {
@@ -213,7 +221,7 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 			}
 			c, ok := containerCodec(ext)
 			if !ok {
-				return Result{}, fmt.Errorf("%w: cannot infer an encoder for the .%s container; pass --transcode", waxerr.ErrIncompatibleSpec, ext)
+				return Result{}, fmt.Errorf("%w: cannot infer an encoder for the .%s container; pass --format", waxerr.ErrIncompatibleSpec, ext)
 			}
 			spec.Codec = c
 			transcoding = true
@@ -226,7 +234,7 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	if fold > 0 && spec.Codec == transcode.CodecCopy {
 		c, ok := sourceEncodeCodec(res.SourceCodec)
 		if !ok {
-			return Result{}, fmt.Errorf("%w: cannot downmix %s without a transcode target (pass --transcode)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+			return Result{}, fmt.Errorf("%w: cannot downmix %s without a transcode target (pass --format)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
 		}
 		spec.Codec = c
 		if spec.Bitrate == 0 && !c.IsLossless() {
@@ -248,13 +256,13 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 				graph += ";[pre]" + foldFilter(fold) + "[folded]"
 				sink = "folded"
 			}
-			measured, err = normalize.MeasureComplex(ctx, r, input, graph, sink)
+			measured, err = normalize.MeasureComplex(ctx, r, input, graph, sink, spec.Threads)
 		} else {
 			var pre []string
 			if fold > 0 {
 				pre = []string{foldFilter(fold)}
 			}
-			measured, err = normalize.Measure(ctx, r, input, pre)
+			measured, err = normalize.Measure(ctx, r, input, pre, spec.Threads)
 		}
 		if err != nil {
 			return Result{}, err
@@ -271,7 +279,7 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	}
 
 	// Preserve the source sample rate because loudnorm otherwise outputs 192 kHz.
-	enc := transcode.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate}
+	enc := transcode.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, StageExt: stageExt, Threads: spec.Threads}
 	switch {
 	case fold > 0 && apply:
 		// Fold before loudnorm so its true-peak limiter bounds fold clipping.
@@ -316,7 +324,7 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	// must not fail the job.
 	if apply {
 		send(StageAnalyzing)
-		if out, merr := normalize.Measure(ctx, r, output, nil); merr == nil {
+		if out, merr := normalize.Measure(ctx, r, output, nil, spec.Threads); merr == nil {
 			res.OutputLoudness = &out
 		}
 	}
@@ -412,6 +420,25 @@ func containerAccepts(ext, codec string) bool {
 		return strings.HasPrefix(c, "pcm")
 	}
 	return true
+}
+
+// copyContainerExt returns a container extension suitable for a stream copy of
+// codec. Only the staged file uses this extension.
+func copyContainerExt(codec string) string {
+	switch strings.ToLower(codec) {
+	case "opus":
+		return "webm"
+	case "aac", "alac":
+		return "m4a"
+	case "vorbis":
+		return "ogg"
+	case "mp3":
+		return "mp3"
+	case "flac":
+		return "flac"
+	default:
+		return "mka" // Matroska accepts the remaining codecs WaxTap handles
+	}
 }
 
 // containerCodec returns the default encoder for a container extension. It

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -13,27 +14,31 @@ import (
 
 func newNormalizeCmd() *cobra.Command {
 	var (
-		apply          bool
-		target         float64
-		loudnessTarget float64
-		transcode      string
-		bitrate        int
-		out            string
-		album          bool
-		dir            string
-		itag           int
-		codec          string
-		noFallback     bool
-		sourcePolicy   string
-		collisionStr   string
+		apply        bool
+		target       float64
+		format       string
+		bitrate      int
+		out          string
+		album        bool
+		dir          string
+		itag         int
+		codec        string
+		channels     string
+		downmix      bool
+		noFallback   bool
+		sourcePolicy string
+		collisionStr string
+		recursive    bool
+		concurrency  int
 	)
 	cmd := &cobra.Command{
 		Use:   "normalize <input> [output]",
 		Short: "Measure or normalize loudness (EBU R128)",
-		Long: "Measure integrated loudness (default) or normalize to a target LUFS with\n" +
-			"--apply (or by setting --target), fused into a transcode. With --album,\n" +
-			"measure a set of files as one album, or with --apply bake the shared album\n" +
-			"gain into each track (preserving track-to-track differences).\n\n" +
+		Long: "Measure integrated loudness without writing output (default), or use\n" +
+			"--apply to normalize to --loudness-target and write re-encoded audio.\n" +
+			"With --album, measure a set of files as one album, or with --apply use\n" +
+			"the shared album gain for each track while preserving track-to-track\n" +
+			"differences.\n\n" +
 			"Applying normalization uses one ffmpeg loudnorm pass with true-peak\n" +
 			"limiting. A loud source may therefore land slightly below the target\n" +
 			"(for example, -14.9 for -14).",
@@ -43,15 +48,13 @@ func newNormalizeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			target, err = resolveLoudnessTarget(cmd, target, loudnessTarget)
-			if err != nil {
+			if err := validateNormalizeModeFlags(cmd, apply); err != nil {
 				return err
 			}
-			doApply := apply || cmd.Flags().Changed("target") || cmd.Flags().Changed("loudness-target")
 
 			if album {
 				return runAlbum(cmd, env, args, albumParams{
-					apply: doApply, target: target, transcode: transcode, bitrate: bitrate, dir: dir, collisionStr: collisionStr,
+					apply: apply, target: target, format: format, bitrate: bitrate, dir: dir, collisionStr: collisionStr,
 				})
 			}
 
@@ -67,20 +70,48 @@ func newNormalizeCmd() *cobra.Command {
 				return usagef("multiple inputs require --album")
 			}
 
-			if !doApply {
-				return runMeasure(cmd, env, source, target, itag, codec, sourcePolicy, noFallback)
+			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
+				return runDirectoryNormalize(cmd, env, directoryNormalizeParams{
+					root: source, explicit: explicit, dir: dir, recursive: recursive,
+					apply: apply, target: target, format: format, bitrate: bitrate,
+					channels: channels, downmix: downmix,
+					collisionStr: collisionStr, concurrency: concurrency,
+				})
 			}
 
-			if transcode == "" {
-				return usagef("normalize --apply re-encodes; pass --transcode (e.g. flac)")
+			if err := validateLocalSourceFlags(cmd, source); err != nil {
+				return err
 			}
-			tf, err := parseTranscodeFormat(transcode)
+			if err := validateNormalizeInputFlags(cmd, apply, false, false); err != nil {
+				return err
+			}
+			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
 			if err != nil {
 				return err
+			}
+			if !apply {
+				if explicit != "" {
+					return usagef("measurement does not write output; remove the output path or use --apply")
+				}
+				return runMeasure(cmd, env, source, itag, codec, sourcePolicy, noFallback, layout, target)
+			}
+
+			// When --format is omitted, infer it from the output extension.
+			if format == "" && filepath.Ext(explicit) == "" {
+				return usagef("normalize --apply re-encodes; pass --format (e.g. flac) or an output file with an extension")
+			}
+			tf, err := transcodeFormatFor(format, explicit)
+			if err != nil {
+				return err
+			}
+			if tf == waxtap.FormatCopy {
+				return usagef("normalization re-encodes; copy is not a valid output format")
 			}
 			spec := waxtap.ProcessSpec{
 				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate},
 				Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: target},
+				Channels:  layout,
+				Downmix:   doDownmix,
 			}
 			mc, err := collisionFor(cmd, collisionStr)
 			if err != nil {
@@ -95,8 +126,7 @@ func newNormalizeCmd() *cobra.Command {
 				return nil
 			}
 			spec.Output = waxtap.ToFile(outPath)
-			// Normalize has no channel-layout preference.
-			sel, policy, err := urlSelection(itag, codec, sourcePolicy, waxtap.LayoutAny)
+			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
 				return err
 			}
@@ -108,45 +138,64 @@ func newNormalizeCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.BoolVar(&apply, "apply", false, "normalize (re-encode) instead of only measuring")
-	f.Float64Var(&target, "target", -14, "target integrated loudness (LUFS) for --apply (alias: --loudness-target)")
-	f.Float64Var(&loudnessTarget, "loudness-target", -14, "alias of --target (consistent with download --loudness-target)")
-	f.StringVar(&transcode, "transcode", "", "output format for --apply: flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&bitrate, "bitrate", 0, "target bitrate for lossy formats")
-	f.StringVarP(&out, "out", "o", "", "output file path (single --apply)")
+	f.BoolVar(&apply, "apply", false, "write normalized audio instead of measuring only")
+	f.Float64Var(&target, "loudness-target", -14, "target integrated loudness (LUFS) for --apply")
+	f.StringVarP(&format, "format", "f", "", "output format for --apply: flac|alac|wav|mp3|aac|opus|vorbis")
+	f.IntVar(&bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy formats (0 = preset default)")
+	f.StringVarP(&out, "out", "o", "", "output file path for one input")
 	f.BoolVar(&album, "album", false, "treat all inputs as one album (group loudness)")
-	f.StringVarP(&dir, "dir", "d", "", "output directory for --album --apply")
-	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
-	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
-	f.BoolVar(&noFallback, "no-fallback", false, "disable WEB-context, watch-page, and incomplete-download fallbacks")
-	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
-	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
+	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input or --album --apply")
+	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
+	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
+	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
+	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
+	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	f.BoolVarP(&recursive, "recursive", "r", false, "recurse into subdirectories for a directory input")
+	f.IntVar(&concurrency, "concurrency", 0, "number of parallel ffmpeg jobs (0 = serial)")
 	return cmd
 }
 
-// resolveLoudnessTarget returns the value supplied through either target flag.
-// Conflicting values are rejected.
-func resolveLoudnessTarget(cmd *cobra.Command, target, alias float64) (float64, error) {
-	tset := cmd.Flags().Changed("target")
-	aset := cmd.Flags().Changed("loudness-target")
+// validateNormalizeModeFlags rejects write-only flags in the default measure
+// mode. This avoids accepting a command that appears to write output but does not.
+func validateNormalizeModeFlags(cmd *cobra.Command, apply bool) error {
+	if apply {
+		return nil
+	}
+	// Channel selection and downmixing affect encoded output, which measure mode
+	// does not produce.
+	return rejectChangedFlags(cmd, "requires --apply", "loudness-target", "format", "bitrate", "out", "dir", "collision", "channels", "downmix")
+}
+
+// validateNormalizeInputFlags rejects flags that do not apply to the selected
+// input shape.
+func validateNormalizeInputFlags(cmd *cobra.Command, apply, directory, album bool) error {
+	if directory || album {
+		if err := rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback"); err != nil {
+			return err
+		}
+	}
 	switch {
-	case tset && aset && target != alias:
-		return 0, usagef("--target and --loudness-target are aliases; set only one (got %g and %g)", target, alias)
-	case aset:
-		return alias, nil
+	case album:
+		// Album processing does not support channel selection or downmixing.
+		return rejectChangedFlags(cmd, "is not used with --album", "recursive", "concurrency", "out", "channels", "downmix")
+	case directory:
+		return nil
+	case apply:
+		return rejectChangedFlags(cmd, "is only used with a directory input", "recursive", "concurrency", "dir")
 	default:
-		return target, nil
+		return rejectChangedFlags(cmd, "is only used with a directory input", "recursive", "concurrency")
 	}
 }
 
 // runMeasure measures a single source and prints its loudness without writing a
 // re-encoded file (the unchanged audio is discarded).
-func runMeasure(cmd *cobra.Command, env *appEnv, source string, target float64, itag int, codec, sourcePolicy string, noFallback bool) error {
+func runMeasure(cmd *cobra.Command, env *appEnv, source string, itag int, codec, sourcePolicy string, noFallback bool, layout waxtap.ChannelLayout, target float64) error {
 	spec := waxtap.ProcessSpec{
+		// Carry the target so a measure-only JSON result does not report zero.
 		Loudness: &waxtap.LoudnessSpec{Mode: waxtap.LoudnessMeasureOnly, Target: target},
 		Output:   waxtap.ToWriter(io.Discard),
 	}
-	sel, policy, err := urlSelection(itag, codec, sourcePolicy, waxtap.LayoutAny)
+	sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 	if err != nil {
 		return err
 	}
@@ -160,13 +209,16 @@ func runMeasure(cmd *cobra.Command, env *appEnv, source string, target float64, 
 type albumParams struct {
 	apply        bool
 	target       float64
-	transcode    string
+	format       string
 	bitrate      int
 	dir          string
 	collisionStr string
 }
 
 func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) error {
+	if err := validateNormalizeInputFlags(cmd, p.apply, false, true); err != nil {
+		return err
+	}
 	for _, in := range inputs {
 		if !isLocalFile(in) {
 			return usagef("--album works on local files only (%q is not a file)", in)
@@ -180,15 +232,18 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 		return emitAlbumMeasure(env, inputs, res)
 	}
 
-	if p.transcode == "" {
-		return usagef("--album --apply re-encodes; pass --transcode (e.g. flac)")
+	if p.format == "" {
+		return usagef("--album --apply re-encodes; pass --format (e.g. flac)")
 	}
 	if p.dir == "" {
 		return usagef("--album --apply writes one file per track; pass --dir")
 	}
-	tf, err := parseTranscodeFormat(p.transcode)
+	tf, err := parseTranscodeFormat(p.format)
 	if err != nil {
 		return err
+	}
+	if tf == waxtap.FormatCopy {
+		return usagef("album normalization re-encodes; --format copy is not supported")
 	}
 	mc, err := collisionFor(cmd, p.collisionStr)
 	if err != nil {

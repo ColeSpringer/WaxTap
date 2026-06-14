@@ -44,7 +44,7 @@ func TestNewExternal_HonorsUmask(t *testing.T) {
 	want := os.FileMode(0o666) &^ readUmask(t)
 
 	final := filepath.Join(t.TempDir(), "out.flac")
-	ext, err := NewExternal(final)
+	ext, err := NewExternal(final, "")
 	if err != nil {
 		t.Fatal(err)
 	}

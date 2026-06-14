@@ -124,6 +124,25 @@ func processRanges(cs *CutSpec) []TimeRange {
 	return cs.Ranges
 }
 
+// ProbeCodec reports the codec name of the first audio stream in a local file,
+// such as "opus" or "aac". It returns ErrUnsupportedInput when the file has no
+// audio stream.
+func (c *Client) ProbeCodec(ctx context.Context, path string) (string, error) {
+	runner, err := c.ffmpeg()
+	if err != nil {
+		return "", err
+	}
+	probe, err := runner.Probe(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	audio, ok := probe.AudioStream()
+	if !ok {
+		return "", fmt.Errorf("%w: no audio stream in %s", ErrUnsupportedInput, path)
+	}
+	return audio.CodecName, nil
+}
+
 // AlbumLoudnessResult reports a group loudness measurement plus per-track
 // measurements, in input order. The album value is a true group EBU R128
 // measurement, not a mean of the per-track LUFS.
@@ -136,7 +155,7 @@ type AlbumLoudnessResult struct {
 // track's loudness. It does not write output files; callers can use the album
 // value for ReplayGain tags or playback gain.
 //
-// It requires ffmpeg. Use normalize.AlbumGainFilter to bake the same album gain
+// It requires ffmpeg. Use normalize.AlbumGainFilter to apply the same album gain
 // into each track.
 func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudnessResult, error) {
 	if len(paths) == 0 {
@@ -176,12 +195,12 @@ type AlbumProcessResult struct {
 	Outputs  []string       // completed output paths in track order
 }
 
-// ProcessAlbum measures local files as one album, then bakes the same gain into
+// ProcessAlbum measures local files as one album, then applies the same gain to
 // every track. The shared offset preserves track-to-track loudness differences;
 // per-track normalization would flatten them.
 //
 // Album processing requires ffmpeg and a non-copy transcode format. A silent
-// album bakes a no-op gain, leaving each track unchanged apart from re-encoding.
+// album applies a no-op gain, leaving each track unchanged apart from re-encoding.
 func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target float64, spec TranscodeSpec) (*AlbumProcessResult, error) {
 	if len(tracks) == 0 {
 		return nil, fmt.Errorf("waxtap.ProcessAlbum: no inputs")

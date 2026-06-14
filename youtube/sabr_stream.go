@@ -229,7 +229,7 @@ func sabrClientInfo(p ClientProfile, hl string) sabr.ClientInfo {
 }
 
 // sabrClientTokenError adds the rejected client's name while preserving the
-// original error for errors.Is and errors.As.
+// original error for errors.Is and errors.AsType.
 func sabrClientTokenError(clientName string, err error) error {
 	if clientName == "" {
 		return err

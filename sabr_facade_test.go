@@ -231,9 +231,12 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 	}
 }
 
-func TestFacade_AllClientsCapReportsIncomplete(t *testing.T) {
+// TestFacade_ForcedWebCapReportsIncompleteWithoutWatchPageRetry verifies that a
+// forced WEB client does not retry the equivalent WEB watch-page path.
+func TestFacade_ForcedWebCapReportsIncompleteWithoutWatchPageRetry(t *testing.T) {
 	capped := fSabrBody([]byte("INIT"), []byte("MEDIA"), 2) // declares 2 segs, sends 1
-	// The watch-page fallback extracts its own (capping) SABR context from the page.
+	// Signature discovery may also request /watch, so detect a redundant fallback
+	// through its warning rather than the request count.
 	watchHTML := []byte("<html><script>var ytInitialPlayerResponse = " + sabrPlayerJSONFor("watchpage") + ";</script></html>")
 
 	var mu sync.Mutex
@@ -272,19 +275,124 @@ func TestFacade_AllClientsCapReportsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var incompleteWarned atomic.Bool
 	out := filepath.Join(t.TempDir(), "track.webm")
 	_, derr := c.Download(context.Background(), waxtap.Request{
-		URL:         "dummyVideo0",
-		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnIncompleteFallback {
+					incompleteWarned.Store(true)
+				}
+			},
+		},
 	})
 	if !errors.Is(derr, waxtap.ErrIncompleteStream) {
 		t.Fatalf("err = %v, want ErrIncompleteStream (exit 7)", derr)
 	}
 	if errors.Is(derr, waxtap.ErrExtractionFailed) {
-		t.Errorf("an all-capped chain must not report extraction-failed (exit 4): %v", derr)
+		t.Errorf("a capped forced-WEB stream must not report extraction-failed (exit 4): %v", derr)
+	}
+	if incompleteWarned.Load() {
+		t.Error("forced WEB has no remaining clients, so no incomplete-fallback warning should fire")
 	}
 	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
-		t.Error("no output file should remain when every client capped")
+		t.Error("no output file should remain when the forced WEB stream capped")
+	}
+}
+
+// TestFacade_SessionAdoptionNonWebClientWarnsDowngrade verifies that session
+// adoption reports delivery by a non-WEB client.
+func TestFacade_SessionAdoptionNonWebClientWarnsDowngrade(t *testing.T) {
+	happy := fSabrHappyBody([]byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA"))
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR delivers
+				return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.RawQuery, "c=android"):
+			return resp(http.StatusOK, happy), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	// Force a single non-WEB client while adopting a session.
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient: &http.Client{Transport: rt},
+		Client:     "android_vr",
+		Session:    &waxtap.POTokenSession{VisitorData: "CgtWSVNJVE9SXzAh"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var downgrade int
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, err := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil &&
+					e.Warning.Code == waxtap.WarnFallbackProfile && strings.Contains(e.Warning.Detail, "WEB audio") {
+					downgrade++
+				}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if res.Client != "ANDROID_VR" {
+		t.Errorf("client = %q, want ANDROID_VR", res.Client)
+	}
+	if downgrade != 1 {
+		t.Errorf("downgrade warning events = %d, want exactly 1", downgrade)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnFallbackProfile && strings.Contains(w.Detail, "WEB audio") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("downgrade warning missing from Result.Warnings (not visible in --json)")
+	}
+}
+
+// TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint verifies that fallback
+// wrapping preserves the embed marker used by the CLI hint.
+func TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint(t *testing.T) {
+	watchHTML := []byte(`<html><script>var ytInitialPlayerResponse = {"playabilityStatus":{"status":"ERROR","reason":"Video unavailable"}};</script></html>`)
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil // web_embedded: ERROR
+		case r.URL.Path == "/watch":
+			return resp(http.StatusOK, watchHTML), nil // WEB fallback also unavailable
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, Client: "web_embedded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if !errors.Is(derr, waxtap.ErrVideoUnavailable) {
+		t.Fatalf("err = %v, want ErrVideoUnavailable (exit 3)", derr)
+	}
+	// The CLI uses Embed to recommend switching to the WEB client.
+	pe, ok := errors.AsType[*waxtap.PlayabilityError](derr)
+	if !ok || !pe.Embed {
+		t.Errorf("err = %v, want a PlayabilityError with Embed=true preserved", derr)
 	}
 }
 
@@ -317,6 +425,50 @@ func TestFacade_InfoResultCarriesClient(t *testing.T) {
 	}
 }
 
+// TestFacade_InfoResultNoFallbackSkipsWatchPage verifies that WithNoFallback
+// disables the watch-page extraction attempt on the read path. The default
+// fetches the watch page (and succeeds via it); WithNoFallback does not.
+func TestFacade_InfoResultNoFallbackSkipsWatchPage(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		opts        []waxtap.ReadOption
+		wantWatched bool
+		wantErr     bool
+	}{
+		{"default falls back to the watch page", nil, true, false},
+		{"no-fallback skips the watch page", []waxtap.ReadOption{waxtap.WithNoFallback()}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			watchHTML := []byte("<html><script>var ytInitialPlayerResponse = " + sabrPlayerJSONFor("watchpage") + ";</script></html>")
+			var watched atomic.Bool
+			rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/v1/player"):
+					return resp(http.StatusOK, []byte(errorPlayerJSON)), nil // every configured client fails
+				case r.URL.Path == "/watch":
+					watched.Store(true)
+					return resp(http.StatusOK, watchHTML), nil
+				default:
+					return resp(http.StatusNotFound, nil), nil
+				}
+			})
+			// Force ANDROID_VR (a non-cipher client) so the only thing that fetches
+			// the watch page is the fallback attempt, not WEB player-JS discovery.
+			c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, Client: "android_vr"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, infoErr := c.InfoResult(context.Background(), "dummyVideo0", waxtap.InfoBasic, tc.opts...)
+			if watched.Load() != tc.wantWatched {
+				t.Errorf("watch-page fetched = %v, want %v", watched.Load(), tc.wantWatched)
+			}
+			if (infoErr != nil) != tc.wantErr {
+				t.Errorf("InfoResult err = %v, wantErr %v", infoErr, tc.wantErr)
+			}
+		})
+	}
+}
+
 // iosPlayerContext returns a SABR context served by the test transport.
 func iosPlayerContext() potoken.PlayerContext {
 	return potoken.PlayerContext{
@@ -331,8 +483,8 @@ func iosPlayerContext() potoken.PlayerContext {
 	}
 }
 
-// TestFacade_ForcedIOSDeliversViaPlayerContext verifies that a WEB
-// player-context can deliver before the forced iOS restriction applies.
+// TestFacade_ForcedIOSDeliversViaPlayerContext verifies that WEB player-context
+// delivery takes precedence over the configured iOS client.
 func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
 	initBytes, mediaBytes := []byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA")
 	umpBody := fSabrHappyBody(initBytes, mediaBytes)
@@ -363,7 +515,7 @@ func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
 		t.Fatalf("forced iOS + delivering player-context should stream via WEB_CONTEXT: %v", err)
 	}
 	if res.Client != "WEB_CONTEXT" {
-		t.Errorf("Result.Client = %q, want WEB_CONTEXT (iOS byte path bypassed by web-context)", res.Client)
+		t.Errorf("Result.Client = %q, want WEB_CONTEXT (player-context should take precedence over iOS)", res.Client)
 	}
 	want := append(append([]byte{}, initBytes...), mediaBytes...)
 	if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
@@ -371,13 +523,13 @@ func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
 	}
 }
 
-// TestFacade_ForcedIOSPlayerContextFailureIsDeliveryUnsupported verifies that a
-// failed player-context does not fall back to iOS byte delivery.
-func TestFacade_ForcedIOSPlayerContextFailureIsDeliveryUnsupported(t *testing.T) {
-	var stray bool
+// TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain verifies that a
+// failed player-context falls through to the configured iOS client.
+func TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain(t *testing.T) {
+	var attemptedIOS bool
 	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(r.URL.Path, "/v1/player") || strings.Contains(r.URL.Path, "/videoplayback") {
-			stray = true // the iOS byte path must not be attempted
+			attemptedIOS = true // the forced iOS chain was attempted
 		}
 		return resp(http.StatusNotFound, nil), nil
 	})
@@ -398,11 +550,14 @@ func TestFacade_ForcedIOSPlayerContextFailureIsDeliveryUnsupported(t *testing.T)
 		URL:         "dummyVideo0",
 		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
 	})
-	if !errors.Is(derr, waxtap.ErrDeliveryUnsupported) {
-		t.Errorf("forced iOS + failed player-context = %v, want ErrDeliveryUnsupported", derr)
+	if derr == nil {
+		t.Fatal("want an error from the failed iOS extraction, got nil")
 	}
-	if stray {
-		t.Error("the forced iOS byte path must not be attempted after the player-context fails")
+	if errors.Is(derr, waxtap.ErrDeliveryUnsupported) {
+		t.Errorf("forced iOS returned ErrDeliveryUnsupported: %v", derr)
+	}
+	if !attemptedIOS {
+		t.Error("the forced iOS chain should be attempted after the player-context fails")
 	}
 }
 

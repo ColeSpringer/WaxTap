@@ -13,8 +13,8 @@ func TestResolveValidatesProcessSpec(t *testing.T) {
 		name string
 		set  map[string]string
 	}{
-		{"negative bitrate", map[string]string{"transcode": "mp3", "bitrate": "-1"}},
-		{"out-of-range loudness target", map[string]string{"transcode": "flac", "normalize": "true", "loudness-target": "50"}},
+		{"negative bitrate", map[string]string{"format": "mp3", "bitrate": "-1"}},
+		{"out-of-range loudness target", map[string]string{"format": "flac", "normalize": "true", "loudness-target": "50"}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -48,10 +48,26 @@ func TestBuildCutSpecValidatesSponsorErrorWithoutRanges(t *testing.T) {
 	df := &downloadFlags{cutMode: "smart", sbOnError: "bogus"}
 	_, err := df.buildCutSpec()
 	if err == nil {
-		t.Fatal("buildCutSpec err = nil, want a --sponsorblock-onerror validation error before the no-cut early return")
+		t.Fatal("buildCutSpec err = nil, want a --sponsorblock-on-error validation error before the no-cut early return")
 	}
 	if !isUsageError(err) {
 		t.Errorf("err = %#v, want a usageError (exit 2)", err)
+	}
+}
+
+// TestMeasureSpecCarriesTarget guards the JSON contract: a measure-only run
+// reports the configured loudness target instead of zero.
+func TestMeasureSpecCarriesTarget(t *testing.T) {
+	df := &downloadFlags{measure: true, loudTarget: -16}
+	ls, err := df.buildLoudnessSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ls == nil || ls.Mode != waxtap.LoudnessMeasureOnly {
+		t.Fatalf("buildLoudnessSpec = %+v, want a measure-only spec", ls)
+	}
+	if ls.Target != -16 {
+		t.Errorf("measure-only Target = %v, want -16 (carried into --json output)", ls.Target)
 	}
 }
 
@@ -63,9 +79,9 @@ func TestBuildProcessSpecNormalizeRequiresEncode(t *testing.T) {
 		df        *downloadFlags
 		wantError bool
 	}{
-		{"normalize without transcode", &downloadFlags{normalize: true, loudTarget: -14}, true},
-		{"normalize + copy", &downloadFlags{normalize: true, transcode: "copy", loudTarget: -14}, true},
-		{"normalize + flac", &downloadFlags{normalize: true, transcode: "flac", loudTarget: -14}, false},
+		{"normalize without format", &downloadFlags{normalize: true, loudTarget: -14}, true},
+		{"normalize + copy", &downloadFlags{normalize: true, format: "copy", loudTarget: -14}, true},
+		{"normalize + flac", &downloadFlags{normalize: true, format: "flac", loudTarget: -14}, false},
 		{"measure only", &downloadFlags{measure: true}, false},
 		{"keep source", &downloadFlags{}, false},
 	}

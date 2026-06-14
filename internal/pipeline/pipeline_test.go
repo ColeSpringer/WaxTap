@@ -190,19 +190,22 @@ func TestRunRemux(t *testing.T) {
 	}
 }
 
-func TestRunRemuxWithoutContainerRejected(t *testing.T) {
+func TestRunRemuxExtensionlessInfersContainer(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
 
-	// Stream copy cannot infer a muxer from these output paths.
+	// Extensionless and .copy destinations infer a container from the source codec.
 	for _, out := range []string{filepath.Join(dir, "out"), filepath.Join(dir, "out.copy")} {
-		_, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
-		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-			t.Errorf("remux to %q = %v, want ErrIncompatibleSpec", out, err)
+		res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
+		if err != nil {
+			t.Fatalf("remux to %q = %v, want success (inferred container)", out, err)
 		}
-		if fileExists(out) {
-			t.Errorf("remux to %q wrote output despite rejection", out)
+		if res.Transcoded {
+			t.Errorf("remux to %q reported a re-encode; want a stream copy", out)
+		}
+		if !fileExists(out) {
+			t.Errorf("remux to %q wrote no output", out)
 		}
 	}
 }

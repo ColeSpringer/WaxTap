@@ -50,7 +50,7 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		encoder = wavEncoder(audio)
 	}
 
-	staged, err := tempfile.NewExternal(output)
+	staged, err := tempfile.NewExternal(output, spec.StageExt)
 	if err != nil {
 		return Result{}, err
 	}

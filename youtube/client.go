@@ -452,16 +452,15 @@ func (c *Client) signatureTimestamp(ctx context.Context, profile ClientProfile, 
 	if !profile.NeedsSignatureTimestamp || c.inspector == nil {
 		return 0 // not needed for this profile (the zeros below are failures)
 	}
-	// A profile that needs the timestamp but gets zero produces an UNPLAYABLE
-	// /player response, so both a lookup error and a resolved-zero are warned (not
-	// silently swallowed) to separate "not needed" from "lookup failed".
+	// A missing timestamp can make /player return UNPLAYABLE. Keep the lookup
+	// details at debug level because the terminal error already reports the result.
 	sts, err := c.inspector.SignatureTimestamp(ctx, resolver.Context{VideoID: videoID})
 	if err != nil {
-		c.log.WarnContext(ctx, "signature timestamp lookup failed; omitting field (expect UNPLAYABLE)", "client", profile.Name, "err", err)
+		c.log.DebugContext(ctx, "signature timestamp lookup failed; omitting field (expect UNPLAYABLE)", "client", profile.Name, "err", err)
 		return 0
 	}
 	if sts == 0 {
-		c.log.WarnContext(ctx, "signature timestamp resolved to zero; omitting field (expect UNPLAYABLE)", "client", profile.Name)
+		c.log.DebugContext(ctx, "signature timestamp resolved to zero; omitting field (expect UNPLAYABLE)", "client", profile.Name)
 	}
 	return sts
 }
@@ -646,8 +645,9 @@ func (c *Client) ForcedSingleClient() (string, bool) {
 	return c.profiles[0].InnerTubeName, true
 }
 
-// IsIOSClient reports whether name is the built-in iOS InnerTube client name.
-func IsIOSClient(name string) bool { return name == profileIOS.InnerTubeName }
+// IsWebClient reports whether name is the built-in WEB InnerTube client name.
+// It does not match WEB_EMBEDDED.
+func IsWebClient(name string) bool { return name == profileWeb.InnerTubeName }
 
 // playlistProfile returns the first configured profile that supports browse
 // requests, falling back to the built-in WEB profile.

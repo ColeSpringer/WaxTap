@@ -157,7 +157,7 @@ func cutMode(m CutMode) cut.Mode {
 // pipelineSpec builds the internal pipeline spec from a ProcessSpec and the
 // resolved removal ranges (explicit ranges plus any from SponsorBlock).
 func pipelineSpec(s ProcessSpec, ranges []cut.Range) pipeline.Spec {
-	ps := pipeline.Spec{Remove: ranges, Downmix: downmixChannels(s.Channels, s.Downmix)}
+	ps := pipeline.Spec{Remove: ranges, Downmix: downmixChannels(s.Channels, s.Downmix), Threads: s.Threads}
 	if s.Cut != nil {
 		ps.CutMode = cutMode(s.Cut.Mode)
 		ps.Crossfade = s.Cut.Crossfade
@@ -385,7 +385,7 @@ func fileSize(p string) int64 {
 // umask controls permissions; private internal directories use stricter modes.
 // For a bare filename, filepath.Dir returns "." and MkdirAll is a no-op.
 func ensureParentDir(path string) error {
-	return os.MkdirAll(filepath.Dir(path), 0o777)
+	return tempfile.WrapOutput("mkdir", os.MkdirAll(filepath.Dir(path), 0o777))
 }
 
 // sameFile reports whether two paths refer to the same file, falling back to an

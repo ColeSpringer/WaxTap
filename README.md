@@ -19,12 +19,13 @@ keeps the selected source stream and does not re-encode.
   facade; `cmd/waxtap` is a real CLI built on the same packages.
 - **Pure-Go extraction** (InnerTube + goja for the cipher). No `yt-dlp`. The
   default ANDROID_VR client returns playable audio for public videos with no PO
-  token; iOS extracts metadata and formats only (its googlevideo URLs reject
-  WaxTap's ranged requests, so `--client ios` serves `info`/`formats`, not
-  downloads). Full WEB audio over SABR/UMP is opt-in: it needs a GVS
-  `potoken.Provider` **plus** an attested identity, either a `/player-context`
-  handoff or `/session` adoption (WaxTap's own WEB `/player` only earns a
-  ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
+  token. Forced `--client ios` byte delivery is best-effort. iOS extracts metadata
+  and formats reliably, but its googlevideo URLs often reject WaxTap's ranged
+  reads. A download can therefore fail with `ErrIncompleteStream` or `ErrURLExpired`
+  (exit 7), especially under `--no-fallback`. Full WEB audio over SABR/UMP is
+  opt-in: it needs a GVS `potoken.Provider` **plus** an attested identity, either
+  a `/player-context` handoff or `/session` adoption (WaxTap's own WEB `/player`
+  only earns a ~1-minute preview); see [PO tokens & WEB](#po-tokens--web).
 - **YouTube-specific code is isolated** behind small interfaces (`youtube`,
   `youtube/internal/resolver`) so most upstream changes stay in a few files.
 - **Operational behavior:** concurrency-safe, context-cancelable, bounded memory,
@@ -133,8 +134,8 @@ The archive preserves the executable bit; a standalone downloaded binary may nee
 ### CLI
 
 Media commands accept a YouTube URL or bare video/playlist ID and support
-`--json` for a stable scriptable contract (`schemaVersion` 3; result objects now
-carry the YouTube `client` that was used). `cut`, `transcode`, and `normalize`
+`--json` for a stable scriptable contract (`schemaVersion` 3; result objects
+include the YouTube `client` that was used). `cut`, `transcode`, and `normalize`
 also accept a local file, so no network is needed for local processing. Every
 command has `--help`.
 
@@ -147,20 +148,33 @@ waxtap formats <video-url>
 waxtap download <video-url> -o track
 
 # Download and transcode to FLAC in a single ffmpeg pass
-waxtap download <video-url> --transcode flac -o track.flac
+waxtap download <video-url> --format flac -o track.flac
 
 # Prefer a native stereo track (the default); fold 5.1 to stereo only if needed
-waxtap download <video-url> --channels stereo --downmix --transcode flac -o track.flac
+waxtap download <video-url> --channels stereo --downmix --format flac -o track.flac
 
-# Remove SponsorBlock non-music segments and normalize loudness in one pass
-waxtap download <video-url> --cut-sponsorblock --transcode mp3 --normalize --loudness-target -14 -o track.mp3
+# Remove SponsorBlock non-music segments and normalize to -14 LUFS in one pass
+waxtap download <video-url> --sponsorblock --format mp3 --normalize --loudness-target -14 -o track.mp3
 
 # Process a LOCAL file (no network)
 waxtap transcode song.flac song.mp3
-waxtap normalize song.wav --apply --target -14 --transcode flac -o song.flac
 
-# Download a whole playlist into a directory, skipping already-fetched IDs
-waxtap download <playlist-url> -d ./music --download-archive seen.txt
+# Normalize a LOCAL file to -14 LUFS (no network)
+waxtap normalize song.wav --apply --loudness-target -14 --format flac -o song.flac
+
+# Transcode or measure every recognized audio file in a directory
+waxtap transcode ./album --format mp3 --dir ./out        # -r recurses; --force re-encodes matching files
+waxtap normalize ./album                                 # reports each file's loudness in LUFS
+
+# Normalize each file independently to -14 LUFS
+waxtap normalize ./album --apply --loudness-target -14 --format flac --dir ./normalized
+
+# Normalize an album to -14 LUFS while preserving relative track loudness
+waxtap normalize --album --apply --loudness-target -14 --format flac --dir ./normalized-album ./album/*.flac
+
+# Download a playlist into a directory. --download-archive skips IDs downloaded
+# on earlier runs; --collision auto-number preserves tracks that share a title.
+waxtap download <playlist-url> -d ./music --download-archive archive.txt --collision auto-number
 
 # Download serially, waiting 5 seconds between downloads, up to 10 attempts
 waxtap download <playlist-url> -d ./music --concurrency 1 --sleep-interval 5s --max-downloads 10
@@ -168,6 +182,17 @@ waxtap download <playlist-url> -d ./music --concurrency 1 --sleep-interval 5s --
 # Check extraction health
 waxtap doctor
 ```
+
+#### Loudness units
+
+WaxTap measures digital program loudness using EBU R128 through ffmpeg's
+`loudnorm` filter. Values passed to `--loudness-target` are integrated loudness
+in LUFS; the default target is `-14 LUFS`, and more negative values are quieter.
+Measurement results report integrated loudness and the gating threshold in LUFS,
+true peak in dBTP, and loudness range in LU.
+
+WaxTap does not use dBA. dBA describes A-weighted acoustic sound-pressure
+measurements, while LUFS measures the perceived loudness of digital audio.
 
 #### Exit codes
 
@@ -255,14 +280,22 @@ Useful operational knobs:
   rebuild. This cannot be combined with `--profile-override`, which supplies its
   own user agents.
 - Single client / session adoption: `--client web|ios|android_vr|web_embedded`
-  forces one built-in client as the whole chain (conflicts with `--profile-override`).
-  `--client ios` is metadata/formats-only: it serves `info`/`formats` but cannot
-  download bytes (configure `--player-context-url` for forced-WEB audio instead).
+  forces a single built-in client (conflicts with `--profile-override`).
+  Forced `--client ios` attempts byte delivery, but it is best-effort: iOS
+  stream URLs often reject ranged reads, so a download can surface
+  `incomplete-stream`/`url-expired` (exit 7), especially under `--no-fallback`.
+  Configure `--player-context-url`/`--session-url` for reliable forced-WEB audio.
   `--client web_embedded` currently falls back to `web` for most videos.
   Use `--client web` or `--client android_vr` to select either client directly.
   `--visitor-data` (+ optional `--cookies`) or `--session-url` adopt an external
   guest session for byte-exact coherence with a token minter; see
   [PO tokens & WEB](#po-tokens--web).
+- Sidecar URLs and authentication: `--potoken-url`, `--player-context-url`, and
+  `--session-url` accept either a base URL, to which WaxTap appends the default
+  path, or a full endpoint URL. Existing query parameters are preserved.
+  `--api-key` (or `WAXTAP_API_KEY`) sends an `X-API-Key` header to all configured
+  sidecars. Sidecar clients do not follow redirects. Use HTTPS when connecting to
+  a sidecar on a remote host.
 - Network posture: `--proxy`, `--qps`, `--cooldown`, `--hl`, `--gl`, and their
   documented `WAXTAP_*` equivalents. `--cooldown` (or `WAXTAP_COOLDOWN`, seconds)
   pauses requests to a host after HTTP 429, or after HTTP 503/403 with a
@@ -273,7 +306,7 @@ Useful operational knobs:
   upper bound, and `--max-downloads` limits download attempts; skipped entries
   and resolution failures do not count. With `--concurrency 1`, the interval
   falls between completed downloads.
-- Channel layout (`download`, `transcode`, `cut`): `--channels
+- Channel layout (`download`, `transcode`, `cut`, `normalize`): `--channels
   mono|stereo|surround|any` prefers the best **native** track of that layout. The
   default is `stereo`, so a native stereo mix beats a 387 kbps 5.1 track (itag
   258) instead of ranking by raw bitrate; `any` restores the bitrate-only ranking.
@@ -288,6 +321,30 @@ Useful operational knobs:
   downmix. It never upmixes and requires `--channels mono` or `stereo`. The
   `channels` and `downmix` config keys set the defaults. Library callers opt in
   with `AudioSelector.WithChannels` and `ProcessSpec.Channels`.
+- Directory processing (`transcode`, `normalize`): directory inputs process
+  recognized audio files with these case-insensitive extensions:
+  `.flac .wav .mp3 .m4a .aac .opus .ogg .alac .mka .webm`. Other files are
+  ignored, and `cut` accepts only a single file or URL.
+- Re-encoded files are written beside each input or under `--dir`. With
+  `-r`/`--recursive`, the output directory preserves the source directory
+  structure. Directory processing does not support `--format copy`.
+- WaxTap probes each candidate before deciding that its codec already matches the
+  target. Matching files are copied unchanged into `--dir`, or left in place when
+  no output directory is set. Use `--force` to re-encode them.
+- `--concurrency` sets the number of parallel ffmpeg jobs; `0` (the default) runs
+  them serially. WaxTap limits each job's thread count during parallel runs.
+  `normalize <dir>` without `--apply` prints a per-file loudness table.
+- `normalize` measures loudness by default and writes nothing. `--apply` enables
+  output, and `--loudness-target` is valid only with `--apply`. Measurement runs
+  the full loudness analysis; it is not a dry-run preview of an apply operation.
+- `download --measure-loudness` adds a loudness measurement to the result while
+  still writing the downloaded file, unlike `normalize` without `--apply`, which
+  measures and discards its output.
+- Metadata and formats: `publishDate` comes from the WEB-only `Microformat`, so
+  `android_vr`/`ios` omit it and the `--write-info-json` sidecar drops the key. The
+  `formats` table flags `DRC=yes` (dynamic-range-compressed) rows; the same itag
+  can appear once per DRC setting. Best-audio selection and `--itag` both prefer
+  the original track and the full-range (`DRC=no`) variant when present.
 - Extraction control: `--no-fallback` (download and process commands) prevents
   fallback from a WEB player context to the configured client chain, disables
   watch-page extraction, and prevents retrying another client after an incomplete
@@ -295,8 +352,11 @@ Useful operational knobs:
   Use `--client` to force a single client. If a forced non-WEB client fails,
   WaxTap may still use the WEB watch page. It reports this with a
   `fallback-profile` warning and a matching stderr line. `--no-fallback`
-  disables the watch-page fallback. Results report the client used as `Client:`
-  (and `client` in `--json`).
+  disables the watch-page fallback, so a requested `--itag` is searched on the
+  first client only and fails if that client does not expose it. Results report
+  the client used as `Client:` (and `client` in `--json`). `info` and `formats`
+  also accept `--no-fallback`; on those read paths the WEB-context and
+  incomplete-download fallbacks never run, so it only disables the watch page.
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
   extraction failures, and `WAXTAP_SABR_DUMP_DIR` to write each raw SABR
   round for offline inspection.
@@ -307,9 +367,10 @@ metadata, stream resolution, and keep-source downloads do not need them.
 ## PO tokens & WEB
 
 ANDROID_VR returns playable audio for public videos with **no PO token** and is
-WaxTap's zero-dependency default. iOS extracts metadata and formats only; its
-googlevideo URLs reject WaxTap's ranged requests, so it cannot deliver bytes.
-Everything below is opt-in, for callers who specifically want the WEB path.
+WaxTap's zero-dependency default. Forced `--client ios` attempts byte delivery but
+is best-effort: its googlevideo URLs often reject WaxTap's ranged reads, so a
+download may fail with `incomplete-stream` (exit 7). Everything below is opt-in,
+for callers who specifically want the WEB path.
 
 The WEB-family clients serve URL-less audio over SABR/UMP. **Full WEB audio needs
 the GVS-scope `potoken.Provider` plus an attested identity, either the attested

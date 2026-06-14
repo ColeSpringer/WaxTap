@@ -58,8 +58,9 @@ var (
 	// ErrInvalidConfig indicates invalid or conflicting library configuration.
 	ErrInvalidConfig = waxerr.ErrInvalidConfig
 
-	// ErrDeliveryUnsupported indicates the selected client can extract metadata and
-	// formats but cannot deliver media bytes in the current configuration.
+	// ErrDeliveryUnsupported indicates that a selected client can extract metadata
+	// and formats but cannot deliver media bytes. It is retained for compatibility;
+	// built-in clients attempt delivery and report transfer errors instead.
 	ErrDeliveryUnsupported = waxerr.ErrDeliveryUnsupported
 )
 

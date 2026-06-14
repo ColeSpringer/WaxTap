@@ -20,17 +20,18 @@ import (
 // context mint and the stream egress the same IP (the signed URL is IP-bound).
 type playerContextProvider struct {
 	endpoint string
+	apiKey   string
 	http     *http.Client
 }
 
-// newPlayerContextProvider builds a provider that talks to the server at baseURL
-// (e.g. "http://127.0.0.1:4416"). The client carries no timeout of its own:
-// every call arrives bounded by Timeouts.WebContext (applied in the library),
-// and a second hidden cap here would silently override a user-raised budget.
-func newPlayerContextProvider(baseURL string) *playerContextProvider {
+// newPlayerContextProvider builds a provider for a player-context endpoint that
+// has already been validated by buildSidecarURL. Calls rely on the library's
+// Timeouts.WebContext deadline, so the HTTP client does not impose another one.
+func newPlayerContextProvider(endpoint, apiKey string) *playerContextProvider {
 	return &playerContextProvider{
-		endpoint: strings.TrimRight(baseURL, "/") + "/player-context",
-		http:     &http.Client{},
+		endpoint: endpoint,
+		apiKey:   apiKey,
+		http:     newSidecarClient(0),
 	}
 }
 
@@ -76,7 +77,7 @@ type playerContextFormatJSON struct {
 // sidecar.
 func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoID string) (potoken.PlayerContext, error) {
 	var out playerContextResponse
-	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "player-context server",
+	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "player-context server", p.apiKey,
 		playerContextRequest{VideoID: videoID}, &out); err != nil {
 		return potoken.PlayerContext{}, err
 	}

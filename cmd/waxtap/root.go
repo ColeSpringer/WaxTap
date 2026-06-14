@@ -32,6 +32,7 @@ type rootFlags struct {
 	sessionURL       string
 	visitorData      string
 	cookies          string
+	apiKey           string
 }
 
 var rootFlagsValue rootFlags
@@ -64,21 +65,22 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&rootFlagsValue.cacheDir, "cache-dir", "", "on-disk player cache directory (default: user cache dir)")
 	pf.BoolVar(&rootFlagsValue.noCache, "no-cache", false, "disable the on-disk player cache")
 	pf.StringVar(&rootFlagsValue.tempDir, "temp-dir", "", "directory for intermediate/staging files (default: OS temp)")
-	pf.StringVar(&rootFlagsValue.proxy, "proxy", "", "proxy URL for all HTTP requests (e.g. http://host:port)")
-	pf.BoolVar(&rootFlagsValue.insecure, "insecure", false, "skip TLS certificate verification (diagnostics only)")
-	pf.Float64Var(&rootFlagsValue.qps, "qps", 0, "per-host request rate cap (0 = unlimited)")
+	pf.StringVar(&rootFlagsValue.proxy, "proxy", "", "proxy URL for YouTube and SponsorBlock requests; sidecars bypass it")
+	pf.BoolVar(&rootFlagsValue.insecure, "insecure", false, "skip TLS verification for YouTube and SponsorBlock requests (diagnostics only)")
+	pf.Float64Var(&rootFlagsValue.qps, "qps", 0, "per-host requests/sec cap (0 = unlimited)")
 	pf.DurationVar(&rootFlagsValue.cooldown, "cooldown", 0, "base host cooldown after a rate-limit response (0 = none)")
 	pf.StringVar(&rootFlagsValue.hl, "hl", "", "InnerTube host language, e.g. en, de, ja (default: en)")
 	pf.StringVar(&rootFlagsValue.gl, "gl", "", "content region hint, e.g. US, DE, JP (default: US)")
 	pf.StringVar(&rootFlagsValue.sponsorblockURL, "sponsorblock-url", "", "override the SponsorBlock API base URL (default: public server)")
 	pf.StringVar(&rootFlagsValue.profileOverride, "profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
 	pf.IntVar(&rootFlagsValue.chromeMajor, "chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
-	pf.StringVar(&rootFlagsValue.potokenURL, "potoken-url", "", "bgutil PO-token provider URL, e.g. http://127.0.0.1:4417 (enables WEB/GVS tokens; contacted directly, not via --proxy; mint host and downloads must share an egress IP for full WEB validation)")
-	pf.StringVar(&rootFlagsValue.playerContextURL, "player-context-url", "", "attested WEB /player-context provider URL (opt-in full WEB audio; same host as --potoken-url, which it also requires; contacted directly, not via --proxy; mint host and downloads must share an egress IP)")
-	pf.StringVar(&rootFlagsValue.client, "client", "", "force one built-in client as the whole chain: web|ios|android_vr|web_embedded (conflicts with --profile-override; --player-context-url is tried first when set, this chain is its fallback; ios supports metadata and formats but not downloads; web_embedded falls back to web for most videos)")
-	pf.StringVar(&rootFlagsValue.sessionURL, "session-url", "", "URL of a /session endpoint that returns {visitor_data, cookies}; with --potoken-url, provides full WEB audio as an alternative to --player-context-url (contacted directly, not through --proxy; requires --client)")
+	pf.StringVar(&rootFlagsValue.potokenURL, "potoken-url", "", "base or full URL of a bgutil PO-token endpoint (enables WEB/GVS tokens; bypasses --proxy)")
+	pf.StringVar(&rootFlagsValue.playerContextURL, "player-context-url", "", "base or full URL of an attested WEB player-context endpoint (requires --potoken-url on the same host; bypasses --proxy)")
+	pf.StringVar(&rootFlagsValue.client, "client", "", "force one built-in client: web|ios|android_vr|web_embedded (conflicts with --profile-override; --player-context-url is tried first; ios byte delivery is best-effort)")
+	pf.StringVar(&rootFlagsValue.sessionURL, "session-url", "", "base or full URL of a session endpoint returning {visitor_data, cookies} (requires --client; bypasses --proxy)")
 	pf.StringVar(&rootFlagsValue.visitorData, "visitor-data", "", "adopt this exact X-Goog-Visitor-Id literal and skip WaxTap's bootstrap (needs a uniform --client)")
 	pf.StringVar(&rootFlagsValue.cookies, "cookies", "", "Netscape cookie file to adopt alongside --visitor-data")
+	pf.StringVar(&rootFlagsValue.apiKey, "api-key", "", "API key sent as X-API-Key to configured PO-token, player-context, and session sidecars (use HTTPS for remote sidecars)")
 
 	root.AddCommand(
 		newInfoCmd(),

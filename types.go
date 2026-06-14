@@ -157,6 +157,10 @@ type ProcessSpec struct {
 	// IncludeMetadata attaches extended video metadata to Result.Metadata for
 	// YouTube downloads. It has no effect on local-file processing.
 	IncludeMetadata bool
+
+	// Threads limits ffmpeg's worker threads for processing operations. Zero lets
+	// ffmpeg choose.
+	Threads int
 }
 
 // Request is a YouTube acquisition + processing request.
@@ -166,8 +170,8 @@ type Request struct {
 
 	// Audio selects which audio stream to take. The zero value is BestAudio.
 	Audio AudioSelector
-	// SourcePolicy controls the source tradeoff when transcoding. The zero value
-	// is MinimizeLoss.
+	// SourcePolicy controls source selection when transcoding. The zero value is
+	// MinimizeLoss.
 	SourcePolicy SourcePolicy
 
 	// NoFallback prevents fallback from a WEB player context to the configured

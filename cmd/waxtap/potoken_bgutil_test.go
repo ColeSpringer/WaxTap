@@ -26,7 +26,7 @@ func TestBgutilProviderPlayerScope(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newBgutilProvider(srv.URL).ProvidePOToken(context.Background(), potoken.Request{
+	resp, err := newBgutilProvider(srv.URL+"/get_pot", "").ProvidePOToken(context.Background(), potoken.Request{
 		Scope:   potoken.ScopePlayer,
 		VideoID: "vid123",
 	})
@@ -44,6 +44,27 @@ func TestBgutilProviderPlayerScope(t *testing.T) {
 	}
 }
 
+// TestBgutilProviderSendsAPIKey verifies the X-API-Key header is sent only when a
+// key is configured.
+func TestBgutilProviderSendsAPIKey(t *testing.T) {
+	for _, key := range []string{"secret-key", ""} {
+		var gotKey string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotKey = r.Header.Get("X-API-Key")
+			_ = json.NewEncoder(w).Encode(bgutilResponse{POToken: "T"})
+		}))
+		_, err := newBgutilProvider(srv.URL+"/get_pot", key).ProvidePOToken(context.Background(),
+			potoken.Request{Scope: potoken.ScopePlayer, VideoID: "v"})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("key %q: %v", key, err)
+		}
+		if gotKey != key {
+			t.Errorf("X-API-Key = %q, want %q", gotKey, key)
+		}
+	}
+}
+
 func TestBgutilProviderGVSScopeAndEpochExpiry(t *testing.T) {
 	var gotBinding string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,8 +75,8 @@ func TestBgutilProviderGVSScopeAndEpochExpiry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// A trailing slash on the base URL must not double up the /get_pot path.
-	resp, err := newBgutilProvider(srv.URL+"/").ProvidePOToken(context.Background(), potoken.Request{
+	// The provider posts to the resolved endpoint without modifying its path.
+	resp, err := newBgutilProvider(srv.URL+"/get_pot", "").ProvidePOToken(context.Background(), potoken.Request{
 		Scope:       potoken.ScopeGVS,
 		VisitorData: "VISITOR==",
 	})
@@ -79,7 +100,7 @@ func TestBgutilProviderServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newBgutilProvider(srv.URL).ProvidePOToken(context.Background(),
+	if _, err := newBgutilProvider(srv.URL+"/get_pot", "").ProvidePOToken(context.Background(),
 		potoken.Request{Scope: potoken.ScopePlayer, VideoID: "v"}); err == nil {
 		t.Fatal("expected an error on a non-200 response")
 	}
@@ -88,7 +109,7 @@ func TestBgutilProviderServerError(t *testing.T) {
 func TestBgutilProviderBindingErrorsBeforeRequest(t *testing.T) {
 	// These must fail in contentBinding, before any HTTP call, so the unroutable
 	// address is never contacted.
-	p := newBgutilProvider("http://127.0.0.1:0")
+	p := newBgutilProvider("http://127.0.0.1:0/get_pot", "")
 	cases := []potoken.Request{
 		{Scope: potoken.ScopePlayer},                  // no video ID
 		{Scope: potoken.ScopeGVS},                     // no visitor data

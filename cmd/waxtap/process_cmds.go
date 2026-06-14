@@ -20,6 +20,14 @@ func isLocalFile(arg string) bool {
 	return err == nil && !fi.IsDir()
 }
 
+// validateLocalSourceFlags rejects URL-selection flags for a local input.
+func validateLocalSourceFlags(cmd *cobra.Command, source string) error {
+	if !isLocalFile(source) {
+		return nil
+	}
+	return rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback")
+}
+
 // dispatchProcess runs a ProcessSpec against a local file or a YouTube URL and
 // returns the Result. A live progress reporter is attached for the duration.
 // noFallback applies only to URL sources.
@@ -95,7 +103,7 @@ func newCutCmd() *cobra.Command {
 		cutMode      string
 		crossfade    time.Duration
 		sbOnError    string
-		transcode    string
+		format       string
 		bitrate      int
 		itag         int
 		codec        string
@@ -109,7 +117,7 @@ func newCutCmd() *cobra.Command {
 		Use:   "cut <input> [output]",
 		Short: "Remove time ranges and/or SponsorBlock segments",
 		Long: "Cut time ranges out of a local audio file or a YouTube video. Provide one\n" +
-			"or more --cut-range, and/or --cut-sponsorblock (YouTube only). Smart mode\n" +
+			"or more --cut-range, and/or --sponsorblock (YouTube only). Smart mode\n" +
 			"stream-copies when cutting alone and fuses the cut into a transcode when\n" +
 			"one is requested.",
 		Args: cobra.RangeArgs(1, 2),
@@ -127,6 +135,13 @@ func newCutCmd() *cobra.Command {
 				explicit = args[1]
 			}
 
+			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
+				return usagef("cut does not support a directory input; pass a single file or a YouTube URL")
+			}
+			if err := validateLocalSourceFlags(cmd, source); err != nil {
+				return err
+			}
+
 			// Parse every shared cut flag before the early returns so cut and
 			// download apply the same validation.
 			rangeList, mode, pol, err := parseCutInputs(ranges, cutMode, sbOnError)
@@ -135,10 +150,13 @@ func newCutCmd() *cobra.Command {
 			}
 			sbSet := sbCats != ""
 			if len(rangeList) == 0 && !sbSet {
-				return usagef("nothing to cut: pass --cut-range and/or --cut-sponsorblock")
+				return usagef("nothing to cut: pass --cut-range and/or --sponsorblock")
 			}
 			if sbSet && isLocalFile(source) {
-				return usagef("--cut-sponsorblock needs a YouTube source (no video ID for a local file)")
+				return usagef("--sponsorblock needs a YouTube source (no video ID for a local file)")
+			}
+			if cmd.Flags().Changed("sponsorblock-on-error") && !sbSet {
+				return usagef("--sponsorblock-on-error requires --sponsorblock")
 			}
 
 			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
@@ -157,9 +175,12 @@ func newCutCmd() *cobra.Command {
 			spec := waxtap.ProcessSpec{Cut: cs, Channels: layout, Downmix: doDownmix}
 			newExt := ""
 			var tf waxtap.TranscodeFormat // FormatCopy when no transcode is requested
-			if transcode != "" {
+			if cmd.Flags().Changed("bitrate") && format == "" {
+				return usagef("--bitrate requires --format")
+			}
+			if format != "" {
 				var terr error
-				if tf, terr = parseTranscodeFormat(transcode); terr != nil {
+				if tf, terr = parseTranscodeFormat(format); terr != nil {
 					return terr
 				}
 				spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}
@@ -195,18 +216,18 @@ func newCutCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path")
 	f.StringArrayVar(&ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
-	f.StringVar(&sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (YouTube only; comma-separated after =, for example --cut-sponsorblock=intro,outro; bare flag = music_offtopic)")
+	f.StringVar(&sbCats, "sponsorblock", "", "remove SponsorBlock categories (YouTube only; comma-separated; bare flag = music_offtopic; use sponsorblock to preview)")
 	f.StringVar(&cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
 	f.DurationVar(&crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
-	f.StringVar(&sbOnError, "sponsorblock-onerror", "proceed", "on SponsorBlock fetch failure: proceed|fail")
-	f.StringVar(&transcode, "transcode", "", "also transcode: flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&bitrate, "bitrate", 0, "target bitrate for lossy transcodes")
-	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
-	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
+	f.StringVar(&sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
+	f.StringVarP(&format, "format", "f", "", "also re-encode to: flac|alac|wav|mp3|aac|opus|vorbis")
+	f.IntVar(&bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy transcodes (0 = preset default)")
+	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
+	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
-	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
-	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
-	if fl := f.Lookup("cut-sponsorblock"); fl != nil {
+	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
+	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	if fl := f.Lookup("sponsorblock"); fl != nil {
 		fl.NoOptDefVal = "music_offtopic"
 	}
 	return cmd
@@ -224,6 +245,10 @@ func newTranscodeCmd() *cobra.Command {
 		noFallback   bool
 		sourcePolicy string
 		collisionStr string
+		dir          string
+		recursive    bool
+		force        bool
+		concurrency  int
 	)
 	cmd := &cobra.Command{
 		Use:   "transcode <input> [output]",
@@ -244,6 +269,20 @@ func newTranscodeCmd() *cobra.Command {
 					return usagef("give the output once (positional or --out, not both)")
 				}
 				explicit = args[1]
+			}
+
+			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
+				return runDirectoryTranscode(cmd, env, directoryTranscodeParams{
+					root: source, explicit: explicit, dir: dir, recursive: recursive,
+					format: format, bitrate: bitrate, channels: channels, downmix: downmix,
+					collisionStr: collisionStr, force: force, concurrency: concurrency,
+				})
+			}
+			if err := rejectChangedFlags(cmd, "is only used with a directory input", "dir", "recursive", "force", "concurrency"); err != nil {
+				return err
+			}
+			if err := validateLocalSourceFlags(cmd, source); err != nil {
+				return err
 			}
 
 			tf, err := transcodeFormatFor(format, explicit)
@@ -283,14 +322,18 @@ func newTranscodeCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&out, "out", "o", "", "output file path")
+	f.StringVarP(&out, "out", "o", "", "output file path (single file)")
 	f.StringVarP(&format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&bitrate, "bitrate", 0, "target bitrate (bits/sec) for lossy formats")
-	f.IntVar(&itag, "itag", 0, "itag to download (URL source)")
-	f.StringVar(&codec, "codec", "", "codec to download (URL source)")
+	f.IntVar(&bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy formats (0 = preset default)")
+	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
+	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
-	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source tradeoff for a URL source")
-	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
+	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
+	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input (default: beside each input)")
+	f.BoolVarP(&recursive, "recursive", "r", false, "recurse into subdirectories for a directory input")
+	f.BoolVar(&force, "force", false, "re-encode even when the source already matches the target format")
+	f.IntVar(&concurrency, "concurrency", 0, "number of parallel ffmpeg jobs (0 = serial)")
 	return cmd
 }
 

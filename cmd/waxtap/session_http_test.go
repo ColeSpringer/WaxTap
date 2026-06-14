@@ -90,7 +90,7 @@ func TestHTTPSessionProvider(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sess, err := newHTTPSessionProvider(srv.URL).ProvideSession(context.Background())
+	sess, err := newHTTPSessionProvider(srv.URL+"/session", "").ProvideSession(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestHTTPSessionProviderCamelCase(t *testing.T) {
 		_, _ = w.Write([]byte(`{"visitorData":"CgtX%3D%3D","cookies":[{"name":"PREF","value":"p","domain":".youtube.com","httpOnly":true}]}`))
 	}))
 	defer srv.Close()
-	sess, err := newHTTPSessionProvider(srv.URL).ProvideSession(context.Background())
+	sess, err := newHTTPSessionProvider(srv.URL+"/session", "").ProvideSession(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestHTTPSessionProvider_EmptyVisitorDataErrors(t *testing.T) {
 		_, _ = w.Write([]byte(`{"visitorData":"","cookies":[]}`))
 	}))
 	defer srv.Close()
-	if _, err := newHTTPSessionProvider(srv.URL).ProvideSession(context.Background()); err == nil {
+	if _, err := newHTTPSessionProvider(srv.URL+"/session", "").ProvideSession(context.Background()); err == nil {
 		t.Fatal("expected an error for an empty visitorData")
 	}
 }
@@ -143,7 +143,7 @@ func TestHTTPSessionProvider_RetriesOnceThenFails(t *testing.T) {
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := newHTTPSessionProvider(srv.URL).ProvideSession(ctx); err == nil {
+	if _, err := newHTTPSessionProvider(srv.URL+"/session", "").ProvideSession(ctx); err == nil {
 		t.Fatal("expected failure after retries")
 	}
 	if hits != 2 {

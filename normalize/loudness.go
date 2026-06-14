@@ -65,16 +65,20 @@ func (l Loudness) Finite() bool {
 // Measure runs a loudnorm analysis pass over input and returns its EBU R128
 // measurement. pre lists audio filters applied before the measurement (e.g. cut
 // filters), so the measured loudness matches the audio that will be encoded. It
-// writes no output file.
-func Measure(ctx context.Context, r *transcode.Runner, input string, pre []string) (Loudness, error) {
+// writes no output file. A positive threads value limits ffmpeg's worker threads;
+// zero leaves thread selection to ffmpeg.
+func Measure(ctx context.Context, r *transcode.Runner, input string, pre []string, threads int) (Loudness, error) {
 	filters := append(append([]string{}, pre...), measureFilter)
-	args := []string{
-		"-hide_banner", "-nostdin",
+	args := []string{"-hide_banner", "-nostdin"}
+	if threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(threads))
+	}
+	args = append(args,
 		"-i", input,
 		"-vn", "-map", "0:a:0",
 		"-af", strings.Join(filters, ","),
 		"-f", "null", "-",
-	}
+	)
 	// Default (info) log level is required: loudnorm prints its JSON at info, so
 	// -loglevel error would suppress the very output we parse.
 	res, err := r.Run(ctx, transcode.Command{Args: args})
@@ -96,16 +100,20 @@ func Measure(ctx context.Context, r *transcode.Runner, input string, pre []strin
 // Use it when the pre-processing cannot be expressed as a linear -af chain, such
 // as a multi-segment cut whose atrim/concat graph only fits -filter_complex. The
 // measured loudness then matches the post-cut audio a fused encode will produce.
-// Use Measure for the linear case.
-func MeasureComplex(ctx context.Context, r *transcode.Runner, input, graph, sink string) (Loudness, error) {
+// Use Measure for the linear case. A positive threads value limits ffmpeg's
+// worker threads; zero leaves thread selection to ffmpeg.
+func MeasureComplex(ctx context.Context, r *transcode.Runner, input, graph, sink string, threads int) (Loudness, error) {
 	full := graph + ";[" + sink + "]" + measureFilter + "[out]"
-	args := []string{
-		"-hide_banner", "-nostdin",
+	args := []string{"-hide_banner", "-nostdin"}
+	if threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(threads))
+	}
+	args = append(args,
 		"-i", input,
 		"-filter_complex", full,
 		"-map", "[out]",
 		"-f", "null", "-",
-	}
+	)
 	// As in Measure, the default (info) log level must stay: loudnorm prints its
 	// JSON at info, so -loglevel error would suppress the output we parse.
 	res, err := r.Run(ctx, transcode.Command{Args: args})
@@ -129,7 +137,7 @@ func MeasureAlbum(ctx context.Context, r *transcode.Runner, inputs []string) (al
 	}
 	perTrack = make([]Loudness, len(inputs))
 	for i, in := range inputs {
-		l, err := Measure(ctx, r, in, nil)
+		l, err := Measure(ctx, r, in, nil, 0)
 		if err != nil {
 			return Loudness{}, nil, fmt.Errorf("normalize: measure track %d: %w", i, err)
 		}

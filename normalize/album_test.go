@@ -55,7 +55,7 @@ func TestMeasureComplex(t *testing.T) {
 	keeps := cut.Keeps([]cut.Range{{Start: time.Second, End: 2 * time.Second}}, total)
 	graph := cut.Graph(keeps, 0, total, "pre")
 
-	l, err := MeasureComplex(context.Background(), r, in, graph, "pre")
+	l, err := MeasureComplex(context.Background(), r, in, graph, "pre", 0)
 	if err != nil {
 		t.Fatalf("MeasureComplex: %v", err)
 	}

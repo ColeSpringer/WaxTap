@@ -10,7 +10,26 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// OutputError marks an error that occurred while staging or publishing output.
+// It unwraps to the underlying cause.
+type OutputError struct {
+	Op    string // the failed step, such as "create", "chmod", or "rename"
+	cause error
+}
+
+func (e *OutputError) Error() string { return e.cause.Error() }
+func (e *OutputError) Unwrap() error { return e.cause }
+
+// WrapOutput wraps err as an output failure. It returns nil when err is nil.
+func WrapOutput(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &OutputError{Op: op, cause: err}
+}
 
 // File is a staged output: write to it, then Commit (atomic rename to the final
 // path) or Discard (remove the temp). The temp is created in the final path's
@@ -20,6 +39,15 @@ type File struct {
 	finalPath string
 	tmpPath   string
 	committed bool
+	closed    bool
+}
+
+func (f *File) close() error {
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+	return f.File.Close()
 }
 
 // New creates a staging file for eventual atomic rename to finalPath. The
@@ -29,12 +57,12 @@ func New(finalPath string) (*File, error) {
 	base := filepath.Base(finalPath)
 	f, err := os.CreateTemp(dir, base+".*.part")
 	if err != nil {
-		return nil, err
+		return nil, WrapOutput("create", err)
 	}
 	if err := chmodUmask(f.Name()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return nil, err
+		return nil, WrapOutput("chmod", err)
 	}
 	return &File{File: f, finalPath: finalPath, tmpPath: f.Name()}, nil
 }
@@ -52,14 +80,14 @@ func (f *File) Commit() error {
 		return nil
 	}
 	if err := f.File.Sync(); err != nil {
-		_ = f.File.Close()
-		return err
+		_ = f.close()
+		return WrapOutput("sync", err)
 	}
-	if err := f.File.Close(); err != nil {
-		return err
+	if err := f.close(); err != nil {
+		return WrapOutput("close", err)
 	}
 	if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
-		return err
+		return WrapOutput("rename", err)
 	}
 	f.committed = true
 	return nil
@@ -71,7 +99,7 @@ func (f *File) Discard() error {
 	if f.committed {
 		return nil
 	}
-	_ = f.File.Close()
+	_ = f.close()
 	if err := os.Remove(f.tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -95,21 +123,26 @@ type External struct {
 
 // NewExternal reserves a temp path next to finalPath for an external writer.
 //
-// The temp name preserves finalPath's extension (for example,
-// out.flac.*.flac), because tools like ffmpeg infer the output container from
-// the filename extension. An extensionless final path uses a dash before the
-// random suffix so the staged path also remains extensionless.
-func NewExternal(finalPath string) (*External, error) {
+// The temp name carries a container extension because tools such as ffmpeg infer
+// the output container from it. By default the extension comes from finalPath.
+// A non-empty ext, with or without a leading dot, overrides the staged extension
+// without changing the path used by Commit.
+func NewExternal(finalPath, ext string) (*External, error) {
 	dir := filepath.Dir(finalPath)
 	base := filepath.Base(finalPath)
-	ext := filepath.Ext(base) // includes the dot, or "" when there is none
+	switch {
+	case ext == "":
+		ext = filepath.Ext(base) // includes the dot, or "" when there is none
+	case !strings.HasPrefix(ext, "."):
+		ext = "." + ext
+	}
 	pattern := base + ".*" + ext
 	if ext == "" {
 		pattern = base + "-*"
 	}
 	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return nil, err
+		return nil, WrapOutput("create", err)
 	}
 	name := f.Name()
 	_ = f.Close() // the external process reopens and overwrites this path
@@ -117,7 +150,7 @@ func NewExternal(finalPath string) (*External, error) {
 	// existing mode, so the published output honors the umask.
 	if err := chmodUmask(name); err != nil {
 		_ = os.Remove(name)
-		return nil, err
+		return nil, WrapOutput("chmod", err)
 	}
 	return &External{finalPath: finalPath, tmpPath: name}, nil
 }
@@ -132,7 +165,7 @@ func (e *External) Commit() error {
 		return nil
 	}
 	if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
-		return err
+		return WrapOutput("rename", err)
 	}
 	e.committed = true
 	return nil

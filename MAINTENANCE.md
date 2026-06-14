@@ -283,6 +283,32 @@ When integrating a provider:
 Cache by scope and binding. Player and GVS tokens are requested separately so a
 provider can mint or reuse the right token for each scope.
 
+### Authenticating sidecars
+
+Use `--api-key`, `WAXTAP_API_KEY`, or `"apiKey"` in `config.json` when a
+PO-token, player-context, or session sidecar requires API-key authentication.
+WaxTap sends the value in the `X-API-Key` header to every configured sidecar. A
+`401` or `403` response is reported as `invalid-config` (exit 2) with guidance to
+set or verify the key. If a fallback client completes the request, the downgrade
+warning includes the same guidance.
+
+Sidecar clients do not follow redirects (`CheckRedirect` returns
+`ErrUseLastResponse`), which prevents the authentication header from being
+forwarded to another origin. Each sidecar setting accepts either a base URL or a
+full endpoint URL, and existing query parameters are preserved by
+`buildSidecarURL`. Use HTTPS for remote sidecars. Sidecar traffic bypasses
+`--proxy`.
+
+### Sidecar fallback behavior
+
+Sidecar failures do not all trigger the same fallback behavior. If the
+player-context request fails, WaxTap may continue with the configured client
+chain. A successful fallback emits a web-context downgrade warning. If
+player-context succeeds but the subsequent GVS token request (`get_pot`) fails,
+WaxTap returns the token error (exit 9) instead of falling back to ANDROID_VR.
+The request is already committed to the WEB context, and the error identifies
+the unavailable endpoint.
+
 ### External session adoption
 
 For byte-exact session coherence with a token minter, WaxTap can adopt an external

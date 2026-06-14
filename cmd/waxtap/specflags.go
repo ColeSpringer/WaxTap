@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -16,6 +17,18 @@ func bindSourceSelectionFlags(f *pflag.FlagSet, channels *string, downmix, noFal
 	f.StringVar(channels, "channels", "stereo", "channel layout to prefer: mono|stereo|surround|any")
 	f.BoolVar(downmix, "downmix", false, "fold the selected source down to --channels when it has more channels")
 	f.BoolVar(noFallback, "no-fallback", false, "disable WEB-context, watch-page, and incomplete-download fallbacks")
+}
+
+// rejectChangedFlags returns a usage error for the first explicitly set flag in
+// names. It is used when a flag is valid for a command but not for its selected
+// mode or input shape.
+func rejectChangedFlags(cmd *cobra.Command, reason string, names ...string) error {
+	for _, name := range names {
+		if cmd.Flags().Changed(name) {
+			return usagef("--%s %s", name, reason)
+		}
+	}
+	return nil
 }
 
 // parseTranscodeFormat maps a user codec name to a TranscodeFormat. An empty
@@ -79,7 +92,8 @@ func parseCutMode(s string) (waxtap.CutMode, error) {
 }
 
 // parseSourcePolicy maps a policy name to a SourcePolicy. "prefer:<codec>"
-// selects PreferCodec.
+// selects PreferCodec, a soft bias that ranks the named codec first but still
+// falls back to other sources, unlike the hard --codec filter.
 func parseSourcePolicy(s string) (waxtap.SourcePolicy, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch {
@@ -106,7 +120,7 @@ func parseSponsorErrorPolicy(s string) (waxtap.SponsorBlockErrorPolicy, error) {
 	case "fail", "fail-download":
 		return waxtap.FailDownload, nil
 	default:
-		return 0, usagef("invalid --sponsorblock-onerror %q (want proceed|fail)", s)
+		return 0, usagef("invalid --sponsorblock-on-error %q (want proceed|fail)", s)
 	}
 }
 

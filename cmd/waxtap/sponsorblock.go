@@ -42,7 +42,7 @@ func newSponsorBlockCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&categories, "categories", "", "comma-separated categories (default: music_offtopic)")
+	cmd.Flags().StringVar(&categories, "categories", "", "comma-separated categories to preview (default: music_offtopic)")
 	return cmd
 }
 

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/internal/tempfile"
 	"github.com/spf13/cobra"
 )
 
@@ -245,6 +246,7 @@ func classifyError(err error) classifiedError {
 			// The sidecar responded, so classify the failure by its HTTP status or
 			// response content.
 			c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
+			c.hint = sidecarAuthHint(sre.statusCode)
 		case isSidecarConnection(err):
 			c.exitCode, c.code, c.hint = 9, "network", "start the PO-token sidecar or correct --potoken-url"
 		default:
@@ -308,12 +310,16 @@ func classifyError(err error) classifiedError {
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
 		c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
+		c.hint = sidecarAuthHint(sre.statusCode)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
 	case isConnectionError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "check network connectivity and any configured provider URLs"
-	case isLocalIOError(err):
+	// Only output failures receive output-directory guidance.
+	case isOutputError(err):
 		c.exitCode, c.code, c.hint = 10, "io", "check the output directory exists and is writable"
+	case isLocalIOError(err):
+		c.exitCode, c.code = 10, "io"
 	}
 	return c
 }
@@ -395,6 +401,14 @@ func isSidecarConnection(err error) bool {
 	return ok
 }
 
+// sidecarAuthHint returns guidance for sidecar authentication failures.
+func sidecarAuthHint(status int) string {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return "the sidecar requires authentication; set or verify --api-key"
+	}
+	return ""
+}
+
 // sidecarResponseExit maps a sidecar response to its CLI exit code and machine
 // code. Client errors indicate invalid configuration, 429 indicates rate
 // limiting, and timeouts, server errors, and invalid HTTP 200 responses indicate
@@ -422,6 +436,12 @@ func isConnectionError(err error) bool {
 // isLocalIOError reports whether err is a local filesystem failure.
 func isLocalIOError(err error) bool {
 	_, ok := errors.AsType[*fs.PathError](err)
+	return ok
+}
+
+// isOutputError reports whether err occurred while staging or publishing output.
+func isOutputError(err error) bool {
+	_, ok := errors.AsType[*tempfile.OutputError](err)
 	return ok
 }
 

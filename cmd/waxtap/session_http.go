@@ -25,14 +25,17 @@ import (
 // share an egress IP.
 type httpSessionProvider struct {
 	endpoint string
+	apiKey   string
 	http     *http.Client
 }
 
-// newHTTPSessionProvider builds a provider that GETs the session document from url.
-func newHTTPSessionProvider(url string) *httpSessionProvider {
+// newHTTPSessionProvider builds a provider for a session endpoint that has
+// already been validated by buildSidecarURL.
+func newHTTPSessionProvider(endpoint, apiKey string) *httpSessionProvider {
 	return &httpSessionProvider{
-		endpoint: url,
-		http:     &http.Client{Timeout: 30 * time.Second},
+		endpoint: endpoint,
+		apiKey:   apiKey,
+		http:     newSidecarClient(30 * time.Second),
 	}
 }
 
@@ -99,7 +102,7 @@ func (p *httpSessionProvider) ProvideSession(ctx context.Context) (potoken.Sessi
 
 func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error) {
 	var doc sessionDoc
-	if err := sidecarJSON(ctx, p.http, http.MethodGet, p.endpoint, "session endpoint", nil, &doc); err != nil {
+	if err := sidecarJSON(ctx, p.http, http.MethodGet, p.endpoint, "session endpoint", p.apiKey, nil, &doc); err != nil {
 		return potoken.Session{}, err
 	}
 	vd := doc.visitorData()

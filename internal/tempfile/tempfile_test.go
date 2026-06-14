@@ -1,10 +1,23 @@
 package tempfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestNewWrapsFailureAsOutputError(t *testing.T) {
+	// A temp under a missing directory fails at os.CreateTemp.
+	bad := filepath.Join(t.TempDir(), "missing-dir", "out.bin")
+	_, err := New(bad)
+	if err == nil {
+		t.Fatal("New into a missing directory should fail")
+	}
+	if _, ok := errors.AsType[*OutputError](err); !ok {
+		t.Fatalf("err = %v (%T), want *OutputError", err, err)
+	}
+}
 
 func TestCommit(t *testing.T) {
 	dir := t.TempDir()
@@ -89,7 +102,7 @@ func TestExternalCommit(t *testing.T) {
 	dir := t.TempDir()
 	final := filepath.Join(dir, "out.flac")
 
-	e, err := NewExternal(final)
+	e, err := NewExternal(final, "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -134,7 +147,7 @@ func TestExternalExtensionlessFinalStagesExtensionless(t *testing.T) {
 	dir := t.TempDir()
 	final := filepath.Join(dir, "track")
 
-	e, err := NewExternal(final)
+	e, err := NewExternal(final, "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -151,7 +164,7 @@ func TestExternalExtensionlessFinalStagesExtensionless(t *testing.T) {
 func TestExternalDottedFinalPreservesExtension(t *testing.T) {
 	// Preserve extensions even when their container is unknown.
 	dir := t.TempDir()
-	e, err := NewExternal(filepath.Join(dir, "my.track.v1"))
+	e, err := NewExternal(filepath.Join(dir, "my.track.v1"), "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -163,7 +176,7 @@ func TestExternalDottedFinalPreservesExtension(t *testing.T) {
 
 func TestExternalDiscardRemovesTemp(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewExternal(filepath.Join(dir, "out.mp3"))
+	e, err := NewExternal(filepath.Join(dir, "out.mp3"), "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -187,7 +200,7 @@ func TestExternalDiscardAfterCommitIsNoop(t *testing.T) {
 	dir := t.TempDir()
 	final := filepath.Join(dir, "out.wav")
 
-	e, err := NewExternal(final)
+	e, err := NewExternal(final, "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -207,7 +220,7 @@ func TestExternalDiscardAfterCommitIsNoop(t *testing.T) {
 
 func TestExternalNoExtension(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewExternal(filepath.Join(dir, "noext"))
+	e, err := NewExternal(filepath.Join(dir, "noext"), "")
 	if err != nil {
 		t.Fatalf("NewExternal: %v", err)
 	}
@@ -216,6 +229,39 @@ func TestExternalNoExtension(t *testing.T) {
 	// temp must still land in the destination directory for an atomic rename.
 	if filepath.Dir(e.Path()) != dir {
 		t.Errorf("temp path %q is not in the destination dir %q", e.Path(), dir)
+	}
+}
+
+func TestExternalStageExtOverridesContainer(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "track") // no extension
+	for _, ext := range []string{"webm", ".m4a"} {
+		e, err := NewExternal(final, ext)
+		if err != nil {
+			t.Fatalf("NewExternal(%q): %v", ext, err)
+		}
+		want := ext
+		if want[0] != '.' {
+			want = "." + want
+		}
+		if got := filepath.Ext(e.Path()); got != want {
+			t.Errorf("ext %q: staged path %q has extension %q, want %q", ext, e.Path(), got, want)
+		}
+		if e.Final() != final {
+			t.Errorf("Final() = %q, want the extensionless %q", e.Final(), final)
+		}
+		_ = e.Discard()
+	}
+}
+
+func TestNewExternalWrapsFailureAsOutputError(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "missing-dir", "out.flac")
+	_, err := NewExternal(bad, "")
+	if err == nil {
+		t.Fatal("NewExternal into a missing directory should fail")
+	}
+	if _, ok := errors.AsType[*OutputError](err); !ok {
+		t.Fatalf("err = %v (%T), want *OutputError", err, err)
 	}
 }
 

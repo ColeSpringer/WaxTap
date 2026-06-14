@@ -10,7 +10,39 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// buildSidecarURL validates a sidecar URL and appends defaultPath when the URL
+// does not already contain an endpoint path. Existing query parameters are
+// preserved.
+func buildSidecarURL(base, defaultPath string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("must use http or https")
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = defaultPath
+	}
+	return u.String(), nil
+}
+
+// newSidecarClient returns a client that does not follow redirects, keeping
+// credentials and request bodies bound to the configured endpoint.
+func newSidecarClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 // Limit sidecar response bodies so a misconfigured endpoint cannot consume
 // unbounded memory or keep a request open indefinitely. Error responses use a
@@ -24,8 +56,9 @@ const (
 // sidecarJSON exchanges JSON with the CLI's PO-token, session, and player-context
 // providers. Connection failures return *sidecarError. Unusable responses
 // return *sidecarResponseError without including raw response bodies. label
-// identifies the provider in returned errors.
-func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, label string, in, out any) error {
+// identifies the provider in returned errors. A non-empty apiKey is sent in the
+// X-API-Key header.
+func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		buf, err := json.Marshal(in)
@@ -42,6 +75,9 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

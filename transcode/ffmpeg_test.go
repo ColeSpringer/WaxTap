@@ -26,6 +26,19 @@ func TestBuildCommand_Copy(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_Threads(t *testing.T) {
+	cmd, err := buildCommand("in.webm", "out.flac", Spec{Codec: CodecFLAC, Threads: 2})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-threads", "2")
+	// Zero threads emits no flag.
+	cmd, _ = buildCommand("in.webm", "out.flac", Spec{Codec: CodecFLAC})
+	if hasFlag(cmd.Args, "-threads") {
+		t.Errorf("Threads=0 should emit no -threads flag: %v", cmd.Args)
+	}
+}
+
 func TestBuildCommand_Lossless(t *testing.T) {
 	cmd, err := buildCommand("in.webm", "out.flac", Spec{Codec: CodecFLAC})
 	if err != nil {

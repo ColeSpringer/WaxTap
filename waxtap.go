@@ -102,7 +102,9 @@ func New(opts Options) (*Client, error) {
 	case opts.ProfileOverridePath != "":
 		var err error
 		if profiles, err = loadProfileOverrides(opts.ProfileOverridePath); err != nil {
-			return nil, err
+			// Profile override failures are invalid configuration, even when a
+			// file read caused the failure.
+			return nil, configErr("%v", err)
 		}
 	}
 
@@ -261,10 +263,31 @@ type InfoResult struct {
 	Client string // YouTube client that produced the metadata
 }
 
+// ReadOption configures Info, InfoResult, and Resolve.
+type ReadOption func(*readOptions)
+
+type readOptions struct {
+	noFallback bool
+}
+
+// WithNoFallback prevents Info, InfoResult, and Resolve from falling back to
+// watch-page extraction.
+func WithNoFallback() ReadOption {
+	return func(o *readOptions) { o.noFallback = true }
+}
+
+func newReadOptions(opts []ReadOption) readOptions {
+	var ro readOptions
+	for _, opt := range opts {
+		opt(&ro)
+	}
+	return ro
+}
+
 // Info returns video metadata and candidate audio formats at the requested depth,
 // without downloading.
-func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video, error) {
-	r, err := c.InfoResult(ctx, url, depth)
+func (c *Client) Info(ctx context.Context, url string, depth InfoDepth, opts ...ReadOption) (*Video, error) {
+	r, err := c.InfoResult(ctx, url, depth, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -281,15 +304,16 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth) (*Video,
 // channel count, bitrate, and duration (network-expensive, and requires ffmpeg).
 // The signed stream URLs themselves are not returned through Video; use Download
 // or Stream to fetch bytes.
-func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth) (*InfoResult, error) {
+func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, opts ...ReadOption) (*InfoResult, error) {
 	id, err := youtube.ExtractVideoID(url)
 	if err != nil {
 		return nil, err
 	}
+	ro := newReadOptions(opts)
 
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
-	ext, err := c.yt.Extract(ectx, id)
+	ext, err := c.yt.ExtractExcluding(ectx, id, watchPageSkip(ro.noFallback))
 	if err != nil {
 		return nil, err
 	}
@@ -316,10 +340,6 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth) (*
 
 	// ffprobe cannot inspect SABR streams because they have no direct URL.
 	if depth >= InfoProbe && rs.Probeable() {
-		// Probing reads media bytes, so a forced iOS client cannot perform it.
-		if err := c.forcedIOSDelivery(); err != nil {
-			return nil, err
-		}
 		runner, ferr := c.ffmpeg()
 		if ferr != nil {
 			return nil, ferr
@@ -403,14 +423,15 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 //
 // It is exposed for diagnostics: the CLI's info --show-urls and doctor. Most
 // callers use Download or Stream, which never expose the raw URL.
-func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector) (ResolvedStream, error) {
+func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector, opts ...ReadOption) (ResolvedStream, error) {
 	id, err := youtube.ExtractVideoID(url)
 	if err != nil {
 		return ResolvedStream{}, err
 	}
+	ro := newReadOptions(opts)
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
-	ext, err := c.yt.Extract(ectx, id)
+	ext, err := c.yt.ExtractExcluding(ectx, id, watchPageSkip(ro.noFallback))
 	if err != nil {
 		return ResolvedStream{}, err
 	}

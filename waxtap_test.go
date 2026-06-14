@@ -706,26 +706,38 @@ func TestProcessExplicitCutOutOfRangeRejected(t *testing.T) {
 	}
 }
 
-func TestProcessRemuxWithoutContainerRejected(t *testing.T) {
+func TestProcessRemuxExtensionlessInfersContainer(t *testing.T) {
 	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
 
-	// Stream copy cannot infer a muxer from these output paths.
+	// Extensionless and .copy destinations infer a container from the source codec.
 	for _, out := range []string{filepath.Join(dir, "out"), filepath.Join(dir, "out.copy")} {
-		_, err := c.Process(context.Background(), ProcessRequest{
+		res, err := c.Process(context.Background(), ProcessRequest{
 			Input: in,
 			ProcessSpec: ProcessSpec{
 				Output:    ToFile(out),
 				Transcode: &TranscodeSpec{Format: FormatCopy},
 			},
 		})
-		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-			t.Errorf("remux to %q = %v, want ErrIncompatibleSpec", out, err)
+		if err != nil {
+			t.Fatalf("remux to %q = %v, want success (inferred container)", out, err)
 		}
-		if fileExists(out) {
-			t.Errorf("rejected remux to %q wrote output", out)
+		if res.Transcoded {
+			t.Errorf("remux to %q reported a re-encode; want a stream copy", out)
+		}
+		if !fileExists(out) || res.OutputBytes <= 0 {
+			t.Fatalf("remux to %q wrote no output", out)
+		}
+		// The audio is stream-copied, so the codec is unchanged from the source.
+		runner, _ := c.ffmpeg()
+		probe, perr := runner.Probe(context.Background(), out)
+		if perr != nil {
+			t.Fatalf("probe %q: %v", out, perr)
+		}
+		if a, _ := probe.AudioStream(); a.CodecName != "flac" {
+			t.Errorf("remux to %q changed codec to %q, want flac (stream copy)", out, a.CodecName)
 		}
 	}
 }

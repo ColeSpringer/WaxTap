@@ -26,14 +26,16 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 	num := entry.Index + 1
 	if s.env.jsonMode() {
 		rec := struct {
-			SchemaVersion int    `json:"schemaVersion"`
-			Type          string `json:"type"`
-			Index         int    `json:"index"`
-			VideoID       string `json:"videoId"`
-			Title         string `json:"title,omitempty"`
-			Status        string `json:"status"`
-			OutputPath    string `json:"outputPath,omitempty"`
-			Error         string `json:"error,omitempty"`
+			SchemaVersion int           `json:"schemaVersion"`
+			Type          string        `json:"type"`
+			Index         int           `json:"index"`
+			VideoID       string        `json:"videoId"`
+			Title         string        `json:"title,omitempty"`
+			Status        string        `json:"status"`
+			OutputPath    string        `json:"outputPath,omitempty"`
+			Client        string        `json:"client,omitempty"`
+			Error         string        `json:"error,omitempty"`
+			Warnings      []warningJSON `json:"warnings,omitempty"`
 		}{SchemaVersion: schemaVersion, Type: "item", Index: num, VideoID: entry.VideoID, Title: entry.Title}
 		switch {
 		case err != nil:
@@ -44,6 +46,10 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 			rec.Status = "ok"
 			if res != nil {
 				rec.OutputPath = res.OutputPath
+				rec.Client = res.Client
+				for _, w := range res.Warnings {
+					rec.Warnings = append(rec.Warnings, warningJSON{Code: w.Code.String(), Detail: w.Detail})
+				}
 			}
 		}
 		if b, mErr := json.Marshal(rec); mErr == nil {

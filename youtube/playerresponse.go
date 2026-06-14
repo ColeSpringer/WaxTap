@@ -200,6 +200,7 @@ func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 	} else if d := parseSeconds(pr.Microformat.PlayerMicroformatRenderer.LengthSeconds); d > 0 {
 		v.Duration = d
 	}
+	// Non-WEB clients omit Microformat, leaving PublishDate at its zero value.
 	v.PublishDate = parseDate(pr.Microformat.PlayerMicroformatRenderer.PublishDate)
 
 	for _, t := range pr.VideoDetails.Thumbnail.Thumbnails {

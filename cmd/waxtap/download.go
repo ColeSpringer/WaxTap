@@ -18,18 +18,16 @@ import (
 // downloadFlags holds every download/process option. The cut/transcode/normalize
 // commands reuse the spec-building helpers but expose narrower flag sets.
 type downloadFlags struct {
-	itag      int
-	codec     string
-	bestAudio bool
+	itag  int
+	codec string
 
 	out          string
 	dir          string
 	template     string
 	collisionStr string
-	skipExisting bool
 
-	transcode string
-	bitrate   int
+	format  string
+	bitrate int
 
 	channels   string
 	downmix    bool
@@ -84,26 +82,24 @@ func newDownloadCmd() *cobra.Command {
 
 func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f := cmd.Flags()
-	f.BoolVar(&df.bestAudio, "best-audio", true, "select the best audio stream (default)")
-	f.IntVar(&df.itag, "itag", 0, "select an exact itag instead of best audio")
-	f.StringVar(&df.codec, "codec", "", "select the best stream matching a codec (e.g. opus, aac)")
+	f.IntVar(&df.itag, "itag", 0, "select an exact itag")
+	f.StringVar(&df.codec, "codec", "", "select the best source matching a codec (hard filter)")
 	f.StringVarP(&df.out, "out", "o", "", "exact output file path (single video only)")
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
 	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
-	f.StringVar(&df.collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip")
-	f.BoolVar(&df.skipExisting, "skip-existing", false, "skip when the target file already exists")
-	f.StringVar(&df.transcode, "transcode", "", "transcode to: copy|flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&df.bitrate, "bitrate", 0, "target bitrate (bits/sec) for lossy transcodes (0 = preset default)")
+	f.StringVar(&df.collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	f.StringVarP(&df.format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
+	f.IntVar(&df.bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy transcodes (0 = preset default)")
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
-	f.StringVar(&df.sbCats, "cut-sponsorblock", "", "remove SponsorBlock categories (comma-separated after =, for example --cut-sponsorblock=intro,outro; bare flag = music_offtopic)")
+	f.StringVar(&df.sbCats, "sponsorblock", "", "remove SponsorBlock categories (comma-separated; bare flag = music_offtopic; use sponsorblock to preview)")
 	f.StringArrayVar(&df.ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
 	f.StringVar(&df.cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
 	f.DurationVar(&df.crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
-	f.StringVar(&df.sbOnError, "sponsorblock-onerror", "proceed", "on SponsorBlock fetch failure: proceed|fail")
+	f.StringVar(&df.sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
 	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode)")
-	f.BoolVar(&df.measure, "measure", false, "measure loudness without altering the audio (still writes the file)")
+	f.BoolVar(&df.measure, "measure-loudness", false, "measure loudness without altering the audio (still writes the downloaded file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
-	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source tradeoff: minimize-loss|best-native|prefer:<codec>")
+	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
 	f.BoolVar(&df.writeInfoJSON, "write-info-json", false, "write a <output>.info.json sidecar")
 	f.IntVar(&df.maxItems, "max-items", 0, "cap playlist items (0 = all)")
@@ -113,8 +109,8 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.DurationVar(&df.maxSleepInterval, "max-sleep-interval", 0, "maximum randomized delay between playlist downloads (requires --sleep-interval)")
 	f.BoolVar(&df.listOnly, "list", false, "list playlist entries without downloading")
 
-	// Allow `--cut-sponsorblock` with no value to mean the default category.
-	if fl := f.Lookup("cut-sponsorblock"); fl != nil {
+	// Allow `--sponsorblock` with no value to mean the default category.
+	if fl := f.Lookup("sponsorblock"); fl != nil {
 		fl.NoOptDefVal = string(sponsorblock.CategoryMusicOffTopic)
 	}
 }
@@ -149,6 +145,10 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 		}
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
 	case isVideo:
+		if err := rejectChangedFlags(cmd, "is only used with a playlist input",
+			"max-items", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
+			return err
+		}
 		return runSingleDownload(cmd.Context(), env, df, arg)
 	case hasPlaylist || errors.Is(idErr, waxtap.ErrIsPlaylist):
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
@@ -165,24 +165,46 @@ const maxConcurrency = 64
 // runs before network work so invalid requests fail before a playlist starts.
 func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	cfg := env.cfg
+	if df.listOnly {
+		if err := rejectChangedFlags(cmd, "cannot be used with --list",
+			"itag", "codec", "out", "dir", "output-template", "collision",
+			"format", "bitrate", "channels", "downmix", "cut-range", "sponsorblock",
+			"cut-mode", "crossfade", "sponsorblock-on-error", "normalize", "measure-loudness",
+			"loudness-target", "source-policy", "no-fallback", "download-archive",
+			"write-info-json", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
+			return err
+		}
+	}
 	if df.out != "" && df.dir != "" {
 		return usagef("--out and --dir are mutually exclusive")
+	}
+	if df.out != "" && cmd.Flags().Changed("output-template") {
+		return usagef("--output-template cannot be used with --out")
+	}
+	if cmd.Flags().Changed("bitrate") && df.format == "" {
+		return usagef("--bitrate requires --format")
+	}
+	if cmd.Flags().Changed("loudness-target") && !df.normalize {
+		return usagef("--loudness-target requires --normalize")
+	}
+	if cmd.Flags().Changed("sponsorblock-on-error") && df.sbCats == "" {
+		return usagef("--sponsorblock-on-error requires --sponsorblock")
+	}
+	if (cmd.Flags().Changed("cut-mode") || cmd.Flags().Changed("crossfade")) && len(df.ranges) == 0 && df.sbCats == "" {
+		return usagef("--cut-mode and --crossfade require --cut-range or --sponsorblock")
 	}
 	if df.out == "" && df.dir == "" {
 		df.dir = "."
 	}
-	mode := collisionAutoNumber
-	switch {
-	case cmd.Flags().Changed("collision"):
+	// Default to fail so an existing file is never silently overwritten or
+	// renamed; an explicit --collision opts into the other behaviors.
+	mode := collisionFail
+	if cmd.Flags().Changed("collision") {
 		m, err := parseCollisionMode(df.collisionStr)
 		if err != nil {
 			return err
 		}
 		mode = m
-	case df.skipExisting:
-		mode = collisionSkip
-	case df.out != "":
-		mode = collisionFail // explicit single-file output is not auto-renamed
 	}
 	df.collision = mode
 
@@ -235,7 +257,7 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 // runPlaylistDownload lists or downloads a playlist.
 func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, url string) error {
 	if df.out != "" {
-		return usagef("--out cannot name a whole playlist; use --dir")
+		return usagef("--out cannot be used with a playlist; use --dir")
 	}
 	if df.listOnly {
 		pl, err := env.client.Enumerate(ctx, url, waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true})
@@ -448,7 +470,7 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from
 // the flags, without an Output.
 func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
-	spec := waxtap.ProcessSpec{SkipIfExists: df.skipExisting, Channels: df.layout, Downmix: df.downmix, IncludeMetadata: df.writeInfoJSON}
+	spec := waxtap.ProcessSpec{Channels: df.layout, Downmix: df.downmix, IncludeMetadata: df.writeInfoJSON}
 	tf, hasTranscode, err := df.transcodeFormat()
 	if err != nil {
 		return spec, err
@@ -467,7 +489,7 @@ func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
 	}
 	// Loudness normalization is a filter, so it needs a real encode target.
 	if loud != nil && loud.Mode == waxtap.LoudnessApply && (!hasTranscode || tf == waxtap.FormatCopy) {
-		return spec, usagef("--normalize re-encodes; add --transcode <format> (e.g. flac), not copy")
+		return spec, usagef("--normalize re-encodes; add --format <format> (e.g. flac), not copy")
 	}
 	spec.Loudness = loud
 	return spec, nil
@@ -475,14 +497,14 @@ func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
 
 // transcodeFormat returns the requested format and whether one was set.
 func (df *downloadFlags) transcodeFormat() (waxtap.TranscodeFormat, bool, error) {
-	if df.transcode == "" {
+	if df.format == "" {
 		return 0, false, nil
 	}
-	f, err := parseTranscodeFormat(df.transcode)
+	f, err := parseTranscodeFormat(df.format)
 	return f, err == nil, err
 }
 
-// buildCutSpec builds a CutSpec from explicit ranges and/or --cut-sponsorblock.
+// buildCutSpec builds a CutSpec from explicit ranges and/or --sponsorblock.
 // sbSet reports whether the SponsorBlock flag was present (so the bare form, which
 // yields the default category, still enables SponsorBlock).
 func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
@@ -511,10 +533,11 @@ func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
 func (df *downloadFlags) buildLoudnessSpec() (*waxtap.LoudnessSpec, error) {
 	switch {
 	case df.normalize && df.measure:
-		return nil, usagef("--normalize and --measure are mutually exclusive")
+		return nil, usagef("--normalize and --measure-loudness are mutually exclusive")
 	case df.normalize:
 		return &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: df.loudTarget}, nil
 	case df.measure:
+		// Carry the target so a measure-only JSON result does not report zero.
 		return &waxtap.LoudnessSpec{Mode: waxtap.LoudnessMeasureOnly, Target: df.loudTarget}, nil
 	default:
 		return nil, nil
@@ -556,7 +579,7 @@ func (r *pathReserver) reserveOr(path string, mode collisionMode) (string, bool,
 		r.claimed[next] = true
 		return next, false, nil
 	default: // collisionFail
-		return "", false, usagef("output file already exists: %s (use --collision to change behavior)", path)
+		return "", false, usagef("output file already exists: %s (set --collision to auto-number, overwrite, or skip)", path)
 	}
 }
 

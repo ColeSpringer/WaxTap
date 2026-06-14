@@ -218,7 +218,7 @@ func TestMeasure_Integration(t *testing.T) {
 	dir := t.TempDir()
 	in := synthSine(t, dir, 3)
 
-	l, err := Measure(context.Background(), r, in, nil)
+	l, err := Measure(context.Background(), r, in, nil, 0)
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestApply_Integration(t *testing.T) {
 	const target = -14.0
 
 	// Measure, then fuse the loudnorm apply filter into a single FLAC encode.
-	measured, err := Measure(context.Background(), r, in, nil)
+	measured, err := Measure(context.Background(), r, in, nil, 0)
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestApply_Integration(t *testing.T) {
 	}
 
 	// The lossless output should measure close to the target.
-	got, err := Measure(context.Background(), r, out, nil)
+	got, err := Measure(context.Background(), r, out, nil, 0)
 	if err != nil {
 		t.Fatalf("Measure(out): %v", err)
 	}
@@ -279,7 +279,7 @@ func TestApply_SilentTrack(t *testing.T) {
 	dir := t.TempDir()
 	silent := synthSilence(t, dir, 3)
 
-	measured, err := Measure(context.Background(), r, silent, nil)
+	measured, err := Measure(context.Background(), r, silent, nil, 0)
 	if err != nil {
 		t.Fatalf("Measure(silence): %v", err)
 	}
