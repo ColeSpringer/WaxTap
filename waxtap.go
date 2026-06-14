@@ -261,6 +261,10 @@ func (c *Client) ffmpeg() (*transcode.Runner, error) {
 type InfoResult struct {
 	Video  *Video // extracted metadata and candidate formats
 	Client string // YouTube client that produced the metadata
+	// SubstitutedFrom names a forced non-WEB client, such as WEB_EMBEDDED, that
+	// the watch-page fallback replaced. When set, the metadata came from WEB
+	// rather than the requested client.
+	SubstitutedFrom string
 }
 
 // ReadOption configures Info, InfoResult, and Resolve.
@@ -318,7 +322,7 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		return nil, err
 	}
 	video := ext.Video()
-	res := &InfoResult{Video: video, Client: ext.ClientName()}
+	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom()}
 	if depth < InfoResolved {
 		return res, nil
 	}

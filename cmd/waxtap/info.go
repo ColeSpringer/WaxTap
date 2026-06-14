@@ -79,6 +79,9 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	if info.Client != "" {
 		env.printf("Client:    %s\n", info.Client)
 	}
+	if info.SubstitutedFrom != "" {
+		env.printf("  (requested %s; fell back to %s)\n", info.SubstitutedFrom, info.Client)
+	}
 	env.printf("Duration:  %s\n", humanDuration(v.Duration))
 	if !v.PublishDate.IsZero() {
 		env.printf("Published: %s\n", v.PublishDate.Format("2006-01-02"))
@@ -131,32 +134,34 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		formats[i] = formatToJSON(f)
 	}
 	out := struct {
-		SchemaVersion int           `json:"schemaVersion"`
-		VideoID       string        `json:"videoId"`
-		Title         string        `json:"title"`
-		Author        string        `json:"author"`
-		Client        string        `json:"client,omitempty"`
-		ChannelID     string        `json:"channelId,omitempty"`
-		DurationSecs  float64       `json:"durationSeconds"`
-		PublishDate   string        `json:"publishDate,omitempty"`
-		IsLive        bool          `json:"isLive"`
-		IsUpcoming    bool          `json:"isUpcoming"`
-		Chapters      int           `json:"chapterCount"`
-		Formats       []formatJSON  `json:"formats"`
-		BestAudioItag *int          `json:"bestAudioItag,omitempty"`
-		Resolved      *resolvedJSON `json:"resolved,omitempty"`
+		SchemaVersion   int           `json:"schemaVersion"`
+		VideoID         string        `json:"videoId"`
+		Title           string        `json:"title"`
+		Author          string        `json:"author"`
+		Client          string        `json:"client,omitempty"`
+		SubstitutedFrom string        `json:"substitutedFrom,omitempty"`
+		ChannelID       string        `json:"channelId,omitempty"`
+		DurationSecs    float64       `json:"durationSeconds"`
+		PublishDate     string        `json:"publishDate,omitempty"`
+		IsLive          bool          `json:"isLive"`
+		IsUpcoming      bool          `json:"isUpcoming"`
+		Chapters        int           `json:"chapterCount"`
+		Formats         []formatJSON  `json:"formats"`
+		BestAudioItag   *int          `json:"bestAudioItag,omitempty"`
+		Resolved        *resolvedJSON `json:"resolved,omitempty"`
 	}{
-		SchemaVersion: schemaVersion,
-		VideoID:       v.ID,
-		Title:         v.Title,
-		Author:        v.Author,
-		Client:        info.Client,
-		ChannelID:     v.ChannelID,
-		DurationSecs:  v.Duration.Seconds(),
-		IsLive:        v.IsLive,
-		IsUpcoming:    v.IsUpcoming,
-		Chapters:      len(v.Chapters),
-		Formats:       formats,
+		SchemaVersion:   schemaVersion,
+		VideoID:         v.ID,
+		Title:           v.Title,
+		Author:          v.Author,
+		Client:          info.Client,
+		SubstitutedFrom: info.SubstitutedFrom,
+		ChannelID:       v.ChannelID,
+		DurationSecs:    v.Duration.Seconds(),
+		IsLive:          v.IsLive,
+		IsUpcoming:      v.IsUpcoming,
+		Chapters:        len(v.Chapters),
+		Formats:         formats,
 	}
 	if !v.PublishDate.IsZero() {
 		out.PublishDate = v.PublishDate.Format("2006-01-02")

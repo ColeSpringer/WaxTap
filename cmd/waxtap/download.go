@@ -70,7 +70,7 @@ func newDownloadCmd() *cobra.Command {
 			"bounded parallelism.\n\n" +
 			"Use --out for a single exact file, or --dir with --output-template to name\n" +
 			"files automatically (the default).",
-		Args: cobra.ExactArgs(1),
+		Args: sponsorblockArgs(cobra.ExactArgs(1), false),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDownload(cmd, df, args[0])
 		},
@@ -184,6 +184,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 			return err
 		}
 	}
+	if err := validateItag(cmd, df.itag); err != nil {
+		return err
+	}
 	if df.out != "" && df.dir != "" {
 		return usagef("--out and --dir are mutually exclusive")
 	}
@@ -204,6 +207,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	}
 	if df.out == "" && df.dir == "" {
 		df.dir = "."
+	}
+	if err := rejectDirIsFile(df.dir); err != nil {
+		return err
 	}
 	// Default to fail so an existing file is never silently overwritten or
 	// renamed; an explicit --collision opts into the other behaviors.
@@ -291,6 +297,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 			if o.Attempted && o.Err == nil && o.Result != nil {
 				finishItem(env, df, o.Entry.VideoID, o.Result)
 				warnChannelLayout(env, df, o.Result)
+				warnContainerExtMismatch(env, df, o.Result)
 				measureNote(env, o.Result)
 			}
 			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
@@ -348,6 +355,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	res, err := env.client.Download(ctx, req)
 	prog.finish()
 	if err != nil {
+		noteForcedIOSIncomplete(env, err)
 		return err
 	}
 
@@ -357,6 +365,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 		return err
 	}
 	warnChannelLayout(env, df, res)
+	warnContainerExtMismatch(env, df, res)
 	measureNote(env, res)
 	return nil
 }
@@ -434,6 +443,38 @@ func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
 		return
 	}
 	env.info("note: requested %s; delivered %s\n", df.layout, channelCountLabel(delivered))
+}
+
+// warnContainerExtMismatch reports when a keep-source download uses an output
+// extension that names a different container. Operations that run ffmpeg remux
+// the stream into the requested container and cannot produce this mismatch.
+func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result) {
+	if _, has, _ := df.transcodeFormat(); has {
+		return // a --format (copy/transcode) muxes to the named container
+	}
+	// Only keep-source delivery writes the stream bytes without remuxing.
+	if res.Transcoded || res.CutApplied || res.SponsorBlockApplied || res.LoudnessApplied {
+		return
+	}
+	if res.OutputPath == "" || res.SourceFormat.Extension == "" {
+		return
+	}
+	outExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(res.OutputPath), "."))
+	srcExt := strings.ToLower(res.SourceFormat.Extension)
+	if outExt == "" || sameContainer(outExt, srcExt) {
+		return
+	}
+	env.info("note: output path uses .%s, but the source container is .%s; bytes were not re-encoded\n", outExt, srcExt)
+}
+
+// sameContainer reports whether two file extensions name the same media
+// container. Both .m4a and .mp4 use the ISO base media file format.
+func sameContainer(a, b string) bool {
+	if a == b {
+		return true
+	}
+	mp4 := func(e string) bool { return e == "m4a" || e == "mp4" }
+	return mp4(a) && mp4(b)
 }
 
 // channelCountLabel names mono and stereo and renders other layouts as a channel
@@ -567,6 +608,9 @@ func newPathReserver() *pathReserver { return &pathReserver{claimed: map[string]
 func (r *pathReserver) reserveOr(path string, mode collisionMode) (string, bool, error) {
 	if r == nil {
 		return resolveCollision(path, mode)
+	}
+	if derr := rejectDirOutput(path); derr != nil {
+		return "", false, derr
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

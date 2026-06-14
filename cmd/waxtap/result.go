@@ -49,8 +49,12 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	if res.Loudness != nil {
 		renderLoudness(env, res.Loudness)
 	}
-	for _, w := range res.Warnings {
-		env.printf("warning:  [%s] %s\n", w.Code, w.Detail)
+	// Non-quiet runs already printed each warning on stderr. Quiet runs still
+	// need the summary because they have no live progress output.
+	if env.quiet() {
+		for _, w := range res.Warnings {
+			env.printf("warning:  [%s] %s\n", w.Code, w.Detail)
+		}
 	}
 }
 
@@ -122,8 +126,11 @@ type resultJSON struct {
 	OutputPath    string `json:"outputPath,omitempty"`
 	Client        string `json:"client,omitempty"`
 
-	SourceFormat formatJSON `json:"sourceFormat"`
-	OutputFormat formatJSON `json:"outputFormat"`
+	// SourceFormat is always present. OutputFormat is omitted for a local source
+	// unless it was re-encoded, matching the human summary's "Encoded:" line.
+	// Pointers allow encoding/json to omit the local output format.
+	SourceFormat *formatJSON `json:"sourceFormat,omitempty"`
+	OutputFormat *formatJSON `json:"outputFormat,omitempty"`
 
 	SourceBytes int64 `json:"sourceBytes"`
 	OutputBytes int64 `json:"outputBytes"`
@@ -147,8 +154,6 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		InputPath:           res.InputPath,
 		OutputPath:          res.OutputPath,
 		Client:              res.Client,
-		SourceFormat:        formatToJSON(res.SourceFormat),
-		OutputFormat:        formatToJSON(res.OutputFormat),
 		SourceBytes:         res.SourceBytes,
 		OutputBytes:         res.OutputBytes,
 		Transcoded:          res.Transcoded,
@@ -157,6 +162,7 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		LoudnessMeasured:    res.LoudnessMeasured,
 		LoudnessApplied:     res.LoudnessApplied,
 	}
+	out.SourceFormat, out.OutputFormat = formatDTOs(res)
 	if res.Loudness != nil {
 		lj := &loudnessJSON{Target: jsonFloat(res.Loudness.Target)}
 		lj.Input = loudnessInfoToJSON(res.Loudness.Input)
@@ -167,6 +173,19 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		out.Warnings = append(out.Warnings, warningJSON{Code: w.Code.String(), Detail: w.Detail})
 	}
 	return out
+}
+
+// formatDTOs includes outputFormat for every YouTube result and for local files
+// that were re-encoded. Other local results omit it because it would duplicate
+// sourceFormat.
+func formatDTOs(res *waxtap.Result) (src, out *formatJSON) {
+	s := formatToJSON(res.SourceFormat)
+	src = &s
+	if res.SourceKind != waxtap.SourceLocalFile || res.Transcoded {
+		o := formatToJSON(res.OutputFormat)
+		out = &o
+	}
+	return src, out
 }
 
 func loudnessInfoToJSON(l *waxtap.LoudnessInfo) *loudnessInfoJSON {

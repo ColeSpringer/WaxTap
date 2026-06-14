@@ -17,7 +17,7 @@ func newSponsorBlockCmd() *cobra.Command {
 		Use:     "sponsorblock <url>",
 		Aliases: []string{"sb"},
 		Short:   "Preview SponsorBlock segments for a video (no download)",
-		Args:    cobra.ExactArgs(1),
+		Args:    sponsorblockArgs(cobra.ExactArgs(1), false),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
 			if err != nil {

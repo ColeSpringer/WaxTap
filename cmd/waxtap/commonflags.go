@@ -1,9 +1,11 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/sponsorblock"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -56,6 +58,80 @@ func bindSponsorBlockFlag(f *pflag.FlagSet, cats *string, usage string) {
 	if fl := f.Lookup("sponsorblock"); fl != nil {
 		fl.NoOptDefVal = string(sponsorblock.CategoryMusicOffTopic)
 	}
+}
+
+// sponsorblockArgs wraps base with a clearer error for a common pflag ambiguity.
+// Since --sponsorblock accepts a bare form, a space-separated value is parsed as
+// a positional argument. Specific categories must use the "=" form.
+//
+// hasOutputPositional is true for commands with an optional trailing output slot
+// such as cut. Setting --out removes that slot.
+func sponsorblockArgs(base cobra.PositionalArgs, hasOutputPositional bool) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		// After parsing, a bare flag is indistinguishable from an explicit value
+		// equal to NoOptDefVal. In either case, only impossible positional shapes
+		// trigger the hint.
+		if fl := cmd.Flags().Lookup("sponsorblock"); fl != nil &&
+			cmd.Flags().Changed("sponsorblock") && fl.Value.String() == fl.NoOptDefVal {
+			if arg, ok := sponsorblockMisparse(cmd, args, hasOutputPositional); ok {
+				return usagef("--sponsorblock needs its value attached with '=' (e.g. --sponsorblock=%s); a space starts a new argument", arg)
+			}
+		}
+		return base(cmd, args)
+	}
+}
+
+// sponsorblockMisparse finds a positional argument that was probably intended as
+// the --sponsorblock value.
+func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional bool) (string, bool) {
+	if !hasOutputPositional {
+		// Download and preview accept exactly one positional argument. Anything
+		// after the source is therefore the likely flag value.
+		if len(args) > 1 {
+			return args[1], true
+		}
+		return "", false
+	}
+
+	// Cut accepts an optional output positional unless --out is set.
+	budget := 2
+	if cmd.Flags().Changed("out") {
+		budget = 1
+	}
+	// A category list beyond the positional budget can only be a misplaced flag
+	// value.
+	if len(args) > budget {
+		for _, a := range args[1:] {
+			if isCategoryList(a) {
+				return a, true
+			}
+		}
+		return "", false
+	}
+	// Treat a comma-separated category list in the output slot as a misplaced
+	// value. A single category could be a legitimate output filename.
+	if len(args) == 2 && budget == 2 && strings.Contains(args[1], ",") && isCategoryList(args[1]) {
+		return args[1], true
+	}
+	return "", false
+}
+
+// isCategoryList reports whether s contains at least one valid SponsorBlock
+// category and no invalid categories. Empty comma-separated parts are ignored to
+// match parseCategories.
+func isCategoryList(s string) bool {
+	n := 0
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue // parseCategories skips empty parts; mirror it
+		}
+		if !sponsorblock.Category(p).Valid() {
+			return false
+		}
+		n++
+	}
+	return n > 0
 }
 
 // bindCutFlags registers the time-range cut flags shared by download and cut.

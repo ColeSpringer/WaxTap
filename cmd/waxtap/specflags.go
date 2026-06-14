@@ -142,6 +142,15 @@ func parseCutInputs(ranges []string, cutMode, sbOnError string) ([]waxtap.TimeRa
 	return rangeList, mode, pol, nil
 }
 
+// validateItag rejects an explicitly set non-positive --itag. Zero is the unset
+// sentinel, and audioSelector treats only positive values as an exact selection.
+func validateItag(cmd *cobra.Command, itag int) error {
+	if cmd.Flags().Changed("itag") && itag <= 0 {
+		return usagef("--itag must be a positive itag (run `waxtap formats <url>` to list them)")
+	}
+	return nil
+}
+
 // audioSelector builds an AudioSelector from --itag, --codec, and the preferred
 // channel layout. An itag identifies an exact encoding and ignores layout.
 func audioSelector(itag int, codec string, layout waxtap.ChannelLayout) (waxtap.AudioSelector, error) {

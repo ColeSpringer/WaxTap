@@ -31,6 +31,9 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 	if p.explicit != "" {
 		return usagef("a directory input writes multiple files; use --dir, not a single output path")
 	}
+	if err := rejectDirIsFile(p.dir); err != nil {
+		return err
+	}
 	if p.format == "" {
 		return usagef("a directory input needs --format (the output extension cannot be inferred per file)")
 	}
@@ -136,6 +139,9 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 		return batchExit(ctx, outcomes)
 	}
 
+	if err := rejectDirIsFile(p.dir); err != nil {
+		return err
+	}
 	if p.format == "" {
 		return usagef("normalizing a directory requires --format (e.g. flac); use --measure-loudness to analyze without writing files")
 	}

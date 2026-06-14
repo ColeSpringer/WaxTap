@@ -85,6 +85,9 @@ func newNormalizeCmd() *cobra.Command {
 			if err := validateNormalizeInputFlags(cmd, measure, false, false); err != nil {
 				return err
 			}
+			if err := validateItag(cmd, itag); err != nil {
+				return err
+			}
 			layout, doDownmix, err := resolveChannels(cmd, env.cfg, channels, downmix)
 			if err != nil {
 				return err
@@ -96,6 +99,11 @@ func newNormalizeCmd() *cobra.Command {
 				return runMeasure(cmd, env, source, itag, codec, sourcePolicy, noFallback, layout, target)
 			}
 
+			// Check the output path before format inference so a directory gets a
+			// useful error instead of a missing file extension error.
+			if err := rejectDirOutput(explicit); err != nil {
+				return err
+			}
 			// When --format is omitted, infer it from the output extension.
 			if format == "" && filepath.Ext(explicit) == "" {
 				return usagef("normalizing a file requires an output path or --format (e.g. flac); use --measure-loudness to analyze without writing output")
@@ -132,6 +140,7 @@ func newNormalizeCmd() *cobra.Command {
 			}
 			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
+				noteForcedIOSIncomplete(env, err)
 				return err
 			}
 			return emitResult(env, res)
@@ -204,6 +213,7 @@ func runMeasure(cmd *cobra.Command, env *appEnv, source string, itag int, codec,
 	}
 	res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 	if err != nil {
+		noteForcedIOSIncomplete(env, err)
 		return err
 	}
 	return emitResult(env, res)

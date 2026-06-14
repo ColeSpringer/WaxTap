@@ -23,10 +23,15 @@ func newFormatsCmd() *cobra.Command {
 			if noFallback {
 				ropts = append(ropts, waxtap.WithNoFallback())
 			}
-			video, err := env.client.Info(cmd.Context(), args[0], waxtap.InfoBasic, ropts...)
+			info, err := env.client.InfoResult(cmd.Context(), args[0], waxtap.InfoBasic, ropts...)
 			if err != nil {
 				return err
 			}
+			// A watch-page fallback returns formats from WEB.
+			if info.SubstitutedFrom != "" {
+				env.info("note: requested %s; listing %s formats from the watch-page fallback\n", info.SubstitutedFrom, info.Client)
+			}
+			video := info.Video
 			formats := audioFormats(video.Formats)
 			if env.jsonMode() {
 				out := make([]formatJSON, len(formats))

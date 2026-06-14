@@ -30,6 +30,23 @@ func TestProgress_OffTTYAnnouncesStageWithoutByteCount(t *testing.T) {
 	}
 }
 
+func TestProgress_WarningCarriesCode(t *testing.T) {
+	var buf bytes.Buffer
+	r := &progressReporter{w: &buf, enabled: true, tty: false}
+
+	r.handle(waxtap.Event{Stage: waxtap.StageWarning, Warning: &waxtap.Warning{
+		Code: waxtap.WarnFallbackProfile, Detail: "served WEB",
+	}})
+
+	out := buf.String()
+	if !strings.Contains(out, "[fallback-profile]") {
+		t.Errorf("live warning should include the code tag, got %q", out)
+	}
+	if !strings.Contains(out, "served WEB") {
+		t.Errorf("live warning should include the detail, got %q", out)
+	}
+}
+
 // On a TTY, progress snapshots still draw the live byte bar.
 func TestProgress_TTYRendersByteProgress(t *testing.T) {
 	var buf bytes.Buffer

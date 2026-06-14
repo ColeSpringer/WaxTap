@@ -193,9 +193,6 @@ in LUFS; the default target is `-14 LUFS`, and more negative values are quieter.
 Measurement results report integrated loudness and the gating threshold in LUFS,
 true peak in dBTP, and loudness range in LU.
 
-WaxTap does not use dBA. dBA describes A-weighted acoustic sound-pressure
-measurements, while LUFS measures the perceived loudness of digital audio.
-
 #### Exit codes
 
 The CLI maps each failure class to a stable exit code so scripts can branch
@@ -375,6 +372,8 @@ Useful operational knobs:
   the client used as `Client:` (and `client` in `--json`). `info` and `formats`
   also accept `--no-fallback`; on those read paths the WEB-context and
   incomplete-download fallbacks never run, so it only disables the watch page.
+  When the watch page replaces a forced client, `info --json` also reports the
+  requested client as `substitutedFrom`.
 - Diagnostics: set `WAXTAP_DUMP_DIR` to write unusable YouTube responses on
   extraction failures, and `WAXTAP_SABR_DUMP_DIR` to write each raw SABR
   round for offline inspection.
@@ -485,4 +484,4 @@ failures, not something WaxTap promises to bypass.
 
 ## License
 
-[MIT](LICENSE). Copyright Cole Springer.
+[MIT](LICENSE).

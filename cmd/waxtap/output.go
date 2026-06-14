@@ -21,8 +21,8 @@ import (
 )
 
 // schemaVersion tags JSON output so callers can handle shape changes. Version 2
-// added audioQuality to format objects; version 3 adds the YouTube client used
-// for each result.
+// added audioQuality to format objects. Version 3 adds the YouTube client.
+// Non-transcoded local results omit the redundant outputFormat field.
 const schemaVersion = 3
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
@@ -332,6 +332,15 @@ const (
 	cipherSolveHint      = "full WEB audio needs an attested identity; set --session-url or --player-context-url (both also require --potoken-url)"
 )
 
+// noteForcedIOSIncomplete suggests the default client chain after a forced iOS
+// client returns an incomplete stream. It is called only for commands that report
+// a single error, avoiding a repeated note for playlist failures.
+func noteForcedIOSIncomplete(env *appEnv, err error) {
+	if errors.Is(err, waxtap.ErrIncompleteStream) && strings.EqualFold(env.cfg.client, "ios") {
+		env.info("note: iOS byte delivery is best-effort; omit --client to use the default android_vr chain\n")
+	}
+}
+
 // friendlyError returns a human message for an error, expanding common sentinels.
 func friendlyError(err error) string {
 	// Provider connection errors may be wrapped by ErrNeedsPOToken. Check them
@@ -353,6 +362,10 @@ func friendlyError(err error) string {
 		return sre.Error()
 	}
 	switch {
+	case errors.Is(err, waxtap.ErrInvalidConfig):
+		// Library errors name Go option fields. Present the corresponding CLI flags
+		// while preserving the wrapped error and its exit-code classification.
+		return translateConfigSymbols(err.Error())
 	case errors.Is(err, waxtap.ErrFFmpegNotFound):
 		return "ffmpeg/ffprobe not found on PATH"
 	case errors.Is(err, waxtap.ErrIsPlaylist):
@@ -373,6 +386,28 @@ func friendlyError(err error) string {
 		return "YouTube returned a playlist shape WaxTap doesn't recognize; the parser may need updating"
 	}
 	return err.Error()
+}
+
+// configSymbolReplacer maps Go option field names in ErrInvalidConfig messages
+// to the corresponding CLI flags. config_symbols_test.go detects message changes
+// that would stop a replacement from matching.
+var configSymbolReplacer = strings.NewReplacer(
+	"ProfileOverridePath", "--profile-override",
+	"ChromeMajor", "--chrome-major",
+	"Options.Client", "--client",
+	"Client and", "--client and",
+	"PerHostQPS", "--qps",
+	"Cooldown", "--cooldown",
+	// config.go currently catches these conflicts before waxtap.New does.
+	"PlayerContextProvider", "--player-context-url",
+	"POTokenProvider", "--potoken-url",
+	"VisitorData", "--visitor-data",
+)
+
+// translateConfigSymbols rewrites Go option field names in a config error message
+// to their CLI flag equivalents.
+func translateConfigSymbols(msg string) string {
+	return configSymbolReplacer.Replace(msg)
 }
 
 // isProxyError reports whether err is a failure to connect to the configured

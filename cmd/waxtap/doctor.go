@@ -17,7 +17,7 @@ import (
 var doctorCandidates = []string{
 	"jNQXAC9IVRw", // "Me at the zoo", the first YouTube video
 	"rFejpH_tAHM", // dotGo 2015, Rob Pike
-	"BaW_jenozKc", // common extractor test video
+	"aqz-KE-bpKQ", // Big Buck Bunny (Blender, CC-BY)
 }
 
 // doctorByteProbe is how many bytes the cheap check reads to prove byte delivery.

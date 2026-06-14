@@ -127,6 +127,43 @@ func TestResolveCollision(t *testing.T) {
 	})
 }
 
+func TestResolveCollisionRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	// Every collision mode must reject a directory output before its mode logic,
+	// so a staged file is never renamed onto a directory.
+	for _, mode := range []collisionMode{collisionFail, collisionOverwrite, collisionSkip, collisionAutoNumber} {
+		_, _, err := resolveCollision(dir, mode)
+		if !isUsageError(err) || !strings.Contains(err.Error(), "existing directory") {
+			t.Errorf("resolveCollision(dir, %v) = %v, want existing directory usage error", mode, err)
+		}
+	}
+	// The playlist path reserver must reject directories too.
+	r := newPathReserver()
+	if _, _, err := r.reserveOr(dir, collisionOverwrite); !isUsageError(err) || !strings.Contains(err.Error(), "existing directory") {
+		t.Errorf("reserveOr(dir) = %v, want existing directory usage error", err)
+	}
+}
+
+func TestRejectDirIsFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f.txt")
+	if err := writeEmpty(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectDirIsFile(file); !isUsageError(err) || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("rejectDirIsFile(file) = %v, want not a directory usage error", err)
+	}
+	if err := rejectDirIsFile(dir); err != nil {
+		t.Errorf("rejectDirIsFile(dir) = %v, want nil", err)
+	}
+	if err := rejectDirIsFile(""); err != nil {
+		t.Errorf("rejectDirIsFile(\"\") = %v, want nil", err)
+	}
+	if err := rejectDirIsFile(filepath.Join(dir, "absent")); err != nil {
+		t.Errorf("rejectDirIsFile(absent) = %v, want nil (created later)", err)
+	}
+}
+
 func writeEmpty(path string) error {
 	f, err := os.Create(path)
 	if err != nil {

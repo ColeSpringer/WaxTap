@@ -52,7 +52,8 @@ func (r *progressReporter) handle(ev waxtap.Event) {
 		r.renderDownloading(ev)
 	case waxtap.StageWarning:
 		if ev.Warning != nil {
-			r.printAbove(fmt.Sprintf("warning: %s", ev.Warning.Detail))
+			// Non-quiet runs show warnings only here, so include the stable code.
+			r.printAbove(fmt.Sprintf("warning: [%s] %s", ev.Warning.Code, ev.Warning.Detail))
 		}
 	case waxtap.StageDone, waxtap.StageFailed:
 		r.clearLocked()

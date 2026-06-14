@@ -54,6 +54,50 @@ func TestWarnChannelLayout(t *testing.T) {
 	}
 }
 
+func TestWarnContainerExtMismatch(t *testing.T) {
+	res := func(outPath, srcExt string) *waxtap.Result {
+		return &waxtap.Result{OutputPath: outPath, SourceFormat: waxtap.Format{Extension: srcExt}}
+	}
+	cases := []struct {
+		name string
+		df   *downloadFlags
+		res  *waxtap.Result
+		want string // substring expected in the note; "" means no note
+	}{
+		{"keep-source m4a on webm", &downloadFlags{}, res("/tmp/out.m4a", "webm"), "output path uses .m4a, but the source container is .webm"},
+		{"keep-source matching ext", &downloadFlags{}, res("/tmp/out.webm", "webm"), ""},
+		{"keep-source case-insensitive match", &downloadFlags{}, res("/tmp/out.WEBM", "webm"), ""},
+		// .m4a and .mp4 use the same container.
+		{"mp4 output on m4a stream", &downloadFlags{}, res("/tmp/out.mp4", "m4a"), ""},
+		{"m4a output on mp4 stream", &downloadFlags{}, res("/tmp/out.m4a", "mp4"), ""},
+		// A .opus extension usually implies Ogg, not WebM.
+		{"opus output on webm stream still warns", &downloadFlags{}, res("/tmp/out.opus", "webm"), "output path uses .opus, but the source container is .webm"},
+		// Any ffmpeg edit remuxes into the named container.
+		{"cut remux suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/clip.mka", SourceFormat: waxtap.Format{Extension: "webm"}, CutApplied: true}, ""},
+		{"sponsorblock remux suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/clip.mka", SourceFormat: waxtap.Format{Extension: "webm"}, SponsorBlockApplied: true}, ""},
+		{"downmix transcode suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/out.ogg", SourceFormat: waxtap.Format{Extension: "webm"}, Transcoded: true}, ""},
+		{"loudness apply suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/out.mka", SourceFormat: waxtap.Format{Extension: "webm"}, LoudnessApplied: true}, ""},
+		// A --format (copy or transcode) muxes to the named container via ffmpeg.
+		{"format copy suppresses", &downloadFlags{format: "copy"}, res("/tmp/out.ogg", "webm"), ""},
+		{"format transcode suppresses", &downloadFlags{format: "flac"}, res("/tmp/out.flac", "webm"), ""},
+		{"no output path", &downloadFlags{}, res("", "webm"), ""},
+		{"no source extension", &downloadFlags{}, res("/tmp/out.m4a", ""), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			warnContainerExtMismatch(noteEnv(&buf), tc.df, tc.res)
+			got := buf.String()
+			switch {
+			case tc.want == "" && got != "":
+				t.Errorf("note = %q, want none", got)
+			case tc.want != "" && !strings.Contains(got, tc.want):
+				t.Errorf("note = %q, want substring %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMeasureNote(t *testing.T) {
 	cases := []struct {
 		name string

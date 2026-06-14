@@ -120,7 +120,7 @@ func newCutCmd() *cobra.Command {
 			"or more --cut-range, and/or --sponsorblock (YouTube only). Smart mode\n" +
 			"stream-copies when cutting alone and fuses the cut into a transcode when\n" +
 			"one is requested.",
-		Args: cobra.RangeArgs(1, 2),
+		Args: sponsorblockArgs(cobra.RangeArgs(1, 2), true),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
 			if err != nil {
@@ -139,6 +139,9 @@ func newCutCmd() *cobra.Command {
 				return usagef("cut does not support a directory input; pass a single file or a YouTube URL")
 			}
 			if err := validateLocalSourceFlags(cmd, source); err != nil {
+				return err
+			}
+			if err := validateItag(cmd, itag); err != nil {
 				return err
 			}
 
@@ -208,6 +211,7 @@ func newCutCmd() *cobra.Command {
 			}
 			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
+				noteForcedIOSIncomplete(env, err)
 				return err
 			}
 			return emitResult(env, res)
@@ -281,7 +285,15 @@ func newTranscodeCmd() *cobra.Command {
 			if err := validateLocalSourceFlags(cmd, source); err != nil {
 				return err
 			}
+			if err := validateItag(cmd, itag); err != nil {
+				return err
+			}
 
+			// Check the output path before format inference so a directory gets a
+			// useful error instead of a missing file extension error.
+			if err := rejectDirOutput(explicit); err != nil {
+				return err
+			}
 			tf, err := transcodeFormatFor(format, explicit)
 			if err != nil {
 				return err
@@ -313,6 +325,7 @@ func newTranscodeCmd() *cobra.Command {
 			}
 			res, err := dispatchProcess(cmd.Context(), env, source, sel, policy, spec, noFallback)
 			if err != nil {
+				noteForcedIOSIncomplete(env, err)
 				return err
 			}
 			return emitResult(env, res)

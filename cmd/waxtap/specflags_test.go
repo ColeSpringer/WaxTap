@@ -7,6 +7,35 @@ import (
 	"github.com/colespringer/waxtap"
 )
 
+func TestValidateItag(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"unset itag ok", []string{"dummyVideo0"}, false},
+		{"itag zero rejected", []string{"dummyVideo0", "--itag", "0"}, true},
+		{"itag negative rejected", []string{"dummyVideo0", "--itag=-5"}, true},
+		{"itag positive ok", []string{"dummyVideo0", "--itag", "140"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newDownloadCmd()
+			if err := cmd.ParseFlags(tc.args); err != nil {
+				t.Fatalf("ParseFlags(%v): %v", tc.args, err)
+			}
+			itag, _ := cmd.Flags().GetInt("itag")
+			err := validateItag(cmd, itag)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateItag(itag=%d) = %v, wantErr=%v", itag, err, tc.wantErr)
+			}
+			if err != nil && !isUsageError(err) {
+				t.Errorf("validateItag(itag=%d) err is %T, want usageError", itag, err)
+			}
+		})
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	tests := []struct {
 		in   string

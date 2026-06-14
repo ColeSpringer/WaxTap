@@ -47,6 +47,9 @@ type acquired struct {
 	transfer mediaTransfer
 	attempt  youtube.AttemptID
 	client   string // display name for logs and warnings
+	// substitutedFrom names the forced client replaced by the WEB watch-page
+	// fallback. It is reported only after delivery succeeds.
+	substitutedFrom string
 }
 
 // webContextCooldown limits a failing WEB player-context provider to one attempt
@@ -116,6 +119,8 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	}
 	c.warnWebContextFallback(em, a, webCtxReason)
 	c.warnSessionDowngrade(em, a)
+	// Stream and Writer succeed once buildTransfer returns.
+	c.warnClientSubstitution(em, a)
 	return a, nil
 }
 
@@ -175,8 +180,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	if err != nil {
 		return nil, err
 	}
-	c.warnClientSubstitution(em, ext)
-	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName()}
+	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom()}
 
 	// SABR reloads are pinned to the original attempt by SABRStream.reextract.
 	if plan.SABR != nil {
@@ -187,11 +191,10 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	return a, nil
 }
 
-// warnClientSubstitution adds a result warning when the WEB watch-page fallback
-// replaces a forced client.
-func (c *Client) warnClientSubstitution(em *emitter, ext *youtube.Extraction) {
-	if from := ext.SubstitutedFrom(); from != "" {
-		em.warn(WarnFallbackProfile, fmt.Sprintf("forced client %s was not delivered; served WEB via the watch-page fallback", from))
+// warnClientSubstitution reports a successful WEB watch-page fallback.
+func (c *Client) warnClientSubstitution(em *emitter, a *acquired) {
+	if a.substitutedFrom != "" {
+		em.warn(WarnFallbackProfile, fmt.Sprintf("forced client %s failed; used WEB through the watch-page fallback", a.substitutedFrom))
 	}
 }
 
@@ -410,6 +413,8 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			}
 			c.warnWebContextFallback(em, a, webCtxReason)
 			c.warnSessionDowngrade(em, a)
+			// Report substitution only after the bytes arrive.
+			c.warnClientSubstitution(em, a)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {

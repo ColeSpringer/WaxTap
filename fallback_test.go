@@ -58,6 +58,33 @@ func TestRefreshFailure(t *testing.T) {
 	})
 }
 
+func TestWarnClientSubstitution(t *testing.T) {
+	collect := func(a *acquired) []Event {
+		var evs []Event
+		em := newEmitter(func(e Event) { evs = append(evs, e) }, "vid")
+		c := &Client{}
+		c.warnClientSubstitution(em, a)
+		return evs
+	}
+	t.Run("substitution emits fallback warning", func(t *testing.T) {
+		evs := collect(&acquired{substitutedFrom: "WEB_EMBEDDED"})
+		if len(evs) != 1 || evs[0].Warning == nil {
+			t.Fatalf("events = %+v, want one warning", evs)
+		}
+		if !strings.Contains(evs[0].Warning.Detail, "used WEB through the watch-page fallback") {
+			t.Errorf("detail = %q, want the WEB fallback", evs[0].Warning.Detail)
+		}
+		if !strings.Contains(evs[0].Warning.Detail, "WEB_EMBEDDED") {
+			t.Errorf("detail = %q, want it to name the substituted client", evs[0].Warning.Detail)
+		}
+	})
+	t.Run("no substitution is silent", func(t *testing.T) {
+		if evs := collect(&acquired{}); len(evs) != 0 {
+			t.Errorf("events = %+v, want none when substitutedFrom is empty", evs)
+		}
+	})
+}
+
 func TestBaseSkip(t *testing.T) {
 	if skip := baseSkip(Request{}); len(skip) != 0 {
 		t.Errorf("default baseSkip = %v, want empty (all fallbacks allowed)", skip)

@@ -156,8 +156,13 @@ func parseCollisionMode(s string) (collisionMode, error) {
 // existing file). For collisionAutoNumber it returns the first free " (n)"
 // variant.
 func resolveCollision(path string, mode collisionMode) (out string, skip bool, err error) {
-	if !pathExists(path) {
-		return path, false, nil
+	// One stat handles both the directory check and collision detection.
+	fi, statErr := os.Stat(path)
+	switch {
+	case statErr != nil:
+		return path, false, nil // let the eventual write report unrelated errors
+	case fi.IsDir():
+		return "", false, dirOutputError(path)
 	}
 	switch mode {
 	case collisionOverwrite:
@@ -194,4 +199,29 @@ func nextAvailableFunc(path string, taken func(string) bool) string {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// dirOutputError reports an output path that names an existing directory.
+func dirOutputError(path string) error {
+	return usagef("output path is an existing directory: %s (give a file path)", path)
+}
+
+// rejectDirOutput rejects an existing directory before collision handling can
+// attempt to replace it with a staged file.
+func rejectDirOutput(path string) error {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return dirOutputError(path)
+	}
+	return nil
+}
+
+// rejectDirIsFile rejects a --dir value that names an existing non-directory.
+func rejectDirIsFile(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
+		return usagef("--dir is not a directory: %s", dir)
+	}
+	return nil
 }

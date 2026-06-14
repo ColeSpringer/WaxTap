@@ -85,6 +85,33 @@ func TestCleanMessage(t *testing.T) {
 	}
 }
 
+func TestNoteForcedIOSIncomplete(t *testing.T) {
+	cases := []struct {
+		name   string
+		client string
+		err    error
+		want   bool
+	}{
+		{"forced ios incomplete", "ios", waxtap.ErrIncompleteStream, true},
+		{"forced ios case-insensitive", "iOS", waxtap.ErrIncompleteStream, true},
+		{"forced ios wrapped incomplete", "ios", fmt.Errorf("deliver: %w", waxtap.ErrIncompleteStream), true},
+		{"forced ios other error", "ios", waxtap.ErrVideoUnavailable, false},
+		{"default chain incomplete", "", waxtap.ErrIncompleteStream, false},
+		{"forced web incomplete", "web", waxtap.ErrIncompleteStream, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var errBuf strings.Builder
+			env := &appEnv{out: &strings.Builder{}, errOut: &errBuf, cfg: &appConfig{client: tc.client}}
+			noteForcedIOSIncomplete(env, tc.err)
+			got := strings.Contains(errBuf.String(), "iOS byte delivery is best-effort")
+			if got != tc.want {
+				t.Errorf("note emitted=%v (%q), want %v", got, errBuf.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestErrorHint_WebEmbeddedFallback(t *testing.T) {
 	err := &waxtap.PlayabilityError{
 		Status:   "ERROR",
