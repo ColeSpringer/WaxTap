@@ -10,7 +10,7 @@ profiles, and verify fixes.
    ```
    waxtap doctor            # extract + resolve + small byte read (cheap)
    waxtap doctor --full     # also download a whole track
-   waxtap doctor --video-id <id-or-url>   # check a specific video
+   waxtap doctor --video <id-or-url>      # check a specific video
    ```
    `doctor` tries a list of known-good videos, so one deleted video does not
    decide the result. Exit code `4` means an extraction/cipher failure: the class
@@ -109,7 +109,7 @@ the current stable Chrome major without authentication, query
 To update the emulated major without rebuilding, use a runtime override:
 
 ```sh
-waxtap --chrome-major 151 info <url>
+waxtap info <url> --chrome-major 151
 # or: WAXTAP_CHROME_MAJOR=151, or "chromeMajor": 151 in config.json
 ```
 
@@ -127,7 +127,7 @@ rebuild. Point WaxTap at a JSON file that replaces the built-in client strategy
 chain:
 
 ```sh
-waxtap --profile-override ./profiles.json info <url>
+waxtap info <url> --profile-override ./profiles.json
 # or: WAXTAP_PROFILE_OVERRIDE=./profiles.json, or "profileOverridePath" in config.json
 ```
 
@@ -192,8 +192,8 @@ template mirrors the current defaults in `youtube/profile.go`:
 
 Notes:
 
-- `requiresPoTokens` is a list of scope names. WaxTap currently applies `player`
-  and `gvs`; omit the field or use `[]` for none. The `none` sentinel must appear
+- `requiresPoTokens` is a list of scope names. WaxTap supports `player` and
+  `gvs`; omit the field or use `[]` for none. The `none` sentinel must appear
   alone, and unsupported scopes such as `subtitles` are rejected.
 - `needsSignatureTimestamp` must be `true` for WEB-family clients that decipher
   signatures (`WEB`, `WEB_EMBEDDED_PLAYER`); without it the `/player` request omits
@@ -201,16 +201,15 @@ Notes:
   reaches SABR. Mobile clients on direct URLs (`ANDROID_VR`, `IOS`) leave it unset.
 - `embedUrl` sets `context.thirdParty.embedUrl`, which `WEB_EMBEDDED_PLAYER`
   requires (a third-party embed origin, not youtube.com). Caveat: even with it,
-  YouTube currently returns `This video is unavailable` (error 152) for the embedded
-  client on many public videos. That is a selective/region restriction tracked
-  upstream as yt-dlp #16077, not a WaxTap bug, so embedded is an unreliable fallback
-  right now.
+  YouTube returns `This video is unavailable` (error 152) for the embedded client
+  on many public videos. That is a selective/region restriction tracked upstream
+  as yt-dlp #16077, not a WaxTap bug, so embedded is an unreliable fallback.
 - Headers such as `X-Youtube-Client-Name` are derived from the scalar fields. Do
   not add a separate header map to the JSON.
 - An override replaces only the primary extraction chain. Player discovery, the
-  watch-page scrape, and playlist fallback still use the built-in WEB identity,
+  watch-page scrape, and playlist fallback use the built-in WEB identity,
   so an override may use a different WEB User-Agent than those requests. The
-  player, PO-token, and stream requests for an extraction still use its winning
+  player, PO-token, and stream requests for an extraction use its winning
   profile consistently, and discovery never requests a PO token. Use
   `--chrome-major` instead when only the built-in Chrome identity needs to change;
   the two options cannot be combined.
@@ -222,7 +221,7 @@ Notes:
 ### Profile refresh checklist
 
 When a client starts returning playability `ERROR`, HTTP 400, empty formats, or
-URLs that now need a PO token, refresh the profile deliberately:
+URLs that require a PO token, refresh the profile deliberately:
 
 - Verify `clientName`, numeric `innerTubeId`, version, user agent, device fields,
   and whether the client should post to a different InnerTube host.
@@ -231,8 +230,8 @@ URLs that now need a PO token, refresh the profile deliberately:
   resolution. WEB declares `["player", "gvs"]`.
 - Keep at least one playlist-capable profile (`WEB` today) in the chain unless
   playlist support has moved elsewhere.
-- Add or update a fixture that captures the new behavior before changing parser
-  or resolver code.
+- Add or update a fixture that captures the response before changing parser or
+  resolver code.
 
 ## On-disk cache
 
@@ -346,21 +345,21 @@ stream under that browser's exact `visitorData`.
   default chain first; only if it fails, run a second `Client` with `--client web
   --session-url ...` (or `--visitor-data ...`).
 
-**WEB streams end to end with the full setup, but it is still not the everyday
-path.** A uniform WEB chain, an adopted coherent session, and a GVS provider on the
+**WEB streams end to end with the full setup, but WEB is not the default path.**
+A uniform WEB chain, an adopted coherent session, and a GVS provider on the
 same egress IP download a complete, playable Opus/WebM (ffprobe-verified). The
 pieces:
 
 - **`selected_audio_format_ids` (field 16), not `selected_format_ids` (field 2).**
-  Field 2 is the deprecated form; the server only emits the WebM init
+  Selecting audio through field 2 does not produce a WebM init. The server emits it
   (`FORMAT_INITIALIZATION_METADATA` + a `MEDIA_HEADER{is_init=1, seq=0}` whose bytes
   begin with the EBML magic) when the audio format is selected via field 16. This is
   what `buildRequest` sends; confirmed by diffing a browser SABR request.
-- **`STREAM_PROTECTION_STATUS = 2` (PENDING) is non-terminal.** WaxTap used to bail
-  on `status >= 2`; the googlevideo reference aborts only on `3` (REQUIRED). Status 2
-  still streams media, so `consume` consumes it and continues; only status 3 yields
+- **`STREAM_PROTECTION_STATUS = 2` (PENDING) is non-terminal.** The googlevideo
+  reference aborts only on `3` (REQUIRED). Status 2 streams media, so `consume`
+  consumes it and continues; only status 3 yields
   `ErrNeedsPOToken`. A status-2 stream that ends with no end-segment or content
-  length still errors via `stallResult`, so a withheld partial is never served as
+  length errors via `stallResult`, so a withheld partial is never served as
   complete.
 - **Coherent session.** A working WEB run needs both `visitorData` and cookies from
   the same browser that mints the token, on the same egress IP. `--session-url`
@@ -382,7 +381,7 @@ WEB is forced (see [Client-profile override files](#client-profile-override-file
 or reached by fallback.
 
 The WEB path has two requirements. Missing either one fails with a typed error
-rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
+rather than dropping to low-quality audio. WaxTap does not fall back to itag 18.
 
 - A `signatureTimestamp` (sts) in the `/player` request. WaxTap reads it from
   `base.js` (`youtube/internal/resolver/cipher.go`, `stsPatterns`). A missing or
@@ -397,11 +396,11 @@ rather than dropping to low-quality audio; there is no legacy itag-18 fallback.
   `STREAM_PROTECTION_STATUS = 3` (REQUIRED) surfaces as `ErrNeedsPOToken`; status 2
   (PENDING) is consumed and streamed (see
   [External session adoption](#external-session-adoption) for the full working
-  setup). Status 2 still caps WEB SABR at a ~1-minute preview for automated
+  setup). Status 2 caps WEB SABR at a ~1-minute preview for automated
   clients, and a better token does not lift it (see [Diagnosing a SABR
   stall](#diagnosing-a-sabr-stall)); full WEB audio comes from an attested
   identity, either a `/player-context` handoff (status-1 URL) or `/session`
-  adoption. ANDROID_VR (which does not use WEB SABR) remains the
+  adoption. ANDROID_VR (which does not use WEB SABR) is the
   zero-dependency default.
 
 ### When SABR breaks
@@ -426,13 +425,13 @@ pinned upstream revision recorded as `upstreamCommit` in `proto.go` (currently
   byte order is easy to invert, so verify it against LuanRT/googlevideo
   `src/core/UmpReader.ts` and `UmpWriter.ts` at the pinned `upstreamCommit`;
   `ump_test.go`'s wire-vector cases assert literal bytes (e.g. `32769` is
-  `c1 00 04`), so an inversion fails fast. An earlier inversion decoded a 32 KB
-  `MEDIA` size as 66560 and mis-framed the rest of the stream, which looked like a
-  withheld-media attestation problem but was purely the decoder. The part-id
+  `c1 00 04`), so an inversion fails fast. A byte-order error can decode a 32 KB
+  `MEDIA` size as 66560 and mis-frame the rest of the stream, which resembles a
+  withheld-media attestation problem. The part-id
   constants run from `MEDIA_HEADER=20` to
   `SABR_CONTEXT_SENDING_POLICY=59` and come from the same revision
   (`protos/video_streaming/ump_part_id.proto`). Unknown part ids are skipped by
-  their encoded size, so new parts stay compatible.
+  their encoded size, so unrecognized parts do not break decoding.
 
 One limitation matters if a specific video stalls or truncates:
 
@@ -440,18 +439,18 @@ One limitation matters if a specific video stalls or truncates:
   complete), so it cannot use the parallel-chunk download path. A SABR download is
   single-stream.
 
-`SABR_CONTEXT_UPDATE` (57) and `SABR_CONTEXT_SENDING_POLICY` (59) are handled
-(commit `5ced779`): `applyContextUpdates`/`applyContextPolicy` fold the update into
-the stored context and echo active types in subsequent requests. They are exercised
-only after attestation passes (status 1), so they stay covered by offline tests
-rather than the live WEB path, which currently stops at the GVS gate (below).
+`SABR_CONTEXT_UPDATE` (57) and `SABR_CONTEXT_SENDING_POLICY` (59) are handled by
+`applyContextUpdates` and `applyContextPolicy`, which fold updates into the stored
+context and echo active types in subsequent requests. They are exercised only
+after attestation passes (status 1), so offline tests cover them because the live
+WEB path stops at the GVS gate described below.
 
 The CLI detects SABR without a provider, since routing to a SABR stream happens
-before any token is minted: `info --show-urls` prints `SABR (no direct URL)` and
+before any token is minted: `info --show-url` prints `SABR (no direct URL)` and
 the JSON sets `resolved.isSabr`.
 
 ```sh
-waxtap --profile-override ./profiles.json info <url> --show-urls
+waxtap info <url> --profile-override ./profiles.json --show-url
 ```
 
 Reading the bytes (`download`, or `doctor`'s byte read) needs the GVS token. The
@@ -461,9 +460,8 @@ without one it fails with `ErrNeedsPOToken`.
 
 ### Diagnosing a SABR stall
 
-The known WEB-SABR cap (root-caused by live capture + a joint investigation with
-the WaxSeal PO-token team, 2026-06): when `STREAM_PROTECTION_STATUS` stays 2
-(attestation pending), the server delivers roughly the first minute of audio
+The known WEB-SABR cap occurs when `STREAM_PROTECTION_STATUS` stays 2
+(attestation pending). The server delivers roughly the first minute of audio
 (itag 258 is about 70s / 8 segments / 3.39 MB; itag 251 is about 60s / 6
 segments) and then goes media-empty for the rest of the session, no matter how
 the request advances.
@@ -481,7 +479,7 @@ re-chase either. The evidence:
   help.
 - Also ruled out: video (a concurrent video track does not lift the audio cap),
   anonymous cookies (googlevideo is a different eTLD+1; the browser sends none),
-  egress IP (residential, still capped), wall-clock pacing (capping reported
+  residential egress IP, wall-clock pacing (capping reported
   `player_time_ms` to real elapsed and waiting 115s does not resume), readahead,
   audio format/bitrate, and client patience (polling 70+ rounds past the wall
   with raised guards never resumes).
@@ -508,16 +506,15 @@ descrambles `n` with its `player_url`, binds a GVS token to its `visitorData`, a
 streams through the normal SABR loop. Verified end to end on a fresh live mint:
 full `634.624s`, itag 258, `status 1` every round, cold start.
 
-The dead ends still hold: a WEB `/player` WaxTap calls itself (or any **bare**
-in-page `/player` fetch) earns only the status-2 preview, and no token or
-request-shape tweak lifts it. The difference is whether the attested browser has
-begun playback: the minting browser must establish the playback session before
-its `serverAbrStreamingUrl` carries the status-1 grade. The load-time URL is
+Do not pursue token or request-shape changes for this cap. A WEB `/player` call
+made by WaxTap, or any **bare** in-page `/player` fetch, receives only the
+status-2 preview. The attested browser must begin playback before its
+`serverAbrStreamingUrl` carries the status-1 grade; the load-time URL is
 status-2. WaxTap classifies an un-handed-off status-2 stall token-neutrally as
 `ErrIncompleteStream` ("...under attestation-pending (status 2); cause is upstream
 of the PO token").
 
-**ANDROID_VR remains the default** (no gate, no GVS pot, direct signed URLs):
+**ANDROID_VR is the default** (no gate, no GVS pot, direct signed URLs):
 verified tokenless on `aqz-KE-bpKQ`: full file, `duration=634.624s`,
 30,767,611 bytes, itag 258. WEB is opt-in via `--player-context-url` and falls
 back to ANDROID_VR on failure, so the cap never blocks a download.

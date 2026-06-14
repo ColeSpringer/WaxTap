@@ -79,7 +79,7 @@ type directoryNormalizeParams struct {
 	explicit     string
 	dir          string
 	recursive    bool
-	apply        bool
+	measure      bool
 	target       float64
 	format       string
 	bitrate      int
@@ -89,26 +89,26 @@ type directoryNormalizeParams struct {
 	concurrency  int
 }
 
-// runDirectoryNormalize measures or normalizes recognized audio files from a
-// directory input.
+// runDirectoryNormalize processes recognized audio files in a directory. It
+// normalizes by default and measures loudness when requested.
 func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalizeParams) error {
-	if err := validateNormalizeInputFlags(cmd, p.apply, true, false); err != nil {
+	if err := validateNormalizeInputFlags(cmd, p.measure, true, false); err != nil {
 		return err
 	}
 	if p.explicit != "" {
-		if p.apply {
+		if !p.measure {
 			return usagef("a directory input writes multiple files; use --dir, not a single output path")
 		}
-		return usagef("measurement does not write output; remove the output path or use --apply")
+		return usagef("--measure-loudness does not write output; remove the output path")
 	}
 	concurrency, err := batchConcurrency(env, p.concurrency)
 	if err != nil {
 		return err
 	}
 	ctx := cmd.Context()
-	// Only apply mode excludes an output directory nested beneath the input root.
+	// Exclude a nested output directory only when writing files.
 	excludeDir := ""
-	if p.apply {
+	if !p.measure {
 		excludeDir = p.dir
 	}
 	inputs, ignored, err := collectAudioInputs(p.root, p.recursive, excludeDir)
@@ -119,7 +119,7 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 		env.info("no recognized audio files found in %s\n", p.root)
 	}
 
-	if !p.apply {
+	if p.measure {
 		threadCap := batchThreadCap(concurrency)
 		measureFn := func(ctx context.Context, input, _ string) (*waxtap.Result, error) {
 			return env.client.Process(ctx, waxtap.ProcessRequest{
@@ -137,7 +137,7 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 	}
 
 	if p.format == "" {
-		return usagef("--apply over a directory needs --format (e.g. flac); the output format cannot be inferred per file")
+		return usagef("normalizing a directory requires --format (e.g. flac); use --measure-loudness to analyze without writing files")
 	}
 	tf, err := parseTranscodeFormat(p.format)
 	if err != nil {
@@ -184,15 +184,12 @@ func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec, threadCap int) func(con
 // default, or an explicit --concurrency 0) means serial; only negatives are
 // rejected. It does not auto-detect cores.
 func batchConcurrency(env *appEnv, n int) (int, error) {
-	if n < 0 {
-		return 0, usagef("--concurrency must be non-negative")
+	n, err := clampConcurrency(env, n)
+	if err != nil {
+		return 0, err
 	}
 	if n == 0 {
 		n = 1
-	}
-	if n > maxConcurrency {
-		env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", n, maxConcurrency, maxConcurrency)
-		return maxConcurrency, nil
 	}
 	return n, nil
 }

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/sponsorblock"
 	"github.com/colespringer/waxtap/youtube"
 	"github.com/spf13/cobra"
 )
@@ -84,18 +83,15 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f := cmd.Flags()
 	f.IntVar(&df.itag, "itag", 0, "select an exact itag")
 	f.StringVar(&df.codec, "codec", "", "select the best source matching a codec (hard filter)")
-	f.StringVarP(&df.out, "out", "o", "", "exact output file path (single video only)")
+	f.StringVarP(&df.out, "out", "o", "", "output file path (single video only)")
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
 	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
-	f.StringVar(&df.collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	bindCollisionFlag(f, &df.collisionStr)
 	f.StringVarP(&df.format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&df.bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy transcodes (0 = preset default)")
+	bindBitrateFlag(f, &df.bitrate)
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
-	f.StringVar(&df.sbCats, "sponsorblock", "", "remove SponsorBlock categories (comma-separated; bare flag = music_offtopic; use sponsorblock to preview)")
-	f.StringArrayVar(&df.ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
-	f.StringVar(&df.cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
-	f.DurationVar(&df.crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
-	f.StringVar(&df.sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
+	bindSponsorBlockFlag(f, &df.sbCats, "remove SponsorBlock categories (comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
+	bindCutFlags(f, &df.ranges, &df.cutMode, &df.crossfade, &df.sbOnError)
 	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode)")
 	f.BoolVar(&df.measure, "measure-loudness", false, "measure loudness without altering the audio (still writes the downloaded file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
@@ -103,16 +99,15 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
 	f.BoolVar(&df.writeInfoJSON, "write-info-json", false, "write a <output>.info.json sidecar")
 	f.IntVar(&df.maxItems, "max-items", 0, "cap playlist items (0 = all)")
-	f.IntVar(&df.concurrency, "concurrency", 0, "parallel downloads for playlists (0 = config/default)")
+	f.IntVar(&df.concurrency, "concurrency", 0, "parallel playlist downloads (0 uses the default of 2)")
 	f.IntVar(&df.maxDownloads, "max-downloads", 0, "maximum download attempts per playlist run (0 = unlimited; skips do not count)")
 	f.DurationVar(&df.sleepInterval, "sleep-interval", 0, "minimum delay before each playlist download after the first (e.g. 5s)")
 	f.DurationVar(&df.maxSleepInterval, "max-sleep-interval", 0, "maximum randomized delay between playlist downloads (requires --sleep-interval)")
 	f.BoolVar(&df.listOnly, "list", false, "list playlist entries without downloading")
 
-	// Allow `--sponsorblock` with no value to mean the default category.
-	if fl := f.Lookup("sponsorblock"); fl != nil {
-		fl.NoOptDefVal = string(sponsorblock.CategoryMusicOffTopic)
-	}
+	bindConfigFlags(f)
+	bindNetworkFlags(f)
+	bindPlayerExtractionFlags(f)
 }
 
 func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
@@ -160,6 +155,20 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 // maxConcurrency bounds the CLI playlist worker pool. DownloadPlaylist applies
 // the same limit for library callers.
 const maxConcurrency = 64
+
+// clampConcurrency validates the requested concurrency. It preserves zero so
+// each caller can choose its own default. Values above maxConcurrency are
+// clamped after a note is printed.
+func clampConcurrency(env *appEnv, n int) (int, error) {
+	if n < 0 {
+		return 0, usagef("--concurrency must be non-negative")
+	}
+	if n > maxConcurrency {
+		env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", n, maxConcurrency, maxConcurrency)
+		return maxConcurrency, nil
+	}
+	return n, nil
+}
 
 // resolve validates download flags and computes values used by every item. It
 // runs before network work so invalid requests fail before a playlist starts.
@@ -227,13 +236,12 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if df.maxDownloads < 0 {
 		return usagef("--max-downloads must be non-negative")
 	}
-	if df.concurrency < 0 {
-		return usagef("--concurrency must be non-negative")
+	// Preserve zero so the library applies the playlist default.
+	n, err := clampConcurrency(env, df.concurrency)
+	if err != nil {
+		return err
 	}
-	if df.concurrency > maxConcurrency {
-		env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", df.concurrency, maxConcurrency, maxConcurrency)
-		df.concurrency = maxConcurrency
-	}
+	df.concurrency = n
 	if df.maxSleepInterval > 0 && df.sleepInterval == 0 {
 		return usagef("--max-sleep-interval requires --sleep-interval")
 	}

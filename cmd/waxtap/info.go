@@ -61,10 +61,13 @@ func newInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&showURLs, "show-urls", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
+	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "ffprobe the selected stream for authoritative rate/channels/bitrate (requires ffmpeg)")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
+	bindConfigFlags(cmd.Flags())
+	bindNetworkFlags(cmd.Flags())
+	bindPlayerExtractionFlags(cmd.Flags())
 	return cmd
 }
 

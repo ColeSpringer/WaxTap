@@ -126,11 +126,11 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 	}
 
 	flags := cmd.Flags()
-	str := func(name, flagVal string, file, env *string, def string) string {
-		return coalesceString(def, file, env, flagPtr(flags, name, flagVal))
+	str := func(name string, file, env *string, def string) string {
+		return coalesceString(def, file, env, flagPtr(flags, name))
 	}
-	boolean := func(name string, flagVal bool, file, env *bool, def bool) bool {
-		return coalesceBool(def, file, env, flagBoolPtr(flags, name, flagVal))
+	boolean := func(name string, file, env *bool, def bool) bool {
+		return coalesceBool(def, file, env, flagBoolPtr(flags, name))
 	}
 
 	a := &appConfig{
@@ -138,31 +138,31 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		quiet:   rootFlagsValue.quiet,
 		verbose: rootFlagsValue.verbose,
 
-		cacheDir: str("cache-dir", rootFlagsValue.cacheDir, fc.CacheDir, ec.CacheDir, ""),
-		noCache:  boolean("no-cache", rootFlagsValue.noCache, fc.NoCache, ec.NoCache, false),
-		tempDir:  str("temp-dir", rootFlagsValue.tempDir, fc.TempDir, ec.TempDir, ""),
+		cacheDir: str("cache-dir", fc.CacheDir, ec.CacheDir, ""),
+		noCache:  boolean("no-cache", fc.NoCache, ec.NoCache, false),
+		tempDir:  str("temp-dir", fc.TempDir, ec.TempDir, ""),
 
-		proxy:    str("proxy", rootFlagsValue.proxy, fc.Proxy, ec.Proxy, ""),
-		insecure: boolean("insecure", rootFlagsValue.insecure, fc.Insecure, ec.Insecure, false),
+		proxy:    str("proxy", fc.Proxy, ec.Proxy, ""),
+		insecure: boolean("insecure", fc.Insecure, ec.Insecure, false),
 
-		perHostQPS: coalesceFloat(0, fc.PerHostQPS, ec.PerHostQPS, flagFloatPtr(flags, "qps", rootFlagsValue.qps)),
-		cooldown:   coalesceDuration(0, fc.CooldownSec, ec.CooldownSec, flagDurationPtr(flags, "cooldown", rootFlagsValue.cooldown)),
-		hl:         str("hl", rootFlagsValue.hl, fc.HL, ec.HL, ""),
-		gl:         str("gl", rootFlagsValue.gl, fc.GL, ec.GL, ""),
+		perHostQPS: coalesceFloat(0, fc.PerHostQPS, ec.PerHostQPS, flagFloatPtr(flags, "qps")),
+		cooldown:   coalesceDuration(0, fc.CooldownSec, ec.CooldownSec, flagDurationPtr(flags, "cooldown")),
+		hl:         str("hl", fc.HL, ec.HL, ""),
+		gl:         str("gl", fc.GL, ec.GL, ""),
 
 		ffmpegProcs:      coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
 		chunks:           coalesceInt(0, fc.Chunks, ec.Chunks, nil),
 		downloads:        coalesceInt(0, fc.Downloads, ec.Downloads, nil),
-		sbBaseURL:        str("sponsorblock-url", rootFlagsValue.sponsorblockURL, fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
-		profileOverride:  str("profile-override", rootFlagsValue.profileOverride, fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
-		chromeMajor:      coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major", rootFlagsValue.chromeMajor)),
-		potokenURL:       str("potoken-url", rootFlagsValue.potokenURL, fc.POTokenURL, ec.POTokenURL, ""),
-		playerContextURL: str("player-context-url", rootFlagsValue.playerContextURL, fc.PlayerContextURL, ec.PlayerContextURL, ""),
-		client:           str("client", rootFlagsValue.client, fc.Client, ec.Client, ""),
-		sessionURL:       str("session-url", rootFlagsValue.sessionURL, fc.SessionURL, ec.SessionURL, ""),
-		visitorData:      str("visitor-data", rootFlagsValue.visitorData, fc.VisitorData, ec.VisitorData, ""),
-		cookiesPath:      str("cookies", rootFlagsValue.cookies, fc.CookiesPath, ec.CookiesPath, ""),
-		apiKey:           str("api-key", rootFlagsValue.apiKey, fc.APIKey, ec.APIKey, ""),
+		sbBaseURL:        str("sponsorblock-url", fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
+		profileOverride:  str("profile-override", fc.ProfileOverridePath, ec.ProfileOverridePath, ""),
+		chromeMajor:      coalesceInt(0, fc.ChromeMajor, ec.ChromeMajor, flagIntPtr(flags, "chrome-major")),
+		potokenURL:       str("potoken-url", fc.POTokenURL, ec.POTokenURL, ""),
+		playerContextURL: str("player-context-url", fc.PlayerContextURL, ec.PlayerContextURL, ""),
+		client:           str("client", fc.Client, ec.Client, ""),
+		sessionURL:       str("session-url", fc.SessionURL, ec.SessionURL, ""),
+		visitorData:      str("visitor-data", fc.VisitorData, ec.VisitorData, ""),
+		cookiesPath:      str("cookies", fc.CookiesPath, ec.CookiesPath, ""),
+		apiKey:           str("api-key", fc.APIKey, ec.APIKey, ""),
 
 		// These are command flags, so configuration applies only when the
 		// corresponding flag is unset.
@@ -183,7 +183,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 // is not an error; an explicitly named file that is missing or malformed is.
 func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	var fc fileConfig
-	path := rootFlagsValue.config
+	path, _ := cmd.Flags().GetString("config")
 	// Only --config requires the named file to exist. Missing environment and
 	// default paths use built-in defaults, while malformed files still return an
 	// error.
@@ -523,41 +523,48 @@ func coalesceDuration(def time.Duration, layers ...*float64) time.Duration {
 	return v
 }
 
-// flagPtr returns a pointer to the flag value when the flag was explicitly set,
-// else nil so a lower-priority layer applies.
-func flagPtr(flags *pflag.FlagSet, name, val string) *string {
-	if flags.Changed(name) {
-		return &val
+// flagPtr returns the current flag value only when the user set the flag.
+// Reading from the FlagSet lets each command own its flag storage. A flag that
+// is absent from the set is treated as unset.
+func flagPtr(flags *pflag.FlagSet, name string) *string {
+	if !flags.Changed(name) {
+		return nil
 	}
-	return nil
+	v, _ := flags.GetString(name)
+	return &v
 }
 
-func flagBoolPtr(flags *pflag.FlagSet, name string, val bool) *bool {
-	if flags.Changed(name) {
-		return &val
+func flagBoolPtr(flags *pflag.FlagSet, name string) *bool {
+	if !flags.Changed(name) {
+		return nil
 	}
-	return nil
+	v, _ := flags.GetBool(name)
+	return &v
 }
 
-func flagFloatPtr(flags *pflag.FlagSet, name string, val float64) *float64 {
-	if flags.Changed(name) {
-		return &val
+func flagFloatPtr(flags *pflag.FlagSet, name string) *float64 {
+	if !flags.Changed(name) {
+		return nil
 	}
-	return nil
+	v, _ := flags.GetFloat64(name)
+	return &v
 }
 
-func flagIntPtr(flags *pflag.FlagSet, name string, val int) *int {
-	if flags.Changed(name) {
-		return &val
+func flagIntPtr(flags *pflag.FlagSet, name string) *int {
+	if !flags.Changed(name) {
+		return nil
 	}
-	return nil
+	v, _ := flags.GetInt(name)
+	return &v
 }
 
-// flagDurationPtr returns an explicitly set duration as seconds.
-func flagDurationPtr(flags *pflag.FlagSet, name string, val time.Duration) *float64 {
-	if flags.Changed(name) {
-		s := val.Seconds()
-		return &s
+// flagDurationPtr returns an explicitly set duration in seconds, as expected by
+// coalesceDuration.
+func flagDurationPtr(flags *pflag.FlagSet, name string) *float64 {
+	if !flags.Changed(name) {
+		return nil
 	}
-	return nil
+	d, _ := flags.GetDuration(name)
+	s := d.Seconds()
+	return &s
 }

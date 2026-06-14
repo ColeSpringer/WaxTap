@@ -215,21 +215,18 @@ func newCutCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path")
-	f.StringArrayVar(&ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
-	f.StringVar(&sbCats, "sponsorblock", "", "remove SponsorBlock categories (YouTube only; comma-separated; bare flag = music_offtopic; use sponsorblock to preview)")
-	f.StringVar(&cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
-	f.DurationVar(&crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
-	f.StringVar(&sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
+	bindCutFlags(f, &ranges, &cutMode, &crossfade, &sbOnError)
+	bindSponsorBlockFlag(f, &sbCats, "remove SponsorBlock categories (YouTube only; comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
 	f.StringVarP(&format, "format", "f", "", "also re-encode to: flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy transcodes (0 = preset default)")
+	bindBitrateFlag(f, &bitrate)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
-	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
-	if fl := f.Lookup("sponsorblock"); fl != nil {
-		fl.NoOptDefVal = "music_offtopic"
-	}
+	bindCollisionFlag(f, &collisionStr)
+	bindConfigFlags(f)
+	bindNetworkFlags(f)
+	bindPlayerExtractionFlags(f)
 	return cmd
 }
 
@@ -324,16 +321,19 @@ func newTranscodeCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path (single file)")
 	f.StringVarP(&format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
-	f.IntVar(&bitrate, "bitrate", 0, "target bitrate in bits/sec for lossy formats (0 = preset default)")
+	bindBitrateFlag(f, &bitrate)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
-	f.StringVar(&collisionStr, "collision", "", "on existing file: fail|overwrite|auto-number|skip (default: fail)")
+	bindCollisionFlag(f, &collisionStr)
 	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input (default: beside each input)")
 	f.BoolVarP(&recursive, "recursive", "r", false, "recurse into subdirectories for a directory input")
 	f.BoolVar(&force, "force", false, "re-encode even when the source already matches the target format")
-	f.IntVar(&concurrency, "concurrency", 0, "number of parallel ffmpeg jobs (0 = serial)")
+	f.IntVar(&concurrency, "concurrency", 0, "parallel ffmpeg jobs (0 runs serially)")
+	bindConfigFlags(f)
+	bindNetworkFlags(f)
+	bindPlayerExtractionFlags(f)
 	return cmd
 }
 

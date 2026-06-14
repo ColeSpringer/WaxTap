@@ -30,6 +30,8 @@ func newCacheCmd() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newCacheDirCmd(), newCacheCleanCmd())
+	// Config flags must be persistent so cache dir and cache clean inherit them.
+	bindConfigFlags(cmd.PersistentFlags())
 	return cmd
 }
 

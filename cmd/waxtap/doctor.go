@@ -75,7 +75,10 @@ func newDoctorCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "download a complete track instead of a small byte range")
-	cmd.Flags().StringVar(&videoID, "video-id", "", "check this specific video/URL instead of the built-in list")
+	cmd.Flags().StringVar(&videoID, "video", "", "check this specific video ID or URL instead of the built-in list")
+	bindConfigFlags(cmd.Flags())
+	bindNetworkFlags(cmd.Flags())
+	bindPlayerExtractionFlags(cmd.Flags())
 	return cmd
 }
 

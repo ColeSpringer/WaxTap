@@ -66,6 +66,132 @@ func TestFlagSurfaceConsistency(t *testing.T) {
 	if newFormatsCmd().Flags().Lookup("no-fallback") == nil {
 		t.Error("formats should expose --no-fallback")
 	}
+
+	// Use --sponsorblock consistently, including its default when no value is given.
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"sponsorblock", newSponsorBlockCmd()},
+		{"download", newDownloadCmd()},
+		{"cut", newCutCmd()},
+	} {
+		f := c.cmd.Flags()
+		if sb := f.Lookup("sponsorblock"); sb == nil {
+			t.Errorf("%s should expose --sponsorblock", c.name)
+		} else if sb.NoOptDefVal != "music_offtopic" {
+			t.Errorf("%s --sponsorblock bare form = %q, want music_offtopic", c.name, sb.NoOptDefVal)
+		}
+		if f.Lookup("categories") != nil {
+			t.Errorf("%s should not expose the removed --categories", c.name)
+		}
+	}
+
+	// Normalize writes by default and uses --measure-loudness for analysis.
+	nf := newNormalizeCmd().Flags()
+	if nf.Lookup("measure-loudness") == nil {
+		t.Error("normalize should expose --measure-loudness")
+	}
+	for _, name := range []string{"apply", "normalize"} {
+		if nf.Lookup(name) != nil {
+			t.Errorf("normalize should not expose --%s", name)
+		}
+	}
+
+	// Download and normalize use the same loudness flag names.
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"download", newDownloadCmd()},
+		{"normalize", newNormalizeCmd()},
+	} {
+		f := c.cmd.Flags()
+		for _, name := range []string{"measure-loudness", "loudness-target"} {
+			if f.Lookup(name) == nil {
+				t.Errorf("%s should expose --%s", c.name, name)
+			}
+		}
+	}
+
+	// Diagnostic flags use their canonical singular forms.
+	if newInfoCmd().Flags().Lookup("show-url") == nil || newInfoCmd().Flags().Lookup("show-urls") != nil {
+		t.Error("info should expose --show-url, not --show-urls")
+	}
+	if newDoctorCmd().Flags().Lookup("video") == nil || newDoctorCmd().Flags().Lookup("video-id") != nil {
+		t.Error("doctor should expose --video, not --video-id")
+	}
+}
+
+// TestExtractionFlagsRelocated verifies that commands expose only the extraction
+// flags they use.
+func TestExtractionFlagsRelocated(t *testing.T) {
+	streamCmds := map[string]*cobra.Command{
+		"info":      newInfoCmd(),
+		"formats":   newFormatsCmd(),
+		"download":  newDownloadCmd(),
+		"cut":       newCutCmd(),
+		"transcode": newTranscodeCmd(),
+		"normalize": newNormalizeCmd(),
+		"doctor":    newDoctorCmd(),
+	}
+	for name, cmd := range streamCmds {
+		f := cmd.Flags()
+		for _, flag := range []string{"proxy", "client", "cache-dir", "potoken-url"} {
+			if f.Lookup(flag) == nil {
+				t.Errorf("%s should expose --%s", name, flag)
+			}
+		}
+	}
+
+	// SponsorBlock makes HTTP requests but does not resolve a player.
+	sb := newSponsorBlockCmd().Flags()
+	if sb.Lookup("proxy") == nil {
+		t.Error("sponsorblock should expose the network flag --proxy")
+	}
+	for _, flag := range []string{"client", "potoken-url", "temp-dir"} {
+		if sb.Lookup(flag) != nil {
+			t.Errorf("sponsorblock should not expose the player flag --%s", flag)
+		}
+	}
+
+	// Non-extraction commands do not expose extraction flags.
+	for name, cmd := range map[string]*cobra.Command{
+		"version":    newVersionCmd(),
+		"exit-codes": newExitCodesCmd(),
+	} {
+		f := cmd.Flags()
+		for _, flag := range []string{"client", "proxy", "cache-dir"} {
+			if f.Lookup(flag) != nil {
+				t.Errorf("%s should not expose --%s", name, flag)
+			}
+		}
+	}
+}
+
+// TestCacheConfigFlagsInherited verifies that cache subcommands inherit the
+// flags read by loadConfig.
+func TestCacheConfigFlagsInherited(t *testing.T) {
+	cache := newCacheCmd()
+	var dir, clean *cobra.Command
+	for _, sub := range cache.Commands() {
+		switch sub.Name() {
+		case "dir":
+			dir = sub
+		case "clean":
+			clean = sub
+		}
+	}
+	if dir == nil || clean == nil {
+		t.Fatalf("cache is missing dir/clean subcommands (dir=%v clean=%v)", dir, clean)
+	}
+	for _, sub := range []*cobra.Command{dir, clean} {
+		for _, flag := range []string{"config", "cache-dir", "no-cache"} {
+			if sub.InheritedFlags().Lookup(flag) == nil {
+				t.Errorf("cache %s should inherit --%s from the parent's PersistentFlags", sub.Name(), flag)
+			}
+		}
+	}
 }
 
 func TestDownloadRejectsIgnoredFlagCombinations(t *testing.T) {

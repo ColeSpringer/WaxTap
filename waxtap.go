@@ -421,7 +421,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 // AudioSelector means best audio. Direct streams include a temporary googlevideo
 // URL and its request metadata. SABR streams set IsSABR and leave URL empty.
 //
-// It is exposed for diagnostics: the CLI's info --show-urls and doctor. Most
+// It is exposed for diagnostics: the CLI's info --show-url and doctor. Most
 // callers use Download or Stream, which never expose the raw URL.
 func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector, opts ...ReadOption) (ResolvedStream, error) {
 	id, err := youtube.ExtractVideoID(url)
@@ -457,7 +457,7 @@ const (
 	InfoBasic InfoDepth = iota
 	// InfoResolved additionally resolves the best-audio stream URL and expiry.
 	// These signed googlevideo URLs are temporary and sensitive; the CLI omits
-	// them from human output unless --show-urls is given.
+	// them from human output unless --show-url is given.
 	InfoResolved
 	// InfoProbe additionally runs ffprobe on the selected format only. This is
 	// network-expensive (it reads the remote signed URL) and is never run on

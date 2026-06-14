@@ -160,20 +160,22 @@ waxtap download <video-url> --sponsorblock --format mp3 --normalize --loudness-t
 waxtap transcode song.flac song.mp3
 
 # Normalize a LOCAL file to -14 LUFS (no network)
-waxtap normalize song.wav --apply --loudness-target -14 --format flac -o song.flac
+waxtap normalize song.wav --loudness-target -14 --format flac -o song.flac
 
-# Transcode or measure every recognized audio file in a directory
+# Transcode every recognized audio file in a directory, or measure loudness
+# without writing output
 waxtap transcode ./album --format mp3 --dir ./out        # -r recurses; --force re-encodes matching files
-waxtap normalize ./album                                 # reports each file's loudness in LUFS
+waxtap normalize ./album --measure-loudness              # reports each file's loudness in LUFS
 
 # Normalize each file independently to -14 LUFS
-waxtap normalize ./album --apply --loudness-target -14 --format flac --dir ./normalized
+waxtap normalize ./album --loudness-target -14 --format flac --dir ./normalized
 
 # Normalize an album to -14 LUFS while preserving relative track loudness
-waxtap normalize --album --apply --loudness-target -14 --format flac --dir ./normalized-album ./album/*.flac
+waxtap normalize --album --loudness-target -14 --format flac --dir ./normalized-album ./album/*.flac
 
-# Download a playlist into a directory. --download-archive skips IDs downloaded
-# on earlier runs; --collision auto-number preserves tracks that share a title.
+# Download a playlist into a directory. WaxTap creates and updates the archive
+# file to skip IDs already recorded there; --collision auto-number preserves
+# tracks that share a title.
 waxtap download <playlist-url> -d ./music --download-archive archive.txt --collision auto-number
 
 # Download serially, waiting 5 seconds between downloads, up to 10 attempts
@@ -269,6 +271,11 @@ environment variable, JSON config file, built-in default. The default config fil
 is `config.json` under `os.UserConfigDir()/waxtap`; override it with `--config`
 or `WAXTAP_CONFIG`.
 
+`--json`, `--quiet`, and `--verbose` are the only global flags. Extraction,
+network, and cache flags appear only on the commands that use them, which keeps
+`version --help` and `exit-codes --help` short. For example, `--proxy` is
+available on `download` and `sponsorblock`, but not on `version`.
+
 Useful operational knobs:
 
 - Cache: `waxtap cache dir`, `waxtap cache clean`, `--cache-dir`,
@@ -306,6 +313,13 @@ Useful operational knobs:
   upper bound, and `--max-downloads` limits download attempts; skipped entries
   and resolution failures do not count. With `--concurrency 1`, the interval
   falls between completed downloads.
+- Download archive (download command): `--download-archive <file>` records the
+  video ID after each successful download. Playlist runs skip IDs already in the
+  file, so re-running a playlist fetches only new entries. The file does not
+  need to exist; WaxTap creates it after the first download. Archives use video
+  IDs rather than output paths, unlike `--collision skip`. WaxTap reads and
+  writes the yt-dlp archive format: one ID per line, with `#` comments and an
+  optional leading `youtube ` token.
 - Channel layout (`download`, `transcode`, `cut`, `normalize`): `--channels
   mono|stereo|surround|any` prefers the best **native** track of that layout. The
   default is `stereo`, so a native stereo mix beats a 387 kbps 5.1 track (itag
@@ -320,7 +334,9 @@ Useful operational knobs:
   chooses stereo over a comparable 5.1 source. `--downmix` applies the selected
   downmix. It never upmixes and requires `--channels mono` or `stereo`. The
   `channels` and `downmix` config keys set the defaults. Library callers opt in
-  with `AudioSelector.WithChannels` and `ProcessSpec.Channels`.
+  with `AudioSelector.WithChannels` and `ProcessSpec.Channels`. `info --channels`
+  previews the `Best audio` selection. `formats` lists every candidate and does
+  not accept a layout flag.
 - Directory processing (`transcode`, `normalize`): directory inputs process
   recognized audio files with these case-insensitive extensions:
   `.flac .wav .mp3 .m4a .aac .opus .ogg .alac .mka .webm`. Other files are
@@ -331,15 +347,17 @@ Useful operational knobs:
 - WaxTap probes each candidate before deciding that its codec already matches the
   target. Matching files are copied unchanged into `--dir`, or left in place when
   no output directory is set. Use `--force` to re-encode them.
-- `--concurrency` sets the number of parallel ffmpeg jobs; `0` (the default) runs
-  them serially. WaxTap limits each job's thread count during parallel runs.
-  `normalize <dir>` without `--apply` prints a per-file loudness table.
-- `normalize` measures loudness by default and writes nothing. `--apply` enables
-  output, and `--loudness-target` is valid only with `--apply`. Measurement runs
-  the full loudness analysis; it is not a dry-run preview of an apply operation.
-- `download --measure-loudness` adds a loudness measurement to the result while
-  still writing the downloaded file, unlike `normalize` without `--apply`, which
-  measures and discards its output.
+- `--concurrency` sets parallelism. The default value, `0`, uses two workers for
+  playlist downloads and runs local ffmpeg batches serially. Local batches
+  include `transcode` and `normalize` over a directory. WaxTap caps each ffmpeg
+  job's thread count during parallel runs.
+- `normalize` writes normalized audio by default, like `transcode`. For one file,
+  provide an output path or `--format`. Directory and album runs require
+  `--format`; albums also require `--dir`. `--measure-loudness` switches to
+  analysis-only mode and prints loudness without writing output.
+  `--loudness-target` sets the normalization target.
+- `download --measure-loudness` adds a loudness measurement while still writing
+  the downloaded file. On `normalize`, the same flag disables output.
 - Metadata and formats: `publishDate` comes from the WEB-only `Microformat`, so
   `android_vr`/`ios` omit it and the `--write-info-json` sidecar drops the key. The
   `formats` table flags `DRC=yes` (dynamic-range-compressed) rows; the same itag

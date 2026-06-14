@@ -49,6 +49,9 @@ func newFormatsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
+	bindConfigFlags(cmd.Flags())
+	bindNetworkFlags(cmd.Flags())
+	bindPlayerExtractionFlags(cmd.Flags())
 	return cmd
 }
 

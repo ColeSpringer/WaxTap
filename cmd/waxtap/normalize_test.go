@@ -3,48 +3,140 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestNormalizeFlagSurface(t *testing.T) {
 	flags := newNormalizeCmd().Flags()
-	for _, name := range []string{"apply", "loudness-target"} {
+	for _, name := range []string{"measure-loudness", "loudness-target", "format", "bitrate", "collision"} {
 		if flags.Lookup(name) == nil {
-			t.Errorf("--%s is missing", name)
+			t.Errorf("normalize should expose --%s", name)
 		}
 	}
-	for _, name := range []string{"target", "measure", "force"} {
+	// Normalize writes by default; --measure-loudness selects analysis-only mode.
+	for _, name := range []string{"apply", "normalize", "measure"} {
 		if flags.Lookup(name) != nil {
-			t.Errorf("--%s should not be exposed", name)
+			t.Errorf("normalize should not expose --%s", name)
 		}
 	}
 }
 
+// TestNormalizeMeasureRejectsWriteFlags verifies that analysis-only mode rejects
+// output-related flags and a positional output path.
 func TestNormalizeMeasureRejectsWriteFlags(t *testing.T) {
 	for _, args := range [][]string{
-		{"in.wav", "--loudness-target", "-16"},
-		{"in.wav", "--format", "flac"},
-		{"in.wav", "--bitrate", "128000"},
-		{"in.wav", "--out", "out.flac"},
-		{"in.wav", "--dir", "out"},
-		{"in.wav", "--collision", "overwrite"},
-		{"in.wav", "--downmix"},
-		{"in.wav", "--channels", "mono"},
-		{"in.wav", "out.flac"},
+		{"in.wav", "--measure-loudness", "--loudness-target", "-16"},
+		{"in.wav", "--measure-loudness", "--format", "flac"},
+		{"in.wav", "--measure-loudness", "--bitrate", "128000"},
+		{"in.wav", "--measure-loudness", "--out", "out.flac"},
+		{"in.wav", "--measure-loudness", "--dir", "out"},
+		{"in.wav", "--measure-loudness", "--collision", "overwrite"},
+		{"in.wav", "--measure-loudness", "--channels", "mono"},
+		{"in.wav", "--measure-loudness", "--downmix"},
+		{"in.wav", "out.flac", "--measure-loudness"}, // positional output
 	} {
 		assertNormalizeUsageError(t, args)
 	}
 }
 
-func TestNormalizeRejectsInputSpecificFlags(t *testing.T) {
-	for _, args := range [][]string{
-		{"in.wav", "--apply", "--format", "flac", "--recursive"},
-		{"in.wav", "--apply", "--format", "flac", "--concurrency", "2"},
-		{"in.wav", "--apply", "--format", "flac", "--dir", "out"},
-		{"a.wav", "b.wav", "--album", "--apply", "--format", "flac", "--dir", "out", "--recursive"},
-		{"a.wav", "b.wav", "--album", "--apply", "--format", "flac", "--dir", "out", "--channels", "mono"},
-	} {
-		assertNormalizeUsageError(t, args)
+// TestNormalizeWriteByDefaultNeedsOutput checks every supported input shape.
+func TestNormalizeWriteByDefaultNeedsOutput(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.wav")
+	f2 := filepath.Join(dir, "b.wav")
+	for _, p := range []string{f1, f2} {
+		if err := os.WriteFile(p, []byte("fixture"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	emptyDir := t.TempDir()
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"file", []string{"missing.wav"}},
+		{"album", []string{"--album", f1, f2}},
+		{"directory", []string{emptyDir}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newNormalizeCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if _, ok := errors.AsType[*usageError](err); !ok {
+				t.Fatalf("normalize %v: err = %v (%T), want *usageError", tc.args, err, err)
+			}
+			if !strings.Contains(err.Error(), "--measure-loudness") {
+				t.Errorf("normalize %v: message = %q, want it to name --measure-loudness", tc.args, err)
+			}
+		})
+	}
+}
+
+// TestValidateNormalizeModeFlags checks flags whose validity depends on mode.
+func TestValidateNormalizeModeFlags(t *testing.T) {
+	writeFlags := []struct{ name, val string }{
+		{"loudness-target", "-16"}, {"format", "flac"}, {"bitrate", "128000"},
+		{"out", "o.flac"}, {"dir", "d"}, {"collision", "overwrite"},
+		{"channels", "mono"}, {"downmix", "true"},
+	}
+	for _, wf := range writeFlags {
+		write := newNormalizeCmd()
+		mustSet(t, write, wf.name, wf.val)
+		if err := validateNormalizeModeFlags(write, false); err != nil {
+			t.Errorf("write mode rejected --%s: %v", wf.name, err)
+		}
+		measure := newNormalizeCmd()
+		mustSet(t, measure, wf.name, wf.val)
+		if err := validateNormalizeModeFlags(measure, true); err == nil {
+			t.Errorf("--measure-loudness accepted --%s, want a usage error", wf.name)
+		}
+	}
+}
+
+// TestValidateNormalizeInputFlags checks flags whose validity depends on input
+// shape.
+func TestValidateNormalizeInputFlags(t *testing.T) {
+	cases := []struct {
+		name              string
+		measure, dir, alb bool
+		flag, val         string
+		wantErr           bool
+	}{
+		// Single-file writes reject the directory-batch flags, including --dir.
+		{"single write recursive", false, false, false, "recursive", "true", true},
+		{"single write concurrency", false, false, false, "concurrency", "2", true},
+		{"single write dir", false, false, false, "dir", "out", true},
+		// Single-file measurement rejects recursive/concurrency (--dir is already
+		// rejected by the mode check).
+		{"single measure recursive", true, false, false, "recursive", "true", true},
+		{"single measure concurrency", true, false, false, "concurrency", "2", true},
+		// Directory writes accept batch flags but reject URL-only flags.
+		{"dir write recursive ok", false, true, false, "recursive", "true", false},
+		{"dir write concurrency ok", false, true, false, "concurrency", "2", false},
+		{"dir write itag", false, true, false, "itag", "140", true},
+		{"dir write codec", false, true, false, "codec", "opus", true},
+		// Albums reject URL flags and per-file/channel flags.
+		{"album itag", false, false, true, "itag", "140", true},
+		{"album recursive", false, false, true, "recursive", "true", true},
+		{"album channels", false, false, true, "channels", "mono", true},
+		{"album out", false, false, true, "out", "o.flac", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newNormalizeCmd()
+			mustSet(t, cmd, tc.flag, tc.val)
+			err := validateNormalizeInputFlags(cmd, tc.measure, tc.dir, tc.alb)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateNormalizeInputFlags err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 

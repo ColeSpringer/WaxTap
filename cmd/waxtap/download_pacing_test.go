@@ -184,15 +184,14 @@ func TestEnvOverlayCooldown(t *testing.T) {
 
 func TestFlagDurationPtr(t *testing.T) {
 	fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
-	var d time.Duration
-	fs.DurationVar(&d, "cooldown", 0, "")
-	if flagDurationPtr(fs, "cooldown", d) != nil {
+	fs.Duration("cooldown", 0, "")
+	if flagDurationPtr(fs, "cooldown") != nil {
 		t.Error("unset flag should yield nil pointer")
 	}
 	if err := fs.Set("cooldown", "8s"); err != nil {
 		t.Fatal(err)
 	}
-	if p := flagDurationPtr(fs, "cooldown", d); p == nil || *p != 8 {
+	if p := flagDurationPtr(fs, "cooldown"); p == nil || *p != 8 {
 		t.Errorf("set flag pointer = %v, want 8 seconds", p)
 	}
 }

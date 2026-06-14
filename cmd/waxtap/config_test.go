@@ -144,15 +144,14 @@ func TestExternalSessionBadCookiesIsUsageError(t *testing.T) {
 
 func TestFlagPtrOnlyWhenChanged(t *testing.T) {
 	fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
-	var v string
-	fs.StringVar(&v, "foo", "def", "")
-	if flagPtr(fs, "foo", v) != nil {
+	fs.String("foo", "def", "")
+	if flagPtr(fs, "foo") != nil {
 		t.Error("unset flag should yield nil pointer")
 	}
 	if err := fs.Set("foo", "bar"); err != nil {
 		t.Fatal(err)
 	}
-	if p := flagPtr(fs, "foo", v); p == nil || *p != "bar" {
+	if p := flagPtr(fs, "foo"); p == nil || *p != "bar" {
 		t.Errorf("set flag pointer = %v", p)
 	}
 }
@@ -199,23 +198,21 @@ func TestEnvOverlayChromeMajorMalformed(t *testing.T) {
 
 func TestFlagIntPtrOnlyWhenChanged(t *testing.T) {
 	fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
-	var v int
-	fs.IntVar(&v, "chrome-major", 0, "")
-	if flagIntPtr(fs, "chrome-major", v) != nil {
+	fs.Int("chrome-major", 0, "")
+	if flagIntPtr(fs, "chrome-major") != nil {
 		t.Error("unset flag should yield nil pointer")
 	}
 	if err := fs.Set("chrome-major", "151"); err != nil {
 		t.Fatal(err)
 	}
-	if p := flagIntPtr(fs, "chrome-major", v); p == nil || *p != 151 {
+	if p := flagIntPtr(fs, "chrome-major"); p == nil || *p != 151 {
 		t.Errorf("set flag pointer = %v", p)
 	}
 }
 
-// newConfigTestCmd builds a command exposing only the --config flag bound to the
-// global rootFlagsValue, as readConfigFile expects.
+// newConfigTestCmd exposes the flag that readConfigFile reads by name.
 func newConfigTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().StringVar(&rootFlagsValue.config, "config", "", "")
+	cmd.Flags().String("config", "", "")
 	return cmd
 }

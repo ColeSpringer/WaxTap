@@ -97,7 +97,7 @@ func TestBatchNormalizeMeasureIntegration(t *testing.T) {
 	synthAudio(t, filepath.Join(root, "b.wav"), "pcm_s16le")
 
 	cmd := newNormalizeCmd()
-	cmd.SetArgs([]string{root})
+	cmd.SetArgs([]string{root, "--measure-loudness"})
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -117,12 +117,12 @@ func TestBatchNormalizeMeasureRejectsDir(t *testing.T) {
 	root := t.TempDir()
 
 	cmd := newNormalizeCmd()
-	cmd.SetArgs([]string{root, "--dir", filepath.Join(root, "normalized")})
+	cmd.SetArgs([]string{root, "--measure-loudness", "--dir", filepath.Join(root, "normalized")})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	err := cmd.Execute()
 	if _, ok := errors.AsType[*usageError](err); !ok {
-		t.Errorf("normalize measure --dir = %v (%T), want usageError", err, err)
+		t.Errorf("normalize --measure-loudness --dir = %v (%T), want usageError", err, err)
 	}
 }
 
