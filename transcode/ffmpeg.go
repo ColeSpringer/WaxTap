@@ -354,6 +354,27 @@ func (e *RunError) Error() string {
 
 func (e *RunError) Unwrap() error { return e.Err }
 
+// emptyDecodeFailure reports whether ffmpeg accepted an input but produced no
+// decodable audio frames.
+func emptyDecodeFailure(err error) bool {
+	runErr, ok := errors.AsType[*RunError](err)
+	if !ok {
+		return false
+	}
+	tail := strings.ToLower(runErr.Stderr)
+	for _, phrase := range []string{
+		"could not open encoder before eof",
+		"nothing was written into output file",
+		"output file is empty",
+		"output file does not contain any stream",
+	} {
+		if strings.Contains(tail, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // RedactPath replaces occurrences of from with to in the message of a RunError
 // chain. It preserves wrapping and returns other errors unchanged.
 func RedactPath(err error, from, to string) error {

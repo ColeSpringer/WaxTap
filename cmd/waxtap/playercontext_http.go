@@ -41,10 +41,10 @@ type playerContextRequest struct {
 
 // playerContextResponse mirrors the WaxSeal /player-context wire contract
 // (snake_case). Metadata and the richer per-format fields may be absent on older
-// servers; their zero values degrade gracefully (video-id filename, unknown
-// duration, quality-blind selection).
+// servers; their zero values allow a video-ID filename, unknown duration, and
+// selection without quality metadata.
 type playerContextResponse struct {
-	Status                       string                    `json:"status"`
+	PlayabilityStatus            string                    `json:"playability_status"`
 	PlayerURL                    string                    `json:"player_url"`
 	ServerAbrStreamingURL        string                    `json:"server_abr_streaming_url"`
 	VideoPlaybackUstreamerConfig string                    `json:"video_playback_ustreamer_config"`
@@ -81,13 +81,11 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 		playerContextRequest{VideoID: videoID}, &out); err != nil {
 		return potoken.PlayerContext{}, err
 	}
-	// Strict validation: reject a context that cannot stream so the caller falls
-	// back to the default chain instantly rather than failing deeper in SABR
-	// setup. The error names the wire keys (snake_case) so a provider author can
-	// match them against their payload. video_playback_ustreamer_config is
-	// validated again in the library, which covers non-CLI providers too.
-	if out.Status != "" && !strings.EqualFold(out.Status, "OK") {
-		return potoken.PlayerContext{}, &sidecarResponseError{label: "player-context server", endpoint: p.endpoint, reason: fmt.Sprintf("status %q", out.Status)}
+	// Reject unusable contexts before SABR setup so the caller can fall back. The
+	// error names the snake_case wire keys for comparison with the response.
+	// video_playback_ustreamer_config is also validated for non-CLI providers.
+	if out.PlayabilityStatus != "" && !strings.EqualFold(out.PlayabilityStatus, "OK") {
+		return potoken.PlayerContext{}, &sidecarResponseError{label: "player-context server", endpoint: p.endpoint, reason: fmt.Sprintf("playability_status %q", out.PlayabilityStatus)}
 	}
 	if out.ServerAbrStreamingURL == "" || out.VisitorData == "" || out.VideoPlaybackUstreamerConfig == "" || len(out.AudioFormats) == 0 {
 		return potoken.PlayerContext{}, &sidecarResponseError{label: "player-context server", endpoint: p.endpoint, reason: "missing server_abr_streaming_url, visitor_data, video_playback_ustreamer_config, or audio_formats"}

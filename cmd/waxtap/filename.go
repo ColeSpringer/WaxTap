@@ -43,15 +43,57 @@ func expandTemplate(tmpl string, d templateData) string {
 	).Replace(tmpl)
 }
 
-// resolveOutputName expands a template and returns a sanitized, cross-platform
-// filename. The extension (the template's trailing {ext}) is preserved through
-// truncation.
+// resolveOutputName expands a template into a sanitized relative path. Literal
+// separators in the template create subdirectories; separators in metadata do
+// not. Each path component is length-capped independently, and the final
+// component keeps the template's {ext}.
 func resolveOutputName(tmpl string, d templateData) string {
-	raw := expandTemplate(tmpl, d)
-	ext := filepath.Ext(raw)
-	stem := strings.TrimSuffix(raw, ext)
-	stem = truncateBytes(sanitizeStem(stem), maxStemBytes)
-	return stem + sanitizeExt(ext)
+	// Split before expansion so separators from metadata remain within one
+	// component. Drop empty components before identifying the filename.
+	var expanded []string
+	for _, part := range strings.FieldsFunc(tmpl, isPathSeparator) {
+		if e := strings.TrimSpace(expandTemplate(part, d)); e != "" {
+			expanded = append(expanded, e)
+		}
+	}
+	if len(expanded) == 0 {
+		return "untitled"
+	}
+	segs := make([]string, len(expanded))
+	last := len(expanded) - 1
+	for i, e := range expanded {
+		stem, ext := e, ""
+		if i == last {
+			ext = filepath.Ext(e)
+			stem = strings.TrimSuffix(e, ext)
+		}
+		seg := truncateBytes(sanitizeStem(stem), maxStemBytes)
+		if i == last {
+			seg += sanitizeExt(ext)
+		}
+		segs[i] = seg
+	}
+	return filepath.Join(segs...)
+}
+
+func isPathSeparator(r rune) bool { return r == '/' || r == '\\' }
+
+// relUnder returns target relative to dir and reports whether target is contained
+// by dir.
+func relUnder(dir, target string) (string, bool) {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+// ensureUnderDir rejects an output path that escapes the base directory.
+func ensureUnderDir(dir, target string) error {
+	if _, ok := relUnder(dir, target); !ok {
+		return usagef("--output-template resolved outside the output directory: %s", target)
+	}
+	return nil
 }
 
 // sanitizeStem makes a filename stem safe on Windows, macOS, and Linux: it drops

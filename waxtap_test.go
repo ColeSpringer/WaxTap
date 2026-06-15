@@ -630,6 +630,25 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: 0}}); err != nil {
 		t.Errorf("zero bitrate = %v, want nil", err)
 	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: maxBitrate + 1}}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("excessive lossy bitrate = %v, want ErrIncompatibleSpec", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: 320000}}); err != nil {
+		t.Errorf("realistic 320 kbps bitrate = %v, want nil", err)
+	}
+	// ffmpeg ignores bitrate for lossless targets, so the upper bound does not apply.
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, Bitrate: maxBitrate + 1}}); err != nil {
+		t.Errorf("high bitrate on a lossless target = %v, want nil (ignored, not an error)", err)
+	}
+}
+
+func TestValidateProcessSpec_NegativeCrossfade(t *testing.T) {
+	if err := validateProcessSpec(ProcessSpec{Cut: &CutSpec{Crossfade: -1}}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("negative crossfade = %v, want ErrIncompatibleSpec (parity with the CLI)", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Cut: &CutSpec{Crossfade: 500 * time.Millisecond}}); err != nil {
+		t.Errorf("non-negative crossfade = %v, want nil", err)
+	}
 }
 
 func TestNew_RejectsInvalidQPS(t *testing.T) {

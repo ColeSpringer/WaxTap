@@ -231,6 +231,146 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 	}
 }
 
+// A GVS mint failure must occur during acquisition so normal fallback remains
+// available. Verify both output paths and the terminal --no-fallback case.
+func TestFacade_DeadGVSProviderFallsBackToChain(t *testing.T) {
+	initBytes, mediaBytes := []byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA")
+	happy := fSabrHappyBody(initBytes, mediaBytes)
+	want := append(append([]byte{}, initBytes...), mediaBytes...)
+
+	newClient := func(t *testing.T) *waxtap.Client {
+		rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/v1/player"):
+				if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR needs no GVS token
+					return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+				}
+				return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+			case strings.Contains(r.URL.RawQuery, "c=android"):
+				return resp(http.StatusOK, happy), nil
+			default:
+				return resp(http.StatusNotFound, nil), nil
+			}
+		})
+		pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+			return iosPlayerContext(), nil // live attested context
+		})
+		deadPO := potoken.ProviderFunc(func(context.Context, potoken.Request) (potoken.Response, error) {
+			return potoken.Response{}, nil // mints nothing usable -> ErrNeedsPOToken
+		})
+		c, err := waxtap.New(waxtap.Options{
+			HTTPClient:            &http.Client{Transport: rt},
+			PlayerContextProvider: pc,
+			POTokenProvider:       deadPO,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	webCtxCounter := func() (func(waxtap.Event), *int) {
+		n := 0
+		return func(e waxtap.Event) {
+			if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+				n++
+			}
+		}, &n
+	}
+
+	// The file sink exercises acquireAndDownload; the writer sink exercises acquire.
+	t.Run("file sink", func(t *testing.T) {
+		ev, n := webCtxCounter()
+		out := filepath.Join(t.TempDir(), "track.webm")
+		res, err := newClient(t).Download(context.Background(), waxtap.Request{
+			URL:         "dummyVideo0",
+			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out), Events: ev},
+		})
+		if err != nil {
+			t.Fatalf("file download should fall back to android_vr: %v", err)
+		}
+		if res.Client != "ANDROID_VR" {
+			t.Errorf("Client = %q, want ANDROID_VR", res.Client)
+		}
+		if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
+			t.Errorf("file = %q, want %q", got, want)
+		}
+		if *n != 1 {
+			t.Errorf("web-context-fallback warnings = %d, want exactly 1", *n)
+		}
+	})
+
+	t.Run("writer sink", func(t *testing.T) {
+		ev, n := webCtxCounter()
+		var buf bytes.Buffer
+		res, err := newClient(t).Download(context.Background(), waxtap.Request{
+			URL:         "dummyVideo0",
+			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToWriter(&buf), Events: ev},
+		})
+		if err != nil {
+			t.Fatalf("writer download should fall back to android_vr: %v", err)
+		}
+		if res.Client != "ANDROID_VR" {
+			t.Errorf("Client = %q, want ANDROID_VR", res.Client)
+		}
+		if !bytes.Equal(buf.Bytes(), want) {
+			t.Errorf("writer = %q, want %q", buf.Bytes(), want)
+		}
+		if *n != 1 {
+			t.Errorf("web-context-fallback warnings = %d, want exactly 1", *n)
+		}
+	})
+
+	t.Run("no-fallback hard-fails", func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "track.webm")
+		_, err := newClient(t).Download(context.Background(), waxtap.Request{
+			URL:         "dummyVideo0",
+			NoFallback:  true,
+			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+		})
+		if !errors.Is(err, waxtap.ErrNeedsPOToken) {
+			t.Fatalf("err = %v, want ErrNeedsPOToken (exit 8) under --no-fallback", err)
+		}
+	})
+}
+
+// Read-only SABR resolution must not mint a delivery token.
+func TestFacade_InfoResolvedSABRSkipsTokenMint(t *testing.T) {
+	var gvsRequested bool
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil // WEB -> SABR formats
+		}
+		return resp(http.StatusNotFound, nil), nil // sts discovery is best-effort
+	})
+	// Mints the player token (so extraction succeeds) but nothing for GVS.
+	playerOnly := potoken.ProviderFunc(func(_ context.Context, req potoken.Request) (potoken.Response, error) {
+		if req.Scope == potoken.ScopeGVS {
+			gvsRequested = true
+			return potoken.Response{}, nil
+		}
+		return potoken.Response{Token: "QUJDREVG"}, nil
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:      &http.Client{Transport: rt},
+		Client:          "web",
+		POTokenProvider: playerOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.InfoResult(context.Background(), "dummyVideo0", waxtap.InfoResolved)
+	if err != nil {
+		t.Fatalf("InfoResolved on a SABR format must not require a GVS token: %v", err)
+	}
+	if info.Video == nil || len(info.Video.Formats) == 0 {
+		t.Errorf("InfoResult.Video = %+v, want resolved metadata", info.Video)
+	}
+	if gvsRequested {
+		t.Error("read-only resolution requested a GVS token; minting should be deferred to delivery")
+	}
+}
+
 // TestFacade_ForcedWebCapReportsIncompleteWithoutWatchPageRetry verifies that a
 // forced WEB client does not retry the equivalent WEB watch-page path.
 func TestFacade_ForcedWebCapReportsIncompleteWithoutWatchPageRetry(t *testing.T) {

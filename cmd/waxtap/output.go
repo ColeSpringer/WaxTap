@@ -291,6 +291,8 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 2, "unsupported-input"
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		c.exitCode, c.code, c.hint = 2, "is-playlist", "the download command expands playlist URLs automatically; info/formats take a single video"
+	case errors.Is(err, waxtap.ErrIsChannel):
+		c.exitCode, c.code, c.hint = 2, "is-channel", "open a specific video from the channel; WaxTap does not enumerate channels"
 	case errors.Is(err, waxtap.ErrInvalidVideoID),
 		errors.Is(err, waxtap.ErrVideoIDTooShort),
 		errors.Is(err, waxtap.ErrInvalidPlaylistID):
@@ -370,6 +372,8 @@ func friendlyError(err error) string {
 		return "ffmpeg/ffprobe not found on PATH"
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "that is a playlist URL, not a single video"
+	case errors.Is(err, waxtap.ErrIsChannel):
+		return "that is a channel URL, not a single video; open a specific video"
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
 	case errors.Is(err, waxtap.ErrPlaylistEmpty):

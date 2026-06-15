@@ -327,7 +327,7 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 // input's directory relative to root.
 func mirrorInto(dir, root, input string, recursive bool, name string) string {
 	if recursive {
-		if rel, err := filepath.Rel(root, filepath.Dir(input)); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		if rel, ok := relUnder(root, filepath.Dir(input)); ok && rel != "." {
 			return filepath.Join(dir, rel, name)
 		}
 	}

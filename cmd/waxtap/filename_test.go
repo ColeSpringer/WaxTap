@@ -61,6 +61,66 @@ func TestResolveOutputNameIndexZeroOmitted(t *testing.T) {
 	}
 }
 
+func TestResolveOutputNameSubdirectory(t *testing.T) {
+	td := templateData{Title: "Song", ID: "abc123", Author: "Artist", Ext: "opus"}
+	got := resolveOutputName("{author}/{id}.{ext}", td)
+	if want := filepath.Join("Artist", "abc123.opus"); got != want {
+		t.Errorf("template = %q, want %q", got, want)
+	}
+	// An empty leading component adds no stray directory.
+	got = resolveOutputName("{author}/{id}.{ext}", templateData{ID: "abc123", Ext: "opus"})
+	if got != "abc123.opus" {
+		t.Errorf("empty author segment should be skipped, got %q", got)
+	}
+}
+
+func TestResolveOutputNameSeparatorInValueStaysOneComponent(t *testing.T) {
+	// A "/" inside a metadata value must not create a directory; only literal
+	// template separators do.
+	got := resolveOutputName("{title} [{id}].{ext}", templateData{Title: "AC/DC", ID: "abc123", Ext: "mp3"})
+	if strings.ContainsAny(got, `/\`) {
+		t.Errorf("value separator leaked into a path: %q", got)
+	}
+	if got != "ACDC [abc123].mp3" {
+		t.Errorf("got %q, want %q", got, "ACDC [abc123].mp3")
+	}
+}
+
+func TestResolveOutputNameTrailingEmptySegmentKeepsExtension(t *testing.T) {
+	// An empty final component must not receive the extension or leave a directory.
+	long := strings.Repeat("x", 300)
+	got := resolveOutputName("{title}.{ext}/{index}", templateData{Title: long, Ext: "opus", Index: 0})
+	if !strings.HasSuffix(got, ".opus") {
+		t.Errorf("trailing empty segment dropped the extension: %q", got)
+	}
+	if strings.ContainsAny(got, `/\`) {
+		t.Errorf("empty final segment left a stray directory: %q", got)
+	}
+}
+
+func TestResolveOutputNameNeutralizesTraversal(t *testing.T) {
+	for _, tmpl := range []string{"/{id}.{ext}", "../{id}.{ext}", "{author}/../{id}.{ext}"} {
+		got := resolveOutputName(tmpl, templateData{ID: "abc123", Ext: "mp3"})
+		if filepath.IsAbs(got) {
+			t.Errorf("%q -> %q is absolute", tmpl, got)
+		}
+		for seg := range strings.SplitSeq(got, string(filepath.Separator)) {
+			if seg == ".." {
+				t.Errorf("%q -> %q keeps a .. component", tmpl, got)
+			}
+		}
+	}
+}
+
+func TestEnsureUnderDir(t *testing.T) {
+	if err := ensureUnderDir("out", filepath.Join("out", "Artist", "id.mp3")); err != nil {
+		t.Errorf("contained path rejected: %v", err)
+	}
+	if err := ensureUnderDir("out", filepath.Join("etc", "passwd")); err == nil {
+		t.Error("a path outside the base dir should be rejected")
+	}
+}
+
 func TestParseCollisionMode(t *testing.T) {
 	for _, tt := range []struct {
 		in   string

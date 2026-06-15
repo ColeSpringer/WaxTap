@@ -124,9 +124,12 @@ func parseSponsorErrorPolicy(s string) (waxtap.SponsorBlockErrorPolicy, error) {
 	}
 }
 
-// parseCutInputs validates the ranges, render mode, and SponsorBlock error policy
-// shared by the download and cut commands.
-func parseCutInputs(ranges []string, cutMode, sbOnError string) ([]waxtap.TimeRange, waxtap.CutMode, waxtap.SponsorBlockErrorPolicy, error) {
+// parseCutInputs validates the ranges, render mode, crossfade, and SponsorBlock
+// error policy shared by the download and cut commands.
+func parseCutInputs(ranges []string, cutMode, sbOnError string, crossfade time.Duration) ([]waxtap.TimeRange, waxtap.CutMode, waxtap.SponsorBlockErrorPolicy, error) {
+	if crossfade < 0 {
+		return nil, 0, 0, usagef("--crossfade must be non-negative")
+	}
 	rangeList, err := parseRanges(ranges)
 	if err != nil {
 		return nil, 0, 0, err

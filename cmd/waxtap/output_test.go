@@ -130,6 +130,20 @@ func TestErrorHint_WebEmbeddedFallback(t *testing.T) {
 	}
 }
 
+func TestChannelURLError(t *testing.T) {
+	c := classifyError(waxtap.ErrIsChannel)
+	if c.exitCode != 2 || c.code != "is-channel" {
+		t.Errorf("classifyError(ErrIsChannel) = {exit %d, code %q}, want {2, is-channel}", c.exitCode, c.code)
+	}
+	msg := friendlyError(waxtap.ErrIsChannel)
+	if strings.HasPrefix(msg, "waxtap:") {
+		t.Errorf("friendlyError leaked the wrapped sentinel prefix: %q", msg)
+	}
+	if !strings.Contains(msg, "channel") || !strings.Contains(msg, "single video") {
+		t.Errorf("friendlyError = %q, want it to name a channel URL and a single video", msg)
+	}
+}
+
 func TestShortsPlaylistError(t *testing.T) {
 	// Shorts shelf playlists are classified as unsupported input, not parser
 	// failures.
@@ -171,6 +185,7 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrUnsupportedInput, 2}, // a correctable bad local input
 		{waxtap.ErrShortsPlaylist, 2},   // known unsupported playlist type
 		{waxtap.ErrIsPlaylist, 2},       // user can select the playlist command
+		{waxtap.ErrIsChannel, 2},        // channel URL, not a single video
 		{waxtap.ErrInvalidConfig, 2},
 		{waxtap.ErrURLExpired, 7},                 // parity with incomplete-stream
 		{waxtap.ErrRequestedFormatUnavailable, 2}, // correctable request error

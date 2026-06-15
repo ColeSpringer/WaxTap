@@ -161,13 +161,16 @@ func resolveMode(mode Mode, crossfade time.Duration, enc transcode.Spec) (Mode, 
 			return 0, fmt.Errorf("%w: copy mode cannot transcode to %v (use accurate or smart mode)", waxerr.ErrIncompatibleSpec, enc.Codec)
 		}
 		if crossfade > 0 {
-			return 0, fmt.Errorf("%w: crossfade requires a re-encode (use accurate mode)", waxerr.ErrIncompatibleSpec)
+			return 0, fmt.Errorf("%w: crossfade requires re-encoding; choose an output format instead of copy", waxerr.ErrIncompatibleSpec)
 		}
 		if len(enc.Filters) > 0 {
 			return 0, fmt.Errorf("%w: encode filters require a re-encode, not copy", waxerr.ErrIncompatibleSpec)
 		}
 	case ModeAccurate:
 		if enc.Codec == transcode.CodecCopy {
+			if crossfade > 0 {
+				return 0, fmt.Errorf("%w: crossfade requires re-encoding; choose an output format instead of copy", waxerr.ErrIncompatibleSpec)
+			}
 			return 0, fmt.Errorf("%w: accurate cut requires an output codec, not copy", waxerr.ErrIncompatibleSpec)
 		}
 	}

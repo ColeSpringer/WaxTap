@@ -38,7 +38,9 @@ func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, format
 	}
 
 	// A format without a URL or cipher is served through the response's SABR
-	// endpoint.
+	// endpoint. The GVS PO token is minted on the delivery path by
+	// SABRStream.PrimeToken or, for direct callers, by the first Open. Read-only
+	// resolution does not mint a token.
 	if rf.URL == "" && rf.SignatureCipher == "" {
 		if ext.serverAbrURL == "" {
 			return MediaPlan{}, fmt.Errorf("%w: candidate has neither URL nor signatureCipher", waxerr.ErrExtractionFailed)

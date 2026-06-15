@@ -18,9 +18,11 @@ package transcode
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/colespringer/waxtap/internal/tempfile"
+	"github.com/colespringer/waxtap/waxerr"
 )
 
 // Result reports a completed transcode.
@@ -61,6 +63,12 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		return Result{}, err // spec error (e.g. copy + filters)
 	}
 	if _, err := r.Run(ctx, cmd); err != nil {
+		if emptyDecodeFailure(err) {
+			// Preserve ffmpeg's diagnostic in verbose logs, but return the same
+			// unsupported-input classification used by Probe.
+			r.log.Debug("transcode produced no output", "err", err)
+			return Result{}, fmt.Errorf("%w: the input has no decodable audio", waxerr.ErrUnsupportedInput)
+		}
 		// ffmpeg's error names the staged temp; show the caller's output path.
 		return Result{}, RedactPath(err, staged.Path(), output)
 	}

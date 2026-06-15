@@ -58,7 +58,11 @@ var ErrRateLimited = errors.New("waxtap: rate limited")
 
 // Input / routing.
 var (
-	ErrIsPlaylist        = errors.New("waxtap: URL is a playlist; use Enumerate")
+	ErrIsPlaylist = errors.New("waxtap: URL is a playlist; use Enumerate")
+	// ErrIsChannel indicates a channel URL (/@handle, /c/, /channel/, /user/) was
+	// passed where a single video is required. It is its own sentinel, not a
+	// malformed-video-ID error.
+	ErrIsChannel         = errors.New("waxtap: URL is a channel, not a single video")
 	ErrInvalidVideoID    = errors.New("waxtap: invalid characters in video ID")
 	ErrVideoIDTooShort   = errors.New("waxtap: video ID is too short")
 	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist ID")

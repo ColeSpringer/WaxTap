@@ -91,6 +91,55 @@ func TestReadConfigFile(t *testing.T) {
 	}
 }
 
+func TestReadConfigFileRejectsUnknownKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"qps":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newConfigTestCmd()
+	if err := cmd.Flags().Set("config", path); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readConfigFile(cmd)
+	if err == nil || !isUsageError(err) {
+		t.Fatalf("readConfigFile err = %v, want a usage error for the misspelled key", err)
+	}
+	if !strings.Contains(err.Error(), "qps") {
+		t.Errorf("err = %q, want it to name the unknown field", err)
+	}
+}
+
+func TestReadConfigFileRejectsTrailingData(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"clean", `{"hl":"en"}`, true},
+		{"trailing newline ok", "{\"hl\":\"en\"}\n", true},
+		{"concatenated objects", `{"hl":"en"}{"hl":"ja"}`, false},
+		{"trailing garbage", `{"hl":"en"} oops`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := newConfigTestCmd()
+			if err := cmd.Flags().Set("config", path); err != nil {
+				t.Fatal(err)
+			}
+			_, err := readConfigFile(cmd)
+			if (err == nil) != tc.ok {
+				t.Fatalf("readConfigFile err = %v, want ok=%v", err, tc.ok)
+			}
+			if err != nil && !isUsageError(err) {
+				t.Errorf("err = %#v, want a usage error", err)
+			}
+		})
+	}
+}
+
 func TestReadConfigFileMissingExplicitErrors(t *testing.T) {
 	cmd := newConfigTestCmd()
 	if err := cmd.Flags().Set("config", filepath.Join(t.TempDir(), "nope.json")); err != nil {
@@ -132,13 +181,41 @@ func TestExternalSessionBadCookiesIsUsageError(t *testing.T) {
 		t.Fatal("a missing --cookies file should error")
 	}
 	if !isUsageError(err) {
-		t.Errorf("err = %#v, want a usageError", err)
+		t.Errorf("err = %#v, want a usage error", err)
 	}
 	if got := exitCodeFor(err); got != 2 {
 		t.Errorf("exit = %d, want 2", got)
 	}
 	if !strings.Contains(err.Error(), "read cookies") {
 		t.Errorf("err = %q, want it to identify the cookie read failure", err)
+	}
+}
+
+func TestValidateLocale(t *testing.T) {
+	cases := []struct {
+		name   string
+		hl, gl string
+		ok     bool
+	}{
+		{"empty unset", "", "", true},
+		{"plain language and region", "en", "US", true},
+		{"language with region subtag", "pt-BR", "BR", true},
+		{"multi-subtag language", "zh-Hans-CN", "CN", true},
+		{"invalid region", "en", "ZZ123", false},
+		{"invalid language", "e!", "US", false},
+		{"region too long", "en", "USA", false},
+		{"only gl set", "", "US", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateLocale(tc.hl, tc.gl)
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateLocale(%q,%q) = %v, want ok=%v", tc.hl, tc.gl, err, tc.ok)
+			}
+			if err != nil && !isUsageError(err) {
+				t.Errorf("err = %#v, want a usage error (exit 2)", err)
+			}
+		})
 	}
 }
 

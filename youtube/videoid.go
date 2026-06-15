@@ -68,9 +68,14 @@ func ExtractVideoID(input string) (string, error) {
 		if id := videoIDFromPath(u); id != "" {
 			return validateID(id)
 		}
+		seg := firstSegment(u.Path)
 		// A URL on a known host with no video, but a playlist reference.
-		if q.Get("list") != "" || firstSegment(u.Path) == "playlist" {
+		if q.Get("list") != "" || seg == "playlist" {
 			return "", waxerr.ErrIsPlaylist
+		}
+		// Classify channel URLs separately so callers can provide specific guidance.
+		if strings.HasPrefix(seg, "@") || seg == "c" || seg == "channel" || seg == "user" {
+			return "", waxerr.ErrIsChannel
 		}
 		// Report a recognized YouTube URL without a video separately from malformed
 		// input.

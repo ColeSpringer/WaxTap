@@ -36,6 +36,16 @@ func TestValidateItag(t *testing.T) {
 	}
 }
 
+func TestParseCutInputs_RejectsNegativeCrossfade(t *testing.T) {
+	_, _, _, err := parseCutInputs([]string{"0-3"}, "smart", "proceed", -time.Second)
+	if err == nil || !isUsageError(err) {
+		t.Fatalf("parseCutInputs(crossfade=-1s) err = %v, want a usage error", err)
+	}
+	if _, _, _, err := parseCutInputs([]string{"0-3"}, "smart", "proceed", 500*time.Millisecond); err != nil {
+		t.Errorf("parseCutInputs with a non-negative crossfade should pass: %v", err)
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	tests := []struct {
 		in   string

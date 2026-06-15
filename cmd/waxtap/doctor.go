@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/colespringer/waxtap"
 	"github.com/spf13/cobra"
@@ -46,7 +47,7 @@ func newDoctorCmd() *cobra.Command {
 			}
 
 			ffmpegPath, _ := exec.LookPath("ffmpeg")
-			rep := &doctorReport{FFmpegPath: ffmpegPath}
+			rep := &doctorReport{FFmpegPath: ffmpegPath, ForcedIOS: strings.EqualFold(env.cfg.client, "ios")}
 
 			var lastErr error
 			for _, id := range candidates {
@@ -89,6 +90,7 @@ type doctorReport struct {
 	Itag       int
 	Bytes      int64
 	Full       bool
+	ForcedIOS  bool
 }
 
 // runDoctorCheck performs one candidate's check, filling rep on success.
@@ -148,9 +150,21 @@ func renderDoctorHuman(env *appEnv, rep *doctorReport, lastErr error) {
 		env.printf("resolve:  ok (itag %d)\n", rep.Itag)
 		env.printf("download: ok (%s, %s)\n", mode, humanBytes(rep.Bytes))
 		env.printf("\nhealthy\n")
+		if note := doctorIOSBestEffortNote(rep); note != "" {
+			env.printf("note: %s\n", note)
+		}
 		return
 	}
 	env.printf("\nUNHEALTHY: %s\n", friendlyError(lastErr))
+}
+
+// doctorIOSBestEffortNote warns when a forced-iOS range check passes without
+// verifying a complete download.
+func doctorIOSBestEffortNote(rep *doctorReport) string {
+	if !rep.Healthy || rep.Full || !rep.ForcedIOS {
+		return ""
+	}
+	return "iOS byte delivery is best-effort. This range check passed, but longer downloads may still be incomplete. Verify with `doctor --client ios --full --video <long-id>`"
 }
 
 func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
@@ -163,6 +177,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		Itag          int    `json:"itag,omitempty"`
 		Bytes         int64  `json:"bytes,omitempty"`
 		FullDownload  bool   `json:"fullDownload"`
+		Note          string `json:"note,omitempty"`
 		Error         string `json:"error,omitempty"`
 	}{
 		SchemaVersion: schemaVersion,
@@ -173,6 +188,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		Itag:          rep.Itag,
 		Bytes:         rep.Bytes,
 		FullDownload:  rep.Full,
+		Note:          doctorIOSBestEffortNote(rep),
 	}
 	if lastErr != nil {
 		out.Error = lastErr.Error()

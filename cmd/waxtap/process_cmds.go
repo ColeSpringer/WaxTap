@@ -147,7 +147,7 @@ func newCutCmd() *cobra.Command {
 
 			// Parse every shared cut flag before the early returns so cut and
 			// download apply the same validation.
-			rangeList, mode, pol, err := parseCutInputs(ranges, cutMode, sbOnError)
+			rangeList, mode, pol, err := parseCutInputs(ranges, cutMode, sbOnError, crossfade)
 			if err != nil {
 				return err
 			}

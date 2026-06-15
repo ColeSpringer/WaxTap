@@ -60,6 +60,22 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
+func TestResolveMode_CrossfadeCopyNamesCrossfade(t *testing.T) {
+	copyc := transcode.Spec{Codec: transcode.CodecCopy}
+	for _, mode := range []Mode{ModeAccurate, ModeCopy} {
+		_, err := resolveMode(mode, time.Second, copyc)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Fatalf("mode %v: err = %v, want ErrIncompatibleSpec", mode, err)
+		}
+		if !strings.Contains(err.Error(), "crossfade") || !strings.Contains(err.Error(), "output format") {
+			t.Errorf("mode %v: message = %q, want it to name the crossfade and the output format", mode, err)
+		}
+		if strings.Contains(err.Error(), "accurate cut") {
+			t.Errorf("mode %v: message = %q, should not leak the internal accurate-cut mode", mode, err)
+		}
+	}
+}
+
 func TestValidateCrossfade(t *testing.T) {
 	cases := []struct {
 		name  string

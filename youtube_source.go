@@ -184,6 +184,13 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 
 	// SABR reloads are pinned to the original attempt by SABRStream.reextract.
 	if plan.SABR != nil {
+		// Prime before Open so acquisition can fall back when the provider fails.
+		pctx, cancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
+		err := plan.SABR.PrimeToken(pctx)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
 		a.transfer = sabrTransfer{dl: c.dl, handle: plan.SABR}
 		return a, nil
 	}
@@ -275,6 +282,8 @@ func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, 
 	}
 	c.noteWebContextSuccess()
 
+	// Only player-context failures affect its cooldown. GVS token failures come
+	// from a separate provider.
 	a, err := c.buildTransfer(ctx, req, id, target, ext, em, pinnedItag)
 	if err != nil {
 		return nil, err

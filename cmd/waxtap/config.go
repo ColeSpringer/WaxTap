@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -175,7 +177,30 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		sponsorBlockTimeout: coalesceDuration(defaultSponsorBlockTimeout, fc.SponsorBlockTimeoutSec, ec.SponsorBlockTimeoutSec),
 		chunkTimeout:        coalesceDuration(defaultChunkTimeout, fc.ChunkTimeoutSec, ec.ChunkTimeoutSec),
 	}
+	if err := validateLocale(a.hl, a.gl); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// hlPattern and glPattern validate the locale forms accepted by YouTube: a
+// BCP-47-style language tag for hl and a two-letter region for gl. They validate
+// syntax only and intentionally do not maintain an ISO code list.
+var (
+	hlPattern = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$`)
+	glPattern = regexp.MustCompile(`^[A-Za-z]{2}$`)
+)
+
+// validateLocale checks the resolved --hl and --gl values. Empty values are
+// valid because the YouTube client applies its own defaults.
+func validateLocale(hl, gl string) error {
+	if hl != "" && !hlPattern.MatchString(hl) {
+		return usagef("invalid --hl %q (want a language code like en or pt-BR)", hl)
+	}
+	if gl != "" && !glPattern.MatchString(gl) {
+		return usagef("invalid --gl %q (want a two-letter region code like US)", gl)
+	}
+	return nil
 }
 
 // readConfigFile loads the JSON config file: the --config flag, then
@@ -205,8 +230,16 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 		}
 		return fc, usagef("read config %s: %v", path, err)
 	}
-	if err := json.Unmarshal(data, &fc); err != nil {
+	// Treat misspelled keys as configuration errors, matching the environment
+	// overlay's strict parsing.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&fc); err != nil {
 		return fc, usagef("parse config %s: %v", path, err)
+	}
+	// Reject content after the first JSON object. Trailing whitespace is allowed.
+	if dec.More() {
+		return fc, usagef("parse config %s: unexpected trailing data after the JSON object", path)
 	}
 	return fc, nil
 }

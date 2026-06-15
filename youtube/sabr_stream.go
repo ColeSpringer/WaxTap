@@ -32,6 +32,8 @@ type SABRStream struct {
 	pinnedItag    int
 	contentLength int64
 	expiresAt     time.Time
+	// primedToken holds the GVS PO token that PrimeToken minted for the first Open.
+	primedToken *potoken.Response
 }
 
 // SABRStreamInfo describes an open SABR stream.
@@ -65,10 +67,13 @@ func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total
 	}
 
 	ext := s.ext
+	primed := s.primedToken
+	s.primedToken = nil // single-use: a second Open re-mints
 	var failure *potoken.HTTPFailure
 	reloads, potRefreshes := 0, 0
 	for {
-		cfg, err := s.client.buildSABRConfig(ctx, ext, s.formatIdx, failure)
+		cfg, err := s.client.buildSABRConfig(ctx, ext, s.formatIdx, failure, primed)
+		primed = nil // the primed token applies only to the first build
 		if err != nil {
 			return nil, SABRStreamInfo{}, err
 		}
@@ -100,6 +105,19 @@ func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total
 	}
 }
 
+// PrimeToken mints the GVS PO token before Open so provider failures surface
+// while the caller can still use a fallback. The first Open consumes the token;
+// later opens, reloads, and refreshes mint a new one. It is a no-op when the
+// selected profile does not require a GVS token.
+func (s *SABRStream) PrimeToken(ctx context.Context) error {
+	token, err := s.client.fetchPOToken(ctx, s.ext.profile, s.ext.session, s.ext.video.ID, potoken.ScopeGVS, nil)
+	if err != nil {
+		return err
+	}
+	s.primedToken = token
+	return nil
+}
+
 // reextract refreshes the player response and finds the originally selected
 // itag, whose index may have changed. A WEB-context extraction re-fetches a
 // fresh attested context (not the InnerTube chain) so the new URL, session, and
@@ -128,7 +146,8 @@ func (s *SABRStream) reextract(ctx context.Context) (*Extraction, error) {
 
 // buildSABRConfig assembles a sabr.Config for ext's format at formatIndex.
 // failure describes the token rejection that triggered a refresh, if any.
-func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (sabr.Config, error) {
+// primed is an optional GVS token to reuse for the first build.
+func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure, primed *potoken.Response) (sabr.Config, error) {
 	rf, ok := ext.rawFormatByIndex(formatIndex)
 	if !ok {
 		return sabr.Config{}, fmt.Errorf("%w: format index %d out of range", waxerr.ErrExtractionFailed, formatIndex)
@@ -137,16 +156,23 @@ func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatInd
 		return sabr.Config{}, fmt.Errorf("%w: SABR format has no serverAbrStreamingUrl", waxerr.ErrExtractionFailed)
 	}
 
-	// The SABR streamerContext carries the raw GVS PO token bytes.
-	token, err := c.fetchPOToken(ctx, ext.profile, ext.session, ext.video.ID, potoken.ScopeGVS, failure)
-	if err != nil {
-		return sabr.Config{}, err
+	// The SABR streamerContext carries the raw GVS PO token bytes. A refresh
+	// always mints a new token.
+	token := primed
+	if failure != nil || token == nil {
+		fresh, err := c.fetchPOToken(ctx, ext.profile, ext.session, ext.video.ID, potoken.ScopeGVS, failure)
+		if err != nil {
+			return sabr.Config{}, err
+		}
+		token = fresh
 	}
 	var potBytes []byte
 	if token != nil {
-		if potBytes, err = decodeBase64Tolerant(token.Token); err != nil {
+		b, err := decodeBase64Tolerant(token.Token)
+		if err != nil {
 			return sabr.Config{}, fmt.Errorf("%w: decode GVS PO token: %v", waxerr.ErrExtractionFailed, err)
 		}
+		potBytes = b
 	}
 
 	ustreamer, err := decodeBase64Tolerant(ext.ustreamerConfig)

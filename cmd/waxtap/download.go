@@ -389,6 +389,9 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 			return waxtap.Request{}, "", nerr
 		}
 		target = filepath.Join(df.dir, resolveOutputName(df.template, td))
+		if err := ensureUnderDir(df.dir, target); err != nil {
+			return waxtap.Request{}, "", err
+		}
 	}
 	resolved, skip, err := reserve.reserveOr(target, df.collision)
 	if err != nil {
@@ -559,7 +562,7 @@ func (df *downloadFlags) transcodeFormat() (waxtap.TranscodeFormat, bool, error)
 func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
 	// Parse every shared cut flag before extraction, even when there is nothing to
 	// cut.
-	ranges, mode, pol, err := parseCutInputs(df.ranges, df.cutMode, df.sbOnError)
+	ranges, mode, pol, err := parseCutInputs(df.ranges, df.cutMode, df.sbOnError, df.crossfade)
 	if err != nil {
 		return nil, err
 	}

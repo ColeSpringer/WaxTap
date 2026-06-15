@@ -103,8 +103,14 @@ func (r *Runner) probe(ctx context.Context, input string, headers http.Header) (
 	// ffprobe can succeed on video-only media. Classify that at the probe
 	// boundary so callers see the same error they get for other unsupported
 	// inputs.
-	if _, ok := pr.AudioStream(); !ok {
+	a, ok := pr.AudioStream()
+	if !ok {
 		return ProbeResult{}, fmt.Errorf("%w: no audio stream", waxerr.ErrUnsupportedInput)
+	}
+	// Empty raw audio can probe successfully with both fields set to zero. Require
+	// both because ffprobe may omit either field for otherwise decodable media.
+	if a.Channels == 0 && a.SampleRate == 0 {
+		return ProbeResult{}, fmt.Errorf("%w: no decodable audio", waxerr.ErrUnsupportedInput)
 	}
 	return pr, nil
 }

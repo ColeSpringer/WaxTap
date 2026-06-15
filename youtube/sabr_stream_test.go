@@ -177,9 +177,56 @@ func TestSABR_ResolveAndStreamBytes(t *testing.T) {
 	if posts != 1 {
 		t.Errorf("SABR POSTs = %d, want 1", posts)
 	}
-	// The GVS token is requested when the SABR request is built, not at resolve.
+	// The GVS token is requested when the SABR request is built (resolution is
+	// read-only and does not mint).
 	if fp.gotReq.Scope != potoken.ScopeGVS {
 		t.Errorf("last provider scope = %v, want GVS", fp.gotReq.Scope)
+	}
+}
+
+func TestSABR_PrimedTokenReusedOnce(t *testing.T) {
+	player := readFixture(t, "player_sabr.json")
+	var posts, gvsMints int
+	prov := providerFunc(func(req potoken.Request) (potoken.Response, error) {
+		if req.Scope == potoken.ScopeGVS {
+			gvsMints++
+		}
+		return potoken.Response{Token: "QUJDREVG"}, nil
+	})
+	c := newTestClientWith(
+		sabrTransport(t, player, [][]byte{sabrHappyBody([]byte("INIT-"), []byte("MEDIA-"))}, &posts),
+		[]ClientProfile{makeProfile(profileWeb)}, prov)
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	plan, err := c.Resolve(context.Background(), ext, 0)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if gvsMints != 0 {
+		t.Fatalf("GVS mints after resolve = %d, want 0 (resolution is read-only)", gvsMints)
+	}
+	if err := plan.SABR.PrimeToken(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if gvsMints != 1 {
+		t.Fatalf("GVS mints after prime = %d, want 1", gvsMints)
+	}
+	rc, _, err := plan.SABR.Open(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer rc.Close()
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if gvsMints != 1 {
+		t.Errorf("GVS mints after open = %d, want 1 (reused primed token, no second mint)", gvsMints)
+	}
+	if posts != 1 {
+		t.Errorf("SABR POSTs = %d, want 1", posts)
 	}
 }
 
@@ -392,10 +439,40 @@ func TestSABR_ReloadErrorsWhenItagGone(t *testing.T) {
 	}
 }
 
-func TestSABR_OpenNeedsGVSProvider(t *testing.T) {
+func TestSABR_PrimeTokenNeedsGVSProvider(t *testing.T) {
 	player := readFixture(t, "player_sabr.json")
 	var posts int
 	// A provider that supplies the player token but nothing for GVS.
+	prov := providerFunc(func(req potoken.Request) (potoken.Response, error) {
+		if req.Scope == potoken.ScopeGVS {
+			return potoken.Response{}, nil
+		}
+		return potoken.Response{Token: "QUJDREVG"}, nil
+	})
+	c := newTestClientWith(sabrTransport(t, player, nil, &posts),
+		[]ClientProfile{makeProfile(profileWeb)}, prov)
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	// Resolution is read-only and must not mint a GVS token.
+	plan, err := c.Resolve(context.Background(), ext, 0)
+	if err != nil {
+		t.Fatalf("Resolve should not mint a token: %v", err)
+	}
+	// PrimeToken surfaces the missing token before delivery starts.
+	if err := plan.SABR.PrimeToken(context.Background()); !errors.Is(err, waxerr.ErrNeedsPOToken) {
+		t.Fatalf("PrimeToken err = %v, want ErrNeedsPOToken", err)
+	}
+	if posts != 0 {
+		t.Errorf("SABR POSTs = %d, want 0 (no GVS token, no request)", posts)
+	}
+}
+
+func TestSABR_OpenUnprimedNeedsGVSProvider(t *testing.T) {
+	player := readFixture(t, "player_sabr.json")
+	var posts int
 	prov := providerFunc(func(req potoken.Request) (potoken.Response, error) {
 		if req.Scope == potoken.ScopeGVS {
 			return potoken.Response{}, nil
@@ -414,7 +491,7 @@ func TestSABR_OpenNeedsGVSProvider(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 	if _, _, err := plan.SABR.Open(context.Background(), nil); !errors.Is(err, waxerr.ErrNeedsPOToken) {
-		t.Fatalf("Open err = %v, want ErrNeedsPOToken", err)
+		t.Fatalf("Open (unprimed) err = %v, want ErrNeedsPOToken", err)
 	}
 	if posts != 0 {
 		t.Errorf("SABR POSTs = %d, want 0 (no GVS token, no request)", posts)
@@ -438,7 +515,7 @@ func TestBuildSABRConfig(t *testing.T) {
 		ustreamerConfig: "Q0FFU0FnZ0I=",
 	}
 
-	cfg, err := c.buildSABRConfig(context.Background(), ext, 0, nil)
+	cfg, err := c.buildSABRConfig(context.Background(), ext, 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

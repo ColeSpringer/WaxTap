@@ -37,7 +37,10 @@ var (
 	ErrRateLimited = waxerr.ErrRateLimited
 
 	// Input / routing.
-	ErrIsPlaylist        = waxerr.ErrIsPlaylist
+	ErrIsPlaylist = waxerr.ErrIsPlaylist
+	// ErrIsChannel indicates a channel URL was passed where a single video is
+	// required.
+	ErrIsChannel         = waxerr.ErrIsChannel
 	ErrInvalidVideoID    = waxerr.ErrInvalidVideoID
 	ErrVideoIDTooShort   = waxerr.ErrVideoIDTooShort
 	ErrInvalidPlaylistID = waxerr.ErrInvalidPlaylistID

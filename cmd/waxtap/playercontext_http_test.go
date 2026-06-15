@@ -9,7 +9,7 @@ import (
 )
 
 const validPlayerContextJSON = `{
-  "status": "OK",
+  "playability_status": "OK",
   "player_url": "https://www.youtube.com/s/player/444511ca/player_es6.vflset/en_US/base.js",
   "server_abr_streaming_url": "https://rr3.googlevideo.com/videoplayback?n=SCRAMBLED&sabr=1",
   "video_playback_ustreamer_config": "dXN0cmVhbWVy",
@@ -68,10 +68,10 @@ func TestPlayerContextProviderErrors(t *testing.T) {
 		want   string
 	}{
 		{"non-200", http.StatusInternalServerError, "boom", "returned"},
-		{"status not OK", http.StatusOK, `{"status":"ERROR: bot check"}`, "status"},
-		{"missing url", http.StatusOK, `{"status":"OK","visitor_data":"v","audio_formats":[{"itag":251}]}`, "missing"},
-		{"missing visitor", http.StatusOK, `{"status":"OK","server_abr_streaming_url":"u","audio_formats":[{"itag":251}]}`, "missing"},
-		{"no formats", http.StatusOK, `{"status":"OK","server_abr_streaming_url":"u","visitor_data":"v"}`, "missing"},
+		{"status not OK", http.StatusOK, `{"playability_status":"ERROR: bot check"}`, "playability_status"},
+		{"missing url", http.StatusOK, `{"playability_status":"OK","visitor_data":"v","audio_formats":[{"itag":251}]}`, "missing"},
+		{"missing visitor", http.StatusOK, `{"playability_status":"OK","server_abr_streaming_url":"u","audio_formats":[{"itag":251}]}`, "missing"},
+		{"no formats", http.StatusOK, `{"playability_status":"OK","server_abr_streaming_url":"u","visitor_data":"v"}`, "missing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

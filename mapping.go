@@ -91,6 +91,10 @@ const (
 	loudnessTargetMax = -5.0
 )
 
+// maxBitrate rejects likely unit mistakes while remaining above practical lossy
+// audio bitrates.
+const maxBitrate = 3_000_000 // bits/sec
+
 // ValidateProcessSpec checks a ProcessSpec without acquiring or processing media.
 // Invalid specs return an error that wraps [ErrIncompatibleSpec].
 // [Client.Download], [Client.Stream], and [Client.Process] call it automatically;
@@ -102,6 +106,11 @@ func ValidateProcessSpec(s ProcessSpec) error { return validateProcessSpec(s) }
 func validateProcessSpec(s ProcessSpec) error {
 	if s.Downmix && s.Channels != LayoutMono && s.Channels != LayoutStereo {
 		return fmt.Errorf("%w: downmix requires Channels mono or stereo, got %s", waxerr.ErrIncompatibleSpec, s.Channels)
+	}
+	// ValidateCrossfade treats non-positive durations as disabled, so reject
+	// negative values before reaching it.
+	if s.Cut != nil && s.Cut.Crossfade < 0 {
+		return fmt.Errorf("%w: crossfade must be non-negative, got %v", waxerr.ErrIncompatibleSpec, s.Cut.Crossfade)
 	}
 	if err := validateLoudness(s.Loudness); err != nil {
 		return err
@@ -124,11 +133,19 @@ func validateLoudness(l *LoudnessSpec) error {
 	return nil
 }
 
-// validateBitrate rejects a negative transcode bitrate. Zero selects the preset
-// default.
+// validateBitrate rejects a negative or implausibly high transcode bitrate. Zero
+// selects the preset default.
 func validateBitrate(t *TranscodeSpec) error {
-	if t != nil && t.Bitrate < 0 {
+	if t == nil {
+		return nil
+	}
+	if t.Bitrate < 0 {
 		return fmt.Errorf("%w: transcode bitrate must be >= 0, got %d", waxerr.ErrIncompatibleSpec, t.Bitrate)
+	}
+	// The upper bound applies only where bitrate is used. ffmpeg ignores it for
+	// lossless and copy targets, so a high value there is harmless, not an error.
+	if t.Bitrate > maxBitrate && !transcodeCodec(t.Format).IsLossless() {
+		return fmt.Errorf("%w: transcode bitrate %d bps is implausibly high (max %d)", waxerr.ErrIncompatibleSpec, t.Bitrate, maxBitrate)
 	}
 	return nil
 }

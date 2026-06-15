@@ -43,6 +43,12 @@ func TestExtractVideoID(t *testing.T) {
 		{"youtube homepage", "https://www.youtube.com/", "", waxerr.ErrInvalidVideoID},
 		{"youtube host bare", "youtube.com", "", waxerr.ErrInvalidVideoID},
 
+		// Channel URLs are neither a video nor a playlist.
+		{"handle channel", "https://www.youtube.com/@Blender", "", waxerr.ErrIsChannel},
+		{"c channel", "https://www.youtube.com/c/Blender", "", waxerr.ErrIsChannel},
+		{"channel id", "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv", "", waxerr.ErrIsChannel},
+		{"user channel", "https://www.youtube.com/user/Blender", "", waxerr.ErrIsChannel},
+
 		{"hostless id with trailing junk", id + "&feature=share", id, nil},
 
 		{"too short", "abc", "", waxerr.ErrVideoIDTooShort},
@@ -98,6 +104,17 @@ func TestExtractVideoID_NoVideoInURLMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not a recognized YouTube video URL or video ID") {
 		t.Errorf("message = %q, want the no-video-in-URL message", err)
+	}
+}
+
+func TestExtractVideoID_ChannelMessage(t *testing.T) {
+	_, err := ExtractVideoID("https://www.youtube.com/@Blender")
+	if !errors.Is(err, waxerr.ErrIsChannel) {
+		t.Fatalf("err = %v, want ErrIsChannel", err)
+	}
+	// A channel URL must not be misclassified as a malformed video ID.
+	if errors.Is(err, waxerr.ErrInvalidVideoID) {
+		t.Errorf("channel URL should not unwrap to ErrInvalidVideoID: %v", err)
 	}
 }
 
