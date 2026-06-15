@@ -155,8 +155,9 @@ type AlbumLoudnessResult struct {
 // track's loudness. It does not write output files; callers can use the album
 // value for ReplayGain tags or playback gain.
 //
-// It requires ffmpeg. Use normalize.AlbumGainFilter to apply the same album gain
-// into each track.
+// It requires ffmpeg. Use ProcessAlbum to measure the album and write normalized
+// tracks. Callers that manage ffmpeg directly can build the gain filter with
+// [normalize.AlbumGainFilter].
 func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudnessResult, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("waxtap.MeasureAlbum: no inputs")

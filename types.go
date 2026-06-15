@@ -82,6 +82,31 @@ func BestNative() SourcePolicy { return format.BestNative() }
 // PreferCodec prefers a source in the named codec family when policy is active.
 func PreferCodec(codec string) SourcePolicy { return format.PreferCodec(codec) }
 
+// SponsorBlock types are re-exported so callers can configure [CutSpec] and call
+// [Client.SponsorBlockSegments] without importing package sponsorblock.
+type (
+	// Category identifies a SponsorBlock segment category.
+	Category = sponsorblock.Category
+	// Segment describes one SponsorBlock skip segment.
+	Segment = sponsorblock.Segment
+)
+
+// SponsorBlock categories. Values match the SponsorBlock API wire strings.
+const (
+	CategorySponsor       = sponsorblock.CategorySponsor
+	CategorySelfPromo     = sponsorblock.CategorySelfPromo
+	CategoryInteraction   = sponsorblock.CategoryInteraction
+	CategoryIntro         = sponsorblock.CategoryIntro
+	CategoryOutro         = sponsorblock.CategoryOutro
+	CategoryPreview       = sponsorblock.CategoryPreview
+	CategoryFiller        = sponsorblock.CategoryFiller
+	CategoryMusicOffTopic = sponsorblock.CategoryMusicOffTopic
+)
+
+// DefaultCategories contains the categories used when [CutSpec.SponsorBlock] is
+// a non-nil empty slice.
+var DefaultCategories = sponsorblock.DefaultCategories
+
 // Extraction models (package youtube). Part of the volatile surface; may evolve
 // pre-1.0.
 type (
@@ -101,6 +126,18 @@ type (
 	POTokenScope    = potoken.Scope
 	// POTokenProviderFunc adapts a closure to POTokenProvider.
 	POTokenProviderFunc = potoken.ProviderFunc
+	// POTokenFailure describes the HTTP failure that triggered a token refresh.
+	// [POTokenRequest].Failure points to a POTokenFailure when one is available.
+	POTokenFailure = potoken.HTTPFailure
+)
+
+// PO-token scopes identify where a token will be used. Tokens are not
+// interchangeable across scopes.
+const (
+	ScopeNone      = potoken.ScopeNone      // no token scope
+	ScopePlayer    = potoken.ScopePlayer    // /player request body
+	ScopeGVS       = potoken.ScopeGVS       // googlevideo media URL
+	ScopeSubtitles = potoken.ScopeSubtitles // subtitle or timed-text URL
 )
 
 // External guest-session adoption (package potoken). A POTokenSession lets WaxTap
@@ -178,6 +215,7 @@ type Request struct {
 	// client chain, disables watch-page extraction, and prevents retrying another
 	// client after an incomplete download. The configured extraction chain may
 	// still select a working client. Set Options.Client to force a single client.
+	// Read methods use WithNoFallback for the same behavior.
 	NoFallback bool
 
 	ProcessSpec
@@ -253,10 +291,9 @@ type CutSpec struct {
 	// media duration. A request whose ranges all lie outside the media returns
 	// ErrIncompatibleSpec; partial overlaps remain valid.
 	Ranges []TimeRange
-	// SponsorBlock lists categories to fetch and remove. Nil disables the SB
-	// fetch entirely; an empty-but-non-nil slice falls back to
-	// sponsorblock.DefaultCategories.
-	SponsorBlock []sponsorblock.Category
+	// SponsorBlock lists categories to fetch and remove. Nil disables
+	// SponsorBlock; a non-nil empty slice uses [DefaultCategories].
+	SponsorBlock []Category
 	// Mode selects copy/accurate/smart rendering.
 	Mode CutMode
 	// Crossfade, when > 0, applies a click-free crossfade at splice points. It
@@ -410,8 +447,8 @@ type StreamInfo struct {
 type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
 	MaxItems int
-	// Enrich is reserved for a future full-metadata pass. Current enumeration
-	// returns lightweight entries regardless of this value.
+	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
+	// Successful calls update their entries; failures are added to Playlist.Errors.
 	Enrich bool
 }
 

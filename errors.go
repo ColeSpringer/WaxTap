@@ -1,14 +1,6 @@
 package waxtap
 
-import (
-	"errors"
-
-	"github.com/colespringer/waxtap/waxerr"
-)
-
-// ErrNotImplemented marks facade methods that are declared but not implemented
-// yet.
-var ErrNotImplemented = errors.New("waxtap: not implemented")
+import "github.com/colespringer/waxtap/waxerr"
 
 // Re-exported sentinel errors. The canonical definitions live in package waxerr;
 // match them with errors.Is.
@@ -63,11 +55,6 @@ var (
 
 	// ErrInvalidConfig indicates invalid or conflicting library configuration.
 	ErrInvalidConfig = waxerr.ErrInvalidConfig
-
-	// ErrDeliveryUnsupported indicates that a selected client can extract metadata
-	// and formats but cannot deliver media bytes. It is retained for compatibility;
-	// built-in clients attempt delivery and report transfer errors instead.
-	ErrDeliveryUnsupported = waxerr.ErrDeliveryUnsupported
 )
 
 // Re-exported structured error types. Use errors.AsType to inspect them.

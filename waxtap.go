@@ -275,7 +275,8 @@ type readOptions struct {
 }
 
 // WithNoFallback prevents Info, InfoResult, and Resolve from falling back to
-// watch-page extraction.
+// watch-page extraction. Request.NoFallback provides the same behavior for
+// Download and Stream.
 func WithNoFallback() ReadOption {
 	return func(o *readOptions) { o.noFallback = true }
 }
@@ -358,9 +359,9 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 }
 
 // Enumerate expands a playlist URL into entries without downloading media.
-// EnumerateOptions.MaxItems caps the listing. With Enrich set, entries are
-// refreshed with bounded-parallel InfoBasic calls; item-level failures are kept
-// on Playlist.Errors.
+// EnumerateOptions.MaxItems caps the listing. With Enrich set, InfoBasic calls
+// refresh entries at bounded concurrency. Successful calls update their entries;
+// item-level failures are added to Playlist.Errors.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
 	if opts.MaxItems < 0 {
 		return nil, configErr("Enumerate: MaxItems must be >= 0, got %d", opts.MaxItems)

@@ -40,7 +40,7 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 	}
 	var doc struct {
 		SchemaVersion   int     `json:"schemaVersion"`
-		SourceKind      string  `json:"sourceKind"` // preserved v3 result field
+		SourceKind      string  `json:"sourceKind"` // preserved result field
 		Author          string  `json:"author"`
 		DurationSeconds float64 `json:"durationSeconds"`
 		PublishDate     string  `json:"publishDate"`
@@ -53,9 +53,9 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		t.Fatalf("sidecar is not valid JSON: %v", err)
 	}
-	// Backward compatibility: the v3 result fields are still present.
+	// Backward compatibility: the embedded result fields are still present.
 	if doc.SchemaVersion != schemaVersion || doc.SourceKind == "" {
-		t.Errorf("sidecar = %+v, want the embedded v3 result fields preserved (schemaVersion/sourceKind)", doc)
+		t.Errorf("sidecar = %+v, want the embedded result fields preserved (schemaVersion/sourceKind)", doc)
 	}
 	if doc.Author != "Test Author" || doc.Description != "a description" || doc.Client != "ANDROID_VR" {
 		t.Errorf("sidecar = %+v, want author/description/client populated", doc)
@@ -81,9 +81,9 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 	}
 }
 
-// TestWriteInfoSidecar_NoMetadataPreservesResultShape verifies a Result without
-// metadata still writes the backward-compatible v3 result document (with the new
-// metadata fields omitted), so old --write-info-json consumers are unaffected.
+// TestWriteInfoSidecar_NoMetadataPreservesResultShape verifies that a Result
+// without metadata keeps the standard result shape and omits the optional
+// metadata fields.
 func TestWriteInfoSidecar_NoMetadataPreservesResultShape(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "track.webm")
 	res := &waxtap.Result{VideoID: "dummyVideo0", Title: "Lean", Client: "WEB"}
@@ -98,7 +98,7 @@ func TestWriteInfoSidecar_NoMetadataPreservesResultShape(t *testing.T) {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	// The embedded v3 result fields are present.
+	// The embedded result fields are present.
 	for _, k := range []string{"schemaVersion", "sourceKind", "videoId", "sourceFormat"} {
 		if _, ok := doc[k]; !ok {
 			t.Errorf("sidecar missing preserved result field %q", k)

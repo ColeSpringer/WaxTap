@@ -54,7 +54,7 @@ the first SmartScreen prompt.
 
 Media commands accept a YouTube URL or bare video or playlist ID. `cut`,
 `transcode`, and `normalize` also accept local files. Every command has `--help`,
-and `--json` provides a stable scriptable contract (`schemaVersion` 3).
+and `--json` provides a stable scriptable contract (`schemaVersion` 4).
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio

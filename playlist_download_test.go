@@ -21,16 +21,16 @@ func makeEntries(n int) []PlaylistEntry {
 
 func noWait(context.Context, int) error { return nil }
 
-func okResolve(_ context.Context, e PlaylistEntry) (Request, string, error) {
+func okBuildRequest(_ context.Context, e PlaylistEntry) (Request, string, error) {
 	return Request{URL: e.VideoID}, "", nil
 }
 
 func checkInvariant(t *testing.T, res *PlaylistRunResult) {
 	t.Helper()
-	sum := res.Downloaded + res.Skipped + res.ResolveFailed + res.DownloadFailed + res.Remaining
+	sum := res.Downloaded + res.Skipped + res.BuildRequestFailed + res.DownloadFailed + res.Remaining
 	if sum != res.Enumerated {
-		t.Errorf("invariant: %d down + %d skip + %d rfail + %d dfail + %d rem = %d, want Enumerated %d",
-			res.Downloaded, res.Skipped, res.ResolveFailed, res.DownloadFailed, res.Remaining, sum, res.Enumerated)
+		t.Errorf("invariant: downloaded=%d skipped=%d buildRequestFailed=%d downloadFailed=%d remaining=%d total=%d, want enumerated=%d",
+			res.Downloaded, res.Skipped, res.BuildRequestFailed, res.DownloadFailed, res.Remaining, sum, res.Enumerated)
 	}
 	if got, want := len(res.Outcomes), res.Enumerated-res.Remaining; got != want {
 		t.Errorf("len(Outcomes) = %d, want Enumerated-Remaining = %d", got, want)
@@ -44,7 +44,7 @@ func TestRunPlaylist_MaxDownloadsCap(t *testing.T) {
 		attempts.Add(1)
 		return &Result{}, nil
 	}
-	res := runPlaylist(context.Background(), entries, 2, 3, noWait, okResolve, nil, dl)
+	res := runPlaylist(context.Background(), entries, 2, 3, noWait, okBuildRequest, nil, dl)
 
 	if got := attempts.Load(); got != 3 {
 		t.Errorf("download attempts = %d, want 3 (the cap)", got)
@@ -63,29 +63,29 @@ func TestRunPlaylist_MaxDownloadsCap(t *testing.T) {
 
 func TestRunPlaylist_OutcomeSplit(t *testing.T) {
 	entries := makeEntries(6)
-	resolve := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
+	buildRequest := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
 		switch e.Index {
 		case 0:
-			return Request{}, "exists", nil // skip
+			return Request{}, "exists", nil
 		case 1:
-			return Request{}, "", errors.New("resolve boom") // resolve fail
+			return Request{}, "", errors.New("build request failed")
 		default:
 			return Request{URL: e.VideoID}, "", nil
 		}
 	}
 	dl := func(_ context.Context, req Request) (*Result, error) {
 		if req.URL == "dummyVideo3" {
-			return nil, errors.New("dl boom") // download fail
+			return nil, errors.New("download failed")
 		}
 		return &Result{OutputPath: req.URL}, nil
 	}
-	res := runPlaylist(context.Background(), entries, 3, 0, noWait, resolve, nil, dl)
+	res := runPlaylist(context.Background(), entries, 3, 0, noWait, buildRequest, nil, dl)
 
 	if res.Skipped != 1 {
 		t.Errorf("Skipped = %d, want 1", res.Skipped)
 	}
-	if res.ResolveFailed != 1 {
-		t.Errorf("ResolveFailed = %d, want 1", res.ResolveFailed)
+	if res.BuildRequestFailed != 1 {
+		t.Errorf("BuildRequestFailed = %d, want 1", res.BuildRequestFailed)
 	}
 	if res.DownloadFailed != 1 {
 		t.Errorf("DownloadFailed = %d, want 1", res.DownloadFailed)
@@ -99,11 +99,11 @@ func TestRunPlaylist_OutcomeSplit(t *testing.T) {
 	checkInvariant(t, res)
 }
 
-func TestRunPlaylist_ResolveErrorsDoNotConsumeCap(t *testing.T) {
+func TestRunPlaylist_BuildRequestErrorsDoNotConsumeCap(t *testing.T) {
 	entries := makeEntries(6)
-	resolve := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
+	buildRequest := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
 		if e.Index < 3 {
-			return Request{}, "", errors.New("boom") // first three resolve-fail
+			return Request{}, "", errors.New("build request failed")
 		}
 		return Request{URL: e.VideoID}, "", nil
 	}
@@ -112,14 +112,14 @@ func TestRunPlaylist_ResolveErrorsDoNotConsumeCap(t *testing.T) {
 		attempts.Add(1)
 		return &Result{}, nil
 	}
-	res := runPlaylist(context.Background(), entries, 2, 2, noWait, resolve, nil, dl)
+	res := runPlaylist(context.Background(), entries, 2, 2, noWait, buildRequest, nil, dl)
 
-	// Resolve errors do not consume the two-attempt limit.
+	// BuildRequest errors do not consume the two-attempt limit.
 	if got := attempts.Load(); got != 2 {
 		t.Errorf("download attempts = %d, want 2", got)
 	}
-	if res.ResolveFailed != 3 {
-		t.Errorf("ResolveFailed = %d, want 3", res.ResolveFailed)
+	if res.BuildRequestFailed != 3 {
+		t.Errorf("BuildRequestFailed = %d, want 3", res.BuildRequestFailed)
 	}
 	if res.Downloaded != 2 {
 		t.Errorf("Downloaded = %d, want 2", res.Downloaded)
@@ -139,7 +139,7 @@ func TestRunPlaylist_OutcomesInPlaylistOrder(t *testing.T) {
 		time.Sleep(time.Duration(len(entries)-idx) * time.Millisecond)
 		return &Result{OutputPath: req.URL}, nil
 	}
-	res := runPlaylist(context.Background(), entries, len(entries), 0, noWait, okResolve, nil, dl)
+	res := runPlaylist(context.Background(), entries, len(entries), 0, noWait, okBuildRequest, nil, dl)
 
 	if len(res.Outcomes) != len(entries) {
 		t.Fatalf("len(Outcomes) = %d, want %d", len(res.Outcomes), len(entries))
@@ -152,13 +152,13 @@ func TestRunPlaylist_OutcomesInPlaylistOrder(t *testing.T) {
 	checkInvariant(t, res)
 }
 
-func TestRunPlaylist_CancelDuringResolveLeavesRemaining(t *testing.T) {
+func TestRunPlaylist_CancelDuringBuildRequestLeavesRemaining(t *testing.T) {
 	entries := makeEntries(5)
 	ctx, cancel := context.WithCancel(context.Background())
 	var attempts atomic.Int32
-	resolve := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
+	buildRequest := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
 		if e.Index == 2 {
-			cancel() // cancel while resolving the third entry
+			cancel() // cancel while building the third entry's request
 		}
 		return Request{URL: e.VideoID}, "", nil
 	}
@@ -166,13 +166,13 @@ func TestRunPlaylist_CancelDuringResolveLeavesRemaining(t *testing.T) {
 		attempts.Add(1)
 		return &Result{}, nil
 	}
-	res := runPlaylist(ctx, entries, 2, 0, noWait, resolve, nil, dl)
+	res := runPlaylist(ctx, entries, 2, 0, noWait, buildRequest, nil, dl)
 
 	if got := attempts.Load(); got != 2 {
 		t.Errorf("download attempts = %d, want 2 (entries 0,1)", got)
 	}
-	if res.DownloadFailed != 0 || res.ResolveFailed != 0 {
-		t.Errorf("DownloadFailed = %d, ResolveFailed = %d, want 0/0 (canceled resolve is Remaining)", res.DownloadFailed, res.ResolveFailed)
+	if res.DownloadFailed != 0 || res.BuildRequestFailed != 0 {
+		t.Errorf("DownloadFailed = %d, BuildRequestFailed = %d, want 0/0 (canceled build request is Remaining)", res.DownloadFailed, res.BuildRequestFailed)
 	}
 	if res.Remaining != 3 {
 		t.Errorf("Remaining = %d, want 3 (entries 2,3,4)", res.Remaining)
@@ -195,7 +195,7 @@ func TestRunPlaylist_CancelDuringWaitLeavesRemaining(t *testing.T) {
 		}
 		return nil
 	}
-	res := runPlaylist(ctx, entries, 2, 0, wait, okResolve, nil, dl)
+	res := runPlaylist(ctx, entries, 2, 0, wait, okBuildRequest, nil, dl)
 
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("download attempts = %d, want 1 (wait canceled before the second)", got)
@@ -231,7 +231,7 @@ func TestRunPlaylist_CancelDuringSemAcquireLeavesRemaining(t *testing.T) {
 		time.Sleep(10 * time.Millisecond) // let it observe cancellation before the slot frees
 		close(release)
 	}()
-	res := runPlaylist(ctx, entries, 1, 0, noWait, okResolve, nil, dl)
+	res := runPlaylist(ctx, entries, 1, 0, noWait, okBuildRequest, nil, dl)
 
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("download attempts = %d, want 1 (canceled while acquiring the slot for the second)", got)
@@ -247,9 +247,9 @@ func TestRunPlaylist_CancelDuringSemAcquireLeavesRemaining(t *testing.T) {
 
 func TestRunPlaylist_PanicsRecovered(t *testing.T) {
 	entries := makeEntries(4)
-	resolve := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
+	buildRequest := func(_ context.Context, e PlaylistEntry) (Request, string, error) {
 		if e.Index == 0 {
-			panic("resolve panic")
+			panic("build request panic")
 		}
 		return Request{URL: e.VideoID}, "", nil
 	}
@@ -259,10 +259,10 @@ func TestRunPlaylist_PanicsRecovered(t *testing.T) {
 			panic("onItem panic")
 		}
 	}
-	res := runPlaylist(context.Background(), entries, 2, 0, noWait, resolve, onItem, dl)
+	res := runPlaylist(context.Background(), entries, 2, 0, noWait, buildRequest, onItem, dl)
 
-	if res.ResolveFailed != 1 {
-		t.Errorf("ResolveFailed = %d, want 1 (the panicking resolve)", res.ResolveFailed)
+	if res.BuildRequestFailed != 1 {
+		t.Errorf("BuildRequestFailed = %d, want 1 (the panicking build request)", res.BuildRequestFailed)
 	}
 	if res.Downloaded != 3 {
 		t.Errorf("Downloaded = %d, want 3", res.Downloaded)
@@ -281,7 +281,7 @@ func TestRunPlaylist_WaitBeforeStartCalledPerAttemptInOrder(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	runPlaylist(context.Background(), entries, 3, 0, wait, okResolve, nil, dl)
+	runPlaylist(context.Background(), entries, 3, 0, wait, okBuildRequest, nil, dl)
 
 	if want := []int{0, 1, 2, 3}; !reflect.DeepEqual(args, want) {
 		t.Errorf("waitBeforeStart started args = %v, want %v", args, want)
@@ -351,13 +351,13 @@ func TestPlaylistDownloadOptionsValidate(t *testing.T) {
 		o       PlaylistDownloadOptions
 		wantErr bool
 	}{
-		{"nil resolve", PlaylistDownloadOptions{}, true},
-		{"ok", PlaylistDownloadOptions{Resolve: okResolve}, false},
-		{"negative max items", PlaylistDownloadOptions{Resolve: okResolve, MaxItems: -1}, true},
-		{"negative max downloads", PlaylistDownloadOptions{Resolve: okResolve, MaxDownloads: -1}, true},
-		{"max sleep without sleep", PlaylistDownloadOptions{Resolve: okResolve, MaxSleepInterval: time.Second}, true},
-		{"max sleep below sleep", PlaylistDownloadOptions{Resolve: okResolve, SleepInterval: 2 * time.Second, MaxSleepInterval: time.Second}, true},
-		{"valid sleep range", PlaylistDownloadOptions{Resolve: okResolve, SleepInterval: time.Second, MaxSleepInterval: 2 * time.Second}, false},
+		{"nil build request", PlaylistDownloadOptions{}, true},
+		{"ok", PlaylistDownloadOptions{BuildRequest: okBuildRequest}, false},
+		{"negative max items", PlaylistDownloadOptions{BuildRequest: okBuildRequest, MaxItems: -1}, true},
+		{"negative max downloads", PlaylistDownloadOptions{BuildRequest: okBuildRequest, MaxDownloads: -1}, true},
+		{"max sleep without sleep", PlaylistDownloadOptions{BuildRequest: okBuildRequest, MaxSleepInterval: time.Second}, true},
+		{"max sleep below sleep", PlaylistDownloadOptions{BuildRequest: okBuildRequest, SleepInterval: 2 * time.Second, MaxSleepInterval: time.Second}, true},
+		{"valid sleep range", PlaylistDownloadOptions{BuildRequest: okBuildRequest, SleepInterval: time.Second, MaxSleepInterval: 2 * time.Second}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

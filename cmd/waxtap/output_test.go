@@ -189,7 +189,6 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrInvalidConfig, 2},
 		{waxtap.ErrURLExpired, 7},                 // parity with incomplete-stream
 		{waxtap.ErrRequestedFormatUnavailable, 2}, // correctable request error
-		{waxtap.ErrDeliveryUnsupported, 2},        // compatibility sentinel
 		{&waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("down")}, 9},
 		{&url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Err: errFake("refused")}}, 9},
 		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},

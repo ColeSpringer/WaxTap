@@ -49,7 +49,7 @@ func TestEmitSummaryJSONAdditiveFields(t *testing.T) {
 func TestEmitSummaryJSONFailureSplit(t *testing.T) {
 	sw, buf := newSummaryEnv(true)
 	err := sw.emitSummary(playlistSummary{
-		total: 5, ok: 1, resolveFailed: 1, downloadFailed: 2,
+		total: 5, ok: 1, buildRequestFailed: 1, downloadFailed: 2,
 	})
 	if err == nil {
 		t.Error("emitSummary returned nil for failed items")
@@ -59,10 +59,10 @@ func TestEmitSummaryJSONFailureSplit(t *testing.T) {
 		t.Fatalf("summary JSON: %v", jerr)
 	}
 	if rec["failed"].(float64) != 3 {
-		t.Errorf("failed = %v, want 3 (resolve+download)", rec["failed"])
+		t.Errorf("failed = %v, want 3", rec["failed"])
 	}
-	if rec["resolveFailed"].(float64) != 1 || rec["downloadFailed"].(float64) != 2 {
-		t.Errorf("failure fields = %v, want resolveFailed=1 downloadFailed=2", rec)
+	if rec["buildRequestFailed"].(float64) != 1 || rec["downloadFailed"].(float64) != 2 {
+		t.Errorf("failure fields = %v, want buildRequestFailed=1 downloadFailed=2", rec)
 	}
 }
 

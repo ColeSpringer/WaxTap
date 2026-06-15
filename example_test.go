@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/sponsorblock"
 )
 
 // ExampleClient_Download downloads the best audio stream to a file. With no
@@ -46,7 +45,7 @@ func ExampleClient_Download_transcodeAndSponsorBlock() {
 		ProcessSpec: waxtap.ProcessSpec{
 			Transcode: &waxtap.TranscodeSpec{Format: waxtap.FormatFLAC},
 			Cut: &waxtap.CutSpec{
-				SponsorBlock: []sponsorblock.Category{sponsorblock.CategoryMusicOffTopic},
+				SponsorBlock: []waxtap.Category{waxtap.CategoryMusicOffTopic},
 				OnError:      waxtap.ProceedUncut,
 			},
 			Output: waxtap.ToFile("track.flac"),
@@ -134,8 +133,8 @@ func ExampleClient_Enumerate() {
 }
 
 // ExampleClient_DownloadPlaylist downloads up to ten playlist entries one at a
-// time, waiting between downloads. Resolve builds each request and may skip an
-// entry; OnItem receives each completed outcome.
+// time, waiting between downloads. BuildRequest prepares or skips each entry;
+// OnItem receives the outcome for every entry the run reaches.
 func ExampleClient_DownloadPlaylist() {
 	client, err := waxtap.New(waxtap.Options{})
 	if err != nil {
@@ -148,7 +147,7 @@ func ExampleClient_DownloadPlaylist() {
 			Concurrency:   1,               // serialize downloads
 			SleepInterval: 5 * time.Second, // pause between them
 			MaxDownloads:  10,              // stop after 10 attempts
-			Resolve: func(_ context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
+			BuildRequest: func(_ context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
 				return waxtap.Request{
 					URL:         e.VideoID,
 					ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(e.VideoID + ".opus")},

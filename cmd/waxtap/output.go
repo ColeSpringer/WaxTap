@@ -21,9 +21,11 @@ import (
 )
 
 // schemaVersion tags JSON output so callers can handle shape changes. Version 2
-// added audioQuality to format objects. Version 3 adds the YouTube client.
+// added audioQuality to format objects. Version 3 added the YouTube client.
+// Version 4 renamed the playlist summary's resolveFailed key to
+// buildRequestFailed.
 // Non-transcoded local results omit the redundant outputFormat field.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -277,8 +279,6 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 3, "playlist-empty"
 	case errors.Is(err, waxtap.ErrRequestedFormatUnavailable):
 		c.exitCode, c.code, c.hint = 2, "format-unavailable", "run `waxtap formats <url>` to list the available itags and codecs"
-	case errors.Is(err, waxtap.ErrDeliveryUnsupported):
-		c.exitCode, c.code = 2, "delivery-unsupported"
 	case errors.Is(err, waxtap.ErrPlaylistParse):
 		c.exitCode, c.code = 4, "stale-parser"
 	case errors.Is(err, waxtap.ErrCipherSolve):

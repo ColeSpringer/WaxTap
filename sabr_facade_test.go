@@ -693,9 +693,6 @@ func TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain(t *testing.T
 	if derr == nil {
 		t.Fatal("want an error from the failed iOS extraction, got nil")
 	}
-	if errors.Is(derr, waxtap.ErrDeliveryUnsupported) {
-		t.Errorf("forced iOS returned ErrDeliveryUnsupported: %v", derr)
-	}
 	if !attemptedIOS {
 		t.Error("the forced iOS chain should be attempted after the player-context fails")
 	}

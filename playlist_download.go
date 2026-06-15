@@ -11,17 +11,17 @@ import (
 // maxConcurrency bounds DownloadPlaylist's worker pool and matches the CLI limit.
 const maxConcurrency = 64
 
-// PlaylistDownloadOptions configures [Client.DownloadPlaylist]. Resolve is
-// required; counts and durations must not be negative.
+// PlaylistDownloadOptions configures [Client.DownloadPlaylist]. BuildRequest is
+// required. Counts and durations must not be negative.
 type PlaylistDownloadOptions struct {
 	// MaxItems limits playlist enumeration. Zero includes all entries.
 	MaxItems int
 	// Concurrency limits parallel downloads. Zero uses the client's download
-	// concurrency, then a default of 2. Resolve calls remain serial and may overlap
-	// a download even when Concurrency is 1.
+	// concurrency, then a default of 2. BuildRequest calls remain serial and may
+	// overlap a download even when Concurrency is 1.
 	Concurrency int
 	// MaxDownloads limits download attempts. Zero is unlimited. Skipped entries
-	// and Resolve errors do not count.
+	// and BuildRequest errors do not count.
 	MaxDownloads int
 	// SleepInterval is the minimum delay before each download start after the
 	// first. Zero disables pacing. With Concurrency set to 1, the delay falls
@@ -31,13 +31,14 @@ type PlaylistDownloadOptions struct {
 	// uniformly within that range. It requires a non-zero SleepInterval.
 	MaxSleepInterval time.Duration
 
-	// Resolve builds a request for each entry. Calls are serial and follow playlist
-	// order. A non-empty skip or a non-nil error prevents the download and does not
-	// count toward MaxDownloads. A panic is recorded as a Resolve error.
-	Resolve func(ctx context.Context, e PlaylistEntry) (req Request, skip string, err error)
+	// BuildRequest prepares a download request for each entry. Calls are serial
+	// and follow playlist order. Returning a non-empty skip reason or an error
+	// prevents the download and does not count toward MaxDownloads. Panics are
+	// recovered and recorded as BuildRequest errors.
+	BuildRequest func(ctx context.Context, e PlaylistEntry) (req Request, skip string, err error)
 	// OnItem receives each attempted, skipped, or failed entry. It is not called
 	// for entries left in Remaining. Calls may be concurrent and out of playlist
-	// order. A panic is ignored.
+	// order. Panics are recovered and ignored.
 	OnItem func(PlaylistItemOutcome)
 }
 
@@ -46,31 +47,32 @@ type PlaylistItemOutcome struct {
 	Entry      PlaylistEntry // playlist entry associated with this outcome
 	Attempted  bool          // whether Download was called and counted against MaxDownloads
 	Result     *Result       // set only after a successful download
-	SkipReason string        // set when Resolve skipped the entry
-	Err        error         // from Resolve when not Attempted, otherwise from Download
+	SkipReason string        // set when BuildRequest skipped the entry
+	Err        error         // from BuildRequest when not Attempted, otherwise from Download
 }
 
 // PlaylistRunResult summarizes a playlist download.
 //
-// Invariant: Downloaded + Skipped + ResolveFailed + DownloadFailed + Remaining
-// equals Enumerated. MaxDownloads counts Downloaded and DownloadFailed.
+// Invariant: Downloaded + Skipped + BuildRequestFailed + DownloadFailed +
+// Remaining equals Enumerated. MaxDownloads counts Downloaded and DownloadFailed.
 type PlaylistRunResult struct {
-	Enumerated     int                   // entries returned by playlist enumeration
-	Downloaded     int                   // successful downloads
-	Skipped        int                   // entries skipped by Resolve
-	ResolveFailed  int                   // entries whose Resolve call failed
-	DownloadFailed int                   // entries whose Download call failed
-	Remaining      int                   // entries not reached because of a limit or cancellation
-	CapReached     bool                  // whether MaxDownloads stopped the run
-	EnumErrors     []error               // item errors returned by playlist enumeration
-	Outcomes       []PlaylistItemOutcome // reached entries, in playlist order
+	Enumerated         int                   // entries returned by playlist enumeration
+	Downloaded         int                   // successful downloads
+	Skipped            int                   // entries skipped by BuildRequest
+	BuildRequestFailed int                   // entries whose BuildRequest call failed
+	DownloadFailed     int                   // entries whose Download call failed
+	Remaining          int                   // entries not reached because of a limit or cancellation
+	CapReached         bool                  // whether MaxDownloads stopped the run
+	EnumErrors         []error               // item errors returned by playlist enumeration
+	Outcomes           []PlaylistItemOutcome // reached entries, in playlist order
 }
 
 // DownloadPlaylist enumerates a playlist URL and downloads its entries with
 // bounded concurrency, optional pacing, and an optional attempt limit.
 //
-// An enumeration failure returns an error and a nil result. After enumeration
-// succeeds, cancellation returns a partial result with ctx.Err().
+// An enumeration failure returns an error and a nil result. Item-level
+// enumeration errors do not stop downloads and are returned in EnumErrors. After
+// enumeration succeeds, cancellation returns a partial result with ctx.Err().
 func (c *Client) DownloadPlaylist(ctx context.Context, url string, o PlaylistDownloadOptions) (*PlaylistRunResult, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
@@ -91,15 +93,15 @@ func (c *Client) DownloadPlaylist(ctx context.Context, url string, o PlaylistDow
 		conc = maxConcurrency
 	}
 
-	res := runPlaylist(ctx, pl.Entries, conc, o.MaxDownloads, pickSleepWait(o), o.Resolve, o.OnItem, c.Download)
+	res := runPlaylist(ctx, pl.Entries, conc, o.MaxDownloads, pickSleepWait(o), o.BuildRequest, o.OnItem, c.Download)
 	res.EnumErrors = pl.Errors
 	return res, ctx.Err()
 }
 
 // validate checks options before any network work.
 func (o PlaylistDownloadOptions) validate() error {
-	if o.Resolve == nil {
-		return fmt.Errorf("waxtap.DownloadPlaylist: Resolve is required")
+	if o.BuildRequest == nil {
+		return fmt.Errorf("waxtap.DownloadPlaylist: BuildRequest is required")
 	}
 	if o.MaxItems < 0 || o.Concurrency < 0 || o.MaxDownloads < 0 || o.SleepInterval < 0 || o.MaxSleepInterval < 0 {
 		return fmt.Errorf("waxtap.DownloadPlaylist: MaxItems, Concurrency, MaxDownloads, SleepInterval, and MaxSleepInterval must be non-negative")
@@ -113,14 +115,14 @@ func (o PlaylistDownloadOptions) validate() error {
 	return nil
 }
 
-// runPlaylist resolves entries serially and dispatches downloads to a bounded
+// runPlaylist builds requests serially and dispatches downloads to a bounded
 // worker pool. Each outcome is stored in its playlist slot to preserve order.
 func runPlaylist(
 	ctx context.Context,
 	entries []PlaylistEntry,
 	conc, maxDownloads int,
 	waitBeforeStart func(ctx context.Context, started int) error,
-	resolve func(ctx context.Context, e PlaylistEntry) (Request, string, error),
+	buildRequest func(ctx context.Context, e PlaylistEntry) (Request, string, error),
 	onItem func(PlaylistItemOutcome),
 	dl func(ctx context.Context, req Request) (*Result, error),
 ) *PlaylistRunResult {
@@ -141,8 +143,9 @@ func runPlaylist(
 coordinator:
 	for i := range entries {
 		entry := entries[i]
-		req, skip, rerr := safeResolve(ctx, resolve, entry)
-		// A canceled Resolve leaves this and later entries in Remaining.
+		req, skip, rerr := safeBuildRequest(ctx, buildRequest, entry)
+		// Cancellation during BuildRequest leaves this and later entries in
+		// Remaining.
 		if ctx.Err() != nil {
 			break
 		}
@@ -159,7 +162,7 @@ coordinator:
 			continue
 		}
 
-		// A resolved request does not count until Download starts.
+		// A built request does not count until Download starts.
 		if maxDownloads > 0 && started == maxDownloads {
 			capReached = true
 			break
@@ -212,25 +215,25 @@ func tally(enumerated int, slots []*PlaylistItemOutcome, capReached bool) *Playl
 		case s.SkipReason != "":
 			res.Skipped++
 		case !s.Attempted:
-			res.ResolveFailed++
+			res.BuildRequestFailed++
 		case s.Err != nil:
 			res.DownloadFailed++
 		default:
 			res.Downloaded++
 		}
 	}
-	res.Remaining = enumerated - (res.Downloaded + res.Skipped + res.ResolveFailed + res.DownloadFailed)
+	res.Remaining = enumerated - (res.Downloaded + res.Skipped + res.BuildRequestFailed + res.DownloadFailed)
 	return res
 }
 
-// safeResolve converts a Resolve panic to an error.
-func safeResolve(ctx context.Context, resolve func(context.Context, PlaylistEntry) (Request, string, error), e PlaylistEntry) (req Request, skip string, err error) {
+// safeBuildRequest converts a BuildRequest panic to an error.
+func safeBuildRequest(ctx context.Context, buildRequest func(context.Context, PlaylistEntry) (Request, string, error), e PlaylistEntry) (req Request, skip string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			req, skip, err = Request{}, "", fmt.Errorf("waxtap: playlist Resolve panicked: %v", r)
+			req, skip, err = Request{}, "", fmt.Errorf("waxtap: playlist BuildRequest panicked: %v", r)
 		}
 	}()
-	return resolve(ctx, e)
+	return buildRequest(ctx, e)
 }
 
 // pickSleepWait builds a context-aware pacing function.

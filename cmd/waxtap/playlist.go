@@ -78,38 +78,38 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 
 // playlistSummary contains the counts printed at the end of a playlist run.
 type playlistSummary struct {
-	total          int
-	ok             int
-	skipped        int
-	resolveFailed  int
-	downloadFailed int
-	remaining      int // never attempted (cap reached or canceled mid-run)
-	enumErrors     int
-	capReached     bool
+	total              int
+	ok                 int
+	skipped            int
+	buildRequestFailed int
+	downloadFailed     int
+	remaining          int // never attempted (cap reached or canceled mid-run)
+	enumErrors         int
+	capReached         bool
 }
 
 // emitSummary writes the aggregate result. Item failures and incomplete
 // enumeration fail the command; reaching --max-downloads does not.
 func (s *syncWriter) emitSummary(sum playlistSummary) error {
-	failed := sum.resolveFailed + sum.downloadFailed
+	failed := sum.buildRequestFailed + sum.downloadFailed
 	if s.env.jsonMode() {
-		// These fields are additive, so the schema version remains unchanged.
+		// schemaVersion 4 renamed resolveFailed to buildRequestFailed.
 		rec := struct {
-			SchemaVersion     int    `json:"schemaVersion"`
-			Type              string `json:"type"`
-			Total             int    `json:"total"`
-			OK                int    `json:"ok"`
-			Skipped           int    `json:"skipped"`
-			Failed            int    `json:"failed"`
-			ResolveFailed     int    `json:"resolveFailed,omitempty"`
-			DownloadFailed    int    `json:"downloadFailed,omitempty"`
-			Remaining         int    `json:"remaining,omitempty"`
-			CapReached        bool   `json:"capReached,omitempty"`
-			EnumerationErrors int    `json:"enumerationErrors,omitempty"`
+			SchemaVersion      int    `json:"schemaVersion"`
+			Type               string `json:"type"`
+			Total              int    `json:"total"`
+			OK                 int    `json:"ok"`
+			Skipped            int    `json:"skipped"`
+			Failed             int    `json:"failed"`
+			BuildRequestFailed int    `json:"buildRequestFailed,omitempty"`
+			DownloadFailed     int    `json:"downloadFailed,omitempty"`
+			Remaining          int    `json:"remaining,omitempty"`
+			CapReached         bool   `json:"capReached,omitempty"`
+			EnumerationErrors  int    `json:"enumerationErrors,omitempty"`
 		}{
 			SchemaVersion: schemaVersion, Type: "summary",
 			Total: sum.total, OK: sum.ok, Skipped: sum.skipped, Failed: failed,
-			ResolveFailed: sum.resolveFailed, DownloadFailed: sum.downloadFailed,
+			BuildRequestFailed: sum.buildRequestFailed, DownloadFailed: sum.downloadFailed,
 			Remaining: sum.remaining, CapReached: sum.capReached, EnumerationErrors: sum.enumErrors,
 		}
 		if b, err := json.Marshal(rec); err == nil {
@@ -186,8 +186,8 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	return nil
 }
 
-// infoSidecarJSON extends the schema-v3 result document with metadata requested
-// by --write-info-json. Embedding resultJSON preserves the existing result fields.
+// infoSidecarJSON extends a result document with metadata requested by
+// --write-info-json. Embedding resultJSON preserves the standard result fields.
 type infoSidecarJSON struct {
 	resultJSON
 	Author          string       `json:"author,omitempty"`

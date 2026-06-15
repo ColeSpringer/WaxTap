@@ -2,7 +2,6 @@ package waxtap
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -41,9 +40,6 @@ func TestForcedIOSAttemptsDelivery(t *testing.T) {
 	})
 	if derr == nil {
 		t.Fatal("want an error from the failed iOS extraction, got nil")
-	}
-	if errors.Is(derr, ErrDeliveryUnsupported) {
-		t.Errorf("forced iOS returned ErrDeliveryUnsupported: %v", derr)
 	}
 	if !rt.playerHit {
 		t.Error("the forced iOS chain should reach the /player path and attempt delivery")

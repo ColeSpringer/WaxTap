@@ -17,15 +17,14 @@ import (
 	"github.com/colespringer/waxtap/internal/httpx"
 	"github.com/colespringer/waxtap/internal/pipeline"
 	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/sponsorblock"
 	"github.com/colespringer/waxtap/waxerr"
 	"github.com/colespringer/waxtap/youtube"
 )
 
 // SponsorBlockSegments returns skip segments for videoURL using the client's
-// SponsorBlock settings and shared HTTP client. It does not cut or download
-// media.
-func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, categories []sponsorblock.Category) ([]sponsorblock.Segment, error) {
+// SponsorBlock settings and shared HTTP client. An empty categories slice uses
+// [DefaultCategories]. The method does not cut or download media.
+func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, categories []Category) ([]Segment, error) {
 	id, err := youtube.ExtractVideoID(videoURL)
 	if err != nil {
 		return nil, err

@@ -100,10 +100,6 @@ var (
 	// ErrInvalidConfig indicates invalid or conflicting configuration or option
 	// values.
 	ErrInvalidConfig = errors.New("waxtap: invalid configuration")
-	// ErrDeliveryUnsupported indicates that a selected client can extract metadata
-	// and formats but cannot deliver media bytes. It is retained for compatibility;
-	// built-in clients attempt delivery and report transfer errors instead.
-	ErrDeliveryUnsupported = errors.New("waxtap: byte delivery not supported for this client")
 )
 
 // RateLimitError carries backoff context for an HTTP 429 (or a 403 that the

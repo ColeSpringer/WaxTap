@@ -289,7 +289,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		MaxDownloads:     df.maxDownloads,
 		SleepInterval:    df.sleepInterval,
 		MaxSleepInterval: df.maxSleepInterval,
-		Resolve: func(rctx context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
+		BuildRequest: func(rctx context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
 			return resolveItem(rctx, env, df, reserver, e.VideoID, e.Title, e.Author, e.Index+1)
 		},
 		OnItem: func(o waxtap.PlaylistItemOutcome) {
@@ -312,14 +312,14 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		env.info("warning: playlist enumeration: %v\n", perr)
 	}
 	sumErr := out.emitSummary(playlistSummary{
-		total:          res.Enumerated,
-		ok:             res.Downloaded,
-		skipped:        res.Skipped,
-		resolveFailed:  res.ResolveFailed,
-		downloadFailed: res.DownloadFailed,
-		remaining:      res.Remaining,
-		enumErrors:     len(res.EnumErrors),
-		capReached:     res.CapReached,
+		total:              res.Enumerated,
+		ok:                 res.Downloaded,
+		skipped:            res.Skipped,
+		buildRequestFailed: res.BuildRequestFailed,
+		downloadFailed:     res.DownloadFailed,
+		remaining:          res.Remaining,
+		enumErrors:         len(res.EnumErrors),
+		capReached:         res.CapReached,
 	})
 	// JSON mode has already written the item records and summary. Preserve the
 	// failure exit code without appending another JSON document.
