@@ -21,6 +21,9 @@ import (
 // The input is validated up front (ffprobe); a corrupt or non-audio file fails
 // with ErrUnsupportedInput. Writing the output over the input is rejected unless
 // the caller targets a different path.
+//
+// Callers may omit Output only for pure loudness measurement: LoudnessMeasureOnly
+// with no transcode, downmix, or cut. Client.Measure wraps that case.
 func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, err error) {
 	em := newEmitter(req.Events, "")
 	defer func() { em.finish(res, err) }()
@@ -28,7 +31,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	if req.Input == "" {
 		return nil, fmt.Errorf("waxtap.Process: Input is required")
 	}
-	if req.Output.kind == outputNone {
+	if req.Output.kind == outputNone && !isMeasureOnlySpec(req.ProcessSpec) {
 		return nil, fmt.Errorf("waxtap.Process: an Output is required")
 	}
 	if err := validateProcessSpec(req.ProcessSpec); err != nil {
@@ -52,15 +55,16 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		return nil, err
 	}
 
-	jobDir, err := c.makeJobDir()
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(jobDir)
-
 	srcExt := filepath.Ext(req.Input)
 	pipeOut := req.Output.path
 	if req.Output.kind == outputWriter {
+		// Writer output needs a staging file; direct file output and pure measurement
+		// do not.
+		jobDir, err := c.makeJobDir()
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(jobDir)
 		pipeOut = filepath.Join(jobDir, "output"+outputExt(req.Transcode, srcExt))
 	}
 
@@ -126,6 +130,13 @@ func processRanges(cs *CutSpec) []TimeRange {
 	return cs.Ranges
 }
 
+// isMeasureOnlySpec reports whether Process can run without an Output. Any
+// transcode, downmix, or cut writes audio, including FormatCopy remuxes.
+func isMeasureOnlySpec(s ProcessSpec) bool {
+	return s.Loudness != nil && s.Loudness.Mode == LoudnessMeasureOnly &&
+		s.Transcode == nil && !s.Downmix && !cutRequested(s.Cut)
+}
+
 // ProbeCodec reports the codec name of the first audio stream in a local file,
 // such as "opus" or "aac". It returns ErrUnsupportedInput when the file has no
 // audio stream.
@@ -151,6 +162,26 @@ func (c *Client) ProbeCodec(ctx context.Context, path string) (string, error) {
 type AlbumLoudnessResult struct {
 	Album    LoudnessInfo   // loudness measured across the complete album
 	PerTrack []LoudnessInfo // measurements in input order
+}
+
+// Measure reports EBU R128 integrated loudness for a single local audio file. It
+// uses Process with a measure-only spec and no Output, so no output or scratch
+// file is created.
+//
+// It requires ffmpeg. Use MeasureAlbum to measure several files as one album, or
+// Process with a LoudnessApply spec to normalize and write audio.
+func (c *Client) Measure(ctx context.Context, path string) (LoudnessInfo, error) {
+	res, err := c.Process(ctx, ProcessRequest{
+		Input:       path,
+		ProcessSpec: ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly}},
+	})
+	if err != nil {
+		return LoudnessInfo{}, err
+	}
+	if res.Loudness == nil || res.Loudness.Input == nil {
+		return LoudnessInfo{}, fmt.Errorf("waxtap.Measure: no loudness measured for %s", path)
+	}
+	return *res.Loudness.Input, nil
 }
 
 // MeasureAlbum measures local audio files as one album and also returns each

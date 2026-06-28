@@ -25,6 +25,10 @@ type templateData struct {
 	Index  int // 1-based playlist position, 0 when not a playlist
 }
 
+// templatePlaceholders is the validation allowlist and error-message order.
+// TestTemplatePlaceholdersMatchExpander keeps it aligned with expandTemplate.
+var templatePlaceholders = []string{"title", "id", "author", "itag", "ext", "index"}
+
 // expandTemplate substitutes {title}, {id}, {author}, {itag}, {ext}, and {index}
 // in tmpl. {index} expands to a zero-padded number for playlist items and to an
 // empty string otherwise.
@@ -43,29 +47,75 @@ func expandTemplate(tmpl string, d templateData) string {
 	).Replace(tmpl)
 }
 
+// validateOutputTemplate accepts only placeholders from templatePlaceholders.
+// Literal braces are not supported; any brace left after stripping known tokens
+// is reported as an invalid placeholder.
+func validateOutputTemplate(tmpl string) error {
+	stripped := tmpl
+	for _, name := range templatePlaceholders {
+		stripped = strings.ReplaceAll(stripped, "{"+name+"}", "")
+	}
+	if strings.ContainsAny(stripped, "{}") {
+		return usagef("invalid --output-template: %q is not a valid placeholder; valid placeholders are %s",
+			firstBadBrace(stripped), strings.Join(templatePlaceholders, ", "))
+	}
+	return nil
+}
+
+// firstBadBrace names the first leftover brace token after known placeholders are
+// removed.
+func firstBadBrace(s string) string {
+	open := strings.IndexByte(s, '{')
+	if open < 0 {
+		if c := strings.IndexByte(s, '}'); c >= 0 {
+			return s[c : c+1]
+		}
+		return s
+	}
+	if c := strings.IndexByte(s[open:], '}'); c >= 0 {
+		return s[open : open+c+1]
+	}
+	return s[open:]
+}
+
 // resolveOutputName expands a template into a sanitized relative path. Literal
 // separators in the template create subdirectories; separators in metadata do
 // not. Each path component is length-capped independently, and the final
-// component keeps the template's {ext}.
+// component uses the template's extension when one is present; otherwise it gets
+// d.Ext.
 func resolveOutputName(tmpl string, d templateData) string {
-	// Split before expansion so separators from metadata remain within one
-	// component. Drop empty components before identifying the filename.
+	// Split before expansion so metadata slashes stay inside one component.
+	// finalTmpl records the last non-empty template segment for extension handling.
 	var expanded []string
+	var finalTmpl string
 	for _, part := range strings.FieldsFunc(tmpl, isPathSeparator) {
 		if e := strings.TrimSpace(expandTemplate(part, d)); e != "" {
 			expanded = append(expanded, e)
+			finalTmpl = part
 		}
 	}
 	if len(expanded) == 0 {
-		return "untitled"
+		// Keep the detected extension even when every placeholder expands empty.
+		return "untitled" + sanitizeExt("."+d.Ext)
 	}
+	// The template provides the extension when its final segment contains {ext} or
+	// ends with an alphanumeric suffix. Dots in titles and text such as
+	// "Ep. {index}" are not treated as extensions.
+	templateHasExt := strings.Contains(finalTmpl, "{ext}") || extLooksReal(filepath.Ext(finalTmpl))
 	segs := make([]string, len(expanded))
 	last := len(expanded) - 1
 	for i, e := range expanded {
 		stem, ext := e, ""
 		if i == last {
-			ext = filepath.Ext(e)
-			stem = strings.TrimSuffix(e, ext)
+			switch {
+			case templateHasExt:
+				// Split the extension before truncation so the suffix survives.
+				ext = filepath.Ext(e)
+				stem = strings.TrimSuffix(e, ext)
+			case d.Ext != "":
+				// Treat the expanded value as the stem and append the actual extension.
+				ext = "." + d.Ext
+			}
 		}
 		seg := truncateBytes(sanitizeStem(stem), maxStemBytes)
 		if i == last {
@@ -77,6 +127,23 @@ func resolveOutputName(tmpl string, d templateData) string {
 }
 
 func isPathSeparator(r rune) bool { return r == '/' || r == '\\' }
+
+// extLooksReal accepts extensions made of a dot plus alphanumerics. filepath.Ext
+// would otherwise treat text after any final dot, including spaces or
+// punctuation, as the extension.
+func extLooksReal(s string) bool {
+	if len(s) < 2 || s[0] != '.' {
+		return false
+	}
+	for _, r := range s[1:] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // relUnder returns target relative to dir and reports whether target is contained
 // by dir.

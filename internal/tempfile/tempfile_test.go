@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,74 @@ func TestNewWrapsFailureAsOutputError(t *testing.T) {
 	}
 	if _, ok := errors.AsType[*OutputError](err); !ok {
 		t.Fatalf("err = %v (%T), want *OutputError", err, err)
+	}
+	// The message names the destination, not the random ".part" staging name.
+	if msg := err.Error(); !strings.Contains(msg, bad+":") {
+		t.Errorf("message = %q, want it to name the destination %q", msg, bad)
+	}
+	if strings.Contains(err.Error(), ".part") {
+		t.Errorf("message = %q, leaked the .part staging suffix", err)
+	}
+}
+
+func TestCommitSyncFailureNamesFinalPath(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.bin")
+	f, err := New(final)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Discard()
+	// Close the underlying file before Commit so Sync fails while the message still
+	// names the destination.
+	if err := f.File.Close(); err != nil {
+		t.Fatalf("close fd: %v", err)
+	}
+	err = f.Commit()
+	if err == nil {
+		t.Fatal("Commit should fail when the fd is already closed")
+	}
+	if _, ok := errors.AsType[*OutputError](err); !ok {
+		t.Fatalf("err = %v (%T), want *OutputError", err, err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, final+":") {
+		t.Errorf("message = %q, want it to name the destination %q", msg, final)
+	}
+	if strings.Contains(msg, ".part") {
+		t.Errorf("message = %q, leaked the .part staging suffix", msg)
+	}
+}
+
+func TestCommitRenameFailureNamesFinalPath(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.bin")
+	f, err := New(final)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Discard()
+	if _, err := f.Write([]byte("data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// Remove the staged temp so Commit fails on rename but still reports the
+	// destination.
+	if err := os.Remove(f.tmpPath); err != nil {
+		t.Fatalf("remove temp: %v", err)
+	}
+	err = f.Commit()
+	if err == nil {
+		t.Fatal("Commit should fail after the staged temp is removed")
+	}
+	if _, ok := errors.AsType[*OutputError](err); !ok {
+		t.Fatalf("err = %v (%T), want *OutputError", err, err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, final+":") {
+		t.Errorf("message = %q, want it to name the destination %q", msg, final)
+	}
+	if strings.Contains(msg, ".part") {
+		t.Errorf("message = %q, leaked the .part staging suffix", msg)
 	}
 }
 
@@ -262,6 +331,10 @@ func TestNewExternalWrapsFailureAsOutputError(t *testing.T) {
 	}
 	if _, ok := errors.AsType[*OutputError](err); !ok {
 		t.Fatalf("err = %v (%T), want *OutputError", err, err)
+	}
+	// The message names the destination, not the random staging name.
+	if msg := err.Error(); !strings.Contains(msg, bad+":") {
+		t.Errorf("message = %q, want it to name the destination %q", msg, bad)
 	}
 }
 

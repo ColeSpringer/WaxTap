@@ -112,6 +112,103 @@ func TestResolveOutputNameNeutralizesTraversal(t *testing.T) {
 	}
 }
 
+func TestValidateOutputTemplate(t *testing.T) {
+	valid := []string{
+		defaultTemplate,
+		"{title}.{ext}",
+		"{index} - {author} - {title} [{id}].{ext}",
+		"{author}/{id}.{ext}",
+		"plain-name.{ext}",
+		"{title}", // no {ext} is allowed; the real extension is added later
+	}
+	for _, tmpl := range valid {
+		if err := validateOutputTemplate(tmpl); err != nil {
+			t.Errorf("validateOutputTemplate(%q) = %v, want nil", tmpl, err)
+		}
+	}
+	invalid := []string{
+		"{artist}",       // unknown placeholder
+		"{}",             // empty
+		"{title, title}", // embedded junk
+		"{title",         // unmatched open brace
+		"title}",         // unmatched close brace
+		"{title}.{xyz}",  // unknown second placeholder
+	}
+	for _, tmpl := range invalid {
+		if err := validateOutputTemplate(tmpl); !isUsageError(err) {
+			t.Errorf("validateOutputTemplate(%q) = %v, want a usage error", tmpl, err)
+		}
+	}
+}
+
+func TestResolveOutputNameAppendsExtension(t *testing.T) {
+	cases := []struct {
+		name, tmpl, want string
+		data             templateData
+	}{
+		{"no ext in template gets real ext", "{title}", "Song.opus", templateData{Title: "Song", Ext: "opus"}},
+		{"literal ext wins", "{title}.mp3", "Song.mp3", templateData{Title: "Song", Ext: "opus"}},
+		{"all-empty falls back to untitled with ext", "{title}", "untitled.opus", templateData{Ext: "opus"}},
+		{"all-empty unknown ext stays untitled", "{title}", "untitled", templateData{}},
+		{"index zero expands empty without artifacts", "{index}{title}", "Song.flac", templateData{Title: "Song", Index: 0, Ext: "flac"}},
+		// A dot inside a metadata value is not an extension: the real one is still
+		// appended, and the value (including its space) is preserved.
+		{"version number in title", "{title}", "Version 1.0.opus", templateData{Title: "Version 1.0", Ext: "opus"}},
+		{"filename-like title", "{title}", "Song.mp3.opus", templateData{Title: "Song.mp3", Ext: "opus"}},
+		{"abbreviation dot in title", "{title}", "Mr. Brightside.opus", templateData{Title: "Mr. Brightside", Ext: "opus"}},
+		{"dot in title with literal template ext", "{title}.{ext}", "Version 1.0.opus", templateData{Title: "Version 1.0", Ext: "opus"}},
+		// {ext} supplies the extension even without a literal dot, so the resolver
+		// must not append the real extension again.
+		{"ext placeholder without dot not doubled", "{id}{ext}", "abcopus", templateData{ID: "abc", Ext: "opus"}},
+		{"ext placeholder with dash not doubled", "{id}-{ext}", "abc-opus", templateData{ID: "abc", Ext: "opus"}},
+		// A literal dot in template text is not a trailing extension; the real one is
+		// still appended.
+		{"abbrev dot in template text", "Ep. {index} - {title}", "Ep. 01 - Song.opus", templateData{Title: "Song", Index: 1, Ext: "opus"}},
+		{"url-like brackets in template", "{title} [www.example.com]", "Song [www.example.com].opus", templateData{Title: "Song", Ext: "opus"}},
+		{"volume dot in template text", "Vol. 1 - {title}", "Vol. 1 - Song.flac", templateData{Title: "Song", Ext: "flac"}},
+		{"real literal ext with internal dot", "Ep. {title}.mp3", "Ep. Song.mp3", templateData{Title: "Song", Ext: "opus"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveOutputName(tc.tmpl, tc.data); got != tc.want {
+				t.Errorf("resolveOutputName(%q, %+v) = %q, want %q", tc.tmpl, tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtLooksReal(t *testing.T) {
+	real := []string{".mp3", ".opus", ".FLAC", ".m4a", ".webm", ".ogg"}
+	for _, s := range real {
+		if !extLooksReal(s) {
+			t.Errorf("extLooksReal(%q) = false, want true", s)
+		}
+	}
+	// Empty strings, missing dots, and punctuation after the dot are not extensions.
+	fake := []string{"", ".", "mp3", ". 01 - {title}", ".com]", ".tar-gz", ". 1 - x"}
+	for _, s := range fake {
+		if extLooksReal(s) {
+			t.Errorf("extLooksReal(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestTemplatePlaceholdersMatchExpander(t *testing.T) {
+	// Every listed placeholder must be substituted by expandTemplate; validation
+	// strips the same list.
+	full := templateData{Title: "T", ID: "I", Author: "A", Ext: "E", Itag: 1, Index: 1}
+	for _, name := range templatePlaceholders {
+		tok := "{" + name + "}"
+		if got := expandTemplate(tok, full); got == tok {
+			t.Errorf("expandTemplate left %q unexpanded, but it is listed in templatePlaceholders", tok)
+		}
+	}
+	// Unknown names pass through untouched so validation can reject them.
+	if got := expandTemplate("{artist}", full); got != "{artist}" {
+		t.Errorf("expandTemplate substituted unlisted {artist}: %q", got)
+	}
+}
+
 func TestEnsureUnderDir(t *testing.T) {
 	if err := ensureUnderDir("out", filepath.Join("out", "Artist", "id.mp3")); err != nil {
 		t.Errorf("contained path rejected: %v", err)

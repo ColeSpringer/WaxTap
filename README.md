@@ -204,7 +204,8 @@ Keys with no flag are config/environment only. Timeout values are seconds.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
   fallbacks. Results report the client that actually delivered them.
 - Playlist downloads support `--concurrency`, pacing, attempt limits, collision
-  policies, and yt-dlp-compatible `--download-archive` files.
+  policies, and yt-dlp-compatible `--download-archive` files. WaxTap writes
+  `youtube <id>` entries and also reads bare-ID entries.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
   cache. Set `WAXTAP_DUMP_DIR` or `WAXTAP_SABR_DUMP_DIR` for diagnostic dumps.
 - Sidecar URL flags accept a base URL or full endpoint. `--api-key` sends
@@ -222,8 +223,8 @@ URL-less SABR/UMP audio. Complete WEB delivery requires:
    `/session`.
 3. A shared egress IP for the attesting service and the download.
 
-A PO token alone does not lift the roughly one-minute preview earned by a WEB
-`/player` request made by WaxTap.
+A PO token by itself is not a portable way to lift the WEB preview cap. Full WEB
+audio can work when WaxTap and WaxSeal share the same attested egress.
 
 ```sh
 # Attested player context

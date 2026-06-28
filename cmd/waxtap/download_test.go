@@ -2,11 +2,25 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap"
 	"github.com/spf13/cobra"
 )
+
+// TestResolveValidatesOutputTemplate checks that malformed templates fail during
+// flag resolution, before download or playlist work starts.
+func TestResolveValidatesOutputTemplate(t *testing.T) {
+	df := &downloadFlags{}
+	cmd := &cobra.Command{Use: "download"}
+	bindDownloadFlags(cmd, df)
+	mustSet(t, cmd, "output-template", "{artist}")
+	err := df.resolve(cmd, testResolveEnv())
+	if !isUsageError(err) || !strings.Contains(err.Error(), "output-template") {
+		t.Fatalf("resolve err = %v, want an --output-template usage error", err)
+	}
+}
 
 func TestResolveValidatesProcessSpec(t *testing.T) {
 	cases := []struct {

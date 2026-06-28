@@ -170,6 +170,21 @@ func ExampleClient_DownloadPlaylist() {
 		res.Downloaded, res.Remaining, res.CapReached)
 }
 
+// ExampleClient_Measure reports the loudness of a single local file without
+// writing any output.
+func ExampleClient_Measure() {
+	client, err := waxtap.New(waxtap.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	loud, err := client.Measure(context.Background(), "song.flac")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%.1f LUFS\n", loud.IntegratedLUFS)
+}
+
 // ExampleClient_MeasureAlbum measures several files as one album, useful for
 // ReplayGain-style album tags without rewriting the files.
 func ExampleClient_MeasureAlbum() {

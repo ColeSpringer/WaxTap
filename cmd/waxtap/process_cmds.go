@@ -29,6 +29,31 @@ func validateLocalSourceFlags(cmd *cobra.Command, source string) error {
 	return rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback")
 }
 
+// validateProcessSource reports whether source is usable by a process command:
+// an existing local file, or a clean YouTube URL/ID. A missing path whose shape
+// is not a valid video ID is reported as a missing file, since that is the more
+// likely intent than a mistyped ID. Commands call it before collision handling so
+// an existing output cannot hide a missing input.
+func validateProcessSource(source string) error {
+	if isLocalFile(source) {
+		return nil
+	}
+	// Process commands take a file path or a clean ID/URL. Strict extraction keeps
+	// an ID-shaped filename such as "aqz-KE-bpKQ.opus" from being treated as a
+	// video download when the intended local file is missing.
+	if _, err := youtube.ExtractVideoIDStrict(source); err != nil {
+		// Report both accepted input forms because this is usually a mistyped
+		// local path, not an intended video ID.
+		if errors.Is(err, waxtap.ErrInvalidVideoID) ||
+			errors.Is(err, waxtap.ErrVideoIDTooShort) ||
+			errors.Is(err, waxtap.ErrVideoIDTooLong) {
+			return usagef("no such file and not a valid YouTube URL or ID: %s", source)
+		}
+		return err
+	}
+	return nil
+}
+
 // dispatchProcess runs a ProcessSpec against a local file or a YouTube URL and
 // returns the Result. A live progress reporter is attached for the duration.
 // noFallback applies only to URL sources.
@@ -40,27 +65,24 @@ func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap
 	if isLocalFile(source) {
 		return env.client.Process(ctx, waxtap.ProcessRequest{Input: source, ProcessSpec: spec})
 	}
-	// Process commands take a file path or a clean ID/URL. Strict extraction keeps
-	// an ID-shaped filename such as "aqz-KE-bpKQ.opus" from being treated as a
-	// video download when the intended local file is missing.
-	if _, err := youtube.ExtractVideoIDStrict(source); err != nil {
-		// Report both accepted input forms because this is usually a mistyped
-		// local path, not an intended video ID.
-		if errors.Is(err, waxtap.ErrInvalidVideoID) ||
-			errors.Is(err, waxtap.ErrVideoIDTooShort) ||
-			errors.Is(err, waxtap.ErrVideoIDTooLong) {
-			return nil, usagef("no such file and not a valid YouTube URL or ID: %s", source)
-		}
+	// runMeasure does not call resolveProcessOutput, so URL sources are validated
+	// here as well.
+	if err := validateProcessSource(source); err != nil {
 		return nil, err
 	}
 	return env.client.Download(ctx, waxtap.Request{URL: source, Audio: sel, SourcePolicy: policy, NoFallback: noFallback, ProcessSpec: spec})
 }
 
-// resolveProcessOutput resolves the output path for a single-file process command
-// and applies the collision mode. explicit is the positional/--out path (may be
-// empty). When empty and the source is local, the name is derived from the input;
-// a URL source requires an explicit output.
+// resolveProcessOutput validates the source, then resolves the output path for a
+// single-file process command and applies the collision mode. explicit is the
+// positional/--out path (may be empty). When empty and the source is local, the
+// name is derived from the input; a URL source requires an explicit output.
+//
+// Validating first keeps an existing output from hiding a missing input.
 func resolveProcessOutput(source, explicit, newExt, tag string, mode collisionMode) (path string, skip bool, err error) {
+	if err := validateProcessSource(source); err != nil {
+		return "", false, err
+	}
 	if explicit == "" {
 		if !isLocalFile(source) {
 			return "", false, usagef("provide an output path (positional or --out) for a URL source")

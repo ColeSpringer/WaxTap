@@ -193,6 +193,10 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if df.out != "" && cmd.Flags().Changed("output-template") {
 		return usagef("--output-template cannot be used with --out")
 	}
+	// Validate every template before network work; the default template passes here.
+	if err := validateOutputTemplate(df.template); err != nil {
+		return err
+	}
 	if cmd.Flags().Changed("bitrate") && df.format == "" {
 		return usagef("--bitrate requires --format")
 	}

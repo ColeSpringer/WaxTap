@@ -68,9 +68,9 @@ func bindSponsorBlockFlag(f *pflag.FlagSet, cats *string, usage string) {
 // such as cut. Setting --out removes that slot.
 func sponsorblockArgs(base cobra.PositionalArgs, hasOutputPositional bool) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
-		// After parsing, a bare flag is indistinguishable from an explicit value
-		// equal to NoOptDefVal. In either case, only impossible positional shapes
-		// trigger the hint.
+		// After parsing, pflag cannot tell a bare flag from an explicit value equal
+		// to NoOptDefVal. In either case, only impossible positional shapes trigger
+		// the hint.
 		if fl := cmd.Flags().Lookup("sponsorblock"); fl != nil &&
 			cmd.Flags().Changed("sponsorblock") && fl.Value.String() == fl.NoOptDefVal {
 			if arg, ok := sponsorblockMisparse(cmd, args, hasOutputPositional); ok {
@@ -85,9 +85,14 @@ func sponsorblockArgs(base cobra.PositionalArgs, hasOutputPositional bool) cobra
 // the --sponsorblock value.
 func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional bool) (string, bool) {
 	if !hasOutputPositional {
-		// Download and preview accept one positional argument. Only report a
-		// misplaced value when a surplus argument is a valid category list. Other
-		// surplus arguments belong to the command's normal arity error.
+		// Download and preview accept one positional argument. With no surplus
+		// positional, there is no misplaced value to report.
+		if len(args) < 2 {
+			return "", false
+		}
+		// Treat a surplus positional as a missing --sponsorblock value only when it is
+		// a valid category list. Other surplus args stay with Cobra's arity error,
+		// since a bare flag and --sponsorblock=<default> look the same after parsing.
 		for _, a := range args[1:] {
 			if isCategoryList(a) {
 				return a, true

@@ -5,11 +5,52 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap"
 )
+
+// TestProcessSourceCheckedBeforeCollision verifies that a missing input is
+// reported before an existing output path is considered.
+func TestProcessSourceCheckedBeforeCollision(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.wav")
+	existing := filepath.Join(dir, "existing.flac")
+	if err := os.WriteFile(existing, []byte("present"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"transcode", []string{"transcode", missing, "-f", "flac", "-o", existing}},
+		{"cut", []string{"cut", missing, "--cut-range", "0-1", "-f", "flac", "-o", existing}},
+		{"normalize", []string{"normalize", missing, "-f", "flac", "-o", existing}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(tc.args)
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if err == nil {
+				t.Fatal("expected an error for a missing source")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "no such file") {
+				t.Errorf("error = %q, want it to report the missing source", msg)
+			}
+			if strings.Contains(msg, "already exists") {
+				t.Errorf("error = %q, the existing output masked the missing source", msg)
+			}
+		})
+	}
+}
 
 func TestDispatchProcessMangledPath(t *testing.T) {
 	client, err := waxtap.New(waxtap.Options{})

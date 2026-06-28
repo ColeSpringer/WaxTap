@@ -3,11 +3,66 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxtap"
 )
+
+// TestAlbumTableHeaders guards the album table labels. Process output uses
+// IN-LUFS for per-track input loudness because the row also includes OUTPUT;
+// measure output has no output column and keeps LUFS.
+func TestAlbumTableHeaders(t *testing.T) {
+	inputs := []string{"a.flac", "b.flac"}
+	perTrack := []waxtap.LoudnessInfo{{IntegratedLUFS: -11}, {IntegratedLUFS: -13}}
+
+	t.Run("process table uses IN-LUFS", func(t *testing.T) {
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+		res := &waxtap.AlbumProcessResult{
+			Album:    waxtap.LoudnessInfo{IntegratedLUFS: -12},
+			GainDB:   -2,
+			PerTrack: perTrack,
+			Outputs:  []string{"out/a.flac", "out/b.flac"},
+		}
+		if err := emitAlbumProcess(env, inputs, res); err != nil {
+			t.Fatal(err)
+		}
+		if s := out.String(); !strings.Contains(s, "IN-LUFS") || !strings.Contains(s, "OUTPUT") {
+			t.Errorf("process table header = %q, want IN-LUFS beside OUTPUT", s)
+		}
+	})
+
+	t.Run("measure table keeps LUFS", func(t *testing.T) {
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+		res := &waxtap.AlbumLoudnessResult{
+			Album:    waxtap.LoudnessInfo{IntegratedLUFS: -12},
+			PerTrack: perTrack,
+		}
+		if err := emitAlbumMeasure(env, inputs, res); err != nil {
+			t.Fatal(err)
+		}
+		s := out.String()
+		// Locate the row naming TRACK and require the plain LUFS column.
+		var header string
+		for line := range strings.SplitSeq(s, "\n") {
+			if strings.Contains(line, "TRACK") {
+				header = line
+				break
+			}
+		}
+		if header == "" {
+			t.Fatalf("measure table has no TRACK header line: %q", s)
+		}
+		if !strings.Contains(header, "LUFS") || strings.Contains(header, "IN-LUFS") {
+			t.Errorf("measure table header = %q, want a plain LUFS column", header)
+		}
+	})
+}
 
 func TestNormalizeFlagSurface(t *testing.T) {
 	flags := newNormalizeCmd().Flags()

@@ -31,6 +31,19 @@ func WrapOutput(op string, err error) error {
 	return &OutputError{Op: op, cause: err}
 }
 
+// retargetPathError replaces temp paths in OS errors with finalPath. That keeps
+// output errors focused on the requested destination. Rename errors arrive as
+// *os.LinkError, which is converted to *os.PathError for a single-path message.
+func retargetPathError(finalPath string, err error) error {
+	if pe, ok := errors.AsType[*os.PathError](err); ok {
+		return &os.PathError{Op: pe.Op, Path: finalPath, Err: pe.Err}
+	}
+	if le, ok := errors.AsType[*os.LinkError](err); ok {
+		return &os.PathError{Op: le.Op, Path: finalPath, Err: le.Err}
+	}
+	return err
+}
+
 // File is a staged output: write to it, then Commit (atomic rename to the final
 // path) or Discard (remove the temp). The temp is created in the final path's
 // directory so the rename stays on one filesystem and is therefore atomic.
@@ -57,12 +70,12 @@ func New(finalPath string) (*File, error) {
 	base := filepath.Base(finalPath)
 	f, err := os.CreateTemp(dir, base+".*.part")
 	if err != nil {
-		return nil, WrapOutput("create", err)
+		return nil, WrapOutput("create", retargetPathError(finalPath, err))
 	}
 	if err := chmodUmask(f.Name()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return nil, WrapOutput("chmod", err)
+		return nil, WrapOutput("chmod", retargetPathError(finalPath, err))
 	}
 	return &File{File: f, finalPath: finalPath, tmpPath: f.Name()}, nil
 }
@@ -81,13 +94,13 @@ func (f *File) Commit() error {
 	}
 	if err := f.File.Sync(); err != nil {
 		_ = f.close()
-		return WrapOutput("sync", err)
+		return WrapOutput("sync", retargetPathError(f.finalPath, err))
 	}
 	if err := f.close(); err != nil {
-		return WrapOutput("close", err)
+		return WrapOutput("close", retargetPathError(f.finalPath, err))
 	}
 	if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
-		return WrapOutput("rename", err)
+		return WrapOutput("rename", retargetPathError(f.finalPath, err))
 	}
 	f.committed = true
 	return nil
@@ -142,7 +155,7 @@ func NewExternal(finalPath, ext string) (*External, error) {
 	}
 	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return nil, WrapOutput("create", err)
+		return nil, WrapOutput("create", retargetPathError(finalPath, err))
 	}
 	name := f.Name()
 	_ = f.Close() // the external process reopens and overwrites this path
@@ -150,7 +163,7 @@ func NewExternal(finalPath, ext string) (*External, error) {
 	// existing mode, so the published output honors the umask.
 	if err := chmodUmask(name); err != nil {
 		_ = os.Remove(name)
-		return nil, WrapOutput("chmod", err)
+		return nil, WrapOutput("chmod", retargetPathError(finalPath, err))
 	}
 	return &External{finalPath: finalPath, tmpPath: name}, nil
 }
@@ -165,7 +178,7 @@ func (e *External) Commit() error {
 		return nil
 	}
 	if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
-		return WrapOutput("rename", err)
+		return WrapOutput("rename", retargetPathError(e.finalPath, err))
 	}
 	e.committed = true
 	return nil

@@ -457,6 +457,57 @@ func TestNormalizeExecuteError_FlagOrder(t *testing.T) {
 	}
 }
 
+// TestFlagOrderHint checks hints for unknown commands and leading-dash IDs,
+// including the guard that an 11-character long flag gets no hint.
+func TestFlagOrderHint(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want string // substring the hint must contain; "" means no hint
+	}{
+		{"unknown command target", `unknown command "dQw4w9WgXcQ" for "waxtap"`, "waxtap download dQw4w9WgXcQ"},
+		{"unknown command non-target", `unknown command "boguscmd" for "waxtap"`, ""},
+		{"dash shorthand 11-char id", "unknown shorthand flag: 'b' in -bcdefghijk", "-- -bcdefghijk"},
+		{"dash shorthand short token", "unknown shorthand flag: 'a' in -abc", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := flagOrderHint(&usageError{msg: tc.msg})
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("flagOrderHint(%q) = %q, want no hint", tc.msg, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("flagOrderHint(%q) = %q, want it to contain %q", tc.msg, got, tc.want)
+			}
+		})
+	}
+
+	// Exercise pflag itself: a leading-dash video ID gets the dash hint, while an
+	// unknown long flag gets no hint. Long-flag hints stay disabled because real
+	// command flags can also look like video IDs.
+	t.Run("real shorthand dash id", func(t *testing.T) {
+		err := newInfoCmd().ParseFlags([]string{"-bcdefghijk"})
+		if err == nil {
+			t.Fatal("expected pflag to reject -bcdefghijk as shorthand flags")
+		}
+		if got := flagOrderHint(&usageError{msg: err.Error()}); !strings.Contains(got, "-- -bcdefghijk") {
+			t.Errorf("hint = %q, want the leading-dash guidance", got)
+		}
+	})
+	t.Run("real long flag no hint", func(t *testing.T) {
+		err := newInfoCmd().ParseFlags([]string{"--collision"})
+		if err == nil {
+			t.Fatal("expected info to reject the unknown --collision flag")
+		}
+		if got := flagOrderHint(&usageError{msg: err.Error()}); got != "" {
+			t.Errorf("hint = %q, want none for an 11-char long flag", got)
+		}
+	})
+}
+
 func TestErrorCode(t *testing.T) {
 	if got := errorCode(waxtap.ErrFFmpegNotFound); got != "ffmpeg-not-found" {
 		t.Errorf("errorCode(ffmpeg) = %q", got)

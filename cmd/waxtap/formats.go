@@ -141,11 +141,11 @@ func hasDRCVariant(formats []waxtap.Format) bool {
 	return false
 }
 
-// formatJSON is the --json view of a format, using explicit CLI field names.
-// Numeric fields stay present even when zero: YouTube uses zero for unknown
-// content length, sample rate, channel count, and bitrate on some SABR, adaptive,
-// and live formats. Only Itag uses omitempty. YouTube formats always carry a
-// non-zero itag, while local sources have none.
+// formatJSON is the --json view for YouTube formats, using explicit CLI field
+// names. Numeric fields stay present even when zero because YouTube uses zero for
+// unknown values in some streams. Only Itag uses omitempty; YouTube formats
+// always carry one. Local-file results use localFormatJSON to avoid network-only
+// fields that would always be zero.
 type formatJSON struct {
 	Itag            int     `json:"itag,omitempty"`
 	Codec           string  `json:"codec"`

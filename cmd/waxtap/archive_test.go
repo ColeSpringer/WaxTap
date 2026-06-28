@@ -36,10 +36,10 @@ func TestArchiveRoundTrip(t *testing.T) {
 		t.Error("reopened archive lost abc")
 	}
 
-	// Exactly one line should have been written.
+	// The archive uses yt-dlp's "youtube <id>" line format.
 	data, _ := os.ReadFile(path)
-	if string(data) != "abc\n" {
-		t.Errorf("archive contents = %q, want %q", data, "abc\n")
+	if string(data) != "youtube abc\n" {
+		t.Errorf("archive contents = %q, want %q", data, "youtube abc\n")
 	}
 }
 

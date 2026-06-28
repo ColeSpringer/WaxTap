@@ -133,11 +133,11 @@ type resultJSON struct {
 	OutputPath    string `json:"outputPath,omitempty"`
 	Client        string `json:"client,omitempty"`
 
-	// SourceFormat is always present. OutputFormat is omitted for a local source
-	// unless it was re-encoded, matching the human summary's "Encoded:" line.
-	// Pointers allow encoding/json to omit the local output format.
-	SourceFormat *formatJSON `json:"sourceFormat,omitempty"`
-	OutputFormat *formatJSON `json:"outputFormat,omitempty"`
+	// SourceFormat is always present. OutputFormat is omitted for unchanged local
+	// sources, matching the human summary's "Encoded:" line. Interfaces allow
+	// YouTube sources to emit formatJSON and local sources to emit localFormatJSON.
+	SourceFormat any `json:"sourceFormat,omitempty"`
+	OutputFormat any `json:"outputFormat,omitempty"`
 
 	SourceBytes int64 `json:"sourceBytes"`
 	OutputBytes int64 `json:"outputBytes"`
@@ -182,16 +182,30 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 	return out
 }
 
-// formatDTOs includes outputFormat for every YouTube result and for local files
-// that were re-encoded. Other local results omit it because it would duplicate
-// sourceFormat.
-func formatDTOs(res *waxtap.Result) (src, out *formatJSON) {
-	s := formatToJSON(res.SourceFormat)
-	src = &s
-	if res.SourceKind != waxtap.SourceLocalFile || res.Transcoded {
-		o := formatToJSON(res.OutputFormat)
-		out = &o
+// localFormatJSON is the --json view of a local-file format. Local probes record
+// only codec and extension, so network-only formatJSON fields are omitted.
+type localFormatJSON struct {
+	Codec     string `json:"codec"`
+	Extension string `json:"extension,omitempty"`
+}
+
+func localFormatToJSON(f waxtap.Format) localFormatJSON {
+	return localFormatJSON{Codec: f.Codec, Extension: f.Extension}
+}
+
+// formatDTOs chooses the JSON shape for sourceFormat and outputFormat. It returns
+// nil for omitted outputFormat so omitempty removes the field instead of encoding
+// null.
+func formatDTOs(res *waxtap.Result) (src, out any) {
+	if res.SourceKind == waxtap.SourceLocalFile {
+		src = localFormatToJSON(res.SourceFormat)
+		if res.Transcoded {
+			out = localFormatToJSON(res.OutputFormat)
+		}
+		return src, out
 	}
+	src = formatToJSON(res.SourceFormat)
+	out = formatToJSON(res.OutputFormat)
 	return src, out
 }
 

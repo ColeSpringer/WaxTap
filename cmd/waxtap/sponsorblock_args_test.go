@@ -27,9 +27,19 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 	}{
 		{"download space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor,intro"}, wantHint},
 		{"download single category space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor"}, wantHint},
-		// A surplus token that is not a category list belongs to the normal arity
-		// error. Suggesting the "=" form would be incorrect.
+		// Non-category surplus args stay with the normal arity error. After parsing,
+		// Cobra cannot tell them apart from stray arguments.
 		{"download non-category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "blah"}, wantReject},
+		{"download typo category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantReject},
+		{"sponsorblock typo category surplus", newSponsorBlockCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantReject},
+		// A stray positional before a bare or explicit-default --sponsorblock is an
+		// arity error, not a misplaced flag value.
+		{"download stray arg plus bare flag", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock"}, wantReject},
+		{"download stray arg plus explicit default", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock=music_offtopic"}, wantReject},
+		// A bare flag with no positional is a clean arity error.
+		{"download bare flag no positional", newDownloadCmd, []string{"--sponsorblock"}, wantReject},
+		{"sponsorblock bare flag no positional", newSponsorBlockCmd, []string{"--sponsorblock"}, wantReject},
+		// Two real targets are an arity error, not a misplaced flag value.
 		{"download two urls bare flag", newDownloadCmd, []string{"dummyVideo0", "dummyVideo1", "--sponsorblock"}, wantReject},
 		{"download equals form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock=sponsor,intro"}, wantOK},
 		{"download bare", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock"}, wantOK},

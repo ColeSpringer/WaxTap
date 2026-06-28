@@ -1,7 +1,9 @@
 package waxtap
 
 import (
+	"encoding/json"
 	"io"
+	"math"
 	"time"
 
 	"github.com/colespringer/waxtap/format"
@@ -338,6 +340,25 @@ type LoudnessInfo struct {
 	TruePeakDBTP   float64 // true peak, dBTP
 	LRA            float64 // loudness range, LU
 	Threshold      float64 // relative gating threshold, LUFS
+}
+
+// MarshalJSON encodes non-finite measurements as JSON null because encoding/json
+// rejects NaN and Inf. Silent tracks can produce -Inf; using null keeps
+// LoudnessInfo JSON-friendly for Measure and MeasureAlbum callers. Field names
+// stay the exported struct names.
+func (l LoudnessInfo) MarshalJSON() ([]byte, error) {
+	finite := func(v float64) *float64 {
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return nil
+		}
+		return &v
+	}
+	return json.Marshal(struct {
+		IntegratedLUFS *float64
+		TruePeakDBTP   *float64
+		LRA            *float64
+		Threshold      *float64
+	}{finite(l.IntegratedLUFS), finite(l.TruePeakDBTP), finite(l.LRA), finite(l.Threshold)})
 }
 
 // LoudnessResult reports loudness measurements. WaxTap returns LUFS/true-peak

@@ -311,7 +311,8 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 	}
 	env.printf("Album:  %s LUFS; applied %+.1f dB to each track\n\n", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tLUFS\tOUTPUT")
+	// Per-track values are input measurements; processed output is not measured here.
+	fmt.Fprintln(tw, "#\tIN-LUFS\tOUTPUT")
 	for i := range res.Outputs {
 		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), res.Outputs[i])
 	}

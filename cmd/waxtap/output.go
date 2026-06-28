@@ -580,18 +580,22 @@ func normalizeExecuteError(err error) error {
 	return err
 }
 
-// flagOrderHint explains Cobra's flag-order trap when the unknown command looks
-// like a YouTube target.
+// flagOrderHint adds CLI help for YouTube-looking arguments that Cobra or pflag
+// parsed before the command could receive them.
 func flagOrderHint(err error) string {
 	ue, ok := errors.AsType[*usageError](err)
 	if !ok {
 		return ""
 	}
-	tok, ok := unknownCommandToken(ue.msg)
-	if !ok || !looksLikeYouTubeTarget(tok) {
-		return ""
+	if tok, ok := unknownCommandToken(ue.msg); ok && looksLikeYouTubeTarget(tok) {
+		return fmt.Sprintf("did you mean `waxtap download %s`? global flags go before the subcommand, command flags after it", tok)
 	}
-	return fmt.Sprintf("did you mean `waxtap download %s`? global flags go before the subcommand, command flags after it", tok)
+	// A video ID that starts with "-" reaches pflag as shorthand flags. The
+	// original token still has the dash, so looksLikeYouTubeTarget can match it.
+	if tok, ok := dashFlagToken(ue.msg); ok && looksLikeYouTubeTarget(tok) {
+		return fmt.Sprintf("a leading-dash video ID is parsed as flags; pass it after -- (e.g. `-- %s`) or use the full https://youtu.be/%s URL", tok, tok)
+	}
+	return ""
 }
 
 // unknownCommandToken extracts the quoted token from a cobra "unknown command"
@@ -609,6 +613,20 @@ func unknownCommandToken(msg string) (string, bool) {
 		return "", false
 	}
 	return tok, true
+}
+
+// dashFlagToken extracts the original argument from pflag's unknown-shorthand
+// message, for example "unknown shorthand flag: 'a' in -abcdefghij". Long flags
+// are left alone because real command flags can also look like video IDs.
+func dashFlagToken(msg string) (string, bool) {
+	if !strings.HasPrefix(msg, "unknown shorthand flag:") {
+		return "", false
+	}
+	_, after, ok := strings.Cut(msg, " in ")
+	if !ok {
+		return "", false
+	}
+	return after, true
 }
 
 // looksLikeYouTubeTarget reports whether s resembles a YouTube URL or bare video

@@ -73,7 +73,9 @@ func (a *downloadArchive) Add(id string) error {
 	}
 	defer func() { _ = unlockFile(f) }()
 
-	if _, err := fmt.Fprintln(f, id); err != nil {
+	// Write yt-dlp-compatible entries. archiveID also accepts bare IDs from older
+	// WaxTap archives.
+	if _, err := fmt.Fprintf(f, "youtube %s\n", id); err != nil {
 		return fmt.Errorf("append to download archive %s: %w", a.path, err)
 	}
 	a.seen[id] = true

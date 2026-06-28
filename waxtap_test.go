@@ -3,6 +3,7 @@ package waxtap
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -1031,6 +1032,191 @@ func TestProcessLocalMeasureOnly(t *testing.T) {
 	}
 	if !fileExists(in) {
 		t.Error("measure-only must not remove the input")
+	}
+}
+
+// TestProcessMeasureOnlyNoOutput verifies that pure measurement works without an
+// Output: it reports loudness, writes no file, leaves the input in place, and
+// still reaches StageFinalizing.
+func TestProcessMeasureOnlyNoOutput(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+
+	var stages []Stage
+	res, err := c.Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly},
+			Events:   func(e Event) { stages = append(stages, e.Stage) },
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process measure-only (no Output): %v", err)
+	}
+	if !res.LoudnessMeasured || res.Loudness == nil || res.Loudness.Input == nil {
+		t.Fatalf("measure-only result = %+v", res)
+	}
+	if res.OutputPath != "" || res.OutputBytes != 0 {
+		t.Errorf("measure-only with no Output should not write a file: path=%q bytes=%d", res.OutputPath, res.OutputBytes)
+	}
+	if res.Transcoded || res.LoudnessApplied {
+		t.Errorf("measure-only must not transcode or apply: %+v", res)
+	}
+	// The lifecycle matches the with-Output measure: StageFinalizing fires.
+	if !containsStage(stages, StageFinalizing) {
+		t.Errorf("stages = %v, want StageFinalizing", stages)
+	}
+	if containsStage(stages, StageSkipped) {
+		t.Errorf("stages = %v, measure-only must not be StageSkipped", stages)
+	}
+	// No stray output files were created alongside the input.
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("dir has %d entries, want only the input file", len(entries))
+	}
+}
+
+func containsStage(stages []Stage, want Stage) bool {
+	for _, s := range stages {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMeasure exercises the Client.Measure convenience wrapper.
+func TestMeasure(t *testing.T) {
+	ffmpegOrSkip(t)
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+
+	got, err := c.Measure(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if math.IsNaN(got.IntegratedLUFS) || math.IsInf(got.IntegratedLUFS, 0) {
+		t.Errorf("Measure returned non-finite loudness for a steady sine: %+v", got)
+	}
+	if got.IntegratedLUFS >= 0 {
+		t.Errorf("Measure integrated LUFS = %v, want a negative value for audio with signal", got.IntegratedLUFS)
+	}
+	// Measure neither writes nor removes anything.
+	if !fileExists(in) {
+		t.Error("Measure must not remove the input")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("dir has %d entries, want only the input file", len(entries))
+	}
+}
+
+// TestLoudnessInfoMarshalJSON verifies that non-finite measurements, such as
+// digital silence yielding -Inf, marshal as null instead of failing json.Marshal.
+func TestLoudnessInfoMarshalJSON(t *testing.T) {
+	b, err := json.Marshal(LoudnessInfo{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: -1.5, LRA: math.NaN(), Threshold: -24})
+	if err != nil {
+		t.Fatalf("marshal non-finite LoudnessInfo: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["IntegratedLUFS"] != nil {
+		t.Errorf("IntegratedLUFS = %v, want null for -Inf", m["IntegratedLUFS"])
+	}
+	if m["LRA"] != nil {
+		t.Errorf("LRA = %v, want null for NaN", m["LRA"])
+	}
+	if m["TruePeakDBTP"] != -1.5 {
+		t.Errorf("TruePeakDBTP = %v, want -1.5 (finite preserved)", m["TruePeakDBTP"])
+	}
+	if m["Threshold"] != -24.0 {
+		t.Errorf("Threshold = %v, want -24 (finite preserved)", m["Threshold"])
+	}
+}
+
+// TestIsMeasureOnlySpec checks which specs may run without an Output. Only pure
+// loudness measurement qualifies; anything that writes audio does not.
+func TestIsMeasureOnlySpec(t *testing.T) {
+	measure := func() *LoudnessSpec { return &LoudnessSpec{Mode: LoudnessMeasureOnly} }
+	cases := []struct {
+		name string
+		spec ProcessSpec
+		want bool
+	}{
+		{"pure measure-only", ProcessSpec{Loudness: measure()}, true},
+		{"no loudness", ProcessSpec{}, false},
+		{"apply not measure", ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: -14}}, false},
+		{"copy remux", ProcessSpec{Loudness: measure(), Transcode: &TranscodeSpec{Format: FormatCopy}}, false},
+		{"transcode", ProcessSpec{Loudness: measure(), Transcode: &TranscodeSpec{Format: FormatMP3}}, false},
+		{"downmix", ProcessSpec{Loudness: measure(), Downmix: true, Channels: LayoutStereo}, false},
+		{"explicit cut ranges", ProcessSpec{Loudness: measure(), Cut: &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}}}, false},
+		{"sponsorblock", ProcessSpec{Loudness: measure(), Cut: &CutSpec{SponsorBlock: []Category{CategoryMusicOffTopic}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isMeasureOnlySpec(tc.spec); got != tc.want {
+				t.Errorf("isMeasureOnlySpec(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProcessNoOutputRequiresOutput verifies that audio-writing specs still need
+// an Output.
+func TestProcessNoOutputRequiresOutput(t *testing.T) {
+	c := newOfflineClient(t)
+	ctx := context.Background()
+	measure := func() *LoudnessSpec { return &LoudnessSpec{Mode: LoudnessMeasureOnly} }
+	cases := []struct {
+		name string
+		spec ProcessSpec
+	}{
+		{"copy remux", ProcessSpec{Loudness: measure(), Transcode: &TranscodeSpec{Format: FormatCopy}}},
+		{"transcode", ProcessSpec{Loudness: measure(), Transcode: &TranscodeSpec{Format: FormatMP3}}},
+		{"downmix", ProcessSpec{Loudness: measure(), Downmix: true, Channels: LayoutStereo}},
+		{"explicit cut", ProcessSpec{Loudness: measure(), Cut: &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}}}},
+		{"no loudness", ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3}}},
+		{"apply", ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: -14}, Transcode: &TranscodeSpec{Format: FormatMP3}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.Process(ctx, ProcessRequest{Input: "in.flac", ProcessSpec: tc.spec})
+			if err == nil || !strings.Contains(err.Error(), "an Output is required") {
+				t.Errorf("Process(%s) err = %v, want 'an Output is required'", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestMeasureNoScratchDir verifies that pure measurement does not touch TempDir.
+func TestMeasureNoScratchDir(t *testing.T) {
+	ffmpegOrSkip(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+	tempDir := filepath.Join(dir, "scratch-never-created")
+	c, err := New(Options{TempDir: tempDir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := c.Measure(context.Background(), in); err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Errorf("Measure created the scratch dir %q (stat err = %v)", tempDir, err)
+	}
+
+	if _, err := c.Process(context.Background(), ProcessRequest{
+		Input:       in,
+		ProcessSpec: ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly}},
+	}); err != nil {
+		t.Fatalf("Process measure-only: %v", err)
+	}
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Errorf("no-Output Process created the scratch dir %q (stat err = %v)", tempDir, err)
 	}
 }
 
