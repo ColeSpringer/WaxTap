@@ -406,8 +406,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// Avoid warning once per item when the forced client needs WEB fallback.
-			v, err := c.Info(youtube.WithBulkExtraction(ctx), pl.Entries[i].VideoID, InfoBasic)
+			v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
 			if err != nil {
 				// Return cancellation through ctx.Err(), not as an item error.
 				if ctx.Err() == nil {

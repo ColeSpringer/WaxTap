@@ -64,6 +64,10 @@ const (
 // BestAudio selects the best audio stream. It prefers the original track,
 // non-DRC audio, higher reported quality tiers, Opus within a tier, and finally
 // higher effective bitrate.
+//
+// With no channel preference it may rank a surround track highest. The CLI
+// constrains this by defaulting to --channels stereo; library callers that want
+// the same should call WithChannels(LayoutStereo).
 func BestAudio() AudioSelector { return format.BestAudio() }
 
 // Itag selects the stream with the exact itag.
@@ -169,8 +173,10 @@ type ProcessSpec struct {
 	Loudness  *LoudnessSpec  // nil = no loudness work
 
 	// Channels is the output layout used by Downmix. LayoutAny, the zero value,
-	// disables downmixing. For YouTube requests, set the same preference on Audio
-	// with WithChannels to favor a native track before processing.
+	// disables downmixing, so a surround source is delivered with all its channels;
+	// the CLI instead defaults to --channels stereo. For YouTube requests, set the
+	// same preference on Audio with WithChannels to favor a native track before
+	// processing.
 	Channels ChannelLayout
 	// Downmix reduces a source with more channels to Channels after probing. It
 	// never adds channels and does nothing when the source already fits the

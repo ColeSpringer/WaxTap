@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/transcode"
 	"github.com/colespringer/waxtap/youtube"
 	"github.com/spf13/cobra"
 )
@@ -261,7 +262,10 @@ func newTranscodeCmd() *cobra.Command {
 		Short: "Transcode a local file or YouTube audio to another format",
 		Long: "Re-encode audio to a target format. The format comes from --format or is\n" +
 			"inferred from the output file extension. FLAC/ALAC/WAV are lossless\n" +
-			"re-encodes (no further loss); copy/remux is the only no-re-encode path.",
+			"re-encodes (no further loss); copy/remux is the only no-re-encode path.\n" +
+			"When both --format and an output extension are given, the extension must be\n" +
+			"a container that can hold the format (for example, mp3 uses .mp3 or .mka,\n" +
+			"not .flac).",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
@@ -284,7 +288,7 @@ func newTranscodeCmd() *cobra.Command {
 					collisionStr: collisionStr, force: force, concurrency: concurrency,
 				})
 			}
-			if err := rejectChangedFlags(cmd, "is only used with a directory input", "dir", "recursive", "force", "concurrency"); err != nil {
+			if err := rejectChangedFlags(cmd, "is only used with a directory input", "dir", "recursive", "concurrency"); err != nil {
 				return err
 			}
 			if err := validateLocalSourceFlags(cmd, source); err != nil {
@@ -324,6 +328,29 @@ func newTranscodeCmd() *cobra.Command {
 			warnALACToAlacExt(env, outPath, tf)
 			spec.Output = waxtap.ToFile(outPath)
 
+			// If a local file already uses the requested codec and no other transform
+			// is pending, stream-copy it instead of encoding it again. This avoids
+			// unnecessary work and an extra lossy pass for MP3, AAC, Opus, and Vorbis.
+			//
+			// The shortcut only works when ffmpeg can infer the output container from
+			// the extension. Codec-name paths such as .alac rely on the encode preset
+			// to provide a muxer, and stream copy has no preset.
+			remuxNoop := false
+			if !force && spec.Transcode != nil && targetCodecFamily(tf) != "" && !batchTransforms(spec) &&
+				isLocalFile(source) && transcode.CanInferContainer(outPath) {
+				// Check the requested format before rewriting to copy, so an
+				// incompatible extension such as opus into .flac is still rejected.
+				if err := waxtap.ValidateProcessSpec(spec); err != nil {
+					return err
+				}
+				// If probing fails or reports a different codec family, run the normal
+				// encode path.
+				if probed, perr := env.client.ProbeCodec(cmd.Context(), source); perr == nil && matchesTargetFamily(probed, tf) {
+					spec.Transcode.Format = waxtap.FormatCopy
+					remuxNoop = true
+				}
+			}
+
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
 				return err
@@ -332,6 +359,9 @@ func newTranscodeCmd() *cobra.Command {
 			if err != nil {
 				noteForcedIOSIncomplete(env, err)
 				return err
+			}
+			if remuxNoop {
+				env.info("note: %s is already %s; copied without re-encoding (use --force to re-encode)\n", source, targetCodecFamily(tf))
 			}
 			return emitResult(env, res)
 		},

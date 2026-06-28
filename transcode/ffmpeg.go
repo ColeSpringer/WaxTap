@@ -156,6 +156,101 @@ func needsForcedMuxer(output string) bool {
 	return !inferableContainers[ext]
 }
 
+// CanInferContainer reports whether path's extension selects a container ffmpeg
+// can infer. When false, as with extensionless or codec-named paths such as
+// ".alac", stream copy has no forced muxer to rely on. Callers should encode in
+// that case; encode presets provide the muxer explicitly.
+func CanInferContainer(path string) bool {
+	return !needsForcedMuxer(path)
+}
+
+// ContainerAccepts reports whether the container named by ext can stream-copy the
+// given codec. Some extensions support several codecs, so this consults a
+// container-compatibility table rather than comparing names; unknown extensions
+// are left for ffmpeg to validate (permissive).
+//
+// Keep all stream-copy container checks routed here. CheckOutputContainer uses it
+// before encoding starts, and the pipeline uses it before copying an already
+// probed source. codecName may be an ffprobe name such as "pcm_s16le" or "opus",
+// or a canonical Codec.String() value such as "wav". The two forms only differ
+// for PCM, so every PCM branch accepts both spellings.
+func ContainerAccepts(ext, codecName string) bool {
+	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
+	c := strings.ToLower(codecName)
+	isPCM := c == "wav" || strings.HasPrefix(c, "pcm")
+	switch ext {
+	case "flac":
+		return c == "flac"
+	case "wav":
+		return isPCM
+	case "mp3":
+		return c == "mp3"
+	case "m4a", "mp4", "m4b":
+		return c == "aac" || c == "alac"
+	case "aac":
+		// .aac selects the raw ADTS muxer, which carries AAC only (not ALAC).
+		return c == "aac"
+	case "ogg", "oga":
+		return c == "vorbis" || c == "opus" || c == "flac"
+	case "opus":
+		return c == "opus"
+	case "webm":
+		return c == "opus" || c == "vorbis"
+	case "mka", "mkv":
+		// Matroska is a general-purpose container; accept the codecs WaxTap handles.
+		switch c {
+		case "opus", "vorbis", "aac", "flac", "mp3", "alac":
+			return true
+		}
+		return isPCM
+	}
+	return true
+}
+
+// ContainersFor returns a short list of conventional container extensions, each
+// with a leading dot, that can stream-copy codecName. codecName may be an
+// ffprobe name such as "pcm_s16le" or a canonical codec name such as "wav"; PCM
+// is normalized here. The result is a subset of the extensions ContainerAccepts
+// allows. Unknown codecs return nil.
+func ContainersFor(codecName string) []string {
+	c := strings.ToLower(codecName)
+	switch {
+	case c == "flac":
+		return []string{".flac", ".mka"}
+	case c == "wav" || strings.HasPrefix(c, "pcm"):
+		return []string{".wav", ".mka"}
+	case c == "mp3":
+		return []string{".mp3", ".mka"}
+	case c == "aac":
+		return []string{".m4a", ".aac", ".mka"}
+	case c == "alac":
+		return []string{".m4a", ".mka"}
+	case c == "opus":
+		return []string{".opus", ".webm", ".ogg", ".mka"}
+	case c == "vorbis":
+		return []string{".ogg", ".webm", ".mka"}
+	}
+	return nil
+}
+
+// CheckOutputContainer reports whether output's extension can hold codec's audio.
+// CodecCopy passes because its container follows the source. An extensionless or
+// codec-named output is force-muxed, so its extension does not constrain the
+// container. A recognized extension that cannot hold codec returns
+// waxerr.ErrIncompatibleSpec with suggested containers. Extensions outside the
+// table pass unchecked; ffmpeg reports the final error if they are invalid.
+func CheckOutputContainer(codec Codec, output string) error {
+	if codec == CodecCopy || needsForcedMuxer(output) {
+		return nil
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
+	if ContainerAccepts(ext, codec.String()) {
+		return nil
+	}
+	return fmt.Errorf("%w: the output extension .%s cannot hold %s audio; use one of %s",
+		waxerr.ErrIncompatibleSpec, ext, codec, strings.Join(ContainersFor(codec.String()), ", "))
+}
+
 // RunnerConfig configures a Runner. The binary paths are looked up in PATH when
 // left empty.
 type RunnerConfig struct {

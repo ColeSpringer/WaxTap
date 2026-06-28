@@ -191,9 +191,16 @@ Keys with no flag are config/environment only. Timeout values are seconds.
 
 - `--client web|ios|android_vr|web_embedded` forces one built-in client.
   `--profile-override` replaces the full client chain, and `--chrome-major`
-  refreshes only the built-in WEB-family identity.
-- `--channels mono|stereo|surround|any` selects a native layout when possible.
-  `--downmix` permits surround-to-mono/stereo conversion; it never upmixes.
+  refreshes only the built-in WEB-family identity. Avoid forcing `--client ios`
+  for audio downloads: metadata usually resolves, but media delivery is
+  unreliable and can fail even on short clips. Use android_vr or an attested WEB
+  profile for audio.
+- `--channels mono|stereo|surround|any` selects a native layout when possible and
+  defaults to stereo. `--downmix` permits surround-to-mono/stereo conversion; it
+  never upmixes. Library callers start with `LayoutAny`, which can rank a
+  surround track highest; pass `WithChannels` to match the CLI's constraint.
+- Available metadata varies by client: WEB exposes the published date, while iOS
+  exposes DRC (loudness-normalized) format variants. This is expected.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
   fallbacks. Results report the client that actually delivered them.
 - Playlist downloads support `--concurrency`, pacing, attempt limits, collision

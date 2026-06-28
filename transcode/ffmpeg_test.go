@@ -484,3 +484,53 @@ func assertSeq(t *testing.T, args []string, seq ...string) {
 	}
 	t.Errorf("args %v do not contain the sequence %v", args, seq)
 }
+
+func TestContainersForSubsetOfContainerAccepts(t *testing.T) {
+	// Every container ContainersFor suggests for a codec must actually accept it,
+	// so messages never recommend an incompatible extension. The probed PCM name
+	// exercises the dual-name normalization.
+	for _, codec := range []string{"flac", "wav", "pcm_s16le", "mp3", "aac", "alac", "opus", "vorbis"} {
+		for _, ext := range ContainersFor(codec) {
+			if !ContainerAccepts(ext, codec) {
+				t.Errorf("ContainersFor(%q) suggests %q, but ContainerAccepts(%q,%q)=false", codec, ext, ext, codec)
+			}
+		}
+	}
+	// Unknown codecs yield no suggestion rather than a wrong one.
+	if got := ContainersFor("ac3"); got != nil {
+		t.Errorf("ContainersFor(ac3) = %v, want nil", got)
+	}
+}
+
+func TestCheckOutputContainer(t *testing.T) {
+	cases := []struct {
+		codec   Codec
+		output  string
+		wantErr bool
+	}{
+		{CodecMP3, "out.flac", true},
+		{CodecMP3, "out.wav", true},
+		{CodecFLAC, "out.opus", true},
+		{CodecMP3, "out.mp3", false},
+		{CodecAAC, "out.m4a", false},
+		{CodecOpus, "out.mka", false},
+		{CodecWAV, "out.mka", false}, // dual-name: canonical "wav" satisfies the PCM branch
+		{CodecWAV, "out.w64", false}, // outside the table: unchecked
+		{CodecFLAC, "out.aiff", false},
+		{CodecALAC, "out.alac", false}, // codec-named: force-muxed
+		{CodecFLAC, "out", false},      // extensionless: force-muxed
+		{CodecCopy, "out.flac", false}, // copy follows the source container
+	}
+	for _, c := range cases {
+		err := CheckOutputContainer(c.codec, c.output)
+		if c.wantErr {
+			if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+				t.Errorf("CheckOutputContainer(%v,%q) = %v, want ErrIncompatibleSpec", c.codec, c.output, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("CheckOutputContainer(%v,%q) = %v, want nil", c.codec, c.output, err)
+		}
+	}
+}

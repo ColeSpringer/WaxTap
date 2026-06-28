@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,18 @@ func emitResult(env *appEnv, res *waxtap.Result) error {
 }
 
 func renderResultHuman(env *appEnv, res *waxtap.Result) {
+	// Quiet mode prints only the output path to stdout and routes warnings to
+	// stderr, so callers can capture the path directly. A measure-only run has an
+	// empty OutputPath and prints nothing.
+	if env.quiet() {
+		if res.OutputPath != "" {
+			env.printf("%s\n", res.OutputPath)
+		}
+		for _, w := range res.Warnings {
+			fmt.Fprintf(env.errOut, "warning:  [%s] %s\n", w.Code, w.Detail)
+		}
+		return
+	}
 	switch res.SourceKind {
 	case waxtap.SourceLocalFile:
 		env.printf("Input:    %s\n", res.InputPath)
@@ -49,13 +62,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	if res.Loudness != nil {
 		renderLoudness(env, res.Loudness)
 	}
-	// Non-quiet runs already printed each warning on stderr. Quiet runs still
-	// need the summary because they have no live progress output.
-	if env.quiet() {
-		for _, w := range res.Warnings {
-			env.printf("warning:  [%s] %s\n", w.Code, w.Detail)
-		}
-	}
+	// Warnings were already printed live on stderr during the non-quiet run.
 }
 
 func renderLoudness(env *appEnv, l *waxtap.LoudnessResult) {

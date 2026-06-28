@@ -164,7 +164,7 @@ func doctorIOSBestEffortNote(rep *doctorReport) string {
 	if !rep.Healthy || rep.Full || !rep.ForcedIOS {
 		return ""
 	}
-	return "iOS byte delivery is best-effort. This range check passed, but longer downloads may still be incomplete. Verify with `doctor --client ios --full --video <long-id>`"
+	return "iOS media delivery is unreliable in current testing, even on short clips. Omit --client for reliable audio. This range check passed, but a full download may still fail. Verify with `doctor --client ios --full --video <long-id>`"
 }
 
 func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {

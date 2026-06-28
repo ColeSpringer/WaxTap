@@ -38,7 +38,7 @@ func newRootCmd() *cobra.Command {
 	// use them, so extraction flags follow the subcommand.
 	pf := root.PersistentFlags()
 	pf.BoolVar(&rootFlagsValue.json, "json", false, "emit machine-readable JSON instead of human output")
-	pf.BoolVarP(&rootFlagsValue.quiet, "quiet", "q", false, "suppress progress and informational output")
+	pf.BoolVarP(&rootFlagsValue.quiet, "quiet", "q", false, "suppress progress and informational output (on success, print only the output path)")
 	pf.BoolVarP(&rootFlagsValue.verbose, "verbose", "v", false, "enable verbose (debug) logging on stderr")
 
 	root.AddCommand(

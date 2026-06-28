@@ -104,7 +104,7 @@ func TestNoteForcedIOSIncomplete(t *testing.T) {
 			var errBuf strings.Builder
 			env := &appEnv{out: &strings.Builder{}, errOut: &errBuf, cfg: &appConfig{client: tc.client}}
 			noteForcedIOSIncomplete(env, tc.err)
-			got := strings.Contains(errBuf.String(), "iOS byte delivery is best-effort")
+			got := strings.Contains(errBuf.String(), "iOS media delivery is unreliable")
 			if got != tc.want {
 				t.Errorf("note emitted=%v (%q), want %v", got, errBuf.String(), tc.want)
 			}

@@ -555,48 +555,34 @@ func TestExtract_WebEmbeddedEmbedRestrictionNotMaskedBySTS(t *testing.T) {
 	}
 }
 
-// TestExtract_BulkSubstitutionLogsAtDebug verifies that bulk extraction lowers
-// expected fallback messages from Warn to Debug.
-func TestExtract_BulkSubstitutionLogsAtDebug(t *testing.T) {
+// TestExtract_SubstitutionLogsAtDebug verifies that a forced-client fallback to
+// the watch page logs at Debug, not Warn. The public warning path reports the
+// substitution, so the CLI should not print an extra slog line.
+func TestExtract_SubstitutionLogsAtDebug(t *testing.T) {
 	html := readFixture(t, "watch_page.html")
 	errResp := readFixture(t, "player_unavailable.json") // status ERROR
-	newClient := func(h slog.Handler) *Client {
-		return New(Config{
-			Logger:   slog.New(h),
-			Profiles: []ClientProfile{makeProfile(profileAndroidVR)}, // forced, non-playlist
-			HTTP: httpx.New(httpx.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				switch {
-				case r.URL.Path == "/watch":
-					return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
-				case strings.HasSuffix(r.URL.Path, "/base.js"):
-					return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
-				case strings.HasSuffix(r.URL.Path, "/v1/player"):
-					return fixtureResp(http.StatusOK, errResp), nil // forced client fails -> watch-page fallback
-				}
-				return fixtureResp(http.StatusNotFound, nil), nil
-			})}}),
-		})
+	h := &levelCaptureHandler{match: "forced client failed; trying watch-page WEB fallback"}
+	c := New(Config{
+		Logger:   slog.New(h),
+		Profiles: []ClientProfile{makeProfile(profileAndroidVR)}, // forced, non-playlist
+		HTTP: httpx.New(httpx.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.URL.Path == "/watch":
+				return fixtureResp(http.StatusOK, watchPageWithBaseJS(html)), nil
+			case strings.HasSuffix(r.URL.Path, "/base.js"):
+				return fixtureResp(http.StatusOK, []byte(stsBaseJS)), nil
+			case strings.HasSuffix(r.URL.Path, "/v1/player"):
+				return fixtureResp(http.StatusOK, errResp), nil // forced client fails -> watch-page fallback
+			}
+			return fixtureResp(http.StatusNotFound, nil), nil
+		})}}),
+	})
+	if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
+		t.Fatal(err)
 	}
-
-	const msg = "forced client failed; trying watch-page WEB fallback"
-	t.Run("single extraction warns", func(t *testing.T) {
-		h := &levelCaptureHandler{match: msg}
-		if _, err := newClient(h).Extract(context.Background(), "testVideo01"); err != nil {
-			t.Fatal(err)
-		}
-		if len(h.levels) != 1 || h.levels[0] != slog.LevelWarn {
-			t.Errorf("levels = %v, want exactly one Warn", h.levels)
-		}
-	})
-	t.Run("bulk extraction debugs", func(t *testing.T) {
-		h := &levelCaptureHandler{match: msg}
-		if _, err := newClient(h).Extract(WithBulkExtraction(context.Background()), "testVideo01"); err != nil {
-			t.Fatal(err)
-		}
-		if len(h.levels) != 1 || h.levels[0] != slog.LevelDebug {
-			t.Errorf("levels = %v, want exactly one Debug", h.levels)
-		}
-	})
+	if len(h.levels) != 1 || h.levels[0] != slog.LevelDebug {
+		t.Errorf("levels = %v, want exactly one Debug", h.levels)
+	}
 }
 
 func TestExtract_WatchPageFallback(t *testing.T) {
@@ -984,9 +970,9 @@ func TestEnumerate_LockupShape(t *testing.T) {
 	}
 }
 
-// TestEnumerate_RetriesUnrecognizedInitialPage covers the Finding 4 gap: a
-// browse page in an unparseable A/B shape is retried instead of failing the
-// whole enumeration.
+// TestEnumerate_RetriesUnrecognizedInitialPage covers a browse response whose
+// JSON parses cleanly but does not expose a recognizable playlist shape. The
+// client should retry once before failing the whole enumeration.
 func TestEnumerate_RetriesUnrecognizedInitialPage(t *testing.T) {
 	browse := readFixture(t, "playlist_browse.json")
 	var calls int

@@ -140,7 +140,9 @@ func (c *Client) initialWebContextReason() string {
 }
 
 // warnWebContextFallback emits one warning when a configured player-context did
-// not deliver and another client did.
+// not deliver and another client did. Successful downloads still need to report
+// that the configured WEB context was bypassed; callers that require WEB delivery
+// can pass --no-fallback.
 func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason string) {
 	if !c.yt.WebContextConfigured() || delivered.attempt == youtube.AttemptWebContext {
 		return
@@ -149,7 +151,7 @@ func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason
 		reason = "unavailable"
 	}
 	detail := fmt.Sprintf("web player-context did not deliver (%s); served via %s", reason, delivered.client)
-	em.warn(WarnWebContextFallback, withAuthHint(detail, reason))
+	em.warn(WarnWebContextFallback, withAuthHint(detail, reason)+"; pass --no-fallback to require WEB delivery")
 }
 
 // warnWebContextEndpointFailed reports a configured WEB player-context failure

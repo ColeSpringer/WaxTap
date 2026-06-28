@@ -22,8 +22,8 @@ func TestDoctorIOSBestEffortNote(t *testing.T) {
 			if (note != "") != tc.want {
 				t.Fatalf("note = %q, want non-empty=%v", note, tc.want)
 			}
-			if tc.want && !strings.Contains(note, "best-effort") {
-				t.Errorf("note = %q, want it to mention best-effort delivery", note)
+			if tc.want && !strings.Contains(note, "media delivery is unreliable") {
+				t.Errorf("note = %q, want it to warn that iOS media delivery is unreliable", note)
 			}
 		})
 	}

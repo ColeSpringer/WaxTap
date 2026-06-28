@@ -211,7 +211,7 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		// an explicit container because they create intermediate concat segments.
 		if (remux || effectiveCut) && fold == 0 && (ext == "" || ext == "copy") {
 			if effectiveCut {
-				return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (.webm/.m4a/.ogg/.mka)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
+				return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (%s)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), containerSuggestion(res.SourceCodec))
 			}
 			stageExt = copyContainerExt(res.SourceCodec)
 		}
@@ -387,39 +387,21 @@ func formatRanges(rs []cut.Range) string {
 	return strings.Join(parts, ", ")
 }
 
-// containerAccepts reports whether the container named by ext can stream-copy
-// the given ffprobe codec. Some extensions support several codecs, so this uses
-// a container compatibility table rather than comparing names. Unknown
-// extensions are left for ffmpeg to validate.
+// containerAccepts reports whether the container named by ext can stream-copy the
+// given ffprobe codec. The compatibility table lives in transcode so copy-time
+// and encode-time checks use the same rules. Unknown extensions are left for
+// ffmpeg to validate.
 func containerAccepts(ext, codec string) bool {
-	c := strings.ToLower(codec)
-	switch ext {
-	case "flac":
-		return c == "flac"
-	case "wav":
-		return strings.HasPrefix(c, "pcm")
-	case "mp3":
-		return c == "mp3"
-	case "m4a", "mp4", "m4b":
-		return c == "aac" || c == "alac"
-	case "aac":
-		// .aac selects the raw ADTS muxer, which carries AAC only (not ALAC).
-		return c == "aac"
-	case "ogg", "oga":
-		return c == "vorbis" || c == "opus" || c == "flac"
-	case "opus":
-		return c == "opus"
-	case "webm":
-		return c == "opus" || c == "vorbis"
-	case "mka", "mkv":
-		// Matroska is a general-purpose container; accept the codecs WaxTap handles.
-		switch c {
-		case "opus", "vorbis", "aac", "flac", "mp3", "alac":
-			return true
-		}
-		return strings.HasPrefix(c, "pcm")
+	return transcode.ContainerAccepts(ext, codec)
+}
+
+// containerSuggestion lists conventional container extensions for a probed source
+// codec. It falls back to a broad list when the codec is unknown.
+func containerSuggestion(codec string) string {
+	if exts := transcode.ContainersFor(codec); len(exts) > 0 {
+		return strings.Join(exts, "/")
 	}
-	return true
+	return ".webm/.m4a/.ogg/.mka"
 }
 
 // copyContainerExt returns a container extension suitable for a stream copy of

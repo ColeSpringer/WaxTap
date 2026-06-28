@@ -199,6 +199,7 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 	}
 
 	var eventWarnings int
+	var detail string
 	out := filepath.Join(t.TempDir(), "track.webm")
 	res, err := c.Download(context.Background(), waxtap.Request{
 		URL: "dummyVideo0",
@@ -207,6 +208,7 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 			Events: func(e waxtap.Event) {
 				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
 					eventWarnings++
+					detail = e.Warning.Detail
 				}
 			},
 		},
@@ -219,6 +221,12 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 	}
 	if eventWarnings != 1 {
 		t.Errorf("web-context-fallback warning events = %d, want exactly 1", eventWarnings)
+	}
+	// The fallback warning names the served client and includes --no-fallback, so
+	// a successful download still reports that the configured player-context was
+	// bypassed.
+	if !strings.Contains(detail, "served via ANDROID_VR") || !strings.Contains(detail, "--no-fallback") {
+		t.Errorf("warning detail = %q, want it to name the served client and the --no-fallback hint", detail)
 	}
 	inResult := 0
 	for _, w := range res.Warnings {

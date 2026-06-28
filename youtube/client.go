@@ -262,20 +262,6 @@ func (c *Client) seedAdoptedCookies(cookies []*http.Cookie) error {
 	return nil
 }
 
-// bulkExtractionKey marks a bulk metadata operation.
-type bulkExtractionKey struct{}
-
-// WithBulkExtraction marks ctx as a bulk metadata operation. Expected per-item
-// fallback messages are logged at Debug instead of Warn.
-func WithBulkExtraction(ctx context.Context) context.Context {
-	return context.WithValue(ctx, bulkExtractionKey{}, true)
-}
-
-func isBulkExtraction(ctx context.Context) bool {
-	v, _ := ctx.Value(bulkExtractionKey{}).(bool)
-	return v
-}
-
 // Extract fetches metadata and candidate audio formats for videoID, trying the
 // client strategy chain in order until one succeeds. Each attempt uses an
 // immutable profile and a shared per-extraction session; the winning profile and
@@ -326,13 +312,10 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 		// forced non-WEB client.
 		substituting := c.forcedNonWebSingle()
 		if substituting {
-			// web_embedded and bulk operations commonly reach this fallback, so log
-			// them at debug level. Other forced-client failures remain warnings.
-			if isWebEmbedded(c.profiles[0]) || isBulkExtraction(ctx) {
-				c.log.DebugContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
-			} else {
-				c.log.WarnContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
-			}
+			// Keep this at Debug. Public warnings such as warnClientSubstitution and
+			// noteForcedIOSIncomplete already report the substitution; a Warn log here
+			// would print a second, unformatted line in the CLI.
+			c.log.DebugContext(ctx, "forced client failed; trying watch-page WEB fallback", "client", c.profiles[0].Name)
 		}
 		ext, ferr := c.extractFromWatchPage(ctx, videoID)
 		if ferr == nil {

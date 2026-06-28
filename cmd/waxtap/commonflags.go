@@ -43,7 +43,7 @@ func bindPlayerExtractionFlags(f *pflag.FlagSet) {
 	f.Int("chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
 	f.String("potoken-url", "", "base or full URL of a bgutil PO-token endpoint (enables WEB/GVS tokens; bypasses --proxy)")
 	f.String("player-context-url", "", "base or full URL of an attested WEB player-context endpoint (requires --potoken-url on the same host; bypasses --proxy)")
-	f.String("client", "", "force one built-in client: web|ios|android_vr|web_embedded (conflicts with --profile-override; --player-context-url is tried first; ios byte delivery is best-effort)")
+	f.String("client", "", "force one built-in client: web|ios|android_vr|web_embedded (conflicts with --profile-override; --player-context-url is tried first; avoid ios for audio downloads)")
 	f.String("session-url", "", "base or full URL of a session endpoint returning {visitor_data, cookies} (requires --client; bypasses --proxy)")
 	f.String("visitor-data", "", "adopt this exact X-Goog-Visitor-Id literal and skip WaxTap's bootstrap (needs a uniform --client)")
 	f.String("cookies", "", "Netscape cookie file to adopt alongside --visitor-data")

@@ -350,7 +350,7 @@ func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 // a single error, avoiding a repeated note for playlist failures.
 func noteForcedIOSIncomplete(env *appEnv, err error) {
 	if errors.Is(err, waxtap.ErrIncompleteStream) && strings.EqualFold(env.cfg.client, "ios") {
-		env.info("note: iOS byte delivery is best-effort; omit --client to use the default android_vr chain\n")
+		env.info("note: iOS media delivery is unreliable in current testing, even on short clips; omit --client for reliable audio\n")
 	}
 }
 

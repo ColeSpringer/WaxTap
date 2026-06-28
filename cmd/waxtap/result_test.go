@@ -70,6 +70,7 @@ func TestRenderResultHumanWarningDedup(t *testing.T) {
 	res := &waxtap.Result{
 		SourceKind: waxtap.SourceLocalFile,
 		InputPath:  "/in.flac",
+		OutputPath: "/out.flac",
 		Warnings:   []waxtap.Warning{{Code: waxtap.WarnFallbackProfile, Detail: "served WEB"}},
 	}
 
@@ -82,13 +83,25 @@ func TestRenderResultHumanWarningDedup(t *testing.T) {
 		}
 	})
 
-	t.Run("quiet keeps summary warnings", func(t *testing.T) {
+	t.Run("quiet prints only the path; warnings to stderr", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		env := &appEnv{out: &out, errOut: &errOut, cfg: &appConfig{quiet: true}}
+		renderResultHuman(env, res)
+		if got := strings.TrimRight(out.String(), "\n"); got != "/out.flac" {
+			t.Errorf("quiet stdout = %q, want exactly the output path", got)
+		}
+		if e := errOut.String(); !strings.Contains(e, "served WEB") || !strings.Contains(e, "fallback-profile") {
+			t.Errorf("quiet warnings should go to stderr with their code:\n%s", e)
+		}
+	})
+
+	t.Run("quiet measure-only prints nothing", func(t *testing.T) {
+		measure := &waxtap.Result{SourceKind: waxtap.SourceLocalFile, InputPath: "/in.flac", LoudnessMeasured: true}
 		var out bytes.Buffer
 		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{quiet: true}}
-		renderResultHuman(env, res)
-		got := out.String()
-		if !strings.Contains(got, "served WEB") || !strings.Contains(got, "fallback-profile") {
-			t.Errorf("quiet summary should recap warnings with their code:\n%s", got)
+		renderResultHuman(env, measure)
+		if out.Len() != 0 {
+			t.Errorf("quiet measure-only (no OutputPath) should print nothing, got %q", out.String())
 		}
 	})
 }

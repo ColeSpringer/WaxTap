@@ -656,6 +656,136 @@ func TestValidateProcessSpec_NegativeCrossfade(t *testing.T) {
 	}
 }
 
+func TestValidateProcessSpec_CheckOutputContainer(t *testing.T) {
+	spec := func(f TranscodeFormat, out string) ProcessSpec {
+		return ProcessSpec{Transcode: &TranscodeSpec{Format: f}, Output: ToFile(out)}
+	}
+	reject := []struct {
+		name string
+		f    TranscodeFormat
+		out  string
+	}{
+		{"mp3 in flac", FormatMP3, "out.flac"},
+		{"mp3 in wav", FormatMP3, "out.wav"},
+		{"flac in opus", FormatFLAC, "out.opus"},
+		{"opus in m4a", FormatOpus, "out.m4a"},
+	}
+	for _, c := range reject {
+		if err := validateProcessSpec(spec(c.f, c.out)); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("%s: err = %v, want ErrIncompatibleSpec", c.name, err)
+		}
+	}
+
+	pass := []struct {
+		name string
+		f    TranscodeFormat
+		out  string
+	}{
+		{"mp3 in mp3", FormatMP3, "out.mp3"},
+		{"flac in flac", FormatFLAC, "out.flac"},
+		{"aac in m4a", FormatAAC, "out.m4a"},
+		{"aac in mp4", FormatAAC, "out.mp4"},
+		{"opus in webm", FormatOpus, "out.webm"},
+		{"opus in mka", FormatOpus, "out.mka"},
+		// WAV dual-name: canonical "wav" must satisfy the PCM-accepting branches.
+		{"wav in mka", FormatWAV, "out.mka"},
+		// Extension outside the table passes unchecked (ffmpeg validates).
+		{"wav in w64", FormatWAV, "out.w64"},
+		{"flac in aiff", FormatFLAC, "out.aiff"},
+		// Force-muxed: codec-named and extensionless outputs are unconstrained.
+		{"alac in .alac", FormatALAC, "out.alac"},
+		{"flac extensionless", FormatFLAC, "out"},
+		// Copy follows the source container, so it is never rejected here.
+		{"copy in flac", FormatCopy, "out.flac"},
+	}
+	for _, c := range pass {
+		if err := validateProcessSpec(spec(c.f, c.out)); err != nil {
+			t.Errorf("%s: err = %v, want nil", c.name, err)
+		}
+	}
+
+	// A writer sink is not container-checked (it stages with a derived extension).
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3}, Output: ToWriter(io.Discard)}); err != nil {
+		t.Errorf("writer sink: err = %v, want nil (no path to check)", err)
+	}
+}
+
+func TestValidateProcessSpec_CutWithoutExtension(t *testing.T) {
+	// Extensionless copy-cut to a file output needs a container or --format.
+	extensionless := ProcessSpec{
+		Cut:    &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}},
+		Output: ToFile("clip"),
+	}
+	if err := validateProcessSpec(extensionless); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("extensionless copy-cut = %v, want ErrIncompatibleSpec", err)
+	}
+	// The same copy-cut with a container extension is valid.
+	withExt := extensionless
+	withExt.Output = ToFile("clip.webm")
+	if err := validateProcessSpec(withExt); err != nil {
+		t.Errorf("copy-cut with .webm = %v, want nil", err)
+	}
+	// The same copy-cut with a re-encode target is valid even extensionless.
+	withFormat := extensionless
+	withFormat.Transcode = &TranscodeSpec{Format: FormatFLAC}
+	if err := validateProcessSpec(withFormat); err != nil {
+		t.Errorf("copy-cut with --format flac = %v, want nil", err)
+	}
+
+	// Accurate cut and crossfade always re-encode, so they need --format
+	// regardless of the output extension.
+	accurate := ProcessSpec{
+		Cut:    &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}, Mode: CutAccurate},
+		Output: ToFile("clip.flac"),
+	}
+	if err := validateProcessSpec(accurate); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("accurate cut without --format = %v, want ErrIncompatibleSpec", err)
+	}
+	crossfade := ProcessSpec{
+		Cut:    &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}, Crossfade: time.Second},
+		Output: ToFile("clip.flac"),
+	}
+	if err := validateProcessSpec(crossfade); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("crossfade without --format = %v, want ErrIncompatibleSpec", err)
+	}
+	// Both are fine once a re-encode target is supplied.
+	accurate.Transcode = &TranscodeSpec{Format: FormatFLAC}
+	if err := validateProcessSpec(accurate); err != nil {
+		t.Errorf("accurate cut with --format = %v, want nil", err)
+	}
+
+	// A copy-cut to a writer sink is valid: the pipeline stages with the source
+	// extension, so the empty path must not be read as "no extension".
+	toWriter := ProcessSpec{
+		Cut:    &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}},
+		Output: ToWriter(io.Discard),
+	}
+	if err := validateProcessSpec(toWriter); err != nil {
+		t.Errorf("copy-cut to writer sink = %v, want nil", err)
+	}
+}
+
+func TestValidateProcessSpec_CutWithDownmixDeferred(t *testing.T) {
+	// Downmix defers these checks until probing. If the source needs folding, the
+	// pipeline encodes after probing and these cuts are valid without --format. If
+	// no fold is needed, the pipeline still applies its copy-mode checks before
+	// writing. None of these should fail during ProcessSpec validation.
+	cut := func(c *CutSpec, out Output) ProcessSpec {
+		return ProcessSpec{Cut: c, Output: out, Downmix: true, Channels: LayoutMono}
+	}
+	ranges := []TimeRange{{Start: 0, End: time.Second}}
+	deferred := []ProcessSpec{
+		cut(&CutSpec{Ranges: ranges, Mode: CutAccurate}, ToFile("clip.flac")),
+		cut(&CutSpec{Ranges: ranges, Crossfade: time.Second}, ToFile("clip.flac")),
+		cut(&CutSpec{Ranges: ranges}, ToFile("clip")), // extensionless
+	}
+	for i, spec := range deferred {
+		if err := validateProcessSpec(spec); err != nil {
+			t.Errorf("deferred[%d] with downmix = %v, want nil (deferred to the pipeline)", i, err)
+		}
+	}
+}
+
 func TestNew_RejectsInvalidQPS(t *testing.T) {
 	for _, q := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		if _, err := New(Options{Politeness: Politeness{PerHostQPS: q}}); !errors.Is(err, ErrInvalidConfig) {

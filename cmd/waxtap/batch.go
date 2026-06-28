@@ -159,6 +159,14 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 	}
 }
 
+// matchesTargetFamily reports whether a probed codec is one that tf produces.
+// Formats without a stable codec family, such as WAV and copy, return false so
+// single-file and batch planning use the same conservative rule.
+func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
+	fam := targetCodecFamily(tf)
+	return fam != "" && format.CodecFamily(codec) == fam
+}
+
 // batchTransforms reports whether the spec requires rewriting matching codecs.
 func batchTransforms(spec waxtap.ProcessSpec) bool {
 	if spec.Downmix || spec.Loudness != nil {
@@ -271,7 +279,7 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 	jobs := make([]batchJob, 0, len(inputs))
 	for i, in := range inputs {
 		noop := false
-		if codec, ok := codecs[in]; ok && format.CodecFamily(codec) == fam {
+		if codec, ok := codecs[in]; ok && matchesTargetFamily(codec, tf) {
 			noop = true
 		}
 

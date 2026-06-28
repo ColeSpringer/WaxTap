@@ -112,10 +112,58 @@ func validateProcessSpec(s ProcessSpec) error {
 	if s.Cut != nil && s.Cut.Crossfade < 0 {
 		return fmt.Errorf("%w: crossfade must be non-negative, got %v", waxerr.ErrIncompatibleSpec, s.Cut.Crossfade)
 	}
+	if err := validateOutputContainer(s); err != nil {
+		return err
+	}
+	if err := validateCutEncodeNeed(s); err != nil {
+		return err
+	}
 	if err := validateLoudness(s.Loudness); err != nil {
 		return err
 	}
 	return validateBitrate(s.Transcode)
+}
+
+// validateOutputContainer rejects a file transcode when the output extension
+// names a container that cannot hold the target codec. Extensionless, codec-
+// named, and copy outputs are unconstrained. Writer sinks are not checked here
+// because they stage with a derived extension.
+func validateOutputContainer(s ProcessSpec) error {
+	if s.Transcode == nil || s.Output.kind != outputFile {
+		return nil
+	}
+	return transcode.CheckOutputContainer(transcodeCodec(s.Transcode.Format), s.Output.path)
+}
+
+// validateCutEncodeNeed rejects copy-mode cuts that cannot be described by the
+// output path alone. Accurate cuts and crossfades require encoding, so copy mode
+// needs an explicit target format. A plain copy cut can keep the source samples,
+// but a file output still needs a container extension.
+//
+// Downmix is skipped here because the pipeline needs the probed channel count.
+// When the source has more channels than the target, the pipeline chooses an
+// encode after probing and the cut is valid without --format. When no fold is
+// needed, the pipeline still applies its copy-mode checks before writing.
+func validateCutEncodeNeed(s ProcessSpec) error {
+	if !cutRequested(s.Cut) || s.Downmix || transcodeCodec(specFormat(s.Transcode)) != transcode.CodecCopy {
+		return nil
+	}
+	switch {
+	case s.Cut.Mode == CutAccurate:
+		return fmt.Errorf("%w: accurate cut re-encodes; pass --format <format> (e.g. flac)", waxerr.ErrIncompatibleSpec)
+	case s.Cut.Crossfade > 0:
+		return fmt.Errorf("%w: crossfade re-encodes; pass --format <format> (e.g. flac)", waxerr.ErrIncompatibleSpec)
+	case s.Output.kind == outputFile && copyCutNeedsExtension(s.Output.path):
+		return fmt.Errorf("%w: cutting without re-encoding keeps the source codec, which needs a container extension on the output (e.g. .opus/.m4a/.webm/.ogg/.mka) or pass --format", waxerr.ErrIncompatibleSpec)
+	}
+	return nil
+}
+
+// copyCutNeedsExtension reports whether a stream-copy cut to path lacks a usable
+// container extension. It mirrors the pipeline's runtime guard (ext "" or "copy").
+func copyCutNeedsExtension(path string) bool {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+	return ext == "" || ext == "copy"
 }
 
 // validateLoudness checks targets used for loudness application. Measure-only
