@@ -41,13 +41,32 @@ func isShortsPlaylistID(id string) bool {
 
 // ExtractVideoID extracts an 11-character video ID from a bare ID or any common
 // YouTube URL form (watch?v=, youtu.be/, /embed/, /shorts/, /v/, /live/),
-// including scheme-less inputs.
+// including scheme-less inputs. It also extracts a bounded 11-character ID token
+// from loose text, such as an ID trailed by "&feature=...", which suits pasted
+// download/info targets.
 //
 // A playlist-only URL (a list= parameter or /playlist path with no video)
 // returns ErrIsPlaylist so the caller can route it to Enumerate. Inputs that
-// carry a candidate of the wrong shape return ErrInvalidVideoID; inputs too
-// short to contain an ID return ErrVideoIDTooShort.
+// carry a candidate of the wrong shape return ErrInvalidVideoID; an
+// all-ID-character token of the wrong length returns ErrVideoIDTooShort or
+// ErrVideoIDTooLong.
 func ExtractVideoID(input string) (string, error) {
+	return extractVideoID(input, true)
+}
+
+// ExtractVideoIDStrict is ExtractVideoID without the loose substring fallback. It
+// still accepts a clean ID and every recognized URL form, but rejects strings that
+// merely embed an 11-character run, such as "aqz-KE-bpKQ.opus" or
+// "/tmp/x/aqz-KE-bpKQ". The process commands use it so a mistyped local path is
+// reported as a missing file.
+func ExtractVideoIDStrict(input string) (string, error) {
+	return extractVideoID(input, false)
+}
+
+// extractVideoID is the shared implementation. allowLoose enables extraction from
+// surrounding text; clean IDs, recognized URLs, playlist routing, and length
+// classification apply either way.
+func extractVideoID(input string, allowLoose bool) (string, error) {
 	s := strings.TrimSpace(input)
 	if s == "" {
 		return "", waxerr.ErrVideoIDTooShort
@@ -82,24 +101,32 @@ func ExtractVideoID(input string) (string, error) {
 		return "", errNoVideoInURL
 	}
 
-	// No recognizable host: accept a bounded, exactly-11-character ID token from
-	// the text (e.g. an ID trailed by "&feature=..."). A longer contiguous token
-	// such as a mistyped 12-char ID is rejected rather than silently truncated
-	// into a different valid video ID.
-	if id, ok := idFromLooseText(s); ok {
-		return id, nil
+	// No recognizable host. Loose callers accept a bounded, exactly-11-character
+	// ID token from text such as an ID trailed by "&feature=..."; a longer
+	// contiguous token is rejected rather than truncated into a different valid ID.
+	// Strict callers skip that extraction, so a file path that embeds an
+	// 11-character run is rejected here.
+	if allowLoose {
+		if id, ok := idFromLooseText(s); ok {
+			return id, nil
+		}
 	}
 	// Route bare playlist IDs to Enumerate instead of treating them as malformed
 	// video IDs.
 	if playlistID.MatchString(s) {
 		return "", waxerr.ErrIsPlaylist
 	}
-	// Length determines whether malformed input is too short or invalid. A token
-	// with 11 characters and an invalid symbol is long enough but malformed.
-	if len(s) < idLen {
+	// Classify the malformed token. Anything shorter than an ID is too short; an
+	// all-ID-character token that reached here is too long (idExact already handled
+	// the exactly-11 case, so it can only be longer); anything else is malformed.
+	switch {
+	case len(s) < idLen:
 		return "", waxerr.ErrVideoIDTooShort
+	case idCharsOnly(s):
+		return "", waxerr.ErrVideoIDTooLong
+	default:
+		return "", waxerr.ErrInvalidVideoID
 	}
-	return "", waxerr.ErrInvalidVideoID
 }
 
 // idFromLooseText returns the first maximal run of ID characters that is exactly
@@ -119,6 +146,21 @@ func isIDChar(r rune) bool {
 		r >= 'a' && r <= 'z' ||
 		r >= '0' && r <= '9' ||
 		r == '_' || r == '-'
+}
+
+// idCharsOnly reports whether s is non-empty and made up only of video-ID
+// characters. With a length check it distinguishes a wrong-length ID from one
+// containing invalid characters.
+func idCharsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !isIDChar(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // ExtractPlaylistID extracts a playlist ID from a bare ID or a URL carrying a

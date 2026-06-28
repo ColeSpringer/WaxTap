@@ -231,6 +231,98 @@ func TestFacade_ColdStartWebContextFallbackWarns(t *testing.T) {
 	}
 }
 
+// TestFacade_WebContextEndpointFailureSurfaced covers a configured player-context
+// endpoint that fails before the fallback chain also fails. The endpoint failure
+// should remain visible as a warning instead of being hidden by the final
+// aggregate error.
+func TestFacade_WebContextEndpointFailureSurfaced(t *testing.T) {
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil // every client unavailable
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	// A non-sidecar endpoint that returns an unexpected response.
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, errors.New("unexpected response from non-sidecar")
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		POTokenProvider:       fProvider{},
+		PlayerContextProvider: pc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var detail string
+	var warnings int
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+					warnings++
+					detail = e.Warning.Detail
+				}
+			},
+		},
+	})
+	if derr == nil {
+		t.Fatal("expected the exhausted chain to fail")
+	}
+	if warnings != 1 {
+		t.Fatalf("web-context warning events = %d, want exactly 1", warnings)
+	}
+	if !strings.Contains(detail, "the fallback also failed") {
+		t.Errorf("warning detail = %q, want it to note the endpoint failure and failed fallback", detail)
+	}
+}
+
+// TestFacade_NoFallbackSuppressesEndpointWarning covers the no-fallback path. The
+// web-context failure is the returned error, so the extra "fallback also failed"
+// warning would be inaccurate.
+func TestFacade_NoFallbackSuppressesEndpointWarning(t *testing.T) {
+	rt := roundTripFn(func(_ *http.Request) (*http.Response, error) {
+		return resp(http.StatusNotFound, nil), nil
+	})
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, errors.New("unexpected response from non-sidecar")
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		POTokenProvider:       fProvider{},
+		PlayerContextProvider: pc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var warnings int
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:        "dummyVideo0",
+		NoFallback: true,
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+					warnings++
+				}
+			},
+		},
+	})
+	if derr == nil {
+		t.Fatal("expected the no-fallback request to fail")
+	}
+	if warnings != 0 {
+		t.Errorf("web-context warnings = %d, want 0 under --no-fallback (no fallback attempted)", warnings)
+	}
+}
+
 // A GVS mint failure must occur during acquisition so normal fallback remains
 // available. Verify both output paths and the terminal --no-fallback case.
 func TestFacade_DeadGVSProviderFallsBackToChain(t *testing.T) {
@@ -503,8 +595,9 @@ func TestFacade_SessionAdoptionNonWebClientWarnsDowngrade(t *testing.T) {
 	}
 }
 
-// TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint verifies that fallback
-// wrapping preserves the embed marker used by the CLI hint.
+// TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint covers an actual
+// embed restriction: a PO token is present, /player returns ERROR, and the error
+// still carries the embed marker used by the CLI hint.
 func TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint(t *testing.T) {
 	watchHTML := []byte(`<html><script>var ytInitialPlayerResponse = {"playabilityStatus":{"status":"ERROR","reason":"Video unavailable"}};</script></html>`)
 	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
@@ -517,7 +610,7 @@ func TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint(t *testing.T) {
 			return resp(http.StatusNotFound, nil), nil
 		}
 	})
-	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, Client: "web_embedded"})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, Client: "web_embedded", POTokenProvider: fProvider{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,6 +626,34 @@ func TestFacade_ForcedWebEmbeddedUnavailablePreservesEmbedHint(t *testing.T) {
 	pe, ok := errors.AsType[*waxtap.PlayabilityError](derr)
 	if !ok || !pe.Embed {
 		t.Errorf("err = %v, want a PlayabilityError with Embed=true preserved", derr)
+	}
+}
+
+// TestFacade_ForcedWebEmbeddedNoTokenNeedsPOToken covers forced web_embedded
+// without a token provider. It should fail at token acquisition, matching forced
+// WEB, rather than making a tokenless /player request and misclassifying the
+// result as unavailable.
+func TestFacade_ForcedWebEmbeddedNoTokenNeedsPOToken(t *testing.T) {
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, Client: "web_embedded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		NoFallback:  true, // isolate the forced web_embedded slot from the watch-page fallback
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if !errors.Is(derr, waxtap.ErrNeedsPOToken) {
+		t.Fatalf("err = %v, want ErrNeedsPOToken (exit 8)", derr)
 	}
 }
 

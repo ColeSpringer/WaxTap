@@ -119,32 +119,41 @@ func buildCommandWith(input, output string, spec Spec, encoderOverride string) (
 	}
 	// Force a muxer only when the output path cannot identify one. Explicit
 	// container extensions such as ".m4a" and ".caf" remain authoritative.
-	if p.muxer != "" && needsForcedMuxer(output, spec.Codec) {
+	if p.muxer != "" && needsForcedMuxer(output) {
 		args = append(args, "-f", p.muxer)
 	}
 	args = append(args, output)
 	return Command{Args: args}, nil
 }
 
-// needsForcedMuxer reports whether ffmpeg needs the preset's -f argument because
-// the output path does not identify a usable container.
+// inferableContainers are output extensions ffmpeg maps to a muxer on its own, so
+// buildCommand leaves them authoritative. Other extensions, whether codec names
+// like ".vorbis" and ".alac" or unrelated names like ".out", get the preset's
+// canonical muxer.
 //
-// An empty extension always needs the canonical muxer. Codec-name extensions
-// need it only when the name is not a container, as with ".vorbis" and ".alac".
-// Real container extensions remain authoritative so ffmpeg can infer them.
-func needsForcedMuxer(output string, codec Codec) bool {
+// This is the set of audio containers ffmpeg can infer, which is broader than
+// (and serves a different purpose from) pipeline's stream-copy compatibility
+// table: it includes the Matroska/WebM family that holds YouTube's native Opus,
+// AIFF/Wave64 PCM containers, and ".caf" for ALAC. ".aac" stays for raw ADTS, and
+// ".caf"/".m4a" let ffmpeg pick ALAC's container. The list is intentionally
+// conservative; a less common inferable container outside it will be force-muxed.
+var inferableContainers = map[string]bool{
+	"mp3": true, "flac": true, "wav": true, "m4a": true, "m4b": true,
+	"mp4": true, "aac": true, "ogg": true, "oga": true, "opus": true,
+	"webm": true, "mka": true, "mkv": true, "caf": true,
+	"aiff": true, "aif": true, "w64": true,
+}
+
+// needsForcedMuxer reports whether ffmpeg needs the preset's -f argument because
+// the output path does not identify a container it can infer.
+//
+// An empty extension, a codec-name extension such as ".vorbis" or ".alac", and
+// an unrelated one such as ".out" all force the canonical muxer. A recognized
+// audio-container extension stays authoritative so ffmpeg infers it, preserving
+// cases like the .caf versus .m4a split for ALAC.
+func needsForcedMuxer(output string) bool {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
-	if ext == "" {
-		return true
-	}
-	switch codec {
-	case CodecVorbis:
-		return ext == "vorbis"
-	case CodecALAC:
-		return ext == "alac"
-	default:
-		return false
-	}
+	return !inferableContainers[ext]
 }
 
 // RunnerConfig configures a Runner. The binary paths are looked up in PATH when

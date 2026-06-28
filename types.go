@@ -518,7 +518,7 @@ const (
 	WarnPlaylistEntryFailed                    // one playlist entry failed (others returned)
 	WarnRateLimitedRetried                     // a request was retried after a 429
 	WarnSponsorBlockEmpty                      // SponsorBlock matched no segments
-	WarnRangesEmpty                            // requested cut ranges did not intersect the media
+	WarnRangesEmpty                            // SponsorBlock segments all fell outside the media
 	WarnThrottled                              // a limiter/cooldown is active
 	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
 	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients

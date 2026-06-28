@@ -1,14 +1,37 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/colespringer/waxtap"
 )
 
-func TestSchemaVersionIsFour(t *testing.T) {
-	if schemaVersion != 4 {
-		t.Errorf("schemaVersion = %d, want 4", schemaVersion)
+func TestSchemaVersionIsOne(t *testing.T) {
+	if schemaVersion != 1 {
+		t.Errorf("schemaVersion = %d, want 1 (pre-1.0 baseline)", schemaVersion)
+	}
+}
+
+func TestFormatJSON_ZeroFieldsStayPresentForYouTube(t *testing.T) {
+	// SABR, adaptive, and live formats can report zero for unknown content length,
+	// sample rate, channel count, and bitrate. The CLI keeps those fields in JSON;
+	// only itag is omitted when there is no YouTube format behind the source.
+	b, err := json.Marshal(formatToJSON(waxtap.Format{Itag: 251, Codec: "opus"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"contentLength", "sampleRate", "channels", "bitrate", "averageBitrate"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("formatJSON dropped %q for a real format with a zero value: %v", k, m)
+		}
+	}
+	if _, ok := m["itag"]; !ok {
+		t.Errorf("itag should be present when non-zero: %v", m)
 	}
 }
 

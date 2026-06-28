@@ -31,6 +31,7 @@ func newFormatsCmd() *cobra.Command {
 			if info.SubstitutedFrom != "" {
 				env.info("note: requested %s; listing %s formats from the watch-page fallback\n", info.SubstitutedFrom, info.Client)
 			}
+			emitWatchPageBreadcrumb(env, info)
 			video := info.Video
 			formats := audioFormats(video.Formats)
 			if env.jsonMode() {
@@ -141,8 +142,12 @@ func hasDRCVariant(formats []waxtap.Format) bool {
 }
 
 // formatJSON is the --json view of a format, using explicit CLI field names.
+// Numeric fields stay present even when zero: YouTube uses zero for unknown
+// content length, sample rate, channel count, and bitrate on some SABR, adaptive,
+// and live formats. Only Itag uses omitempty. YouTube formats always carry a
+// non-zero itag, while local sources have none.
 type formatJSON struct {
-	Itag            int     `json:"itag"`
+	Itag            int     `json:"itag,omitempty"`
 	Codec           string  `json:"codec"`
 	MIMEType        string  `json:"mimeType"`
 	Extension       string  `json:"extension"`

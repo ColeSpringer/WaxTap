@@ -218,11 +218,14 @@ func cutRequested(c *CutSpec) bool {
 	return c != nil && (len(c.Ranges) > 0 || c.SponsorBlock != nil)
 }
 
-// warnEmptyCut reports a SponsorBlock-only request that removed no audio.
+// warnEmptyCut reports a SponsorBlock-only request whose segments fell outside the
+// media so nothing was removed. sbHadSegments says whether SponsorBlock returned
+// any segments: when it returned none, collectRanges already emitted
+// WarnSponsorBlockEmpty, so this stays silent to avoid a duplicate warning.
 // Explicit ranges that do not intersect the media are rejected by the pipeline.
-func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result) {
-	if cs != nil && cs.SponsorBlock != nil && len(cs.Ranges) == 0 && !pres.Cut && pres.SourceDuration > 0 {
-		em.warn(WarnRangesEmpty, "cut ranges did not intersect the media; delivered uncut")
+func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments bool) {
+	if cs != nil && cs.SponsorBlock != nil && sbHadSegments && len(cs.Ranges) == 0 && !pres.Cut && pres.SourceDuration > 0 {
+		em.warn(WarnRangesEmpty, "SponsorBlock segments fell outside the media; delivered uncut")
 	}
 }
 

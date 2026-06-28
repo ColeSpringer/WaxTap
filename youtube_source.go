@@ -110,10 +110,17 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	defer ecancel()
 	ext, err := c.yt.ExtractExcluding(ectx, id, baseSkip(req))
 	if err != nil {
+		// Don't blame the player-context endpoint when the request was canceled.
+		if ctx.Err() == nil {
+			c.warnWebContextEndpointFailed(em, webCtxReason)
+		}
 		return nil, err
 	}
 	a, err := c.buildTransfer(ctx, req, id, target, ext, em, 0)
 	if err != nil {
+		if ctx.Err() == nil {
+			c.warnWebContextEndpointFailed(em, webCtxReason)
+		}
 		return nil, err
 	}
 	c.warnWebContextFallback(em, a, webCtxReason)
@@ -142,10 +149,30 @@ func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason
 		reason = "unavailable"
 	}
 	detail := fmt.Sprintf("web player-context did not deliver (%s); served via %s", reason, delivered.client)
-	if authFailureInReason(reason) {
-		detail += "; set or verify --api-key"
+	em.warn(WarnWebContextFallback, withAuthHint(detail, reason))
+}
+
+// warnWebContextEndpointFailed reports a configured WEB player-context failure
+// after the fallback chain also fails. That keeps the endpoint failure visible
+// when the final error is a generic downstream aggregate, such as an incomplete
+// stream after every client is exhausted. It fires only for the "failed: " reason
+// form, not for a cooldown skip or a delivered stream that was later capped.
+func (c *Client) warnWebContextEndpointFailed(em *emitter, reason string) {
+	cause, ok := strings.CutPrefix(reason, "failed: ")
+	if !ok {
+		return
 	}
-	em.warn(WarnWebContextFallback, detail)
+	detail := fmt.Sprintf("web player-context endpoint returned an unexpected response (%s); the fallback also failed", cause)
+	em.warn(WarnWebContextFallback, withAuthHint(detail, reason))
+}
+
+// withAuthHint appends the api-key hint when reason carries an HTTP auth
+// rejection, so the two web-context warnings stay consistent.
+func withAuthHint(detail, reason string) string {
+	if authFailureInReason(reason) {
+		return detail + "; set or verify --api-key"
+	}
+	return detail
 }
 
 // isWebFamily reports whether a client display name belongs to the WEB family.
@@ -459,6 +486,13 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 		if a.attempt != youtube.AttemptWebContext {
 			em.warn(WarnIncompleteFallback, fmt.Sprintf("client %q returned an incomplete stream; checking remaining clients", a.client))
 		}
+	}
+	// The download chain is exhausted. If a configured player-context failed and a
+	// fallback was attempted but never delivered, surface that endpoint failure next
+	// to the aggregate. Under --no-fallback no fallback was attempted, so the
+	// endpoint failure is already the returned error.
+	if !req.NoFallback {
+		c.warnWebContextEndpointFailed(em, webCtxReason)
 	}
 	return nil, download.Result{}, "", causes.aggregate()
 }
@@ -800,7 +834,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	if err != nil {
 		return "", nil, err
 	}
-	warnEmptyCut(em, req.Cut, pres)
+	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
 
 	deliver := pres.OutputPath
 	if deliver == "" {

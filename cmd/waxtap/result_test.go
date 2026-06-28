@@ -45,6 +45,11 @@ func TestResultJSONFormatOmission(t *testing.T) {
 		if sf["codec"] != "flac" {
 			t.Errorf("sourceFormat.codec = %v, want flac (must not be lost from JSON)", sf["codec"])
 		}
+		// A local source has no itag, so it is omitted rather than shown as zero.
+		// Other numeric fields stay present because zero means unknown.
+		if _, ok := sf["itag"]; ok {
+			t.Errorf("local sourceFormat should omit the unknown itag: %v", sf)
+		}
 		if has(m, "outputFormat") {
 			t.Errorf("a local result that was not re-encoded should omit the redundant outputFormat: %v", m)
 		}

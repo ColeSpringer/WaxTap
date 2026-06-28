@@ -41,6 +41,7 @@ func newInfoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			emitWatchPageBreadcrumb(env, info)
 			video := info.Video
 
 			var resolved *waxtap.ResolvedStream

@@ -71,7 +71,9 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	if err != nil {
 		return nil, err
 	}
-	warnEmptyCut(em, req.Cut, pres)
+	// Local inputs have no SponsorBlock source, so no SponsorBlock segments were
+	// returned.
+	warnEmptyCut(em, req.Cut, pres, false)
 
 	srcFmt := Format{
 		Codec:     pres.SourceCodec,

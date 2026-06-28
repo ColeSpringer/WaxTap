@@ -39,10 +39,15 @@ func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap
 	if isLocalFile(source) {
 		return env.client.Process(ctx, waxtap.ProcessRequest{Input: source, ProcessSpec: spec})
 	}
-	if _, err := youtube.ExtractVideoID(source); err != nil {
+	// Process commands take a file path or a clean ID/URL. Strict extraction keeps
+	// an ID-shaped filename such as "aqz-KE-bpKQ.opus" from being treated as a
+	// video download when the intended local file is missing.
+	if _, err := youtube.ExtractVideoIDStrict(source); err != nil {
 		// Report both accepted input forms because this is usually a mistyped
 		// local path, not an intended video ID.
-		if errors.Is(err, waxtap.ErrInvalidVideoID) || errors.Is(err, waxtap.ErrVideoIDTooShort) {
+		if errors.Is(err, waxtap.ErrInvalidVideoID) ||
+			errors.Is(err, waxtap.ErrVideoIDTooShort) ||
+			errors.Is(err, waxtap.ErrVideoIDTooLong) {
 			return nil, usagef("no such file and not a valid YouTube URL or ID: %s", source)
 		}
 		return nil, err

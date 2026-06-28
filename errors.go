@@ -32,9 +32,12 @@ var (
 	ErrIsPlaylist = waxerr.ErrIsPlaylist
 	// ErrIsChannel indicates a channel URL was passed where a single video is
 	// required.
-	ErrIsChannel         = waxerr.ErrIsChannel
-	ErrInvalidVideoID    = waxerr.ErrInvalidVideoID
+	ErrIsChannel      = waxerr.ErrIsChannel
+	ErrInvalidVideoID = waxerr.ErrInvalidVideoID
+	// ErrVideoIDTooShort and ErrVideoIDTooLong indicate an all-ID-character token
+	// of the wrong length (a video ID is exactly 11 characters).
 	ErrVideoIDTooShort   = waxerr.ErrVideoIDTooShort
+	ErrVideoIDTooLong    = waxerr.ErrVideoIDTooLong
 	ErrInvalidPlaylistID = waxerr.ErrInvalidPlaylistID
 	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
 	// response parsed but matched no known shape.

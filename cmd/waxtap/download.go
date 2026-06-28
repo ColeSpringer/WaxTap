@@ -467,7 +467,7 @@ func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result
 	if outExt == "" || sameContainer(outExt, srcExt) {
 		return
 	}
-	env.info("note: output path uses .%s, but the source container is .%s; bytes were not re-encoded\n", outExt, srcExt)
+	env.info("note: output path uses .%s, but the source container is .%s; bytes were not re-encoded (rename to .%s or pass --format to convert)\n", outExt, srcExt, srcExt)
 }
 
 // sameContainer reports whether two file extensions name the same media

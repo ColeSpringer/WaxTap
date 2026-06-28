@@ -559,10 +559,20 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 
 	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)
 	if err != nil {
-		// A 400 from the initial browse request means YouTube rejected the
-		// playlist ID.
-		if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok && hse.StatusCode == http.StatusBadRequest {
-			return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidPlaylistID, err)
+		// Map YouTube's browse status to a user-facing playlist error. The raw error
+		// carries the internal endpoint URL, so keep it on the debug log for
+		// --verbose diagnosis and leave the CLI to render a clean message.
+		if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok {
+			c.log.DebugContext(ctx, "initial playlist browse failed", "playlist", playlistID, "status", hse.StatusCode, "err", err)
+			switch hse.StatusCode {
+			case http.StatusBadRequest:
+				return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidPlaylistID, err)
+			case http.StatusNotFound:
+				// A deleted or nonexistent playlist. Private playlists return HTTP 200
+				// with an in-body alert, and a 403 is an anti-bot or attestation block,
+				// so neither case is folded into this status mapping.
+				return nil, fmt.Errorf("%w: %v", waxerr.ErrPlaylistUnavailable, err)
+			}
 		}
 		return nil, err
 	}

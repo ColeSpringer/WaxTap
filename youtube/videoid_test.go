@@ -58,8 +58,12 @@ func TestExtractVideoID(t *testing.T) {
 		{"eleven chars with stray symbol", "aaaaaaaaaa!", "", waxerr.ErrInvalidVideoID},
 		{"eleven symbol-heavy chars", "abc!@#=+;:_", "", waxerr.ErrInvalidVideoID},
 		{"bad id in watch param", "https://www.youtube.com/watch?v=short", "", waxerr.ErrInvalidVideoID},
-		{"overlong bare token not truncated", id + "x", "", waxerr.ErrInvalidVideoID},
-		{"overlong bare token plus more", id + "xy", "", waxerr.ErrInvalidVideoID},
+		// An all-ID-character token of the wrong length is a length problem, not a
+		// truncation or an invalid-character one.
+		{"overlong bare token not truncated", id + "x", "", waxerr.ErrVideoIDTooLong},
+		{"overlong bare token plus more", id + "xy", "", waxerr.ErrVideoIDTooLong},
+		// The URL branch validates the path segment exactly, so an overlong segment
+		// stays invalid rather than too-long.
 		{"overlong id in youtu.be path", "https://youtu.be/" + id + "x", "", waxerr.ErrInvalidVideoID},
 
 		// A non-YouTube host is not a video reference, even with a valid-looking ID.
@@ -84,6 +88,60 @@ func TestExtractVideoID(t *testing.T) {
 				t.Fatalf("id = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestExtractVideoIDStrict(t *testing.T) {
+	const id = "testVideo01"
+	// Strict extraction accepts a clean ID and recognized URLs but rejects strings
+	// that only contain an 11-character run, so a mistyped local path does not
+	// resolve to the embedded ID.
+	reject := []string{
+		id + ".flac",          // <id>.<ext>, the output-template shape
+		id + " backup",        // space-delimited name
+		"/tmp/x/" + id,        // path separator
+		"D:" + id,             // Windows drive prefix
+		id + "&feature=share", // query-style junk
+	}
+	for _, in := range reject {
+		t.Run("reject "+in, func(t *testing.T) {
+			if got, err := ExtractVideoIDStrict(in); err == nil {
+				t.Fatalf("ExtractVideoIDStrict(%q) = %q, want an error", in, got)
+			}
+		})
+	}
+
+	accept := map[string]string{
+		id:                                      id,
+		"https://www.youtube.com/watch?v=" + id: id,
+		"https://youtu.be/" + id:                id,
+	}
+	for in, want := range accept {
+		t.Run("accept "+in, func(t *testing.T) {
+			got, err := ExtractVideoIDStrict(in)
+			if err != nil {
+				t.Fatalf("ExtractVideoIDStrict(%q): %v", in, err)
+			}
+			if got != want {
+				t.Fatalf("id = %q, want %q", got, want)
+			}
+		})
+	}
+
+	// The loose extractor still accepts trailing junk, which strict rejects above.
+	if got, err := ExtractVideoID(id + "&feature=share"); err != nil || got != id {
+		t.Fatalf("ExtractVideoID(loose) = %q, %v; want %q", got, err, id)
+	}
+}
+
+func TestExtractVideoID_TooLong(t *testing.T) {
+	// A 12-character all-valid-character token is too long, not invalid-character.
+	_, err := ExtractVideoID("testVideo012")
+	if !errors.Is(err, waxerr.ErrVideoIDTooLong) {
+		t.Fatalf("err = %v, want ErrVideoIDTooLong", err)
+	}
+	if !strings.Contains(err.Error(), "11 characters") {
+		t.Errorf("message = %q, want a length message", err)
 	}
 }
 

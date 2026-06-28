@@ -265,6 +265,10 @@ type InfoResult struct {
 	// the watch-page fallback replaced. When set, the metadata came from WEB
 	// rather than the requested client.
 	SubstitutedFrom string
+	// ViaWatchPage reports that the metadata came from the watch-page fallback. For
+	// a forced WEB client this read needs no PO token, unlike a forced WEB stream;
+	// SubstitutedFrom stays empty because WEB is not substituted for itself.
+	ViaWatchPage bool
 }
 
 // ReadOption configures Info, InfoResult, and Resolve.
@@ -323,7 +327,7 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		return nil, err
 	}
 	video := ext.Video()
-	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom()}
+	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom(), ViaWatchPage: ext.Attempt() == youtube.AttemptWatchPage}
 	if depth < InfoResolved {
 		return res, nil
 	}

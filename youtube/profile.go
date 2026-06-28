@@ -178,9 +178,13 @@ var (
 		InnerTubeID:   56,
 		Version:       clientident.WebEmbeddedVersion,
 		UserAgent:     clientident.UserAgent(0),
-		// Embed origin matches yt-dlp's choice (reddit.com). The embedded client
-		// needs no PO token (yt-dlp defines none for web_embedded).
-		EmbedURL:                "https://www.reddit.com/",
+		// Embed origin matches yt-dlp's choice (reddit.com).
+		EmbedURL: "https://www.reddit.com/",
+		// web_embedded is WEB-family and uses both PO-token scopes. Player tokens make
+		// a forced no-token client fail at token acquisition instead of sending a
+		// tokenless /player request. GVS tokens cover the later stream request when
+		// /player does return playable formats.
+		RequiresPOTokens:        []potoken.Scope{potoken.ScopePlayer, potoken.ScopeGVS},
 		SupportsPlaylists:       false,
 		NeedsSignatureTimestamp: true,
 	}

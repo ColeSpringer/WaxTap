@@ -420,7 +420,7 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 	var names []string
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if resp, ok := discoveryResp(r); ok {
-			return resp, nil // WEB_EMBEDDED loads base.js before the player request
+			return resp, nil // WEB-family clients load base.js before the player request
 		}
 		if !strings.HasSuffix(r.URL.Path, "/v1/player") {
 			t.Errorf("unexpected request: %s", r.URL)
@@ -428,7 +428,7 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 		}
 		name := r.Header.Get("X-Youtube-Client-Name")
 		names = append(names, name)
-		if name == "28" || name == "5" { // ANDROID_VR and IOS are age-gated
+		if name == "28" { // ANDROID_VR is age-gated; IOS delivers
 			return fixtureResp(http.StatusOK, login), nil
 		}
 		return fixtureResp(http.StatusOK, ok), nil
@@ -441,7 +441,11 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 	if ext.Video().Title != "Test Song" {
 		t.Errorf("title = %q", ext.Video().Title)
 	}
-	if want := []string{"28", "5", "56"}; !slicesEqual(names, want) {
+	// Without a PO token, the WEB-family clients (WEB=1, WEB_EMBEDDED=56)
+	// short-circuit at the token fetch and make no /player call, so only
+	// ANDROID_VR and IOS do.
+	// (TestExtract_PlayabilityErrorTriesAllClients covers the token-present chain.)
+	if want := []string{"28", "5"}; !slicesEqual(names, want) {
 		t.Errorf("client order = %v, want %v", names, want)
 	}
 }
@@ -622,10 +626,11 @@ func TestExtract_WatchPageFallback(t *testing.T) {
 	if ext.Video().Title != "From Watch Page" {
 		t.Errorf("title = %q", ext.Video().Title)
 	}
-	// The watch page is fetched twice: by signature-timestamp discovery and by the
-	// streamingData scrape fallback (the same URL now that discovery sends bpctr).
-	if watchCalls != 2 {
-		t.Errorf("watchCalls = %d, want 2 (discovery + scrape)", watchCalls)
+	// Without a PO token the WEB-family clients short-circuit at the token fetch,
+	// before signature-timestamp discovery, so the only /watch fetch is the
+	// streamingData scrape fallback (which carries base.js inline).
+	if watchCalls != 1 {
+		t.Errorf("watchCalls = %d, want 1 (scrape fallback only)", watchCalls)
 	}
 }
 
@@ -831,6 +836,37 @@ func TestEnumerate_BadRequestIsInvalidPlaylistID(t *testing.T) {
 	_, err := c.Enumerate(context.Background(), "PLbroken", 0)
 	if !errors.Is(err, waxerr.ErrInvalidPlaylistID) {
 		t.Fatalf("err = %v, want ErrInvalidPlaylistID", err)
+	}
+}
+
+func TestEnumerate_NotFoundIsPlaylistUnavailable(t *testing.T) {
+	// A 404 from the browse endpoint means the playlist is deleted or nonexistent.
+	// It should surface as ErrPlaylistUnavailable, not as a raw HTTP status that
+	// leaks the internal browse URL.
+	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusNotFound, []byte(`{"error":{"code":404,"message":"Not Found"}}`)), nil
+	}))
+	_, err := c.Enumerate(context.Background(), "PLmissing", 0)
+	if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
+		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+	}
+}
+
+func TestEnumerate_ForbiddenIsNotPlaylistUnavailable(t *testing.T) {
+	// A browse 403 is an anti-bot or attestation block, not a permanently
+	// unavailable playlist. Private playlists return HTTP 200 with an in-body
+	// alert. Keep 403 outside ErrPlaylistUnavailable so callers do not treat a
+	// reachable playlist as permanently gone.
+	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusForbidden, []byte(`{"error":{"code":403,"message":"Forbidden"}}`)), nil
+	}))
+	_, err := c.Enumerate(context.Background(), "PLblocked", 0)
+	if errors.Is(err, waxerr.ErrPlaylistUnavailable) {
+		t.Fatalf("err = %v, want a 403 NOT mapped to ErrPlaylistUnavailable", err)
+	}
+	hse, ok := errors.AsType[*waxerr.HTTPStatusError](err)
+	if !ok || hse.StatusCode != http.StatusForbidden {
+		t.Fatalf("err = %v, want the underlying HTTP 403 preserved", err)
 	}
 }
 

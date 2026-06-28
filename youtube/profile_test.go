@@ -98,13 +98,16 @@ func TestIOSRequiresNoPOTokens(t *testing.T) {
 	}
 }
 
-// TestWebEmbeddedRequiresNoPOTokens locks the embedded client to needing no PO
-// tokens (matching yt-dlp). If YouTube starts requiring one, this fails and forces
-// an explicit decision instead of a silent breakage.
-func TestWebEmbeddedRequiresNoPOTokens(t *testing.T) {
+// TestWebEmbeddedRequiresBothPOTokens keeps the embedded client aligned with the
+// WEB-family token model: player tokens gate /player, and GVS tokens gate the
+// media request when /player returns playable formats.
+func TestWebEmbeddedRequiresBothPOTokens(t *testing.T) {
 	emb := profileByName(t, "WEB_EMBEDDED_PLAYER")
-	if emb.requiresPOToken(potoken.ScopePlayer) || emb.requiresPOToken(potoken.ScopeGVS) {
-		t.Errorf("WEB_EMBEDDED_PLAYER should require no PO tokens, got %v", emb.RequiresPOTokens)
+	if !emb.requiresPOToken(potoken.ScopePlayer) {
+		t.Errorf("WEB_EMBEDDED_PLAYER should require a player PO token, got %v", emb.RequiresPOTokens)
+	}
+	if !emb.requiresPOToken(potoken.ScopeGVS) {
+		t.Errorf("WEB_EMBEDDED_PLAYER should require a GVS PO token (WEB-family), got %v", emb.RequiresPOTokens)
 	}
 	// The embed origin must be present, or /player returns a playability ERROR.
 	if emb.EmbedURL == "" {

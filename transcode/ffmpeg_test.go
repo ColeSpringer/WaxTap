@@ -209,6 +209,44 @@ func TestBuildCommand_ContainerExtensionsAuthoritative(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_UnrecognizedExtensionForcesMuxer(t *testing.T) {
+	// An extension that names no container, such as ".out", cannot be inferred, so
+	// the selected preset's canonical muxer is forced.
+	cmd, err := buildCommand("in.webm", "a.out", Spec{Codec: CodecFLAC})
+	if err != nil {
+		t.Fatalf("buildCommand: %v", err)
+	}
+	assertSeq(t, cmd.Args, "-f", "flac")
+}
+
+func TestBuildCommand_MatroskaWebMContainersInferred(t *testing.T) {
+	// WebM and Matroska are audio containers, and WebM holds YouTube's native Opus.
+	// ffmpeg should infer those muxers from the extension instead of receiving the
+	// preset's raw or default container.
+	cases := []struct {
+		out   string
+		codec Codec
+	}{
+		{"track.webm", CodecOpus},
+		{"track.mka", CodecFLAC},
+		{"track.mka", CodecOpus},
+		{"track.mkv", CodecAAC},
+		// AIFF and Wave64 are PCM containers ffmpeg infers.
+		{"track.aiff", CodecWAV},
+		{"track.aif", CodecWAV},
+		{"track.w64", CodecWAV},
+	}
+	for _, c := range cases {
+		cmd, err := buildCommand("in.webm", c.out, Spec{Codec: c.codec})
+		if err != nil {
+			t.Fatalf("buildCommand(%q): %v", c.out, err)
+		}
+		if hasFlag(cmd.Args, "-f") {
+			t.Errorf("%s to %q should infer the container (no -f): %v", c.codec, c.out, cmd.Args)
+		}
+	}
+}
+
 func TestBuildCommand_LossyDefaults(t *testing.T) {
 	cases := []struct {
 		name  string

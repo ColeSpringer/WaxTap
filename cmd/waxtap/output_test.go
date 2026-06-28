@@ -380,6 +380,61 @@ func TestClassifyError_PlaylistAvailability(t *testing.T) {
 	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "This playlist does not exist."}); !strings.Contains(c.message, "does not exist") {
 		t.Errorf("message = %q, want YouTube's reason preserved", c.message)
 	}
+	// A browse 404 wraps the sentinel around an HTTPStatusError that embeds the
+	// internal endpoint URL. Classification should keep the exit code while hiding
+	// that URL from user-facing output.
+	wrapped := fmt.Errorf("%w: %v", waxtap.ErrPlaylistUnavailable,
+		&waxtap.HTTPStatusError{StatusCode: 404, URL: "https://www.youtube.com/youtubei/v1/browse"})
+	if c := classifyError(wrapped); c.exitCode != 3 || c.code != "playlist-unavailable" {
+		t.Errorf("wrapped 404 = %+v, want playlist-unavailable exit 3", c)
+	}
+	if c := classifyError(wrapped); strings.Contains(c.message, "youtubei") {
+		t.Errorf("message = %q, leaked the internal endpoint URL", c.message)
+	}
+}
+
+func TestFriendlyError_HTTPStatusNoURL(t *testing.T) {
+	// An otherwise-unclassified status error, such as an innertube 503, should
+	// render without leaking its endpoint URL and still name the right service.
+	cases := []struct {
+		name       string
+		url        string
+		wantSource string
+	}{
+		{"youtube innertube", "https://www.youtube.com/youtubei/v1/browse", "YouTube"},
+		{"sponsorblock", "https://sponsor.ajay.app/api/skipSegments", "SponsorBlock"},
+		{"googlevideo", "https://rr3---sn-abc.googlevideo.com/videoplayback?x=1", "googlevideo"},
+		{"unknown host", "https://example.test/x", "the server"},
+		{"no url", "", "the server"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := friendlyError(&waxtap.HTTPStatusError{StatusCode: 503, URL: tc.url})
+			if strings.Contains(msg, "youtubei") || strings.Contains(msg, "skipSegments") || strings.Contains(msg, "videoplayback") {
+				t.Errorf("msg = %q, leaked the endpoint path", msg)
+			}
+			if !strings.Contains(msg, "503") {
+				t.Errorf("msg = %q, want it to report the HTTP status", msg)
+			}
+			if !strings.Contains(msg, tc.wantSource) {
+				t.Errorf("msg = %q, want it attributed to %q", msg, tc.wantSource)
+			}
+		})
+	}
+}
+
+func TestFriendlyError_SponsorBlockNotMisattributed(t *testing.T) {
+	// A SponsorBlock fetch failure under --sponsorblock-on-error fail wraps a
+	// SponsorBlock HTTPStatusError; it must not be reported as a YouTube outage.
+	wrapped := fmt.Errorf("waxtap: SponsorBlock fetch failed: %w",
+		&waxtap.HTTPStatusError{StatusCode: 503, URL: "https://sponsor.ajay.app/api/skipSegments"})
+	msg := friendlyError(wrapped)
+	if strings.Contains(msg, "YouTube") {
+		t.Errorf("msg = %q, misattributed a SponsorBlock failure to YouTube", msg)
+	}
+	if !strings.Contains(msg, "SponsorBlock") {
+		t.Errorf("msg = %q, want it attributed to SponsorBlock", msg)
+	}
 }
 
 // TestNormalizeExecuteError_FlagOrder verifies that a Cobra unknown-command for a

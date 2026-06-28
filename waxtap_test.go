@@ -553,37 +553,42 @@ func TestEnumerateRejectsNegativeMaxItems(t *testing.T) {
 func TestWarnEmptyCut(t *testing.T) {
 	const dur = 200 * time.Second
 
-	warned := func(cs *CutSpec, pres pipeline.Result) bool {
+	warned := func(cs *CutSpec, pres pipeline.Result, sbHadSegments bool) bool {
 		var got bool
 		em := newEmitter(func(e Event) {
 			if e.Stage == StageWarning && e.Warning != nil && e.Warning.Code == WarnRangesEmpty {
 				got = true
 			}
 		}, "")
-		warnEmptyCut(em, cs, pres)
+		warnEmptyCut(em, cs, pres, sbHadSegments)
 		return got
 	}
 
-	// A SponsorBlock-only request that removes nothing emits WarnRangesEmpty.
 	sbOnly := &CutSpec{SponsorBlock: []sponsorblock.Category{}}
-	if !warned(sbOnly, pipeline.Result{SourceDuration: dur}) {
-		t.Error("SponsorBlock-only empty cut should emit WarnRangesEmpty")
+	// SponsorBlock returned segments but they all fell outside the media: warn.
+	if !warned(sbOnly, pipeline.Result{SourceDuration: dur}, true) {
+		t.Error("SponsorBlock segments outside the media should emit WarnRangesEmpty")
+	}
+	// SponsorBlock returned no segments: WarnSponsorBlockEmpty already covered it,
+	// so do not emit a duplicate WarnRangesEmpty.
+	if warned(sbOnly, pipeline.Result{SourceDuration: dur}, false) {
+		t.Error("no SponsorBlock segments must not also emit WarnRangesEmpty")
 	}
 	// Do not warn after an effective cut, for explicit ranges, without a cut, with
 	// unknown duration, or for an empty CutSpec.
-	if warned(sbOnly, pipeline.Result{SourceDuration: dur, Cut: true}) {
+	if warned(sbOnly, pipeline.Result{SourceDuration: dur, Cut: true}, true) {
 		t.Error("an effective cut must not warn")
 	}
-	if warned(&CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}}, pipeline.Result{SourceDuration: dur}) {
+	if warned(&CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}}, pipeline.Result{SourceDuration: dur}, false) {
 		t.Error("explicit ranges are handled in the pipeline, not warned here")
 	}
-	if warned(&CutSpec{}, pipeline.Result{SourceDuration: dur}) {
+	if warned(&CutSpec{}, pipeline.Result{SourceDuration: dur}, false) {
 		t.Error("an empty CutSpec (no ranges, no SponsorBlock) is not a cut and must not warn")
 	}
-	if warned(nil, pipeline.Result{SourceDuration: dur}) {
+	if warned(nil, pipeline.Result{SourceDuration: dur}, false) {
 		t.Error("nil cut must not warn")
 	}
-	if warned(sbOnly, pipeline.Result{}) {
+	if warned(sbOnly, pipeline.Result{}, true) {
 		t.Error("unknown duration must not warn")
 	}
 }

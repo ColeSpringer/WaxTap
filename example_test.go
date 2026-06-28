@@ -120,7 +120,7 @@ func ExampleClient_Enumerate() {
 	}
 
 	pl, err := client.Enumerate(context.Background(),
-		"https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+		"https://www.youtube.com/playlist?list=UUSMOQeBJ2RAnuFungnQOxLg",
 		waxtap.EnumerateOptions{MaxItems: 50},
 	)
 	if err != nil {
@@ -142,7 +142,7 @@ func ExampleClient_DownloadPlaylist() {
 	}
 
 	res, err := client.DownloadPlaylist(context.Background(),
-		"https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+		"https://www.youtube.com/playlist?list=UUSMOQeBJ2RAnuFungnQOxLg",
 		waxtap.PlaylistDownloadOptions{
 			Concurrency:   1,               // serialize downloads
 			SleepInterval: 5 * time.Second, // pause between them

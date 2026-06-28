@@ -93,7 +93,8 @@ type playlistSummary struct {
 func (s *syncWriter) emitSummary(sum playlistSummary) error {
 	failed := sum.buildRequestFailed + sum.downloadFailed
 	if s.env.jsonMode() {
-		// schemaVersion 4 renamed resolveFailed to buildRequestFailed.
+		// The playlist summary reports buildRequestFailed (the per-entry
+		// BuildRequest callback failures), distinct from downloadFailed.
 		rec := struct {
 			SchemaVersion      int    `json:"schemaVersion"`
 			Type               string `json:"type"`

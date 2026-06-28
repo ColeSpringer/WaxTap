@@ -20,12 +20,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// schemaVersion tags JSON output so callers can handle shape changes. Version 2
-// added audioQuality to format objects. Version 3 added the YouTube client.
-// Version 4 renamed the playlist summary's resolveFailed key to
-// buildRequestFailed.
-// Non-transcoded local results omit the redundant outputFormat field.
-const schemaVersion = 4
+// schemaVersion tags JSON output so callers can handle shape changes. Version 1 is
+// the pre-1.0 baseline. Non-transcoded local results omit the redundant
+// outputFormat field, and local formats omit itag because they do not come from a
+// YouTube format.
+const schemaVersion = 1
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -295,6 +294,7 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code, c.hint = 2, "is-channel", "open a specific video from the channel; WaxTap does not enumerate channels"
 	case errors.Is(err, waxtap.ErrInvalidVideoID),
 		errors.Is(err, waxtap.ErrVideoIDTooShort),
+		errors.Is(err, waxtap.ErrVideoIDTooLong),
 		errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		c.exitCode, c.code = 2, "invalid-input"
 	case errors.Is(err, waxtap.ErrInvalidConfig):
@@ -334,6 +334,17 @@ const (
 	cipherSolveHint      = "full WEB audio needs an attested identity; set --session-url or --player-context-url (both also require --potoken-url)"
 )
 
+// emitWatchPageBreadcrumb notes on stderr that forced WEB metadata was served
+// from the watch page, which does not need a PO token. The note is limited to
+// forced WEB so the default client chain does not print a misleading token hint
+// after falling back to the watch page. The info and formats commands call it
+// before their output branch so human and JSON modes behave the same.
+func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
+	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
+		env.info("note: WEB metadata via the watch-page fallback (no PO token)\n")
+	}
+}
+
 // noteForcedIOSIncomplete suggests the default client chain after a forced iOS
 // client returns an incomplete stream. It is called only for commands that report
 // a single error, avoiding a repeated note for playlist failures.
@@ -363,6 +374,12 @@ func friendlyError(err error) string {
 		}
 		return sre.Error()
 	}
+	// A typed playlist-unavailable error carries YouTube's own reason (no URL), so
+	// surface it. The bare wrapped sentinel from a browse 403/404 embeds the
+	// internal endpoint URL and is handled by the switch with a fixed message.
+	if pue, ok := errors.AsType[*waxtap.PlaylistUnavailableError](err); ok && pue.Reason != "" {
+		return pue.Error()
+	}
 	switch {
 	case errors.Is(err, waxtap.ErrInvalidConfig):
 		// Library errors name Go option fields. Present the corresponding CLI flags
@@ -376,6 +393,9 @@ func friendlyError(err error) string {
 		return "that is a channel URL, not a single video; open a specific video"
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
+	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
+		// A fixed message keeps the wrapped browse URL out of the output.
+		return "this playlist is unavailable; it may be private, deleted, or nonexistent"
 	case errors.Is(err, waxtap.ErrPlaylistEmpty):
 		return "this playlist has no videos"
 	case errors.Is(err, waxtap.ErrShortsPlaylist):
@@ -391,7 +411,37 @@ func friendlyError(err error) string {
 	case errors.Is(err, waxtap.ErrPlaylistParse):
 		return "YouTube returned a playlist shape WaxTap doesn't recognize; the parser may need updating"
 	}
+	// Any remaining HTTP status error, such as an innertube 500/503 or a
+	// SponsorBlock fetch failure, would otherwise leak its endpoint URL through
+	// err.Error(). Render it without the URL and attribute it to the right service.
+	if hse, ok := errors.AsType[*waxtap.HTTPStatusError](err); ok {
+		return fmt.Sprintf("%s returned HTTP %d", httpStatusSource(hse.URL), hse.StatusCode)
+	}
 	return err.Error()
+}
+
+// httpStatusSource names the service behind an HTTPStatusError from its URL host,
+// so an unclassified status is attributed correctly (YouTube vs SponsorBlock vs
+// googlevideo) without leaking the full URL. Unknown hosts get a neutral label.
+func httpStatusSource(rawURL string) string {
+	if rawURL == "" {
+		return "the server"
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return "the server"
+	}
+	host := strings.ToLower(u.Hostname())
+	switch {
+	case strings.Contains(host, "sponsor"):
+		return "SponsorBlock"
+	case strings.Contains(host, "googlevideo"):
+		return "googlevideo"
+	case strings.Contains(host, "youtube"):
+		return "YouTube"
+	default:
+		return "the server"
+	}
 }
 
 // configSymbolReplacer maps Go option field names in ErrInvalidConfig templates

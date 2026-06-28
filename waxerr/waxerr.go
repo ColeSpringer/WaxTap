@@ -62,9 +62,12 @@ var (
 	// ErrIsChannel indicates a channel URL (/@handle, /c/, /channel/, /user/) was
 	// passed where a single video is required. It is its own sentinel, not a
 	// malformed-video-ID error.
-	ErrIsChannel         = errors.New("waxtap: URL is a channel, not a single video")
-	ErrInvalidVideoID    = errors.New("waxtap: invalid characters in video ID")
-	ErrVideoIDTooShort   = errors.New("waxtap: video ID is too short")
+	ErrIsChannel      = errors.New("waxtap: URL is a channel, not a single video")
+	ErrInvalidVideoID = errors.New("waxtap: invalid characters in video ID")
+	// ErrVideoIDTooShort and ErrVideoIDTooLong report an all-ID-character token of
+	// the wrong length (a YouTube video ID is exactly 11 characters).
+	ErrVideoIDTooShort   = errors.New("waxtap: video ID is too short (expected 11 characters)")
+	ErrVideoIDTooLong    = errors.New("waxtap: video ID is too long (expected 11 characters)")
 	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist ID")
 	// ErrPlaylistParse indicates a playlist browse response that parsed as JSON
 	// but matched no known item shape. Unlike ErrInvalidPlaylistID it is a

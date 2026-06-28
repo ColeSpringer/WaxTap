@@ -62,3 +62,41 @@ func TestInfoSubstitutionBreadcrumb(t *testing.T) {
 		}
 	})
 }
+
+// TestWatchPageBreadcrumb covers forced WEB metadata served from the watch-page
+// fallback. The note belongs only on a forced WEB read; on the default chain it
+// would imply a token issue when the client fallback simply settled on WEB.
+func TestWatchPageBreadcrumb(t *testing.T) {
+	webViaWatch := &waxtap.InfoResult{
+		Video:        &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A"},
+		Client:       "WEB",
+		ViaWatchPage: true,
+	}
+
+	t.Run("forced web prints breadcrumb", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{client: "web"}}
+		emitWatchPageBreadcrumb(env, webViaWatch)
+		if !strings.Contains(errBuf.String(), "watch-page fallback (no PO token)") {
+			t.Errorf("want the watch-page breadcrumb, got:\n%s", errBuf.String())
+		}
+	})
+
+	t.Run("default chain does not", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{}}
+		emitWatchPageBreadcrumb(env, webViaWatch)
+		if errBuf.Len() != 0 {
+			t.Errorf("unforced client must print no breadcrumb, got:\n%s", errBuf.String())
+		}
+	})
+
+	t.Run("forced web but not via watch page", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{client: "web"}}
+		emitWatchPageBreadcrumb(env, &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB"})
+		if errBuf.Len() != 0 {
+			t.Errorf("a direct WEB read must print no breadcrumb, got:\n%s", errBuf.String())
+		}
+	})
+}
