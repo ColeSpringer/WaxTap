@@ -60,7 +60,15 @@ var (
 	ErrInvalidConfig = waxerr.ErrInvalidConfig
 )
 
-// Re-exported structured error types. Use errors.AsType to inspect them.
+// Re-exported structured error types. Inspect them with errors.AsType, or with
+// errors.As using a double-pointer target: each satisfies error on its pointer
+// type (like *os.PathError), so the value form errors.As(err, &PlayabilityError{})
+// panics. Use:
+//
+//	var pe *PlayabilityError
+//	if errors.As(err, &pe) { /* pe.Status, pe.Reason */ }
+//
+// equivalently errors.AsType[*PlayabilityError](err).
 type (
 	RateLimitError   = waxerr.RateLimitError
 	ExtractionError  = waxerr.ExtractionError

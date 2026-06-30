@@ -120,6 +120,13 @@ type Result struct {
 
 	InputLoudness  *normalize.Loudness // measured post-cut input loudness
 	OutputLoudness *normalize.Loudness // measured output loudness, set only on Apply
+
+	// OutputProbe is an ffprobe of the written OutputPath, populated whenever an
+	// output file was produced (transcode, remux, downmix, or copy-mode cut). It is
+	// nil for a measure-only or no-op spec (OutputPath == "") and nil when the probe
+	// failed. Callers read it for authoritative output rate/channels/bitrate/
+	// duration/size.
+	OutputProbe *transcode.ProbeResult
 }
 
 // Run processes input per spec, writing any output to output. It returns a
@@ -327,6 +334,15 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		if out, merr := normalize.Measure(ctx, r, output, nil, spec.Threads); merr == nil {
 			res.OutputLoudness = &out
 		}
+	}
+
+	// Probe the written output so callers can report authoritative output numbers
+	// (sample rate, channels, bitrate, duration, size). Best-effort: the write
+	// already succeeded, so a probe failure must not fail the job. Reaching here
+	// means a real file was produced; the measure-only/no-op early return above
+	// left OutputPath empty and never probes.
+	if op, perr := r.Probe(ctx, output); perr == nil {
+		res.OutputProbe = &op
 	}
 	return res, nil
 }

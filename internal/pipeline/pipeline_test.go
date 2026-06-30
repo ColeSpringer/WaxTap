@@ -140,6 +140,43 @@ func TestRunTranscode(t *testing.T) {
 	assertHasStage(t, *seen, StageTranscoding)
 }
 
+// TestRunPopulatesOutputProbe checks that a run producing a file leaves an
+// OutputProbe for the caller, while a measure-only run (no output) leaves it nil.
+func TestRunPopulatesOutputProbe(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+
+	t.Run("transcode populates the probe", func(t *testing.T) {
+		out := filepath.Join(dir, "out.mp3")
+		res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecMP3, Bitrate: 128000}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.OutputProbe == nil {
+			t.Fatal("OutputProbe = nil, want a probe of the written output")
+		}
+		a, ok := res.OutputProbe.AudioStream()
+		if !ok || a.SampleRate <= 0 || a.Channels <= 0 {
+			t.Errorf("OutputProbe audio = %+v (ok=%v), want a positive sample rate and channel count", a, ok)
+		}
+		if res.OutputProbe.Format.Size <= 0 {
+			t.Errorf("OutputProbe size = %d, want > 0", res.OutputProbe.Format.Size)
+		}
+	})
+
+	t.Run("measure-only leaves it nil", func(t *testing.T) {
+		out := filepath.Join(dir, "measured.flac")
+		res, err := Run(context.Background(), r, in, out, Spec{Loudness: &Loudness{Apply: false}}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.OutputProbe != nil {
+			t.Errorf("measure-only OutputProbe = %+v, want nil (no output written)", res.OutputProbe)
+		}
+	})
+}
+
 func TestRunCutFusedTranscode(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()

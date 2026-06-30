@@ -269,13 +269,25 @@ type InfoResult struct {
 	// a forced WEB client this read needs no PO token, unlike a forced WEB stream;
 	// SubstitutedFrom stays empty because WEB is not substituted for itself.
 	ViaWatchPage bool
+	// Probed reports that InfoProbe ran ffprobe on the resolved best-audio stream,
+	// so that row's sample rate, channels, bitrate, and duration are authoritative.
+	// It is false for SABR streams, which have no direct URL to probe.
+	Probed bool
+	// BestIndex is the index into Video.Formats that InfoResolved/InfoProbe resolved
+	// (and, for InfoProbe, probed in place). It is -1 at InfoBasic depth or when no
+	// audio could be selected. A probe mutates that row, so callers should display
+	// BestIndex rather than re-running selection on the mutated slice.
+	BestIndex int
 }
 
-// ReadOption configures Info, InfoResult, and Resolve.
+// ReadOption configures Info, InfoResult, and Resolve. WithNoFallback applies to
+// all three; WithChannels only affects the best-audio row Info and InfoResult
+// pick (Resolve takes an explicit AudioSelector and ignores it).
 type ReadOption func(*readOptions)
 
 type readOptions struct {
 	noFallback bool
+	layout     ChannelLayout
 }
 
 // WithNoFallback prevents Info, InfoResult, and Resolve from falling back to
@@ -283,6 +295,15 @@ type readOptions struct {
 // Download and Stream.
 func WithNoFallback() ReadOption {
 	return func(o *readOptions) { o.noFallback = true }
+}
+
+// WithChannels sets the channel preference Info and InfoResult use to pick the
+// best-audio row they resolve and probe, matching the row a default download
+// would select. The zero value (LayoutAny) imposes no preference, so a surround
+// track may rank highest. Resolve takes an explicit AudioSelector and ignores
+// this option.
+func WithChannels(layout ChannelLayout) ReadOption {
+	return func(o *readOptions) { o.layout = layout }
 }
 
 func newReadOptions(opts []ReadOption) readOptions {
@@ -327,15 +348,20 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		return nil, err
 	}
 	video := ext.Video()
-	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom(), ViaWatchPage: ext.Attempt() == youtube.AttemptWatchPage}
+	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom(), ViaWatchPage: ext.Attempt() == youtube.AttemptWatchPage, BestIndex: -1}
 	if depth < InfoResolved {
 		return res, nil
 	}
 
-	idx, serr := format.BestForTarget(video.Formats, format.MinimizeLoss(), format.Target{})
+	// Resolve and probe the row the CLI displays as "Best audio" (the same selector,
+	// with the caller's channel preference), so the content length and probed
+	// numbers land on the displayed row rather than a surround track that outranks
+	// it under MinimizeLoss with no preference.
+	idx, serr := selectIndex(BestAudio().WithChannels(ro.layout), MinimizeLoss(), format.Target{}, video.Formats)
 	if serr != nil {
 		return res, nil // nothing resolvable; return the basic metadata
 	}
+	res.BestIndex = idx
 	rctx, rcancel := withTimeout(ctx, c.opts.Timeouts.Resolve)
 	defer rcancel()
 	plan, rerr := c.yt.Resolve(rctx, ext, idx)
@@ -358,6 +384,7 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 			return nil, perr
 		}
 		applyProbe(&video.Formats[idx], probe)
+		res.Probed = true
 	}
 	return res, nil
 }

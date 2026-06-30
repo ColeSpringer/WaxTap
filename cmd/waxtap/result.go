@@ -72,6 +72,12 @@ func renderLoudness(env *appEnv, l *waxtap.LoudnessResult) {
 	}
 	if l.Output != nil {
 		env.printf("          output %s LUFS (target %s)\n", humanLUFS(l.Output.IntegratedLUFS), humanLUFS(l.Target))
+		// l.Output is set only in apply mode. A clip shorter than the LUFS gate yields
+		// a non-finite integrated loudness (NaN or -Inf), which humanLUFS renders as
+		// "n/a"; say why so the line does not read as a verified normalization.
+		if nonFinite(l.Output.IntegratedLUFS) {
+			env.printf("          (output integrated loudness could not be measured: clip too short to gate)\n")
+		}
 	}
 }
 

@@ -84,6 +84,12 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 	}, nil
 }
 
+// ClientNameWebContext is the profile and [Extraction.ClientName] value reported
+// for the attested WEB player-context streaming path. It names the magic string in
+// one place; library callers can compare it against a Result's client to detect
+// WEB-context delivery.
+const ClientNameWebContext = "WEB_CONTEXT"
+
 // webContextProfile builds the WEB_CONTEXT client profile: a WEB identity that
 // requires only a GVS PO token (the player token is skipped because /player is
 // not called here) and no signature timestamp. version comes from the attested
@@ -92,7 +98,7 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 // override applies here exactly as on every other WEB-family path.
 func (c *Client) webContextProfile(version string) ClientProfile {
 	base := profileWeb
-	base.Name = "WEB_CONTEXT"
+	base.Name = ClientNameWebContext
 	base.UserAgent = c.webFallback.UserAgent
 	if version != "" {
 		base.Version = version

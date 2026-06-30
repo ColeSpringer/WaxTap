@@ -326,6 +326,27 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 	if p.Transcoded {
 		res.OutputFormat = outputFormat(p.OutputCodec, srcFmt)
 	}
+	if p.Cut {
+		// A cut shrinks the output. For a copy cut OutputFormat is still srcFmt, whose
+		// Duration and ContentLength describe the uncut source; for a fused cut+encode
+		// it is the codec/extension target with zero numerics. Either way, set the
+		// post-cut duration as a baseline (a probe supersedes it) and clear
+		// ContentLength: the cut byte size is unknown without a probe, and the source
+		// size would be wrong.
+		if d := p.SourceDuration - p.Removed; d > 0 {
+			res.OutputFormat.Duration = d
+		} else {
+			res.OutputFormat.Duration = 0
+		}
+		res.OutputFormat.ContentLength = 0
+	}
+	if p.OutputProbe != nil {
+		// Overlay authoritative rate/channels/bitrate/duration from the written file.
+		applyProbe(&res.OutputFormat, *p.OutputProbe)
+		if sz := p.OutputProbe.Format.Size; sz > 0 {
+			res.OutputFormat.ContentLength = sz
+		}
+	}
 	if p.LoudnessMeasured {
 		res.Loudness = &LoudnessResult{
 			Input:  toLoudnessInfo(p.InputLoudness),
@@ -337,9 +358,9 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 }
 
 // applyProbe fills a candidate Format with authoritative values from an ffprobe
-// of its resolved stream (InfoProbe depth). It overwrites only the measured
-// numeric fields and duration, leaving the codec id from the player response,
-// which is more specific than ffprobe's normalized name.
+// of its resolved stream (InfoProbe depth) or written output. It overwrites only
+// the measured numeric fields and duration, leaving the codec id from the player
+// response, which is more specific than ffprobe's normalized name.
 func applyProbe(f *Format, pr transcode.ProbeResult) {
 	if a, ok := pr.AudioStream(); ok {
 		if a.SampleRate > 0 {
@@ -357,6 +378,17 @@ func applyProbe(f *Format, pr transcode.ProbeResult) {
 	}
 	if pr.Format.Duration > 0 {
 		f.Duration = pr.Format.Duration
+	}
+	// ffprobe often leaves the audio-stream bitrate zero for VBR/lossless. Fall back
+	// to the container bitrate, then a size/duration estimate, so both the
+	// info --probe row and a download's OutputFormat report a usable bitrate.
+	if f.Bitrate == 0 {
+		switch secs := f.Duration.Seconds(); {
+		case pr.Format.BitRate > 0:
+			f.Bitrate = pr.Format.BitRate
+		case secs > 0 && pr.Format.Size > 0:
+			f.Bitrate = int(float64(pr.Format.Size) * 8 / secs)
+		}
 	}
 }
 

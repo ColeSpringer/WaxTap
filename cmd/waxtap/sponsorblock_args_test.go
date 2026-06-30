@@ -30,15 +30,20 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 		// args[0]. The scan must catch it in any positional slot.
 		{"download natural order", newDownloadCmd, []string{"--sponsorblock", "sponsor,intro", "dummyVideo0"}, wantHint},
 		{"download single category space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor"}, wantHint},
-		// Non-category surplus args stay with the normal arity error. After parsing,
-		// Cobra cannot tell them apart from stray arguments.
-		{"download non-category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "blah"}, wantReject},
-		{"download typo category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantReject},
-		{"sponsorblock typo category surplus", newSponsorBlockCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantReject},
-		// A stray positional before a bare or explicit-default --sponsorblock is an
-		// arity error, not a misplaced flag value.
-		{"download stray arg plus bare flag", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock"}, wantReject},
-		{"download stray arg plus explicit default", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock=music_offtopic"}, wantReject},
+		// A bare --sponsorblock plus a surplus non-target arg is most likely a
+		// space-separated value (a misspelled category or a stray token), so it gets
+		// the "=" hint. Commands whose only positional is a target (download,
+		// sponsorblock) widen past category-only detection; a real <id> <id> still
+		// goes to arity (below).
+		{"download non-category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "blah"}, wantHint},
+		{"download typo category surplus", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantHint},
+		// The flag-first <typo> <url> form (a misspelled category before the target).
+		{"download typo natural order", newDownloadCmd, []string{"--sponsorblock", "notacategory", "dummyVideo0"}, wantHint},
+		{"sponsorblock typo category surplus", newSponsorBlockCmd, []string{"dummyVideo0", "--sponsorblock", "notacategory"}, wantHint},
+		// pflag cannot tell a bare flag from a surplus value, so a stray non-target
+		// positional next to --sponsorblock gets the same hint.
+		{"download stray arg plus bare flag", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock"}, wantHint},
+		{"download stray arg plus explicit default", newDownloadCmd, []string{"dummyVideo0", "stray", "--sponsorblock=music_offtopic"}, wantHint},
 		// A bare flag with no positional is a clean arity error.
 		{"download bare flag no positional", newDownloadCmd, []string{"--sponsorblock"}, wantReject},
 		{"sponsorblock bare flag no positional", newSponsorBlockCmd, []string{"--sponsorblock"}, wantReject},

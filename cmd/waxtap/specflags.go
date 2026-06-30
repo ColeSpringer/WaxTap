@@ -215,6 +215,12 @@ func parseRanges(specs []string) ([]waxtap.TimeRange, error) {
 			if !ok {
 				return nil, usagef("invalid range %q (want start-end)", part)
 			}
+			// strings.Cut splits on the first "-", so a residual "-" in the end token
+			// means the input carried more than one separator (e.g. 1-2-3). Report the
+			// range shape rather than letting parseTimestamp reject the "2-3" fragment.
+			if strings.Contains(endStr, "-") {
+				return nil, usagef("invalid range %q: want one start-end (e.g. 1:00-2:30)", part)
+			}
 			start, err := parseTimestamp(startStr)
 			if err != nil {
 				return nil, err

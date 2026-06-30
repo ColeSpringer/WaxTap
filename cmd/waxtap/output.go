@@ -109,10 +109,17 @@ type jsonFloat float64
 
 func (f jsonFloat) MarshalJSON() ([]byte, error) {
 	v := float64(f)
-	if math.IsInf(v, 0) || math.IsNaN(v) {
+	if nonFinite(v) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(v)
+}
+
+// nonFinite reports whether v is NaN or infinite. humanLUFS renders such loudness
+// values as "n/a" and the JSON encoders as null; a clip shorter than the LUFS gate
+// produces one.
+func nonFinite(v float64) bool {
+	return math.IsNaN(v) || math.IsInf(v, 0)
 }
 
 // humanBytes formats a byte count with a binary-magnitude unit.
@@ -148,7 +155,7 @@ func humanDuration(d time.Duration) string {
 
 // humanLUFS formats a loudness value, rendering non-finite (silent) as "n/a".
 func humanLUFS(v float64) string {
-	if math.IsInf(v, 0) || math.IsNaN(v) {
+	if nonFinite(v) {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.1f", v)
@@ -352,23 +359,31 @@ func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 // becomes user-visible. Keep this on commands that resolve a stream; local
 // processing and SponsorBlock preview should stay quiet.
 func noteUseBothWebSources(env *appEnv) {
-	c := env.cfg
-	// A deliberately forced non-WEB client is not attempting WEB extraction, so a
-	// "use both / set --client web" note would contradict that choice. Only the WEB
-	// client or the default chain reach WEB.
+	if msg, ok := webSourcesNote(env.cfg); ok {
+		env.info("%s\n", msg)
+	}
+}
+
+// webSourcesNote returns the "supply both WEB sources" note and whether the
+// config is on a single-source WEB path the note applies to. It is the shared
+// gate behind the pre-flight note (info/formats) and the outcome-aware download
+// note. A deliberately forced non-WEB client is not attempting WEB extraction, so
+// a "use both / set --client web" note would contradict that choice; only the WEB
+// client or the default chain reach WEB.
+func webSourcesNote(c *appConfig) (string, bool) {
 	if c.client != "" && !strings.EqualFold(c.client, "web") {
-		return
+		return "", false
 	}
 	onWebPath := c.potokenURL != "" || c.playerContextURL != "" || c.sessionURL != "" || c.visitorData != ""
 	bothSources := c.playerContextURL != "" && c.sessionURL != ""
 	if !onWebPath || bothSources {
-		return
+		return "", false
 	}
 	msg := "note: for WEB extraction, supply both --player-context-url and --session-url (both also require --potoken-url)"
 	if !strings.EqualFold(c.client, "web") {
 		msg += ", and set --client web"
 	}
-	env.info("%s\n", msg)
+	return msg, true
 }
 
 // noteForcedIOSIncomplete suggests the default client chain after a forced iOS

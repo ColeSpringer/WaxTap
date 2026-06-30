@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -155,6 +157,61 @@ func TestNoteUseBothWebSources(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNoteUseBothWebSourcesIfActionable covers the outcome-aware nudge: it fires
+// only when a WEB cap, fallback, or failure makes a second source actionable, and
+// stays silent on a clean WEB_CONTEXT delivery or a non-WEB error. The config gate
+// is a single-source WEB path so webSourcesNote returns true.
+func TestNoteUseBothWebSourcesIfActionable(t *testing.T) {
+	cfg := &appConfig{playerContextURL: "p", potokenURL: "u"} // one WEB source, not both
+
+	fires := func(res *waxtap.Result, err error) bool {
+		var buf bytes.Buffer
+		noteUseBothWebSourcesIfActionable(&appEnv{out: io.Discard, errOut: &buf, cfg: cfg}, res, err)
+		return strings.Contains(buf.String(), "for WEB extraction")
+	}
+	withWarn := func(code waxtap.WarningCode) *waxtap.Result {
+		return &waxtap.Result{Client: "ANDROID_VR", Warnings: []waxtap.Warning{{Code: code}}}
+	}
+
+	t.Run("nil res with incomplete-stream fires", func(t *testing.T) {
+		if !fires(nil, fmt.Errorf("capped: %w", waxtap.ErrIncompleteStream)) {
+			t.Error("a nil result with a WEB-relevant error should fire without panicking")
+		}
+	})
+	t.Run("nil res with needs-po-token fires", func(t *testing.T) {
+		if !fires(nil, fmt.Errorf("web: %w", waxtap.ErrNeedsPOToken)) {
+			t.Error("ErrNeedsPOToken on a partial-WEB config should keep the supply-both pointer")
+		}
+	})
+	t.Run("nil res with disk error stays silent", func(t *testing.T) {
+		if fires(nil, errors.New("write /out/x: no space left on device")) {
+			t.Error("a plain disk error must not trigger the WEB nudge")
+		}
+	})
+	t.Run("clean WEB_CONTEXT success stays silent", func(t *testing.T) {
+		if fires(&waxtap.Result{Client: "WEB_CONTEXT"}, nil) {
+			t.Error("a clean delivery with no warnings must stay silent")
+		}
+	})
+	t.Run("clean default-chain success stays silent", func(t *testing.T) {
+		// Regression guard: ANDROID_VR is first-in-chain, not a WEB fallback, so a
+		// clean default-chain download must not nudge on a partial-WEB config.
+		if fires(&waxtap.Result{Client: "ANDROID_VR"}, nil) {
+			t.Error("a clean default-chain (ANDROID_VR) success must stay silent")
+		}
+	})
+	t.Run("context retry fires", func(t *testing.T) {
+		if !fires(withWarn(waxtap.WarnWebContextRetry), nil) {
+			t.Error("a WEB context cap/retry should fire the nudge")
+		}
+	})
+	t.Run("context fallback fires", func(t *testing.T) {
+		if !fires(withWarn(waxtap.WarnWebContextFallback), nil) {
+			t.Error("a WEB context fallback to another client should fire the nudge")
+		}
+	})
 }
 
 func TestMeasureNote(t *testing.T) {

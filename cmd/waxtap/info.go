@@ -34,7 +34,9 @@ func newInfoCmd() *cobra.Command {
 			if probe {
 				depth = waxtap.InfoProbe
 			}
-			var ropts []waxtap.ReadOption
+			// Resolve/probe the same row the human and JSON output display as "Best
+			// audio", so --probe refines the displayed row, not a surround track.
+			ropts := []waxtap.ReadOption{waxtap.WithChannels(layout)}
 			if noFallback {
 				ropts = append(ropts, waxtap.WithNoFallback())
 			}
@@ -54,7 +56,14 @@ func newInfoCmd() *cobra.Command {
 				resolved = &rs
 			}
 
-			bestIdx, bestErr := sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
+			// Prefer the row InfoResult actually resolved/probed: applyProbe mutates
+			// that row in place, so re-selecting on the mutated slice could land on a
+			// different near-tie row than the one shown as (probed).
+			var bestErr error
+			bestIdx := info.BestIndex
+			if info.BestIndex < 0 {
+				bestIdx, bestErr = sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
+			}
 
 			if env.jsonMode() {
 				return emitInfoJSON(env, info, bestIdx, bestErr, resolved)
@@ -108,7 +117,15 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 		if f.IsOriginal == waxtap.Yes {
 			env.printf("  (original)")
 		}
+		if info.Probed {
+			// The row's numbers came from ffprobe of the resolved stream, not the
+			// player manifest.
+			env.printf("  (probed)")
+		}
 		env.printf("\n")
+		if info.Probed && f.Duration > 0 {
+			env.printf("  length:  %s\n", humanDuration(f.Duration))
+		}
 		if f.ContentLength > 0 {
 			env.printf("  size:    %s\n", humanBytes(f.ContentLength))
 		}
@@ -134,6 +151,19 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 	formats := make([]formatJSON, len(deduped))
 	for i, f := range deduped {
 		formats[i] = formatToJSON(f)
+	}
+	// dedupFormats keeps the first row per {itag,track,drc}. When the probed best row
+	// is a later duplicate, overlay its authoritative numbers onto the kept row so
+	// the formats[] entry agrees with the human "Best audio" line. Finalize formats
+	// before building out so the slice is not mutated afterward.
+	if bestErr == nil && info.Probed {
+		bestKey := dedupKey(v.Formats[bestIdx])
+		for i := range deduped {
+			if dedupKey(deduped[i]) == bestKey {
+				formats[i] = formatToJSON(v.Formats[bestIdx])
+				break
+			}
+		}
 	}
 	out := struct {
 		SchemaVersion   int           `json:"schemaVersion"`

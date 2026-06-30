@@ -2,6 +2,7 @@ package waxtap_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -218,4 +219,30 @@ func ExampleClient_Info() {
 		log.Fatal(err)
 	}
 	fmt.Printf("%s by %s (%d formats)\n", video.Title, video.Author, len(video.Formats))
+}
+
+// Example_errors shows the two ways to inspect a failure from Download or Info:
+// errors.Is for the sentinel category, and errors.As for YouTube's structured
+// detail. The re-exported error types satisfy error on their pointer type, so
+// errors.As takes a double-pointer target (var pe *PlayabilityError; &pe).
+func Example_errors() {
+	// In real use this comes from client.Download/Info; constructed here for a
+	// self-contained example.
+	var err error = &waxtap.PlayabilityError{
+		Status:   "UNPLAYABLE",
+		Reason:   "This video is unavailable",
+		Sentinel: waxtap.ErrVideoUnavailable,
+	}
+
+	if errors.Is(err, waxtap.ErrVideoUnavailable) {
+		fmt.Println("category: video unavailable")
+	}
+
+	var pe *waxtap.PlayabilityError
+	if errors.As(err, &pe) {
+		fmt.Printf("status: %s\n", pe.Status)
+	}
+	// Output:
+	// category: video unavailable
+	// status: UNPLAYABLE
 }

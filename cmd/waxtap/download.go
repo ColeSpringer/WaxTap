@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxtap"
@@ -57,6 +59,7 @@ type downloadFlags struct {
 	layout           waxtap.ChannelLayout // resolved in RunE from --channels
 	channelsExplicit bool                 // true when a flag or config value requested a layout
 	archive          *downloadArchive
+	streamW          io.Writer // stdout sink when --out is "-"; nil for a file sink
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -83,7 +86,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f := cmd.Flags()
 	f.IntVar(&df.itag, "itag", 0, "select an exact itag")
 	f.StringVar(&df.codec, "codec", "", "select the best source matching a codec (hard filter)")
-	f.StringVarP(&df.out, "out", "o", "", "output file path (single video only)")
+	f.StringVarP(&df.out, "out", "o", "", "output file path, or - for stdout (single video; - is not atomic: a mid-stream failure can leave a truncated stream, and the error/exit code go to stderr)")
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
 	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
 	bindCollisionFlag(f, &df.collisionStr)
@@ -115,7 +118,6 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	if err != nil {
 		return err
 	}
-	noteUseBothWebSources(env)
 	if err := df.resolve(cmd, env); err != nil {
 		return err
 	}
@@ -193,6 +195,24 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	}
 	if df.out != "" && cmd.Flags().Changed("output-template") {
 		return usagef("--output-template cannot be used with --out")
+	}
+	// Map -o - to the stdout writer sink. Reset first so a reused command struct
+	// never carries a stale writer. A writer sink has no file path, so reject the
+	// flags that need one.
+	df.streamW = nil
+	if df.out == "-" {
+		if df.writeInfoJSON {
+			return usagef("--write-info-json cannot be used with -o - (a writer sink has no file path to attach a sidecar to)")
+		}
+		if cmd.Flags().Changed("collision") {
+			return usagef("--collision cannot be used with -o - (stdout is not a file path)")
+		}
+		// Refuse to flood a terminal with binary audio when the user forgot to
+		// redirect; piping or a file redirect is required.
+		if isTerminal(env.out) {
+			return usagef("refusing to write audio to the terminal; redirect to a file (e.g. > track.opus) or pipe to another command (e.g. | ffprobe -)")
+		}
+		df.streamW = env.out
 	}
 	// Validate every template before network work; the default template passes here.
 	if err := validateOutputTemplate(df.template); err != nil {
@@ -292,6 +312,9 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 
 	out := &syncWriter{env: env}
 	reserver := newPathReserver()
+	// OnItem may run concurrently, so track the actionable-WEB signal atomically and
+	// emit the nudge once after the run instead of per item.
+	var actionableWeb atomic.Bool
 	res, runErr := env.client.DownloadPlaylist(ctx, url, waxtap.PlaylistDownloadOptions{
 		MaxItems:         df.maxItems,
 		Concurrency:      df.concurrency, // 0 => library uses config/default
@@ -308,6 +331,9 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 				warnChannelLayout(env, df, o.Result)
 				warnContainerExtMismatch(env, df, o.Result)
 				measureNote(env, o.Result)
+			}
+			if webOutcomeActionable(o.Result, o.Err) {
+				actionableWeb.Store(true)
 			}
 			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
 		},
@@ -330,6 +356,11 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		enumErrors:         len(res.EnumErrors),
 		capReached:         res.CapReached,
 	})
+	// Emit the WEB-sources nudge once if any item capped, fell back, or failed on a
+	// WEB path. It goes to stderr, so it is safe in JSON mode too.
+	if actionableWeb.Load() {
+		noteUseBothWebSources(env)
+	}
 	// JSON mode has already written the item records and summary. Preserve the
 	// failure exit code without appending another JSON document.
 	err := sumErr
@@ -343,15 +374,36 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 }
 
 // runSingleDownload downloads one video with a live progress bar.
-func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg string) error {
+func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg string) (err error) {
+	// When streaming to stdout, every status line and JSON document must go to
+	// stderr so stdout carries only audio bytes. rep is a copy with out redirected,
+	// and one deferred seam keeps any returned error off stdout (the audio sink):
+	// render it to stderr and tell main not to write an error document there. This
+	// covers every return below, including pre-stream and emit failures.
+	rep := env
+	if df.streamW != nil {
+		se := *env
+		se.out = env.errOut
+		rep = &se
+		defer func() {
+			if err == nil {
+				return
+			}
+			if _, already := errors.AsType[*alreadyRenderedError](err); !already {
+				renderError(env.errOut, env.jsonMode(), err)
+			}
+			err = alreadyRendered(err)
+		}()
+	}
+
 	req, skipped, err := resolveItem(ctx, env, df, nil, arg, "", "", 0)
 	if err != nil {
 		return err
 	}
 	if skipped != "" {
-		env.info("skipped (%s)\n", skipped)
-		if env.jsonMode() {
-			return env.emitJSON(struct {
+		rep.info("skipped (%s)\n", skipped)
+		if rep.jsonMode() {
+			return rep.emitJSON(struct {
 				SchemaVersion int    `json:"schemaVersion"`
 				Skipped       string `json:"skipped"`
 			}{schemaVersion, skipped})
@@ -365,17 +417,19 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	prog.finish()
 	if err != nil {
 		noteForcedIOSIncomplete(env, err)
+		noteUseBothWebSourcesIfActionable(env, res, err) // res is nil here; err-gated
 		return err
 	}
 
 	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
 	finishItem(env, df, id, res)
-	if err := emitResult(env, res); err != nil {
+	if err := emitResult(rep, res); err != nil {
 		return err
 	}
 	warnChannelLayout(env, df, res)
 	warnContainerExtMismatch(env, df, res)
 	measureNote(env, res)
+	noteUseBothWebSourcesIfActionable(env, res, nil)
 	return nil
 }
 
@@ -389,6 +443,16 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 	}
 	if df.archive != nil && df.archive.Has(id) {
 		return waxtap.Request{}, "archive", nil
+	}
+
+	// Streaming to stdout has no file path: skip naming and collision handling and
+	// pass "-" through (buildRequest routes to the writer sink).
+	if df.streamW != nil {
+		req, err := df.buildRequest(idOrURL, "-")
+		if err != nil {
+			return waxtap.Request{}, "", err
+		}
+		return req, "", nil
 	}
 
 	target := df.out
@@ -510,6 +574,39 @@ func measureNote(env *appEnv, res *waxtap.Result) {
 	}
 }
 
+// noteUseBothWebSourcesIfActionable prints the "supply both WEB sources" note only
+// when the run hit a WEB cap, fallback, or failure a second source could have
+// helped. A clean WEB context delivery stays silent.
+func noteUseBothWebSourcesIfActionable(env *appEnv, res *waxtap.Result, err error) {
+	if msg, ok := webSourcesNote(env.cfg); ok && webOutcomeActionable(res, err) {
+		env.info("%s\n", msg)
+	}
+}
+
+// webOutcomeActionable reports whether a download outcome shows a WEB-specific
+// cap, fallback, or failure a second source could address. A failed Download
+// returns a nil Result, so the err checks carry that case; a clean success (nil
+// err, no WEB warning) returns false.
+//
+// The fallback signal is WarnWebContextFallback, not a "client != WEB_CONTEXT"
+// check: that warning fires only when a configured WEB context did not deliver, so
+// the default chain settling on ANDROID_VR (the client that works out of the box)
+// on a partial-WEB config no longer trips the note on every success. Plain
+// IO/disk/network errors are not WEB-relevant.
+func webOutcomeActionable(res *waxtap.Result, err error) bool {
+	if res != nil {
+		for _, w := range res.Warnings {
+			if w.Code == waxtap.WarnWebContextRetry || w.Code == waxtap.WarnWebContextFallback {
+				return true
+			}
+		}
+	}
+	return errors.Is(err, waxtap.ErrIncompleteStream) ||
+		errors.Is(err, waxtap.ErrExtractionFailed) ||
+		errors.Is(err, waxtap.ErrNeedsPOToken) ||
+		isProviderError(err)
+}
+
 // buildRequest assembles a Download request for url delivering to outPath.
 func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, error) {
 	sel, err := audioSelector(df.itag, df.codec, df.layout)
@@ -524,7 +621,11 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 	if err != nil {
 		return waxtap.Request{}, err
 	}
-	spec.Output = waxtap.ToFile(outPath)
+	if df.streamW != nil {
+		spec.Output = waxtap.ToWriter(df.streamW)
+	} else {
+		spec.Output = waxtap.ToFile(outPath)
+	}
 	return waxtap.Request{URL: url, Audio: sel, SourcePolicy: policy, NoFallback: df.noFallback, ProcessSpec: spec}, nil
 }
 

@@ -111,6 +111,18 @@ func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional
 			return a, true
 		}
 	}
+	// Widened pass: a misspelled category (not a valid category word, so the loop
+	// above skipped it) also strands the real target. Only for commands whose sole
+	// positional is a video target; the category loop continues past every
+	// non-category arg, so this must be a separate pass. Return the first surplus
+	// arg that is not a YouTube target, leaving a genuine `<id> <id>` to arity.
+	if surplus && !hasOutputPositional {
+		for _, a := range args {
+			if !looksLikeYouTubeTarget(a) {
+				return a, true
+			}
+		}
+	}
 	return "", false
 }
 
