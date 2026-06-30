@@ -54,7 +54,9 @@ the first SmartScreen prompt.
 
 Media commands accept a YouTube URL or bare video or playlist ID. `cut`,
 `transcode`, and `normalize` also accept local files. Every command has `--help`,
-and `--json` provides a stable scriptable contract (`schemaVersion` 1).
+and `--json` provides a stable scriptable contract (`schemaVersion` 1). `info
+--show-url` adds a signed, expiring stream URL to the JSON `url` field; treat any
+captured output as sensitive.
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
@@ -236,6 +238,19 @@ waxtap download <url> \
 waxtap download <url> --client web \
   --session-url http://127.0.0.1:4417/session \
   --potoken-url http://127.0.0.1:4417
+```
+
+If one sidecar exposes all three routes, you can configure both WEB handoff paths
+in one command. WaxTap tries the attested player context first. If that path
+fails or caps, the WEB client chain can still use the adopted session from
+`--session-url`.
+
+```sh
+# Player context first, adopted WEB session as fallback
+waxtap download <url> --client web \
+  --player-context-url http://127.0.0.1:4416/player-context \
+  --session-url http://127.0.0.1:4416/session \
+  --potoken-url http://127.0.0.1:4416/get_pot
 ```
 
 Session adoption requires a single-client chain. Static adoption is also

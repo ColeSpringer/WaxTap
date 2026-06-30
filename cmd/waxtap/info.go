@@ -21,6 +21,7 @@ func newInfoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noteUseBothWebSources(env)
 			// Use download's source preference so "Best audio" reports the format
 			// a default download would select.
 			layout, err := parseChannels(resolveChannelsFlag(cmd, env.cfg, channels))

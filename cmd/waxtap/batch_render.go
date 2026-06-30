@@ -106,7 +106,7 @@ func emitBatchProcess(env *appEnv, outcomes []batchOutcome, ignored int, fmtName
 			env.printf("FAIL:      %s: %s\n", o.input, friendlyError(o.err))
 		}
 	}
-	emitBatchSummaryHuman(env, countBatch(outcomes, ignored))
+	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "encoded")
 }
 
 // emitBatchMeasure writes a loudness table or NDJSON item records and a summary.
@@ -133,13 +133,20 @@ func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) {
 			env.printf("FAIL: %s: %s\n", o.input, friendlyError(o.err))
 		}
 	}
-	emitBatchSummaryHuman(env, countBatch(outcomes, ignored))
+	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "measured")
 }
 
-// emitBatchSummaryHuman prints a summary and omits optional zero-value categories.
-func emitBatchSummaryHuman(env *appEnv, c batchCounts) {
-	line := fmt.Sprintf("%d processed, %d copied, %d unchanged, %d ignored, %d failed",
-		c.processed, c.copied, c.unchanged, c.ignored, c.failed)
+// emitBatchSummaryHuman prints one summary line. The leading total includes every
+// terminal state; c.processed names only files that were encoded or measured.
+// verb is the word shown for statusOK entries. Zero-value optional states are
+// omitted.
+func emitBatchSummaryHuman(env *appEnv, c batchCounts, verb string) {
+	total := c.processed + c.copied + c.unchanged + c.ignored + c.failed + c.skipped + c.notRun
+	line := fmt.Sprintf("%d files: %d %s, %d copied, %d unchanged, %d failed",
+		total, c.processed, verb, c.copied, c.unchanged, c.failed)
+	if c.ignored > 0 {
+		line += fmt.Sprintf(", %d ignored", c.ignored)
+	}
 	if c.skipped > 0 {
 		line += fmt.Sprintf(", %d skipped", c.skipped)
 	}

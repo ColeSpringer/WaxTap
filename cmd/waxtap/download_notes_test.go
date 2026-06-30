@@ -98,6 +98,65 @@ func TestWarnContainerExtMismatch(t *testing.T) {
 	}
 }
 
+func TestWarnBitrateIgnoredIfLossless(t *testing.T) {
+	cases := []struct {
+		name    string
+		tf      waxtap.TranscodeFormat
+		bitrate int
+		want    bool
+	}{
+		{"flac with bitrate", waxtap.FormatFLAC, 320000, true},
+		{"alac with bitrate", waxtap.FormatALAC, 320000, true},
+		{"wav with bitrate", waxtap.FormatWAV, 320000, true},
+		{"copy with bitrate", waxtap.FormatCopy, 320000, true},
+		{"lossy mp3 with bitrate", waxtap.FormatMP3, 320000, false},
+		{"lossy opus with bitrate", waxtap.FormatOpus, 320000, false},
+		{"flac without bitrate", waxtap.FormatFLAC, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			warnBitrateIgnoredIfLossless(noteEnv(&buf), tc.tf, tc.bitrate)
+			if got := strings.Contains(buf.String(), "--bitrate is ignored"); got != tc.want {
+				t.Errorf("note emitted=%v (%q), want %v", got, buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestNoteUseBothWebSources(t *testing.T) {
+	cases := []struct {
+		name       string
+		cfg        *appConfig
+		wantFire   bool
+		wantSetWeb bool // message includes "set --client web"
+	}{
+		{"token only default client", &appConfig{potokenURL: "u"}, true, true},
+		{"token only client web", &appConfig{potokenURL: "u", client: "web"}, true, false},
+		// A deliberately forced non-WEB client is not steered toward WEB.
+		{"token only forced android", &appConfig{potokenURL: "u", client: "android_vr"}, false, false},
+		{"context only default", &appConfig{potokenURL: "u", playerContextURL: "p"}, true, true},
+		{"session only web", &appConfig{potokenURL: "u", sessionURL: "s", client: "web"}, true, false},
+		{"both sources", &appConfig{potokenURL: "u", playerContextURL: "p", sessionURL: "s", client: "web"}, false, false},
+		{"no web config", &appConfig{}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			noteUseBothWebSources(&appEnv{out: io.Discard, errOut: &buf, cfg: tc.cfg})
+			got := buf.String()
+			if fired := strings.Contains(got, "for WEB extraction"); fired != tc.wantFire {
+				t.Fatalf("fired=%v (%q), want %v", fired, got, tc.wantFire)
+			}
+			if tc.wantFire {
+				if hasSetWeb := strings.Contains(got, "set --client web"); hasSetWeb != tc.wantSetWeb {
+					t.Errorf("set-client-web=%v (%q), want %v", hasSetWeb, got, tc.wantSetWeb)
+				}
+			}
+		})
+	}
+}
+
 func TestMeasureNote(t *testing.T) {
 	cases := []struct {
 		name string

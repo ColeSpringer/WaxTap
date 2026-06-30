@@ -140,6 +140,40 @@ func TestLoadProfileOverrides_Errors(t *testing.T) {
 	}
 }
 
+// TestLoadProfileOverrides_TypeMismatchMessage checks that top-level shape errors
+// and field type errors are reported in config-file terms, not Go struct terms.
+func TestLoadProfileOverrides_TypeMismatchMessage(t *testing.T) {
+	t.Run("top-level array", func(t *testing.T) {
+		_, err := loadProfileOverrides(writeOverride(t, `[]`))
+		if err == nil {
+			t.Fatal("expected an error for a top-level array")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "expected a JSON object, got array") {
+			t.Errorf("error = %q, want the clean type-mismatch message", msg)
+		}
+		if strings.Contains(msg, "profileOverrideFile") || strings.Contains(msg, "Go value") {
+			t.Errorf("error = %q, leaks the internal Go type", msg)
+		}
+	})
+	t.Run("mistyped field is not reported as a wrong top-level shape", func(t *testing.T) {
+		_, err := loadProfileOverrides(writeOverride(t, `{"profiles":"x"}`))
+		if err == nil {
+			t.Fatal("expected an error for a mistyped profiles field")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, `field "profiles" has the wrong type`) {
+			t.Errorf("error = %q, want a field-level type message", msg)
+		}
+		if strings.Contains(msg, "expected a JSON object") {
+			t.Errorf("error = %q, a mistyped field is not a wrong top-level shape", msg)
+		}
+		if strings.Contains(msg, "profileOverrideFile") || strings.Contains(msg, "profileSpec") {
+			t.Errorf("error = %q, leaks the internal Go type", msg)
+		}
+	})
+}
+
 func TestLoadProfileOverrides_MissingFile(t *testing.T) {
 	if _, err := loadProfileOverrides(filepath.Join(t.TempDir(), "absent.json")); err == nil {
 		t.Fatal("expected an error for a missing override file")

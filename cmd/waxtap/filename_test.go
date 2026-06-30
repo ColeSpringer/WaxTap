@@ -86,6 +86,42 @@ func TestResolveOutputNameSeparatorInValueStaysOneComponent(t *testing.T) {
 	}
 }
 
+func TestResolveOutputNameSingleDownloadIndexStrip(t *testing.T) {
+	// {index} on a single download must not leave a dangling separator. A playlist
+	// item keeps the zero-padded index.
+	cases := []struct {
+		name, tmpl string
+		index      int
+		want       string
+	}{
+		{"single download strips dash", "track-{index}.{ext}", 0, "track.webm"},
+		{"playlist keeps index", "track-{index}.{ext}", 1, "track-01.webm"},
+		{"lone index falls back to default stem", "{index}", 0, "untitled.webm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveOutputName(tc.tmpl, templateData{Ext: "webm", Index: tc.index})
+			if got != tc.want {
+				t.Errorf("resolveOutputName(%q, index=%d) = %q, want %q", tc.tmpl, tc.index, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExpandTemplateIndexSeparators(t *testing.T) {
+	// Each adjacent separator (but not ".") is stripped along with the empty {index}.
+	for _, tc := range []struct{ tmpl, want string }{
+		{"track-{index}.{ext}", "track.webm"},
+		{"track_{index}.{ext}", "track.webm"},
+		{"track {index}.{ext}", "track.webm"},
+		{"{index}-track.{ext}", "track.webm"},
+	} {
+		if got := expandTemplate(tc.tmpl, templateData{Ext: "webm", Index: 0}); got != tc.want {
+			t.Errorf("expandTemplate(%q) = %q, want %q", tc.tmpl, got, tc.want)
+		}
+	}
+}
+
 func TestResolveOutputNameTrailingEmptySegmentKeepsExtension(t *testing.T) {
 	// An empty final component must not receive the extension or leave a directory.
 	long := strings.Repeat("x", 300)

@@ -26,6 +26,9 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 		want argsOutcome
 	}{
 		{"download space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor,intro"}, wantHint},
+		// With the flag and value before the target, the category list lands at
+		// args[0]. The scan must catch it in any positional slot.
+		{"download natural order", newDownloadCmd, []string{"--sponsorblock", "sponsor,intro", "dummyVideo0"}, wantHint},
 		{"download single category space form", newDownloadCmd, []string{"dummyVideo0", "--sponsorblock", "sponsor"}, wantHint},
 		// Non-category surplus args stay with the normal arity error. After parsing,
 		// Cobra cannot tell them apart from stray arguments.
@@ -46,6 +49,10 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 		{"download no flag", newDownloadCmd, []string{"dummyVideo0"}, wantOK},
 		// ExactArgs(1) must still reject a surplus without --sponsorblock.
 		{"download surplus no flag", newDownloadCmd, []string{"dummyVideo0", "extra"}, wantReject},
+		// With -o set, the flag-first form puts the category list in the first
+		// positional slot; it should get the SponsorBlock hint, not a duplicate-output
+		// error.
+		{"cut natural order with -o", newCutCmd, []string{"--sponsorblock", "sponsor,intro", "in.flac", "-o", "out.mp3"}, wantHint},
 		// With -o set, a space-separated value is an impossible surplus.
 		{"cut with -o set", newCutCmd, []string{"in.flac", "--sponsorblock", "sponsor", "-o", "out.webm"}, wantHint},
 		{"cut trailing comma with -o", newCutCmd, []string{"in.flac", "--sponsorblock", "sponsor,", "-o", "out.webm"}, wantHint},
@@ -54,6 +61,11 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 		// A space-separated value plus an output positional exceeds the budget.
 		{"cut comma cats plus output", newCutCmd, []string{"in.flac", "--sponsorblock", "sponsor,intro", "out.flac"}, wantHint},
 		{"cut single cat plus output", newCutCmd, []string{"in.flac", "--sponsorblock", "sponsor", "out.flac"}, wantHint},
+		// A category-named input at the first positional must not be treated as the
+		// misplaced value; the surplus is a plain arity error.
+		{"cut category-named input not treated", newCutCmd, []string{"sponsor", "a.flac", "b.flac", "--sponsorblock"}, wantReject},
+		// The real comma-list value is still caught even when the input is category-named.
+		{"cut category-named input with comma value", newCutCmd, []string{"sponsor", "--sponsorblock", "sponsor,intro"}, wantHint},
 		// A lone token in the output slot may be a valid filename.
 		{"cut single token output slot", newCutCmd, []string{"in.flac", "--sponsorblock", "sponsor"}, wantOK},
 		{"cut non-category output", newCutCmd, []string{"in.flac", "--sponsorblock", "myclip.mp3"}, wantOK},

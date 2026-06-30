@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -330,8 +331,8 @@ const (
 	// poTokenHint covers a missing provider, a failed mint, or a token YouTube
 	// rejected. A status-2 cap is classified as ErrIncompleteStream instead.
 	poTokenHint          = "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
-	incompleteStreamHint = "another client may deliver the full stream; for forced WEB audio set --player-context-url or --session-url (both also require --potoken-url)"
-	cipherSolveHint      = "full WEB audio needs an attested identity; set --session-url or --player-context-url (both also require --potoken-url)"
+	incompleteStreamHint = "another client may deliver the full stream (omit --no-fallback); for forced WEB audio supply both --player-context-url and --session-url (both also require --potoken-url), then retry if WEB hit a transient status-2 cap"
+	cipherSolveHint      = "full WEB audio needs an attested identity; supply both --player-context-url and --session-url (both also require --potoken-url)"
 )
 
 // emitWatchPageBreadcrumb notes on stderr that forced WEB metadata was served
@@ -343,6 +344,31 @@ func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
 		env.info("note: WEB metadata via the watch-page fallback (no PO token)\n")
 	}
+}
+
+// noteUseBothWebSources prints one pre-flight note when a stream command is likely
+// to use WEB token extraction without both identity sources. The paired setup lets
+// WEB try player-context and adopted-session paths before a transient status-2 cap
+// becomes user-visible. Keep this on commands that resolve a stream; local
+// processing and SponsorBlock preview should stay quiet.
+func noteUseBothWebSources(env *appEnv) {
+	c := env.cfg
+	// A deliberately forced non-WEB client is not attempting WEB extraction, so a
+	// "use both / set --client web" note would contradict that choice. Only the WEB
+	// client or the default chain reach WEB.
+	if c.client != "" && !strings.EqualFold(c.client, "web") {
+		return
+	}
+	onWebPath := c.potokenURL != "" || c.playerContextURL != "" || c.sessionURL != "" || c.visitorData != ""
+	bothSources := c.playerContextURL != "" && c.sessionURL != ""
+	if !onWebPath || bothSources {
+		return
+	}
+	msg := "note: for WEB extraction, supply both --player-context-url and --session-url (both also require --potoken-url)"
+	if !strings.EqualFold(c.client, "web") {
+		msg += ", and set --client web"
+	}
+	env.info("%s\n", msg)
 }
 
 // noteForcedIOSIncomplete suggests the default client chain after a forced iOS
@@ -587,15 +613,55 @@ func flagOrderHint(err error) string {
 	if !ok {
 		return ""
 	}
-	if tok, ok := unknownCommandToken(ue.msg); ok && looksLikeYouTubeTarget(tok) {
+	tok, isUnknownCmd := unknownCommandToken(ue.msg)
+	if isUnknownCmd && looksLikeYouTubeTarget(tok) {
 		return fmt.Sprintf("did you mean `waxtap download %s`? global flags go before the subcommand, command flags after it", tok)
 	}
 	// A video ID that starts with "-" reaches pflag as shorthand flags. The
 	// original token still has the dash, so looksLikeYouTubeTarget can match it.
-	if tok, ok := dashFlagToken(ue.msg); ok && looksLikeYouTubeTarget(tok) {
-		return fmt.Sprintf("a leading-dash video ID is parsed as flags; pass it after -- (e.g. `-- %s`) or use the full https://youtu.be/%s URL", tok, tok)
+	if dtok, ok := dashFlagToken(ue.msg); ok && looksLikeYouTubeTarget(dtok) {
+		return fmt.Sprintf("a leading-dash video ID is parsed as flags; pass it after -- (e.g. `-- %s`) or use the full https://youtu.be/%s URL", dtok, dtok)
+	}
+	// A non-target token can be reported as the command, for example
+	// `--no-cache --cache-dir /p info <id>` as `unknown command "/p"`. cobra can
+	// consume a later subcommand while traversing flags, so when a flag precedes a
+	// real subcommand, explain the ordering. Keep the hint generic: a flag value can
+	// coincidentally equal a subcommand name.
+	if isUnknownCmd && flagBeforeSubcommand(os.Args[1:], rootSubcommandNames) {
+		return "a flag before the subcommand can be parsed as part of command lookup; put global flags (--json/--quiet/--verbose) before the subcommand and any command flags after it"
 	}
 	return ""
+}
+
+// rootSubcommandNames is the set of subcommand names and aliases (including
+// cobra's built-in help and completion) used to detect a flag placed before the
+// subcommand. TestRootSubcommandNamesMatchTree keeps it aligned with the live
+// command tree.
+var rootSubcommandNames = map[string]bool{
+	"info": true, "formats": true, "download": true, "cut": true,
+	"transcode": true, "normalize": true, "sponsorblock": true, "sb": true,
+	"cache": true, "doctor": true, "version": true, "exit-codes": true,
+	"help": true, "completion": true,
+}
+
+// flagBeforeSubcommand reports whether a flag token precedes the first recognized
+// subcommand in args. cobra traversal can consume a later subcommand after an
+// unknown bare boolean flag, turning `waxtap --no-cache info <id>` into
+// `unknown command "<id>"`; this detects that shape. A bare "-" (stdin) and "--"
+// (terminator) are not flags. A subcommand with no preceding flag yields false so a
+// genuine command typo is not given an ordering hint. A flag value can coincide with
+// a subcommand name, so callers should use only generic guidance.
+func flagBeforeSubcommand(args []string, names map[string]bool) bool {
+	firstFlag := -1
+	for i, a := range args {
+		if firstFlag < 0 && len(a) > 1 && a[0] == '-' && a != "--" {
+			firstFlag = i
+		}
+		if names[a] {
+			return firstFlag >= 0 && firstFlag < i
+		}
+	}
+	return false
 }
 
 // unknownCommandToken extracts the quoted token from a cobra "unknown command"

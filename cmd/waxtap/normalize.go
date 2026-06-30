@@ -133,6 +133,7 @@ func newNormalizeCmd() *cobra.Command {
 				env.info("skipped (exists): %s\n", outPath)
 				return nil
 			}
+			warnBitrateIgnoredIfLossless(env, tf, bitrate)
 			spec.Output = waxtap.ToFile(outPath)
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {

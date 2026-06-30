@@ -115,6 +115,7 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	if err != nil {
 		return err
 	}
+	noteUseBothWebSources(env)
 	if err := df.resolve(cmd, env); err != nil {
 		return err
 	}
@@ -199,6 +200,10 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	}
 	if cmd.Flags().Changed("bitrate") && df.format == "" {
 		return usagef("--bitrate requires --format")
+	}
+	// Report this once per run, not once per playlist item.
+	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
+		warnBitrateIgnoredIfLossless(env, tf, df.bitrate)
 	}
 	if cmd.Flags().Changed("loudness-target") && !df.normalize {
 		return usagef("--loudness-target requires --normalize")

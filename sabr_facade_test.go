@@ -827,6 +827,162 @@ func TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain(t *testing.T
 	}
 }
 
+// TestFacade_WebContextCapRetriesOnceThenSucceeds covers a capped WEB_CONTEXT
+// stream that succeeds after one fresh /player-context. The retry should commit
+// the complete delivery, call the provider exactly twice, and emit one
+// WarnWebContextRetry.
+func TestFacade_WebContextCapRetriesOnceThenSucceeds(t *testing.T) {
+	init, media := []byte("INIT"), []byte("MEDIA")
+	capped := fSabrBody(init, media, 2)  // declares 2 segs, sends 1, then caps
+	happy := fSabrHappyBody(init, media) // 1 of 1, complete
+
+	var mu sync.Mutex
+	gen, vpInGen, providerCalls := 0, 0, 0
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		mu.Lock()
+		gen++
+		vpInGen = 0
+		providerCalls++
+		mu.Unlock()
+		return iosPlayerContext(), nil
+	})
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if !strings.Contains(r.URL.Path, "/videoplayback") {
+			return resp(http.StatusNotFound, nil), nil // web-context delivers without /player
+		}
+		mu.Lock()
+		g, round := gen, vpInGen+1
+		vpInGen = round
+		mu.Unlock()
+		switch {
+		case g >= 2:
+			return resp(http.StatusOK, happy), nil // the fresh retry delivers fully
+		case round == 1:
+			return resp(http.StatusOK, capped), nil // first attempt sends 1 of 2
+		default:
+			return resp(http.StatusOK, nil), nil // later rounds deliver nothing, then cap
+		}
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var retries atomic.Int32
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, derr := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextRetry {
+					retries.Add(1)
+				}
+			},
+		},
+	})
+	if derr != nil {
+		t.Fatalf("a one-shot retry should deliver the full stream: %v", derr)
+	}
+	if res.Client != "WEB_CONTEXT" {
+		t.Errorf("Result.Client = %q, want WEB_CONTEXT", res.Client)
+	}
+	if got := retries.Load(); got != 1 {
+		t.Errorf("WarnWebContextRetry events = %d, want exactly 1", got)
+	}
+	inResult := 0
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnWebContextRetry {
+			inResult++
+		}
+	}
+	if inResult != 1 {
+		t.Errorf("Result.Warnings web-context-retry = %d, want exactly 1 (visible in --json)", inResult)
+	}
+	mu.Lock()
+	calls := providerCalls
+	mu.Unlock()
+	if calls != 2 {
+		t.Errorf("player-context fetches = %d, want exactly 2 (initial + one retry)", calls)
+	}
+	want := append(append([]byte{}, init...), media...)
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// TestFacade_WebContextCapRetryHonoredUnderNoFallback verifies the retry fires even
+// under --no-fallback (it re-runs the same WEB attempt, not a client switch) and is
+// bounded to one retry before the cap is reported as ErrIncompleteStream.
+func TestFacade_WebContextCapRetryHonoredUnderNoFallback(t *testing.T) {
+	init, media := []byte("INIT"), []byte("MEDIA")
+	capped := fSabrBody(init, media, 2)
+
+	var mu sync.Mutex
+	vpInGen, providerCalls := 0, 0
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		mu.Lock()
+		vpInGen = 0
+		providerCalls++
+		mu.Unlock()
+		return iosPlayerContext(), nil
+	})
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if !strings.Contains(r.URL.Path, "/videoplayback") {
+			return resp(http.StatusNotFound, nil), nil
+		}
+		mu.Lock()
+		round := vpInGen + 1
+		vpInGen = round
+		mu.Unlock()
+		if round == 1 {
+			return resp(http.StatusOK, capped), nil
+		}
+		return resp(http.StatusOK, nil), nil // every attempt caps
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var retries atomic.Int32
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:        "dummyVideo0",
+		NoFallback: true,
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextRetry {
+					retries.Add(1)
+				}
+			},
+		},
+	})
+	if !errors.Is(derr, waxtap.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream after the bounded retry", derr)
+	}
+	if got := retries.Load(); got != 1 {
+		t.Errorf("WarnWebContextRetry events = %d, want exactly 1 (bounded)", got)
+	}
+	mu.Lock()
+	calls := providerCalls
+	mu.Unlock()
+	if calls != 2 {
+		t.Errorf("player-context fetches = %d, want exactly 2 (initial + one retry, no client switch)", calls)
+	}
+}
+
 func TestFacade_CreatesMissingOutputDir(t *testing.T) {
 	happy := fSabrHappyBody([]byte("INIT"), []byte("MEDIA"))
 	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
@@ -856,6 +1012,120 @@ func TestFacade_CreatesMissingOutputDir(t *testing.T) {
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Errorf("output file not written to the created dir: %v", err)
+	}
+}
+
+// TestFacade_WebContextCapRetryFailurePreservesIncomplete covers a first
+// WEB_CONTEXT attempt that caps before the retry can establish a fresh context.
+// The original cap should remain the reported cause instead of being replaced by
+// the retry's lower-rank setup error.
+func TestFacade_WebContextCapRetryFailurePreservesIncomplete(t *testing.T) {
+	init, media := []byte("INIT"), []byte("MEDIA")
+	capped := fSabrBody(init, media, 2)
+
+	var mu sync.Mutex
+	vpInGen, providerCalls := 0, 0
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		mu.Lock()
+		providerCalls++
+		n := providerCalls
+		vpInGen = 0
+		mu.Unlock()
+		if n >= 2 {
+			return potoken.PlayerContext{}, errors.New("fresh context fetch failed") // retry can't re-establish
+		}
+		return iosPlayerContext(), nil
+	})
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if !strings.Contains(r.URL.Path, "/videoplayback") {
+			return resp(http.StatusNotFound, nil), nil
+		}
+		mu.Lock()
+		round := vpInGen + 1
+		vpInGen = round
+		mu.Unlock()
+		if round == 1 {
+			return resp(http.StatusOK, capped), nil
+		}
+		return resp(http.StatusOK, nil), nil
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		NoFallback:  true,
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if !errors.Is(derr, waxtap.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream preserved from the first cap", derr)
+	}
+	mu.Lock()
+	calls := providerCalls
+	mu.Unlock()
+	if calls != 2 {
+		t.Errorf("player-context fetches = %d, want exactly 2 (initial + one retry)", calls)
+	}
+}
+
+// TestFacade_SponsorBlockFailFastBeforeDownload verifies that the fail policy
+// checks SponsorBlock before downloading media. An outage should stop the request
+// before any /videoplayback request or staged output.
+func TestFacade_SponsorBlockFailFastBeforeDownload(t *testing.T) {
+	happy := fSabrHappyBody([]byte("INIT"), []byte("MEDIA"))
+	var videoplaybacks atomic.Int32
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(r.URL.Path, "skipSegments"):
+			return resp(http.StatusInternalServerError, []byte("boom")), nil // SponsorBlock is down
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			videoplaybacks.Add(1)
+			return resp(http.StatusOK, happy), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:   &http.Client{Transport: rt},
+		SponsorBlock: waxtap.SponsorBlockOptions{BaseURL: "http://sb.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Cut: &waxtap.CutSpec{
+				SponsorBlock: []waxtap.Category{waxtap.CategoryMusicOffTopic},
+				OnError:      waxtap.FailDownload,
+			},
+			Output: waxtap.ToFile(out),
+		},
+	})
+	if derr == nil {
+		t.Fatal("a SponsorBlock outage under the fail policy must fail the request")
+	}
+	if !strings.Contains(derr.Error(), "SponsorBlock") {
+		t.Errorf("err = %v, want it to name the SponsorBlock fetch failure", derr)
+	}
+	if n := videoplaybacks.Load(); n != 0 {
+		t.Errorf("/videoplayback requests = %d, want 0 (fail before the download stage)", n)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("output exists (stat err = %v), want nothing staged after a fail-fast", err)
 	}
 }
 

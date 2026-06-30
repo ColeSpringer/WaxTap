@@ -109,6 +109,53 @@ func TestReadConfigFileRejectsUnknownKey(t *testing.T) {
 	}
 }
 
+// TestReadConfigFileTypeMismatchMessage checks that top-level shape errors and
+// field type errors are reported in config-file terms, not Go struct terms.
+func TestReadConfigFileTypeMismatchMessage(t *testing.T) {
+	readWithConfig := func(t *testing.T, body string) error {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := newConfigTestCmd()
+		if err := cmd.Flags().Set("config", path); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readConfigFile(cmd)
+		return err
+	}
+	t.Run("top-level array", func(t *testing.T) {
+		err := readWithConfig(t, `[]`)
+		if err == nil || !isUsageError(err) {
+			t.Fatalf("err = %v, want a usage error for the wrong-shape config", err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "expected a JSON object, got array") {
+			t.Errorf("err = %q, want the clean type-mismatch message", msg)
+		}
+		if strings.Contains(msg, "fileConfig") || strings.Contains(msg, "Go value") {
+			t.Errorf("err = %q, leaks the internal Go type", msg)
+		}
+	})
+	t.Run("mistyped field is not reported as a wrong top-level shape", func(t *testing.T) {
+		err := readWithConfig(t, `{"hl":123}`)
+		if err == nil || !isUsageError(err) {
+			t.Fatalf("err = %v, want a usage error for the mistyped field", err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, `field "hl" has the wrong type`) {
+			t.Errorf("err = %q, want a field-level type message", msg)
+		}
+		if strings.Contains(msg, "expected a JSON object") {
+			t.Errorf("err = %q, a mistyped field is not a wrong top-level shape", msg)
+		}
+		if strings.Contains(msg, "fileConfig") || strings.Contains(msg, "Go struct field") {
+			t.Errorf("err = %q, leaks the internal Go type", msg)
+		}
+	})
+}
+
 func TestReadConfigFileRejectsTrailingData(t *testing.T) {
 	for _, tc := range []struct {
 		name string

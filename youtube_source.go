@@ -401,6 +401,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	pinnedItag := 0
 	firstClient := ""
 	firstFromWebContext := false
+	webContextRetried := false
 	webCtxReason := c.initialWebContextReason()
 	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
 
@@ -470,9 +471,24 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			}
 			return nil, download.Result{}, "", derr
 		}
-		causes.add(a.attempt, derr)
-		if a.attempt == youtube.AttemptWebContext {
+		// Record the cap (a non-retrying first/only cap, or any non-web-context cap)
+		// so a later retry that fails to re-extract still surfaces ErrIncompleteStream
+		// in the aggregate. The retry's own second cap re-enters here with
+		// webContextRetried set and is skipped to avoid a duplicate "tried" entry.
+		if a.attempt != youtube.AttemptWebContext || !webContextRetried {
+			causes.add(a.attempt, derr)
+		}
+		// Retry the same web-context attempt once with a fresh context before falling
+		// back. ExtractWebContext re-fetches /player-context each call, so re-entering
+		// acquireWebContext (no skip set) yields a new, likely status-1 context. Confirm
+		// it is still selectable because a concurrent sibling may have armed the
+		// cooldown. This is the same attempt, not a client switch, so it is allowed
+		// under --no-fallback.
+		if a.attempt == youtube.AttemptWebContext && !webContextRetried && !c.webContextCoolingDown() {
+			webContextRetried = true
 			webCtxReason = "stream capped before completion"
+			em.warn(WarnWebContextRetry, "attested WEB context was capped (attestation status 2, usually transient); retrying once with a fresh context")
+			continue
 		}
 		if req.NoFallback {
 			break // do not switch clients after an incomplete delivery
@@ -790,6 +806,20 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 // returns the deliverable file path and a Result with metadata and flags filled,
 // leaving sink-specific fields to the caller.
 func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut string, em *emitter) (string, *Result, error) {
+	// Under the fail policy, probe SponsorBlock before the download so an outage
+	// stops the request before media transfer starts. This only inspects the error
+	// and discards the segments; collectRanges below remains the single emitter of
+	// empty/proceed-uncut warnings. The same id keys the cache, so the later fetch
+	// is a hit unless the cache is disabled.
+	if cs := req.Cut; cs != nil && cs.SponsorBlock != nil && cs.OnError == FailDownload {
+		sbCtx, cancel := withTimeout(ctx, c.sponsorBlockTimeout(cs))
+		_, ferr := c.sb.FetchSegments(sbCtx, id, cs.SponsorBlock)
+		cancel()
+		if ferr != nil {
+			return "", nil, fmt.Errorf("waxtap: SponsorBlock fetch failed: %w", ferr)
+		}
+	}
+
 	// The selected format determines the staged source filename.
 	dest := func(a *acquired) string { return filepath.Join(jobDir, "source"+sourceExt(a.fmtSel)) }
 	a, dlRes, srcPath, err := c.acquireAndDownload(ctx, req, id, em, dest)

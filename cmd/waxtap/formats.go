@@ -19,6 +19,7 @@ func newFormatsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noteUseBothWebSources(env)
 			var ropts []waxtap.ReadOption
 			if noFallback {
 				ropts = append(ropts, waxtap.WithNoFallback())

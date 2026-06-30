@@ -36,6 +36,16 @@ func expandTemplate(tmpl string, d templateData) string {
 	index := ""
 	if d.Index > 0 {
 		index = fmt.Sprintf("%02d", d.Index)
+	} else {
+		// {index} is empty for a single download. Remove one adjacent filename
+		// separator so `track-{index}.{ext}` becomes `track.webm`, not
+		// `track-.webm`. Do not remove "."; it is the extension separator in
+		// `{index}.{ext}`.
+		for _, sep := range []string{"-", "_", " "} {
+			tmpl = strings.ReplaceAll(tmpl, sep+"{index}", "")
+			tmpl = strings.ReplaceAll(tmpl, "{index}"+sep, "")
+		}
+		tmpl = strings.ReplaceAll(tmpl, "{index}", "")
 	}
 	return strings.NewReplacer(
 		"{title}", d.Title,

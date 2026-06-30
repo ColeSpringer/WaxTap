@@ -123,6 +123,24 @@ func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 	}
 }
 
+// isLosslessFormat reports whether a transcode preset ignores --bitrate. The CLI
+// keeps this small mirror because the TranscodeFormat-to-codec mapping is
+// unexported. FormatCopy is a remux, not an encoder, but it ignores --bitrate the
+// same way.
+func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
+	return tf == waxtap.FormatCopy || tf == waxtap.FormatFLAC ||
+		tf == waxtap.FormatALAC || tf == waxtap.FormatWAV
+}
+
+// warnBitrateIgnoredIfLossless notes that --bitrate has no effect on a lossless or
+// copy target, so a user who set it deliberately gets a signal instead of silence.
+// Call it once per invocation with the parsed format, not per batch item.
+func warnBitrateIgnoredIfLossless(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
+	if bitrate > 0 && isLosslessFormat(tf) {
+		env.info("note: --bitrate is ignored for lossless and copy targets\n")
+	}
+}
+
 func newCutCmd() *cobra.Command {
 	var (
 		out          string
@@ -231,6 +249,7 @@ func newCutCmd() *cobra.Command {
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
+			warnBitrateIgnoredIfLossless(env, tf, bitrate)
 			spec.Output = waxtap.ToFile(outPath)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
@@ -348,6 +367,7 @@ func newTranscodeCmd() *cobra.Command {
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
+			warnBitrateIgnoredIfLossless(env, tf, bitrate)
 			spec.Output = waxtap.ToFile(outPath)
 
 			// If a local file already uses the requested codec and no other transform

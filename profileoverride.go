@@ -62,6 +62,14 @@ func loadProfileOverrides(path string) ([]youtube.ClientProfile, error) {
 	dec.DisallowUnknownFields()
 	var f profileOverrideFile
 	if err := dec.Decode(&f); err != nil {
+		// json.UnmarshalTypeError exposes the JSON value kind. Use that instead of
+		// the default message, which includes internal Go type names.
+		if uterr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+			if uterr.Field == "" {
+				return nil, fmt.Errorf("parse profile override %s: expected a JSON object, got %s", path, uterr.Value)
+			}
+			return nil, fmt.Errorf("parse profile override %s: field %q has the wrong type (got %s)", path, uterr.Field, uterr.Value)
+		}
 		return nil, fmt.Errorf("parse profile override %s: %w", path, err)
 	}
 	// json.Decoder stops after the first value. Check for EOF so a second object

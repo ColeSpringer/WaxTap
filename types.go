@@ -174,11 +174,12 @@ type ProcessSpec struct {
 	Cut       *CutSpec       // nil = no cut
 	Loudness  *LoudnessSpec  // nil = no loudness work
 
-	// Channels is the output layout used by Downmix. LayoutAny, the zero value,
-	// disables downmixing, so a surround source is delivered with all its channels;
-	// the CLI instead defaults to --channels stereo. For YouTube requests, set the
-	// same preference on Audio with WithChannels to favor a native track before
-	// processing.
+	// Channels is the Downmix target layout. When Downmix is set it must be
+	// LayoutMono or LayoutStereo; pairing Downmix with LayoutAny is a hard error.
+	// LayoutAny, the zero value, means no downmix target, so Downmix must be false
+	// and a surround source is delivered with all its channels (the CLI instead
+	// defaults to --channels stereo). For YouTube requests, set the same preference
+	// on Audio with WithChannels to favor a native track before processing.
 	Channels ChannelLayout
 	// Downmix reduces a source with more channels to Channels after probing. It
 	// never adds channels and does nothing when the source already fits the
@@ -549,6 +550,7 @@ const (
 	WarnThrottled                              // a limiter/cooldown is active
 	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
 	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
+	WarnWebContextRetry                        // WEB player-context was capped (status 2); retried once with a fresh context
 )
 
 func (w WarningCode) String() string {
@@ -573,6 +575,8 @@ func (w WarningCode) String() string {
 		return "web-context-fallback"
 	case WarnIncompleteFallback:
 		return "incomplete-fallback"
+	case WarnWebContextRetry:
+		return "web-context-retry"
 	default:
 		return "unknown"
 	}

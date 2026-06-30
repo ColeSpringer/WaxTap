@@ -508,6 +508,82 @@ func TestFlagOrderHint(t *testing.T) {
 	})
 }
 
+func TestFlagBeforeSubcommand(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"flag before subcommand", []string{"--no-cache", "--cache-dir", "/p", "info", "id"}, true},
+		{"single flag before subcommand", []string{"--no-cache", "info", "id"}, true},
+		{"subcommand first", []string{"info", "--no-cache", "id"}, false},
+		{"no subcommand", []string{"--json", "boguscmd"}, false},
+		{"bare dash is not a flag", []string{"-", "info"}, false},
+		{"terminator is not a flag", []string{"--", "info"}, false},
+		{"alias recognized", []string{"--no-cache", "sb", "id"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := flagBeforeSubcommand(tc.args, rootSubcommandNames); got != tc.want {
+				t.Errorf("flagBeforeSubcommand(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFlagOrderHint_GenericOrder(t *testing.T) {
+	saved := os.Args
+	defer func() { os.Args = saved }()
+
+	// A flag before the subcommand can make cobra report the next token as an
+	// unknown command. The hint explains ordering even when the token is not
+	// target-shaped, and it does not name a specific subcommand.
+	os.Args = []string{"waxtap", "--no-cache", "--cache-dir", "/p", "info", "dQw4w9WgXcQ"}
+	got := flagOrderHint(&usageError{msg: `unknown command "/p" for "waxtap"`})
+	if !strings.Contains(got, "before the subcommand") || !strings.Contains(got, "after it") {
+		t.Errorf("flagOrderHint = %q, want the generic flag-ordering guidance", got)
+	}
+
+	// A flag value that coincides with a subcommand name must not be reported as the
+	// swallowed subcommand; the generic hint avoids naming it.
+	os.Args = []string{"waxtap", "--cache-dir", "version", "abc123"}
+	got = flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`})
+	if strings.Contains(got, "version") {
+		t.Errorf("flagOrderHint = %q, must not name a flag value as the subcommand", got)
+	}
+
+	// A genuine subcommand typo (no preceding flag) gets no generic hint.
+	os.Args = []string{"waxtap", "boguscmd"}
+	if got := flagOrderHint(&usageError{msg: `unknown command "boguscmd" for "waxtap"`}); got != "" {
+		t.Errorf("flagOrderHint = %q, want no hint for a bare subcommand typo", got)
+	}
+}
+
+// TestRootSubcommandNamesMatchTree keeps the static order-hint set aligned with
+// the live command tree.
+func TestRootSubcommandNamesMatchTree(t *testing.T) {
+	root := newRootCmd()
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
+	want := map[string]bool{}
+	for _, c := range root.Commands() {
+		want[c.Name()] = true
+		for _, a := range c.Aliases {
+			want[a] = true
+		}
+	}
+	for name := range want {
+		if !rootSubcommandNames[name] {
+			t.Errorf("command %q is in the tree but missing from rootSubcommandNames", name)
+		}
+	}
+	for name := range rootSubcommandNames {
+		if !want[name] {
+			t.Errorf("rootSubcommandNames has %q, which is not a command name or alias in the tree", name)
+		}
+	}
+}
+
 func TestErrorCode(t *testing.T) {
 	if got := errorCode(waxtap.ErrFFmpegNotFound); got != "ffmpeg-not-found" {
 		t.Errorf("errorCode(ffmpeg) = %q", got)

@@ -81,45 +81,35 @@ func sponsorblockArgs(base cobra.PositionalArgs, hasOutputPositional bool) cobra
 	}
 }
 
-// sponsorblockMisparse finds a positional argument that was probably intended as
-// the --sponsorblock value.
+// sponsorblockMisparse finds a positional argument that likely belongs to
+// --sponsorblock. The flag accepts an optional value, so
+// `--sponsorblock <cats> <url>` parses as a bare flag plus positionals. A
+// comma-separated category list is treated as the missing value in any slot. A
+// single category word is only reported when it is surplus and not in the
+// target/input slot, because names like "sponsor" can also be real files.
 func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional bool) (string, bool) {
-	if !hasOutputPositional {
-		// Download and preview accept one positional argument. With no surplus
-		// positional, there is no misplaced value to report.
-		if len(args) < 2 {
-			return "", false
-		}
-		// Treat a surplus positional as a missing --sponsorblock value only when it is
-		// a valid category list. Other surplus args stay with Cobra's arity error,
-		// since a bare flag and --sponsorblock=<default> look the same after parsing.
-		for _, a := range args[1:] {
-			if isCategoryList(a) {
-				return a, true
-			}
-		}
-		return "", false
+	// Budget is the number of legitimate positionals: one target, plus an optional
+	// output slot for cut unless --out supplies it.
+	budget := 1
+	if hasOutputPositional && !cmd.Flags().Changed("out") {
+		budget = 2
 	}
-
-	// Cut accepts an optional output positional unless --out is set.
-	budget := 2
-	if cmd.Flags().Changed("out") {
-		budget = 1
-	}
-	// A category list beyond the positional budget can only be a misplaced flag
-	// value.
-	if len(args) > budget {
-		for _, a := range args[1:] {
-			if isCategoryList(a) {
-				return a, true
-			}
+	surplus := len(args) > budget
+	for i, a := range args {
+		if !isCategoryList(a) {
+			continue
 		}
-		return "", false
-	}
-	// Treat a comma-separated category list in the output slot as a misplaced
-	// value. A single category could be a legitimate output filename.
-	if len(args) == 2 && strings.Contains(args[1], ",") && isCategoryList(args[1]) {
-		return args[1], true
+		switch {
+		case surplus && (strings.Contains(a, ",") || i > 0):
+			// Beyond the budget: a comma list, or a category word past the first
+			// positional, is a misplaced value. A lone category word at args[0] may be
+			// a category-named target/input, so leave it for arity.
+			return a, true
+		case !surplus && strings.Contains(a, ","):
+			// In-budget comma lists get the same treatment; it is more helpful to
+			// explain the flag form than to accept `sponsor,intro` as an output name.
+			return a, true
+		}
 	}
 	return "", false
 }

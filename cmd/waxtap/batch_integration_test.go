@@ -106,7 +106,7 @@ func TestBatchNormalizeMeasureIntegration(t *testing.T) {
 	}
 	got := buf.String()
 	// The loudness table header and both files should appear, with no output files.
-	for _, want := range []string{"LUFS", "a.flac", "b.wav", "2 processed"} {
+	for _, want := range []string{"LUFS", "a.flac", "b.wav", "2 files: 2 measured"} {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Errorf("measure output missing %q:\n%s", want, got)
 		}

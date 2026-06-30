@@ -235,6 +235,14 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&fc); err != nil {
+		// json.UnmarshalTypeError exposes the JSON value kind. Use that instead of
+		// the default message, which includes internal Go type names.
+		if uterr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+			if uterr.Field == "" {
+				return fc, usagef("parse config %s: expected a JSON object, got %s", path, uterr.Value)
+			}
+			return fc, usagef("parse config %s: field %q has the wrong type (got %s)", path, uterr.Field, uterr.Value)
+		}
 		return fc, usagef("parse config %s: %v", path, err)
 	}
 	// Reject content after the first JSON object. Trailing whitespace is allowed.
