@@ -6,9 +6,75 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxtap"
 )
+
+// TestInfoChaptersDetail verifies info --full's chapters are detailed in the
+// human list and the JSON chapters array, with an open-ended last chapter that
+// omits its end.
+func TestInfoChaptersDetail(t *testing.T) {
+	noBest := errors.New("no best audio")
+	withChapters := &waxtap.InfoResult{
+		Video: &waxtap.Video{
+			ID: "dummyVideo0", Title: "T", Author: "A",
+			Chapters: []waxtap.Chapter{
+				{Title: "Intro", Start: 0, End: 30 * time.Second},
+				{Title: "Outro", Start: 90 * time.Second}, // open-ended (End == 0)
+			},
+		},
+		Client: "ANDROID_VR",
+	}
+
+	t.Run("human list", func(t *testing.T) {
+		var out bytes.Buffer
+		renderInfoHuman(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, withChapters, 0, noBest, nil, false)
+		got := out.String()
+		if !strings.Contains(got, "Chapters:  2") {
+			t.Errorf("want the chapter count, got:\n%s", got)
+		}
+		if !strings.Contains(got, "0:00-0:30  Intro") {
+			t.Errorf("want the ranged Intro line, got:\n%s", got)
+		}
+		// The open-ended last chapter shows only its start.
+		if !strings.Contains(got, "1:30  Outro") || strings.Contains(got, "1:30-") {
+			t.Errorf("want an open-ended Outro line (start only), got:\n%s", got)
+		}
+	})
+
+	t.Run("json array", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, withChapters, 0, noBest, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := out.String()
+		if !strings.Contains(got, `"chapterCount": 2`) {
+			t.Errorf("want chapterCount, got:\n%s", got)
+		}
+		if !strings.Contains(got, `"title": "Intro"`) || !strings.Contains(got, `"endSeconds": 30`) {
+			t.Errorf("want the Intro chapter with endSeconds, got:\n%s", got)
+		}
+		if !strings.Contains(got, `"title": "Outro"`) {
+			t.Errorf("want the Outro chapter, got:\n%s", got)
+		}
+		// Only Intro carries an end; the open-ended Outro omits endSeconds.
+		if n := strings.Count(got, "endSeconds"); n != 1 {
+			t.Errorf("endSeconds count = %d, want 1 (open-ended chapter omits it):\n%s", n, got)
+		}
+	})
+
+	t.Run("absent when no chapters", func(t *testing.T) {
+		plain := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "ANDROID_VR"}
+		var out bytes.Buffer
+		if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, plain, 0, noBest, nil); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), `"chapters"`) {
+			t.Errorf("JSON should omit the chapters array when empty, got:\n%s", out.String())
+		}
+	})
+}
 
 // TestInfoSubstitutionBreadcrumb verifies that a forced-client fallback to WEB
 // is shown in human and JSON output.

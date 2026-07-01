@@ -1,0 +1,7 @@
+{
+  "playabilityStatus": {
+    "status": "CONTENT_CHECK_REQUIRED",
+    "reason": "The following content may contain content that is inappropriate for some users"
+  },
+  "videoDetails": { "videoId": "testVideo01" }
+}

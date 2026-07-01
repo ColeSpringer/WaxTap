@@ -114,10 +114,10 @@ func (l playlistVideoList) legacyToken() string {
 // list (only on initial pages), or a "no videos" notice.
 type playlistItem struct {
 	PlaylistVideoRenderer *struct {
-		VideoID       string   `json:"videoId"`
-		Title         textRuns `json:"title"`
-		ShortByline   textRuns `json:"shortBylineText"`
-		LengthSeconds string   `json:"lengthSeconds"`
+		VideoID       string     `json:"videoId"`
+		Title         textRuns   `json:"title"`
+		ShortByline   bylineText `json:"shortBylineText"`
+		LengthSeconds string     `json:"lengthSeconds"`
 	} `json:"playlistVideoRenderer"`
 	LockupViewModel           *lockupViewModel    `json:"lockupViewModel"`
 	ContinuationItemRenderer  *continuationMarker `json:"continuationItemRenderer"`
@@ -188,21 +188,36 @@ func (e continuationEndpoint) token() string {
 	return ""
 }
 
+// itemVideoID returns the entry's video ID for Skip/Stop predicates, without a
+// full toEntry parse. It is empty for continuation markers and non-video shapes,
+// so a playlist or mix lockup's non-video contentId never reaches the video-keyed
+// predicates. It shares lockupViewModel.videoID with toEntry so the two cannot
+// diverge.
+func (it playlistItem) itemVideoID() string {
+	if r := it.PlaylistVideoRenderer; r != nil {
+		return r.VideoID
+	}
+	if l := it.LockupViewModel; l != nil {
+		return l.videoID()
+	}
+	return ""
+}
+
 func (it playlistItem) toEntry(index int) (PlaylistEntry, error) {
 	if r := it.PlaylistVideoRenderer; r != nil && r.VideoID != "" {
 		return PlaylistEntry{
-			VideoID:  r.VideoID,
-			Title:    r.Title.String(),
-			Author:   r.ShortByline.String(),
-			Duration: time.Duration(atoi(r.LengthSeconds)) * time.Second,
-			Index:    index,
+			VideoID:   r.VideoID,
+			Title:     r.Title.String(),
+			Author:    r.ShortByline.String(),
+			ChannelID: r.ShortByline.channelID(),
+			Duration:  time.Duration(atoi(r.LengthSeconds)) * time.Second,
+			Index:     index,
 		}, nil
 	}
 	if l := it.LockupViewModel; l != nil && l.ContentID != "" {
 		// Only video lockups become entries: playlist, mix, and podcast lockups
-		// share this view model and their contentId is not a video ID. An absent
-		// contentType is accepted so older pages keep parsing.
-		if l.ContentType != "" && l.ContentType != "LOCKUP_CONTENT_TYPE_VIDEO" {
+		// share this view model and their contentId is not a video ID.
+		if !l.isVideo() {
 			return PlaylistEntry{}, fmt.Errorf("playlist item %d (lockup %s) is %s, not a video", index, l.ContentID, l.ContentType)
 		}
 		title := l.Metadata.LockupMetadataViewModel.Title.Content
@@ -271,6 +286,20 @@ type thumbnailBadge struct {
 	} `json:"thumbnailBadgeViewModel"`
 }
 
+// isVideo reports whether the lockup is a video, not a playlist/mix/podcast that
+// shares this view model. An absent contentType is accepted so older pages parse.
+func (l *lockupViewModel) isVideo() bool {
+	return l.ContentType == "" || l.ContentType == "LOCKUP_CONTENT_TYPE_VIDEO"
+}
+
+// videoID returns the lockup's video ID, or "" when it is not a video lockup.
+func (l *lockupViewModel) videoID() string {
+	if l.isVideo() {
+		return l.ContentID
+	}
+	return ""
+}
+
 // author returns the first metadata-row text, which for playlist videos is the
 // channel name. Best-effort: an absent row yields "".
 func (l *lockupViewModel) author() string {
@@ -326,6 +355,45 @@ type textRuns struct {
 	Runs       []struct {
 		Text string `json:"text"`
 	} `json:"runs"`
+}
+
+// bylineText is a channel byline: a text node whose runs also carry the channel's
+// browse navigation, so the uploader's UC channel ID can be read at enumerate
+// time without a per-video Enrich.
+type bylineText struct {
+	SimpleText string `json:"simpleText"`
+	Runs       []struct {
+		Text               string `json:"text"`
+		NavigationEndpoint struct {
+			BrowseEndpoint struct {
+				BrowseID string `json:"browseId"`
+			} `json:"browseEndpoint"`
+		} `json:"navigationEndpoint"`
+	} `json:"runs"`
+}
+
+func (b bylineText) String() string {
+	if b.SimpleText != "" {
+		return b.SimpleText
+	}
+	var s strings.Builder
+	for _, r := range b.Runs {
+		s.WriteString(r.Text)
+	}
+	return s.String()
+}
+
+// channelID returns the first run's browse target that is a channel ID. A byline
+// run links to the uploader's channel (a canonical UC browseId); other links (a
+// hashtag, a topic) do not, so they are ignored. The full isChannelID check keeps
+// a malformed or truncated UC value out of the entry.
+func (b bylineText) channelID() string {
+	for _, r := range b.Runs {
+		if id := r.NavigationEndpoint.BrowseEndpoint.BrowseID; isChannelID(id) {
+			return id
+		}
+	}
+	return ""
 }
 
 func (t textRuns) String() string {

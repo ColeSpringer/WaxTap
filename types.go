@@ -122,6 +122,27 @@ type (
 	Playlist       = youtube.Playlist
 	PlaylistEntry  = youtube.PlaylistEntry
 	ResolvedStream = youtube.ResolvedStream
+	// LiveStatus reports a video's live-broadcast state. On a Video from Info it is
+	// LiveNone or LiveWasLive; live/upcoming videos surface as error sentinels.
+	LiveStatus = youtube.LiveStatus
+	// Availability reports whether a video is publicly listed. It is set only when a
+	// watch-page metadata pass runs (see WithFullMetadata), else AvailabilityUnknown.
+	Availability = youtube.Availability
+)
+
+// LiveStatus values.
+const (
+	LiveNone     = youtube.LiveNone
+	LiveUpcoming = youtube.LiveUpcoming
+	LiveNow      = youtube.LiveNow
+	LiveWasLive  = youtube.LiveWasLive
+)
+
+// Availability values.
+const (
+	AvailabilityUnknown  = youtube.AvailabilityUnknown
+	AvailabilityPublic   = youtube.AvailabilityPublic
+	AvailabilityUnlisted = youtube.AvailabilityUnlisted
 )
 
 // PO-token provider contract (package potoken).
@@ -226,6 +247,15 @@ type Request struct {
 	// still select a working client. Set Options.Client to force a single client.
 	// Read methods use WithNoFallback for the same behavior.
 	NoFallback bool
+
+	// FullMetadata runs a token-free watch-page pass during the download and fills
+	// Result.Metadata with the PublishDate and Chapters that the default /player
+	// client omits, so an ingest that needs them is one call instead of a separate
+	// Info(..., WithFullMetadata()) plus Download. It requires IncludeMetadata and is
+	// a no-op with NoFallback (which forbids the watch page). The extra fetch is
+	// skipped when extraction already scraped the watch page. Enrichment is
+	// best-effort: a failure leaves the base metadata and never fails the download.
+	FullMetadata bool
 
 	ProcessSpec
 }
@@ -455,10 +485,19 @@ type Result struct {
 // on Result.
 type VideoMetadata struct {
 	Author      string        // channel / uploader name
+	ChannelID   string        // YouTube channel ID (canonical UC identity anchor)
 	Duration    time.Duration // video duration, 0 if unknown
 	PublishDate time.Time     // publication date, zero if unknown
 	Description string        // video description
-	Formats     []Format      // full candidate audio (and incidental video) formats
+	// Availability is the listing state. It is Public or Unlisted only when
+	// Request.FullMetadata ran the watch-page pass that determines it; otherwise
+	// AvailabilityUnknown.
+	Availability Availability
+	// Chapters are the video's chapter markers. They are populated only when
+	// Request.FullMetadata ran the watch-page pass (the default /player response
+	// omits them); nil otherwise.
+	Chapters []Chapter
+	Formats  []Format // full candidate audio (and incidental video) formats
 }
 
 // StreamInfo is the initial metadata returned by Client.Stream alongside the
@@ -478,6 +517,20 @@ type EnumerateOptions struct {
 	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
 	// Successful calls update their entries; failures are added to Playlist.Errors.
 	Enrich bool
+
+	// Skip omits entries whose video ID it matches while continuing to page, for an
+	// archive cursor. The consumer owns persistence: pass a predicate that reads
+	// your store. It is safe on any playlist (seen items may be interspersed) and
+	// runs before MaxItems, so the cap counts unseen entries. Skipped entries still
+	// advance PlaylistEntry.Index, which stays the true playlist position.
+	Skip func(id string) bool
+	// Stop halts pagination at the first entry it matches (excluding that entry and
+	// everything after) and leaves Playlist.Continuation empty. It is only correct
+	// on an append-only newest-first feed such as a channel uploads playlist, where
+	// a subscription poll stops at the first already-seen ID instead of paging the
+	// whole feed. On a curated playlist, which can insert entries anywhere, Stop
+	// drops items; use Skip there. Stop is checked before Skip.
+	Stop func(id string) bool
 
 	// OnProgress reports the running entry count after each playlist page. It is
 	// optional and never triggers downloads.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,7 @@ type playerResponse struct {
 			PublishDate          string `json:"publishDate"`
 			UploadDate           string `json:"uploadDate"`
 			OwnerChannelName     string `json:"ownerChannelName"`
+			IsUnlisted           bool   `json:"isUnlisted"`
 			LiveBroadcastDetails struct {
 				IsLiveNow bool `json:"isLiveNow"`
 			} `json:"liveBroadcastDetails"`
@@ -131,6 +133,15 @@ func (pr *playerResponse) isLiveNow() bool {
 	return pr.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
 }
 
+// duration returns the video length, preferring videoDetails over the microformat
+// (the latter is WEB-only). It is zero when neither carries a length.
+func (pr *playerResponse) duration() time.Duration {
+	if d := parseSeconds(pr.VideoDetails.LengthSeconds); d > 0 {
+		return d
+	}
+	return parseSeconds(pr.Microformat.PlayerMicroformatRenderer.LengthSeconds)
+}
+
 // serverAbrURL returns the SABR streaming endpoint, if present.
 func (pr *playerResponse) serverAbrURL() string {
 	return pr.StreamingData.ServerAbrStreamingURL
@@ -154,17 +165,23 @@ func (pr *playerResponse) expiresAt(now time.Time) time.Time {
 
 // playabilityError classifies playabilityStatus into WaxTap's error taxonomy. A
 // nil return means the response is usable by the download pipeline.
+//
+// Reason matching for members-only and geo-blocked videos is best-effort under
+// the default en/US locale; a non-English HL may fall back to ErrVideoUnavailable.
 func (pr *playerResponse) playabilityError() error {
 	status := pr.PlayabilityStatus.Status
 	reason := pr.PlayabilityStatus.Reason
 
 	switch status {
 	case "OK", "":
-		// Live and upcoming streams are not handled by the download pipeline.
-		// Completed livestream VODs report isLiveContent without isLiveNow or
-		// isUpcoming, so they are allowed.
-		if pr.isLiveNow() || pr.VideoDetails.IsUpcoming {
-			return &waxerr.PlayabilityError{Status: status, Reason: "live or upcoming content", Sentinel: waxerr.ErrLiveContent}
+		// Upcoming and currently-live streams are not handled by the download
+		// pipeline. A completed livestream VOD reports isLiveContent without isLiveNow
+		// or isUpcoming, so it is allowed. Upcoming ranks first: a premiere can be both.
+		switch {
+		case pr.VideoDetails.IsUpcoming:
+			return &waxerr.PlayabilityError{Status: status, Reason: "upcoming content", Sentinel: waxerr.ErrLiveNotStarted}
+		case pr.isLiveNow():
+			return &waxerr.PlayabilityError{Status: status, Reason: "live content", Sentinel: waxerr.ErrLiveContent}
 		}
 		return nil
 	case "LOGIN_REQUIRED":
@@ -173,12 +190,32 @@ func (pr *playerResponse) playabilityError() error {
 			return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrVideoRestricted}
 		}
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLoginRequired}
-	case "AGE_CHECK_REQUIRED", "CONTENT_CHECK_REQUIRED":
+	case "AGE_CHECK_REQUIRED", "AGE_VERIFICATION_REQUIRED":
+		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrAgeRestricted}
+	case "CONTENT_CHECK_REQUIRED":
+		// A sensitive/graphic-content confirmation gate, distinct from age: an
+		// interactive confirm the automated client cannot satisfy.
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLoginRequired}
 	case "LIVE_STREAM_OFFLINE":
-		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLiveContent}
+		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLiveNotStarted}
 	default: // UNPLAYABLE, ERROR, and anything unknown
-		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrVideoUnavailable}
+		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: classifyUnplayableReason(reason)}
+	}
+}
+
+// classifyUnplayableReason maps a free-text UNPLAYABLE/ERROR reason to a specific
+// availability sentinel. Matching is best-effort and English-oriented; an
+// unrecognized reason is the generic ErrVideoUnavailable.
+func classifyUnplayableReason(reason string) error {
+	r := strings.ToLower(reason)
+	switch {
+	// "members" (plural, as YouTube phrases it) avoids matching "remember".
+	case strings.Contains(r, "members"):
+		return waxerr.ErrMembersOnly
+	case strings.Contains(r, "country") || strings.Contains(r, "region"):
+		return waxerr.ErrGeoBlocked
+	default:
+		return waxerr.ErrVideoUnavailable
 	}
 }
 
@@ -187,25 +224,24 @@ func (pr *playerResponse) playabilityError() error {
 func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 	v := &Video{
 		ID:          videoID,
+		URL:         "https://www.youtube.com/watch?v=" + videoID,
 		Title:       pr.VideoDetails.Title,
 		Author:      pr.VideoDetails.Author,
 		ChannelID:   pr.VideoDetails.ChannelID,
 		Description: pr.VideoDetails.ShortDescription,
-		IsLive:      pr.isLiveNow(),
-		IsUpcoming:  pr.VideoDetails.IsUpcoming,
+		LiveStatus:  pr.liveStatus(),
 	}
 
-	if d := parseSeconds(pr.VideoDetails.LengthSeconds); d > 0 {
-		v.Duration = d
-	} else if d := parseSeconds(pr.Microformat.PlayerMicroformatRenderer.LengthSeconds); d > 0 {
-		v.Duration = d
-	}
+	v.Duration = pr.duration()
 	// Non-WEB clients omit Microformat, leaving PublishDate at its zero value.
 	v.PublishDate = parseDate(pr.Microformat.PlayerMicroformatRenderer.PublishDate)
 
 	for _, t := range pr.VideoDetails.Thumbnail.Thumbnails {
 		v.Thumbnails = append(v.Thumbnails, Thumbnail{URL: t.URL, Width: t.Width, Height: t.Height})
 	}
+	// YouTube returns thumbnails smallest-first; deliver them largest-first with a
+	// deterministic tie-break so callers can take Thumbnails[0] as the best.
+	sortThumbnailsLargestFirst(v.Thumbnails)
 
 	raw := pr.audioFormats()
 	v.Formats = mapFormats(raw)
@@ -213,6 +249,37 @@ func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 		return nil, nil, waxerr.ErrNoAudioFormats
 	}
 	return v, raw, nil
+}
+
+// liveStatus classifies the video's broadcast state from the player response.
+// playabilityError rejects live/upcoming videos before a Video is built, so a
+// returned Video is in practice LiveNone or LiveWasLive; the full mapping is kept
+// so the classification is correct wherever it is derived.
+func (pr *playerResponse) liveStatus() LiveStatus {
+	switch {
+	case pr.VideoDetails.IsUpcoming:
+		return LiveUpcoming
+	case pr.isLiveNow():
+		return LiveNow
+	case pr.VideoDetails.IsLiveContent:
+		return LiveWasLive
+	default:
+		return LiveNone
+	}
+}
+
+// sortThumbnailsLargestFirst orders thumbnails by descending pixel area, then a
+// stable URL tie-break so equal-size candidates keep a deterministic order.
+func sortThumbnailsLargestFirst(ts []Thumbnail) {
+	sort.Slice(ts, func(i, j int) bool {
+		if ts[i].Width != ts[j].Width {
+			return ts[i].Width > ts[j].Width
+		}
+		if ts[i].Height != ts[j].Height {
+			return ts[i].Height > ts[j].Height
+		}
+		return ts[i].URL < ts[j].URL
+	})
 }
 
 // audioFormats returns the raw audio renditions (adaptive first). WaxTap is
@@ -366,20 +433,33 @@ func atoi64(s string) int64 {
 // follows it. It tracks string literals and escapes so braces inside strings do
 // not end the object early.
 func extractJSONObject(s, marker string) ([]byte, bool) {
-	i := strings.Index(s, marker)
-	if i < 0 {
-		return nil, false
+	obj, _, ok := extractJSONObjectFrom(s, marker, 0)
+	return obj, ok
+}
+
+// extractJSONObjectFrom is extractJSONObject with a starting offset. It returns
+// the balanced object and the index just past its closing brace, so a caller can
+// iterate successive matches of the same marker, for example to skip a decoy
+// `var ytInitialData = {...}` assignment and find the real one.
+func extractJSONObjectFrom(s, marker string, start int) (obj []byte, end int, ok bool) {
+	if start < 0 {
+		start = 0
 	}
-	rel := strings.IndexByte(s[i:], '{')
+	rel := strings.Index(s[start:], marker)
 	if rel < 0 {
-		return nil, false
+		return nil, 0, false
 	}
-	start := i + rel
+	i := start + rel
+	brace := strings.IndexByte(s[i:], '{')
+	if brace < 0 {
+		return nil, 0, false
+	}
+	objStart := i + brace
 
 	depth := 0
 	inStr := false
 	escaped := false
-	for k := start; k < len(s); k++ {
+	for k := objStart; k < len(s); k++ {
 		ch := s[k]
 		if inStr {
 			switch {
@@ -400,9 +480,9 @@ func extractJSONObject(s, marker string) ([]byte, bool) {
 		case '}':
 			depth--
 			if depth == 0 {
-				return []byte(s[start : k+1]), true
+				return []byte(s[objStart : k+1]), k + 1, true
 			}
 		}
 	}
-	return nil, false
+	return nil, 0, false
 }

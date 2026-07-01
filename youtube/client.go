@@ -479,16 +479,27 @@ func missingTimestampError(perr error) error {
 	}
 }
 
+// fetchWatchPage GETs the consent-bypassed watch page for videoID through the
+// built-in WEB profile and a bootstrapped session. It is the shared fetch path
+// for the watch-page extraction fallback and the WatchPageMetadata enrichment
+// pass, so both go through the same rate-limit and cooldown machinery.
+func (c *Client) fetchWatchPage(ctx context.Context, videoID string) ([]byte, *session, error) {
+	sess, err := c.newBootstrappedSession(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := c.httpGet(ctx, c.webFallback, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, sess, nil
+}
+
 // extractFromWatchPage fetches the watch page and parses the embedded
 // ytInitialPlayerResponse, as a fallback when the InnerTube clients fail.
 func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Extraction, error) {
 	profile := c.webFallback
-	sess, err := c.newBootstrappedSession(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := c.httpGet(ctx, profile, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
+	body, sess, err := c.fetchWatchPage(ctx, videoID)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +516,55 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	if err != nil {
 		return nil, err
 	}
+	// The watch page carries chapters (in ytInitialData) and the availability
+	// microformat, so fill them now rather than re-fetching for WithFullMetadata.
+	fillWatchPageEnrichment(video, body, pr)
 	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
+}
+
+// fillWatchPageEnrichment fills chapters and availability into v from
+// already-fetched watch-page HTML and its parsed player response. The watch page
+// is a WEB response, so its microformat determines availability; publishDate was
+// already set by toVideo from the same microformat.
+func fillWatchPageEnrichment(v *Video, body []byte, pr *playerResponse) {
+	v.Chapters = parseChapters(body, v.Duration)
+	v.Availability = AvailabilityFromUnlisted(pr.Microformat.PlayerMicroformatRenderer.IsUnlisted)
+}
+
+// WatchPageMeta is the metadata a watch-page fetch adds beyond a /player
+// response: the publish date and unlisted state from the WEB microformat, and the
+// chapters from ytInitialData.
+type WatchPageMeta struct {
+	PublishDate time.Time // zero when the page carried none
+	Chapters    []Chapter // nil when the video has no chapters
+	Unlisted    bool      // the video is unlisted (link-only)
+}
+
+// WatchPageMetadata fetches the watch page for videoID and returns the metadata
+// only the WEB watch page carries: publish date, chapters, and unlisted state. It
+// is the token-free enrichment behind waxtap.WithFullMetadata for extractions
+// that did not already scrape the watch page.
+//
+// Context cancellation is returned as a fatal error. A fetch or parse failure is
+// also returned, but callers treating enrichment as best-effort should keep the
+// base metadata when the context was not canceled.
+func (c *Client) WatchPageMetadata(ctx context.Context, videoID string) (WatchPageMeta, error) {
+	// The session is not reused after this one-shot fetch, so its visitorData is not
+	// learned back (unlike extractFromWatchPage, which resolves streams next).
+	body, _, err := c.fetchWatchPage(ctx, videoID)
+	if err != nil {
+		return WatchPageMeta{}, err
+	}
+	pr, err := parseWatchPage(body)
+	if err != nil {
+		c.dumpArtifact(ctx, "watchpage-"+videoID+".html", body)
+		return WatchPageMeta{}, &waxerr.ExtractionError{Stage: "watch-page-metadata", Cause: err}
+	}
+	return WatchPageMeta{
+		PublishDate: parseDate(pr.Microformat.PlayerMicroformatRenderer.PublishDate),
+		Chapters:    parseChapters(body, pr.duration()),
+		Unlisted:    pr.Microformat.PlayerMicroformatRenderer.IsUnlisted,
+	}, nil
 }
 
 // Info returns video metadata and candidate formats.
@@ -524,16 +583,37 @@ const (
 	browseRetryDelay = 500 * time.Millisecond
 )
 
+// EnumOptions configures Client.Enumerate. The facade builds one from its own
+// EnumerateOptions plus any resolved channel ID.
+type EnumOptions struct {
+	// MaxItems caps the returned entries; <= 0 lists every entry.
+	MaxItems int
+	// OnPage reports the running entry count after each successfully appended page.
+	OnPage func(count int)
+	// Skip omits matching entries but keeps paging, for an archive cursor over an
+	// arbitrary playlist. It is applied before the MaxItems cap so the cap counts
+	// unseen entries, and skipped entries still advance the index so
+	// PlaylistEntry.Index stays the true playlist position.
+	Skip func(id string) bool
+	// Stop halts pagination at the first matching entry (excluding it and every
+	// entry after it) and leaves Playlist.Continuation empty. It is only correct on
+	// an append-only newest-first feed (a channel uploads playlist); a curated PL
+	// can insert entries anywhere, so Stop on one would drop items. Use Skip for the
+	// general case. Stop is checked before Skip.
+	Stop func(id string) bool
+	// ChannelID, when set, is stamped onto every entry. A channel-feed enumeration
+	// already knows the uploader, so no per-video Enrich is needed.
+	ChannelID string
+}
+
 // Enumerate expands a playlist into lightweight entries without downloading. It
-// pages through continuations until exhausted or maxItems (<= 0 means all) is
-// reached. Per-page failures after the first page are collected in Playlist.Errors
+// pages through continuations until exhausted, MaxItems is reached, or Stop halts
+// paging. Per-page failures after the first page are collected in Playlist.Errors
 // rather than discarding the entries already gathered.
-//
-// onPage reports the running entry count after each successfully appended page.
-func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int, onPage func(int)) (*Playlist, error) {
+func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions) (*Playlist, error) {
 	// Reject negative caps instead of treating them as an unlimited request.
-	if maxItems < 0 {
-		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, maxItems)
+	if o.MaxItems < 0 {
+		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, o.MaxItems)
 	}
 	profile := c.playlistProfile()
 	sess, err := c.newBootstrappedSession(ctx)
@@ -564,12 +644,17 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int,
 	sess.learnVisitorData(meta.visitorData)
 	pl.Title = meta.title
 	pl.Author = meta.author
-	truncated := c.appendPlaylistItems(pl, items, maxItems)
-	if onPage != nil {
-		onPage(len(pl.Entries))
+
+	// rawPos is the true playlist position, advanced for every video entry (kept or
+	// skipped) so PlaylistEntry.Index survives Skip. It lives here, not in
+	// appendPlaylistItems, so it persists across pages.
+	rawPos := 0
+	truncated, halted := c.appendPlaylistItems(pl, items, o, &rawPos)
+	if o.OnPage != nil {
+		o.OnPage(len(pl.Entries))
 	}
 
-	for token != "" && !reachedLimit(pl, maxItems) {
+	for token != "" && !halted && !reachedLimit(pl, o.MaxItems) {
 		if err := ctx.Err(); err != nil {
 			return pl, err
 		}
@@ -584,17 +669,17 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int,
 			pl.Errors = append(pl.Errors, err)
 			break
 		}
-		truncated = c.appendPlaylistItems(pl, items, maxItems)
-		if onPage != nil {
-			onPage(len(pl.Entries))
+		truncated, halted = c.appendPlaylistItems(pl, items, o, &rawPos)
+		if o.OnPage != nil {
+			o.OnPage(len(pl.Entries))
 		}
 	}
 
 	// Continuation tokens are page-granular. Only expose one when the current
-	// page was fully consumed: a mid-page maxItems cutoff has no precise resume
-	// point, and surfacing the next-page token would silently skip this page's
-	// unreturned entries.
-	if reachedLimit(pl, maxItems) && !truncated {
+	// page was fully consumed at the MaxItems boundary: a mid-page cutoff
+	// (truncated) has no precise resume point, and an early Stop (halted) has no
+	// meaningful resume point at all.
+	if reachedLimit(pl, o.MaxItems) && !truncated && !halted {
 		pl.Continuation = token
 	}
 	return pl, nil
@@ -672,22 +757,42 @@ func (c *Client) playlistProfile() ClientProfile {
 	return c.webFallback
 }
 
-// appendPlaylistItems adds entries up to maxItems. It returns true when the
-// limit is reached before the current page is fully consumed; continuation
-// tokens cannot resume from that mid-page position.
-func (c *Client) appendPlaylistItems(pl *Playlist, items []playlistItem, maxItems int) (truncated bool) {
+// appendPlaylistItems adds entries up to MaxItems, applying the Skip/Stop
+// predicates and the channel stamp. rawPos advances for every video entry (kept
+// or skipped) so PlaylistEntry.Index stays the true playlist position. It returns
+// truncated when the MaxItems cap cut the page short (no precise resume point) and
+// halted when Stop matched (pagination must stop with no resume point).
+func (c *Client) appendPlaylistItems(pl *Playlist, items []playlistItem, o EnumOptions, rawPos *int) (truncated, halted bool) {
 	for _, it := range items {
-		if reachedLimit(pl, maxItems) {
-			return true
+		if reachedLimit(pl, o.MaxItems) {
+			return true, false
 		}
-		entry, err := it.toEntry(len(pl.Entries))
-		if err != nil {
-			pl.Errors = append(pl.Errors, err) // partial enumeration is not fatal
+		id := it.itemVideoID()
+		if o.Stop != nil && id != "" && o.Stop(id) {
+			return false, true
+		}
+		if o.Skip != nil && id != "" && o.Skip(id) {
+			*rawPos++ // a skipped entry still consumes a playlist position
 			continue
 		}
+		entry, err := it.toEntry(*rawPos)
+		if err != nil {
+			pl.Errors = append(pl.Errors, err) // partial enumeration is not fatal
+			// A video item that failed to parse still occupied a playlist position,
+			// so advance the index to keep later entries at their true position. A
+			// non-video shape (id == "") occupies none.
+			if id != "" {
+				*rawPos++
+			}
+			continue
+		}
+		if o.ChannelID != "" {
+			entry.ChannelID = o.ChannelID
+		}
 		pl.Entries = append(pl.Entries, entry)
+		*rawPos++
 	}
-	return false
+	return false, false
 }
 
 func reachedLimit(pl *Playlist, maxItems int) bool {

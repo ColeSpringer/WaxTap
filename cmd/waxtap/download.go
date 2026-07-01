@@ -66,10 +66,11 @@ func newDownloadCmd() *cobra.Command {
 	df := &downloadFlags{}
 	cmd := &cobra.Command{
 		Use:   "download <url>",
-		Short: "Download audio from a video or playlist",
+		Short: "Download audio from a video, playlist, or channel",
 		Long: "Download the selected audio stream from a YouTube video, optionally\n" +
 			"transcoding, cutting, removing SponsorBlock segments, and normalizing\n" +
-			"loudness. A playlist URL is expanded and its entries are downloaded with\n" +
+			"loudness. A playlist URL, or a channel URL (which resolves to the\n" +
+			"channel's uploads feed), is expanded and its entries are downloaded with\n" +
 			"bounded parallelism.\n\n" +
 			"Use --out for a single exact file, or --dir with --output-template to name\n" +
 			"files automatically (the default).",
@@ -106,7 +107,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.IntVar(&df.maxDownloads, "max-downloads", 0, "maximum download attempts per playlist run (0 = unlimited; skips do not count)")
 	f.DurationVar(&df.sleepInterval, "sleep-interval", 0, "minimum delay before each playlist download after the first (e.g. 5s)")
 	f.DurationVar(&df.maxSleepInterval, "max-sleep-interval", 0, "maximum randomized delay between playlist downloads (requires --sleep-interval)")
-	f.BoolVar(&df.listOnly, "list", false, "list playlist entries without downloading")
+	f.BoolVar(&df.listOnly, "list", false, "list playlist or channel entries without downloading")
 
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
@@ -129,17 +130,19 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 	}
 
 	// Classify the argument before doing network work. A watch URL with a list
-	// parameter follows the video path unless --list is set; playlist-only inputs
-	// expand.
+	// parameter follows the video path unless --list is set; playlist-only and
+	// channel inputs expand (a channel resolves to its uploads feed).
 	_, idErr := youtube.ExtractVideoID(arg)
 	_, plErr := youtube.ExtractPlaylistID(arg)
+	_, chErr := youtube.ExtractChannelRef(arg)
 	isVideo := idErr == nil
 	hasPlaylist := plErr == nil
+	isChannel := chErr == nil
 
 	switch {
 	case df.listOnly:
-		if !hasPlaylist {
-			return usagef("--list needs a playlist URL or ID")
+		if !hasPlaylist && !isChannel {
+			return usagef("--list needs a playlist or channel URL or ID")
 		}
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
 	case isVideo:
@@ -150,7 +153,7 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 		// A watch?v=X&list=Y URL downloads only the video; note the dropped playlist.
 		noteDroppedPlaylist(env, arg, "pass the playlist URL to download every item, or add --list to enumerate")
 		return runSingleDownload(cmd.Context(), env, df, arg)
-	case hasPlaylist || errors.Is(idErr, waxtap.ErrIsPlaylist):
+	case hasPlaylist || isChannel || errors.Is(idErr, waxtap.ErrIsPlaylist):
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
 	default:
 		return idErr

@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	innerTubeBase  = "https://www.youtube.com/youtubei/v1"
-	playerEndpoint = innerTubeBase + "/player"
-	browseEndpoint = innerTubeBase + "/browse"
+	innerTubeBase   = "https://www.youtube.com/youtubei/v1"
+	playerEndpoint  = innerTubeBase + "/player"
+	browseEndpoint  = innerTubeBase + "/browse"
+	resolveEndpoint = innerTubeBase + "/navigation/resolve_url"
 
 	// maxResponseBytes bounds how much of an InnerTube response we buffer.
 	maxResponseBytes = 24 << 20 // 24 MiB
@@ -24,6 +25,7 @@ type innertubeRequest struct {
 	VideoID         string           `json:"videoId,omitempty"`
 	BrowseID        string           `json:"browseId,omitempty"`
 	Continuation    string           `json:"continuation,omitempty"`
+	URL             string           `json:"url,omitempty"` // navigation/resolve_url target
 	Context         innertubeContext `json:"context"`
 	PlaybackContext *playbackContext `json:"playbackContext,omitempty"`
 	ContentCheckOK  bool             `json:"contentCheckOk,omitempty"`

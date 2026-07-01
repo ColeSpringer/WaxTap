@@ -31,6 +31,14 @@ type PlaylistDownloadOptions struct {
 	// uniformly within that range. It requires a non-zero SleepInterval.
 	MaxSleepInterval time.Duration
 
+	// Skip and Stop drive an archive cursor during enumeration, matching
+	// EnumerateOptions. Skip omits matching entries but keeps paging (safe on any
+	// playlist); Stop halts paging at the first match (only correct on a newest-first
+	// channel uploads feed). Using Stop for a subscription poll avoids paging the
+	// whole feed each run instead of skipping only at BuildRequest time.
+	Skip func(id string) bool
+	Stop func(id string) bool
+
 	// BuildRequest prepares a download request for each entry. Calls are serial
 	// and follow playlist order. Returning a non-empty skip reason or an error
 	// prevents the download and does not count toward MaxDownloads. Panics are
@@ -77,7 +85,7 @@ func (c *Client) DownloadPlaylist(ctx context.Context, url string, o PlaylistDow
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
-	pl, err := c.Enumerate(ctx, url, EnumerateOptions{MaxItems: o.MaxItems})
+	pl, err := c.Enumerate(ctx, url, EnumerateOptions{MaxItems: o.MaxItems, Skip: o.Skip, Stop: o.Stop})
 	if err != nil {
 		return nil, err
 	}

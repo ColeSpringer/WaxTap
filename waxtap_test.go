@@ -373,6 +373,31 @@ func newOfflineClient(t *testing.T) *Client {
 	return c
 }
 
+// TestVideoMetadataForMapsChannelAndChapters checks the metadata mapping: with
+// IncludeMetadata the result carries ChannelID and the (FullMetadata-populated)
+// Chapters; without IncludeMetadata it is nil.
+func TestVideoMetadataForMapsChannelAndChapters(t *testing.T) {
+	v := &youtube.Video{
+		Author:    "A",
+		ChannelID: "UCabcdefghijklmnopqrstuv",
+		Chapters:  []youtube.Chapter{{Title: "Intro", Start: 0, End: 30 * time.Second}},
+	}
+	if got := videoMetadataFor(Request{}, v); got != nil {
+		t.Errorf("videoMetadataFor without IncludeMetadata = %+v, want nil", got)
+	}
+	req := Request{ProcessSpec: ProcessSpec{IncludeMetadata: true}}
+	md := videoMetadataFor(req, v)
+	if md == nil {
+		t.Fatal("videoMetadataFor with IncludeMetadata = nil")
+	}
+	if md.ChannelID != "UCabcdefghijklmnopqrstuv" {
+		t.Errorf("ChannelID = %q", md.ChannelID)
+	}
+	if len(md.Chapters) != 1 || md.Chapters[0].Title != "Intro" {
+		t.Errorf("Chapters = %+v, want one Intro chapter", md.Chapters)
+	}
+}
+
 func TestDownloadRejectsPlaylistURL(t *testing.T) {
 	c := newOfflineClient(t)
 	_, err := c.Download(context.Background(), Request{

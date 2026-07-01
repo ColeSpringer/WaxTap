@@ -21,9 +21,11 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 		Client:  "ANDROID_VR",
 		Metadata: &waxtap.VideoMetadata{
 			Author:      "Test Author",
+			ChannelID:   "UCabcdefghijklmnopqrstuv",
 			Duration:    634500 * time.Millisecond,
 			PublishDate: time.Date(2008, 5, 31, 0, 0, 0, 0, time.UTC),
 			Description: "a description",
+			Chapters:    []waxtap.Chapter{{Title: "Intro", Start: 0, End: 30 * time.Second}},
 			Formats: []waxtap.Format{
 				{Itag: 251, Codec: "opus", Extension: "webm", AverageBitrate: 160000},
 			},
@@ -42,11 +44,16 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 		SchemaVersion   int     `json:"schemaVersion"`
 		SourceKind      string  `json:"sourceKind"` // preserved result field
 		Author          string  `json:"author"`
+		ChannelID       string  `json:"channelId"`
 		DurationSeconds float64 `json:"durationSeconds"`
 		PublishDate     string  `json:"publishDate"`
 		Description     string  `json:"description"`
 		Client          string  `json:"client"`
-		Formats         []struct {
+		Chapters        []struct {
+			StartSeconds float64 `json:"startSeconds"`
+			Title        string  `json:"title"`
+		} `json:"chapters"`
+		Formats []struct {
 			Itag int `json:"itag"`
 		} `json:"formats"`
 	}
@@ -59,6 +66,12 @@ func TestWriteInfoSidecar_EnrichedDTO(t *testing.T) {
 	}
 	if doc.Author != "Test Author" || doc.Description != "a description" || doc.Client != "ANDROID_VR" {
 		t.Errorf("sidecar = %+v, want author/description/client populated", doc)
+	}
+	if doc.ChannelID != "UCabcdefghijklmnopqrstuv" {
+		t.Errorf("channelId = %q, want the identity anchor populated", doc.ChannelID)
+	}
+	if len(doc.Chapters) != 1 || doc.Chapters[0].Title != "Intro" {
+		t.Errorf("chapters = %+v, want one Intro chapter", doc.Chapters)
 	}
 	if doc.DurationSeconds != 634.5 {
 		t.Errorf("durationSeconds = %v, want 634.5 (float seconds, not ns)", doc.DurationSeconds)

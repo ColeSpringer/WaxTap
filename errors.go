@@ -18,8 +18,17 @@ var (
 	ErrVideoUnavailable = waxerr.ErrVideoUnavailable
 	ErrVideoRestricted  = waxerr.ErrVideoRestricted
 	ErrLoginRequired    = waxerr.ErrLoginRequired
-	ErrLiveContent      = waxerr.ErrLiveContent
-	ErrNoAudioFormats   = waxerr.ErrNoAudioFormats
+	// ErrLiveContent indicates a stream that is currently live; ErrLiveNotStarted
+	// indicates an upcoming/premiere or offline stream that may become available.
+	ErrLiveContent    = waxerr.ErrLiveContent
+	ErrLiveNotStarted = waxerr.ErrLiveNotStarted
+	// ErrAgeRestricted, ErrMembersOnly, and ErrGeoBlocked are specific availability
+	// verdicts. The default ANDROID_VR client bypasses age-gating, so
+	// ErrAgeRestricted is near-unreachable unless a stricter client is forced.
+	ErrAgeRestricted  = waxerr.ErrAgeRestricted
+	ErrMembersOnly    = waxerr.ErrMembersOnly
+	ErrGeoBlocked     = waxerr.ErrGeoBlocked
+	ErrNoAudioFormats = waxerr.ErrNoAudioFormats
 	// ErrRequestedFormatUnavailable indicates an explicit itag/codec selector
 	// matched none of the available audio formats. It is distinct from
 	// ErrNoAudioFormats, which means no usable audio formats exist.

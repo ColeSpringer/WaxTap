@@ -42,8 +42,22 @@ var (
 	ErrVideoUnavailable = errors.New("waxtap: video unavailable")
 	ErrVideoRestricted  = errors.New("waxtap: video restricted")
 	ErrLoginRequired    = errors.New("waxtap: login required")
-	ErrLiveContent      = errors.New("waxtap: live/upcoming content is not supported")
-	ErrNoAudioFormats   = errors.New("waxtap: no audio formats available")
+	// ErrLiveContent indicates a stream that is currently live. Unlike
+	// ErrLiveNotStarted, waiting will not make it a downloadable VOD until it ends.
+	ErrLiveContent = errors.New("waxtap: live content is not supported")
+	// ErrLiveNotStarted indicates a scheduled premiere or upcoming stream that has
+	// not begun, or a live stream that is offline. It may become available later,
+	// which distinguishes it from ErrLiveContent (a stream currently live).
+	ErrLiveNotStarted = errors.New("waxtap: live stream has not started")
+	// ErrAgeRestricted indicates an age-gated video. The default token-free
+	// ANDROID_VR client bypasses age-gating, so this is near-unreachable unless a
+	// stricter client is forced.
+	ErrAgeRestricted = errors.New("waxtap: age-restricted video")
+	// ErrMembersOnly indicates a video available only to channel members.
+	ErrMembersOnly = errors.New("waxtap: members-only video")
+	// ErrGeoBlocked indicates a video blocked in the request IP's country/region.
+	ErrGeoBlocked     = errors.New("waxtap: video is not available in this region")
+	ErrNoAudioFormats = errors.New("waxtap: no audio formats available")
 	// ErrRequestedFormatUnavailable indicates an explicit --itag/--codec selector
 	// matched none of the available audio formats. Unlike ErrNoAudioFormats, it
 	// means usable audio exists but not in the requested format.
@@ -284,6 +298,10 @@ func errRank(err error) int {
 		errors.Is(err, ErrVideoRestricted),
 		errors.Is(err, ErrLoginRequired),
 		errors.Is(err, ErrLiveContent),
+		errors.Is(err, ErrLiveNotStarted),
+		errors.Is(err, ErrAgeRestricted),
+		errors.Is(err, ErrMembersOnly),
+		errors.Is(err, ErrGeoBlocked),
 		errors.Is(err, ErrNoAudioFormats),
 		// A requested-format miss proves that extraction succeeded, so it outranks
 		// availability errors from other clients.

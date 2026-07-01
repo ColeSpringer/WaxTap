@@ -1,0 +1,7 @@
+{
+  "playabilityStatus": {
+    "status": "AGE_CHECK_REQUIRED",
+    "reason": "This video may be inappropriate for some users"
+  },
+  "videoDetails": { "videoId": "testVideo01" }
+}

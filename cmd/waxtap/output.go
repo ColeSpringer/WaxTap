@@ -279,6 +279,14 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 3, "login-required"
 	case errors.Is(err, waxtap.ErrLiveContent):
 		c.exitCode, c.code = 3, "live-content"
+	case errors.Is(err, waxtap.ErrLiveNotStarted):
+		c.exitCode, c.code = 3, "live-not-started"
+	case errors.Is(err, waxtap.ErrAgeRestricted):
+		c.exitCode, c.code = 3, "age-restricted"
+	case errors.Is(err, waxtap.ErrMembersOnly):
+		c.exitCode, c.code = 3, "members-only"
+	case errors.Is(err, waxtap.ErrGeoBlocked):
+		c.exitCode, c.code = 3, "geo-blocked"
 	case errors.Is(err, waxtap.ErrNoAudioFormats):
 		c.exitCode, c.code = 3, "no-audio-formats"
 	case errors.Is(err, waxtap.ErrPlaylistUnavailable):

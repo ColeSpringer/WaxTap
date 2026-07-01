@@ -68,9 +68,14 @@ func TestPreferErr_RequestedFormatNotMasked(t *testing.T) {
 func TestPreferErr_AvailabilityFamily(t *testing.T) {
 	for _, sentinel := range []error{
 		ErrVideoUnavailable, ErrVideoRestricted, ErrLoginRequired, ErrLiveContent, ErrNoAudioFormats,
+		ErrLiveNotStarted, ErrAgeRestricted, ErrMembersOnly, ErrGeoBlocked,
 	} {
 		if got := PreferErr(ErrNeedsPOToken, sentinel); got != sentinel {
 			t.Errorf("PreferErr(needs-po-token, %v) = %v, want %v", sentinel, got, sentinel)
+		}
+		// The new verdicts must outrank a generic/network error, like their siblings.
+		if got := PreferErr(errors.New("generic"), sentinel); got != sentinel {
+			t.Errorf("PreferErr(generic, %v) = %v, want %v (rank 5)", sentinel, got, sentinel)
 		}
 	}
 }

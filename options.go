@@ -109,8 +109,12 @@ type Options struct {
 // Locale sets InnerTube localization hints. The zero value uses en / US.
 //
 // HL affects localized UI text YouTube returns, including some error reasons.
-// GL is a content-region hint; it does not change the request IP or bypass geo
-// restrictions. Titles and descriptions are usually returned as-authored.
+// Availability classification of members-only and geo-blocked videos matches
+// those reason strings and is tuned for English, so a non-English HL may report
+// [ErrVideoUnavailable] instead of [ErrMembersOnly] or [ErrGeoBlocked] (both are
+// still skip-class verdicts). GL is a content-region hint; it does not change the
+// request IP or bypass geo restrictions. Titles and descriptions are usually
+// returned as-authored.
 type Locale struct {
 	HL string // host language, e.g. "en", "de", "ja"
 	GL string // content region, e.g. "US", "DE", "JP"

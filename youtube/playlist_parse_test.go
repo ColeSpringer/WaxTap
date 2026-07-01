@@ -207,6 +207,23 @@ func TestToEntry_NonVideoLockupIsError(t *testing.T) {
 	}
 }
 
+// TestItemVideoIDGatesNonVideoLockup verifies itemVideoID only exposes a video
+// lockup's contentId to the Skip/Stop predicates, mirroring toEntry's gate.
+func TestItemVideoIDGatesNonVideoLockup(t *testing.T) {
+	video := playlistItem{LockupViewModel: &lockupViewModel{ContentID: "vidvidvid00", ContentType: "LOCKUP_CONTENT_TYPE_VIDEO"}}
+	if got := video.itemVideoID(); got != "vidvidvid00" {
+		t.Errorf("video lockup itemVideoID = %q, want vidvidvid00", got)
+	}
+	playlist := playlistItem{LockupViewModel: &lockupViewModel{ContentID: "PLnotavideo0", ContentType: "LOCKUP_CONTENT_TYPE_PLAYLIST"}}
+	if got := playlist.itemVideoID(); got != "" {
+		t.Errorf("playlist lockup itemVideoID = %q, want empty (gated)", got)
+	}
+	legacy := playlistItem{LockupViewModel: &lockupViewModel{ContentID: "oldvidvid00"}} // no ContentType
+	if got := legacy.itemVideoID(); got != "oldvidvid00" {
+		t.Errorf("typeless lockup itemVideoID = %q, want oldvidvid00 (accepted)", got)
+	}
+}
+
 // TestSplitItems_ContinuationMarkerVariants covers every observed home of the
 // continuation token: the legacy direct endpoint, the live
 // commandExecutorCommand nesting, and the view-model innertubeCommand form

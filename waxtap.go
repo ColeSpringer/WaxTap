@@ -265,10 +265,18 @@ type InfoResult struct {
 	// the watch-page fallback replaced. When set, the metadata came from WEB
 	// rather than the requested client.
 	SubstitutedFrom string
-	// ViaWatchPage reports that the metadata came from the watch-page fallback. For
-	// a forced WEB client this read needs no PO token, unlike a forced WEB stream;
-	// SubstitutedFrom stays empty because WEB is not substituted for itself.
+	// ViaWatchPage reports that the primary metadata came from the watch-page
+	// fallback. For a forced WEB client this read needs no PO token, unlike a forced
+	// WEB stream; SubstitutedFrom stays empty because WEB is not substituted for
+	// itself.
 	ViaWatchPage bool
+	// FullMetadata reports that watch-page enrichment (PublishDate, Chapters, and
+	// Availability) was populated, either by the opt-in WithFullMetadata pass or
+	// because the primary extraction already scraped the watch page (ViaWatchPage).
+	// This is a different axis from ViaWatchPage, which reports where the base
+	// metadata came from. When false, an empty Chapters slice or Unknown
+	// Availability means enrichment did not run, not that the video has none.
+	FullMetadata bool
 	// Probed reports that InfoProbe ran ffprobe on the resolved best-audio stream,
 	// so that row's sample rate, channels, bitrate, and duration are authoritative.
 	// It is false for SABR streams, which have no direct URL to probe.
@@ -286,8 +294,9 @@ type InfoResult struct {
 type ReadOption func(*readOptions)
 
 type readOptions struct {
-	noFallback bool
-	layout     ChannelLayout
+	noFallback   bool
+	fullMetadata bool
+	layout       ChannelLayout
 }
 
 // WithNoFallback prevents Info, InfoResult, and Resolve from falling back to
@@ -304,6 +313,21 @@ func WithNoFallback() ReadOption {
 // this option.
 func WithChannels(layout ChannelLayout) ReadOption {
 	return func(o *readOptions) { o.layout = layout }
+}
+
+// WithFullMetadata makes Info and InfoResult run a token-free watch-page pass
+// that backfills PublishDate (when the primary client omitted it), Chapters, and
+// Availability. The default ANDROID_VR client omits these, so this is what makes
+// them reliable across clients. InfoResult.FullMetadata reports whether the data
+// was populated.
+//
+// It costs one extra HTTP request unless the primary extraction already scraped
+// the watch page (InfoResult.ViaWatchPage), in which case the data is already
+// present and no extra fetch runs. Enrichment is best-effort: a parse failure
+// leaves the fields zero/Unknown rather than failing the call. WithFullMetadata
+// is a no-op when combined with WithNoFallback, which forbids the watch page.
+func WithFullMetadata() ReadOption {
+	return func(o *readOptions) { o.fullMetadata = true }
 }
 
 func newReadOptions(opts []ReadOption) readOptions {
@@ -349,6 +373,20 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	}
 	video := ext.Video()
 	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom(), ViaWatchPage: ext.Attempt() == youtube.AttemptWatchPage, BestIndex: -1}
+	if res.ViaWatchPage {
+		// The primary extraction already scraped the watch page, so chapters,
+		// availability, and publish date are already on the Video.
+		res.FullMetadata = true
+	}
+	// The watch-page enrichment pass fills PublishDate/Chapters/Availability. It is
+	// metadata, independent of depth, so it runs before the InfoResolved gate. It is
+	// a no-op with NoFallback (which forbids the watch page) or when the data is
+	// already present.
+	if ro.fullMetadata && !ro.noFallback && !res.FullMetadata {
+		if err := c.fullMetadataPass(ctx, res, id); err != nil {
+			return nil, err
+		}
+	}
 	if depth < InfoResolved {
 		return res, nil
 	}
@@ -389,19 +427,47 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	return res, nil
 }
 
-// Enumerate expands a playlist URL into entries without downloading media.
-// EnumerateOptions.MaxItems caps the listing. With Enrich set, InfoBasic calls
-// refresh entries at bounded concurrency. Successful calls update their entries;
-// item-level failures are added to Playlist.Errors.
+// fullMetadataPass runs the token-free watch-page metadata fetch and merges
+// PublishDate (only if the primary client left it zero), Chapters, and
+// Availability onto the extracted Video. Caller cancellation is fatal; any other
+// failure is best-effort and leaves the base metadata with FullMetadata false.
+func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id string) error {
+	meta, err := c.watchPageMeta(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		c.log.DebugContext(ctx, "full-metadata watch-page pass failed; keeping base metadata", "err", err)
+		return nil
+	}
+	mergeWatchPageMeta(res.Video, meta)
+	res.FullMetadata = true
+	return nil
+}
+
+// Enumerate expands a playlist or channel URL into entries without downloading
+// media. A channel reference (a bare UC ID, or a /channel/, /@handle, /c/, or
+// /user/ URL, with any trailing tab stripped) resolves to the channel's uploads
+// feed, which is newest-first and historically omits Shorts and live streams.
+// EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an archive
+// cursor. With Enrich set, InfoBasic calls refresh entries at bounded
+// concurrency. Successful calls update their entries; item-level failures are
+// added to Playlist.Errors.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
 	if opts.MaxItems < 0 {
 		return nil, configErr("Enumerate: MaxItems must be >= 0, got %d", opts.MaxItems)
 	}
-	id, err := youtube.ExtractPlaylistID(url)
+	id, channelID, err := c.resolveEnumerateTarget(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	pl, err := c.yt.Enumerate(ctx, id, opts.MaxItems, opts.OnProgress)
+	pl, err := c.yt.Enumerate(ctx, id, youtube.EnumOptions{
+		MaxItems:  opts.MaxItems,
+		OnPage:    opts.OnProgress,
+		Skip:      opts.Skip,
+		Stop:      opts.Stop,
+		ChannelID: channelID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +477,22 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 		}
 	}
 	return pl, nil
+}
+
+// resolveEnumerateTarget maps an Enumerate URL to a playlist ID plus, for a
+// channel reference, the resolved UC ID that stamps every entry's ChannelID. An
+// explicit playlist (a bare PL ID or a list= parameter, even on a channel URL)
+// names a specific playlist and takes precedence over the channel's uploads feed;
+// otherwise a channel URL resolves to that feed.
+func (c *Client) resolveEnumerateTarget(ctx context.Context, url string) (playlistID, channelID string, err error) {
+	id, plErr := youtube.ExtractPlaylistID(url)
+	if plErr == nil {
+		return id, "", nil
+	}
+	if ref, cerr := youtube.ExtractChannelRef(url); cerr == nil {
+		return c.yt.ResolveUploadsPlaylist(ctx, ref)
+	}
+	return "", "", plErr
 }
 
 // enrichEntries refreshes playlist entries with InfoBasic. Each worker owns one
@@ -465,6 +547,11 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 			pl.Entries[i].Title = v.Title
 			pl.Entries[i].Author = v.Author
 			pl.Entries[i].Duration = v.Duration
+			// Fill the channel ID when enumerate time did not carry a byline browseId
+			// (a mixed-channel playlist), leaving a channel-feed stamp intact.
+			if pl.Entries[i].ChannelID == "" {
+				pl.Entries[i].ChannelID = v.ChannelID
+			}
 		}(i)
 	}
 	wg.Wait()

@@ -171,6 +171,10 @@ func TestExitCodeFor(t *testing.T) {
 		{nil, 0},
 		{context.Canceled, 130},
 		{waxtap.ErrVideoUnavailable, 3},
+		{waxtap.ErrLiveNotStarted, 3}, // availability verdicts share exit 3
+		{waxtap.ErrAgeRestricted, 3},
+		{waxtap.ErrMembersOnly, 3},
+		{waxtap.ErrGeoBlocked, 3},
 		{waxtap.ErrExtractionFailed, 4},
 		{waxtap.ErrPlaylistParse, 4}, // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
@@ -273,6 +277,25 @@ func TestClassifyError_NewCodesAndHints(t *testing.T) {
 	}
 	if !strings.Contains(c.message, "140") {
 		t.Errorf("message = %q, want it to name the available itags", c.message)
+	}
+}
+
+// TestClassifyError_AvailabilityCodes checks the four new availability verdicts
+// map to distinct exit-3 code strings.
+func TestClassifyError_AvailabilityCodes(t *testing.T) {
+	cases := []struct {
+		err  error
+		code string
+	}{
+		{waxtap.ErrLiveNotStarted, "live-not-started"},
+		{waxtap.ErrAgeRestricted, "age-restricted"},
+		{waxtap.ErrMembersOnly, "members-only"},
+		{waxtap.ErrGeoBlocked, "geo-blocked"},
+	}
+	for _, tc := range cases {
+		if c := classifyError(tc.err); c.exitCode != 3 || c.code != tc.code {
+			t.Errorf("classifyError(%v) = {exit %d, code %q}, want {3, %q}", tc.err, c.exitCode, c.code, tc.code)
+		}
 	}
 }
 

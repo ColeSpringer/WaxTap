@@ -52,12 +52,15 @@ the first SmartScreen prompt.
 
 ## CLI
 
-Media commands accept a YouTube URL or bare video or playlist ID. `cut`,
+Media commands accept a YouTube URL or bare video or playlist ID; `download`
+also accepts a channel URL (a `/channel/`, `/@handle`, `/c/`, or `/user/` link,
+or a bare `UC` ID), which resolves to the channel's uploads feed. `cut`,
 `transcode`, and `normalize` also accept local files. Every command has `--help`,
 and `--json` provides a stable scriptable contract (`schemaVersion` 1). `info
 --show-url` adds a signed, expiring stream URL at `resolved.url`, plus
 `resolved.expiresAt` and `resolved.contentLength`; treat captured output as
-sensitive.
+sensitive. `info --full` adds the publish date and chapters via a token-free
+watch-page fetch.
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
@@ -71,8 +74,13 @@ waxtap normalize song.wav --loudness-target -14 --format flac -o song.flac
 waxtap normalize --album --format flac --dir ./normalized ./album/*.flac
 
 waxtap download <playlist-url> -d ./music --download-archive archive.txt
+waxtap download <channel-url> -d ./music         # the channel's uploads feed
+waxtap download <channel-url> --list             # list entries, no download
 waxtap doctor
 ```
+
+Channel and playlist enumeration returns entries in feed order; a channel's
+uploads feed is newest-first and historically omits Shorts and live streams.
 
 Directory inputs are supported by `transcode` and `normalize`; use `-r` to
 recurse, `--dir` for an output directory, and `--force` to re-encode files that
@@ -90,7 +98,7 @@ The CLI maps failures to stable process exit codes. The same class appears in
 | 0 | success |
 | 1 | unclassified error |
 | 2 | invalid request/config, including a playlist or channel URL passed to a video command, unsupported input, or unavailable requested format |
-| 3 | unavailable/restricted video or playlist, login required, live content, or no audio |
+| 3 | unavailable/restricted video (private, age-restricted, members-only, geo-blocked, removed) or playlist, login required, live or upcoming content, or no audio |
 | 4 | extraction, cipher, or playlist parsing failure; WaxTap may need an update |
 | 5 | rate limited |
 | 6 | ffmpeg/ffprobe not found |
@@ -139,9 +147,17 @@ func main() {
 }
 ```
 
-The default `Download` does not re-encode. See
-[`example_test.go`](example_test.go) for streaming, local processing, playlists,
-SponsorBlock, album measurement, and metadata examples.
+The default `Download` (a nil `ProcessSpec`) delivers the source stream
+byte-for-byte: no ffmpeg, `SourceBytes == OutputBytes`, and `Transcoded` false.
+`Client.Enumerate` expands a playlist or channel URL, with `Skip`/`Stop`
+predicates for an archive cursor; `Info(..., WithFullMetadata())` and
+`Request.FullMetadata` add publish date and chapters. Availability failures
+(`ErrVideoUnavailable`, `ErrAgeRestricted`, `ErrMembersOnly`, `ErrGeoBlocked`,
+`ErrLiveContent`, `ErrLiveNotStarted`, and siblings) are typed sentinels a feed
+consumer should skip rather than treat as fatal; see the package doc's
+skip-vs-fail taxonomy. See [`example_test.go`](example_test.go) for streaming,
+local processing, playlists, SponsorBlock, album measurement, and metadata
+examples.
 
 ## Configuration
 

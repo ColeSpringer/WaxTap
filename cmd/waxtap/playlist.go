@@ -191,11 +191,13 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 // --write-info-json. Embedding resultJSON preserves the standard result fields.
 type infoSidecarJSON struct {
 	resultJSON
-	Author          string       `json:"author,omitempty"`
-	DurationSeconds float64      `json:"durationSeconds,omitempty"`
-	PublishDate     string       `json:"publishDate,omitempty"`
-	Description     string       `json:"description,omitempty"`
-	Formats         []formatJSON `json:"formats,omitempty"`
+	Author          string        `json:"author,omitempty"`
+	ChannelID       string        `json:"channelId,omitempty"`
+	DurationSeconds float64       `json:"durationSeconds,omitempty"`
+	PublishDate     string        `json:"publishDate,omitempty"`
+	Description     string        `json:"description,omitempty"`
+	Chapters        []chapterJSON `json:"chapters,omitempty"`
+	Formats         []formatJSON  `json:"formats,omitempty"`
 }
 
 // writeInfoSidecar atomically writes <output>.info.json next to a download.
@@ -203,8 +205,10 @@ func writeInfoSidecar(outputPath string, res *waxtap.Result) error {
 	doc := infoSidecarJSON{resultJSON: resultToJSON(res)}
 	if m := res.Metadata; m != nil {
 		doc.Author = m.Author
+		doc.ChannelID = m.ChannelID
 		doc.DurationSeconds = m.Duration.Seconds()
 		doc.Description = m.Description
+		doc.Chapters = chaptersToJSON(m.Chapters)
 		if !m.PublishDate.IsZero() {
 			doc.PublishDate = m.PublishDate.Format("2006-01-02")
 		}

@@ -9,6 +9,7 @@ func newInfoCmd() *cobra.Command {
 	var (
 		showURLs   bool
 		probe      bool
+		full       bool
 		channels   string
 		noFallback bool
 	)
@@ -39,6 +40,9 @@ func newInfoCmd() *cobra.Command {
 			ropts := []waxtap.ReadOption{waxtap.WithChannels(layout)}
 			if noFallback {
 				ropts = append(ropts, waxtap.WithNoFallback())
+			}
+			if full {
+				ropts = append(ropts, waxtap.WithFullMetadata())
 			}
 			info, err := env.client.InfoResult(cmd.Context(), args[0], depth, ropts...)
 			if err != nil {
@@ -75,6 +79,7 @@ func newInfoCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "ffprobe the selected stream for authoritative rate/channels/bitrate (requires ffmpeg)")
+	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters) via a token-free watch-page pass")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
 	bindConfigFlags(cmd.Flags())
@@ -98,12 +103,13 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	if !v.PublishDate.IsZero() {
 		env.printf("Published: %s\n", v.PublishDate.Format("2006-01-02"))
 	}
-	if v.IsLive || v.IsUpcoming {
-		env.printf("Live:      %v (upcoming: %v)\n", v.IsLive, v.IsUpcoming)
+	if v.LiveStatus != waxtap.LiveNone {
+		env.printf("Live:      %s\n", v.LiveStatus)
 	}
 	env.printf("Formats:   %d audio candidate(s)\n", len(audioFormats(v.Formats)))
 	if len(v.Chapters) > 0 {
 		env.printf("Chapters:  %d\n", len(v.Chapters))
+		renderChapters(env, v.Chapters)
 	}
 
 	if bestErr == nil {
@@ -178,7 +184,8 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		PublishDate     string        `json:"publishDate,omitempty"`
 		IsLive          bool          `json:"isLive"`
 		IsUpcoming      bool          `json:"isUpcoming"`
-		Chapters        int           `json:"chapterCount"`
+		ChapterCount    int           `json:"chapterCount"`
+		Chapters        []chapterJSON `json:"chapters,omitempty"`
 		Formats         []formatJSON  `json:"formats"`
 		BestAudioItag   *int          `json:"bestAudioItag,omitempty"`
 		Resolved        *resolvedJSON `json:"resolved,omitempty"`
@@ -191,10 +198,16 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		SubstitutedFrom: info.SubstitutedFrom,
 		ChannelID:       v.ChannelID,
 		DurationSecs:    v.Duration.Seconds(),
-		IsLive:          v.IsLive,
-		IsUpcoming:      v.IsUpcoming,
-		Chapters:        len(v.Chapters),
-		Formats:         formats,
+		// Derive the long-standing booleans from LiveStatus. A returned Video is
+		// never live or upcoming (those are error sentinels), so both stay false and
+		// the JSON shape is unchanged.
+		IsLive:     v.LiveStatus == waxtap.LiveNow,
+		IsUpcoming: v.LiveStatus == waxtap.LiveUpcoming,
+		// chapterCount is unchanged; the chapters array is additive and only present
+		// when a watch-page pass (info --full) populated it, so the schema stays 1.
+		ChapterCount: len(v.Chapters),
+		Chapters:     chaptersToJSON(v.Chapters),
+		Formats:      formats,
 	}
 	if !v.PublishDate.IsZero() {
 		out.PublishDate = v.PublishDate.Format("2006-01-02")
@@ -221,4 +234,42 @@ type resolvedJSON struct {
 	IsSABR        bool   `json:"isSabr,omitempty"`
 	ExpiresAt     string `json:"expiresAt,omitempty"`
 	ContentLength int64  `json:"contentLength"`
+}
+
+// chapterJSON is one chapter in the info --json output. EndSeconds is omitted for
+// an open-ended last chapter (unknown duration) rather than emitting an end before
+// the start.
+type chapterJSON struct {
+	StartSeconds float64  `json:"startSeconds"`
+	EndSeconds   *float64 `json:"endSeconds,omitempty"`
+	Title        string   `json:"title"`
+}
+
+// chaptersToJSON maps chapters to their JSON form. It returns nil for none, so the
+// omitempty chapters field is absent unless a watch-page pass populated it.
+func chaptersToJSON(chapters []waxtap.Chapter) []chapterJSON {
+	if len(chapters) == 0 {
+		return nil
+	}
+	out := make([]chapterJSON, len(chapters))
+	for i, c := range chapters {
+		out[i] = chapterJSON{StartSeconds: c.Start.Seconds(), Title: c.Title}
+		if c.End > c.Start {
+			end := c.End.Seconds()
+			out[i].EndSeconds = &end
+		}
+	}
+	return out
+}
+
+// renderChapters prints the chapter list under the count line. Each line shows the
+// time range and title; an open-ended last chapter shows only its start.
+func renderChapters(env *appEnv, chapters []waxtap.Chapter) {
+	for _, c := range chapters {
+		if c.End > c.Start {
+			env.printf("  %s-%s  %s\n", humanDuration(c.Start), humanDuration(c.End), c.Title)
+		} else {
+			env.printf("  %s  %s\n", humanDuration(c.Start), c.Title)
+		}
+	}
 }

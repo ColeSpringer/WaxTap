@@ -1,0 +1,7 @@
+{
+  "playabilityStatus": {
+    "status": "UNPLAYABLE",
+    "reason": "This video is available to this channel's members on level: Supporter or any higher level"
+  },
+  "videoDetails": { "videoId": "testVideo01" }
+}

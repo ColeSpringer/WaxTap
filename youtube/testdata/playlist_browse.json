@@ -24,7 +24,7 @@
                                 "playlistVideoRenderer": {
                                   "videoId": "aaaaaaaaaaa",
                                   "title": { "runs": [{ "text": "Song A" }] },
-                                  "shortBylineText": { "runs": [{ "text": "Artist A" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist A", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCaaaaaaaaaaaaaaaaaaaaaa" } } }] },
                                   "lengthSeconds": "180"
                                 }
                               },

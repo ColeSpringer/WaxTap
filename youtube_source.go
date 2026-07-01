@@ -127,6 +127,7 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	c.warnSessionDowngrade(em, a)
 	// Stream and Writer succeed once buildTransfer returns.
 	c.warnClientSubstitution(em, a)
+	c.applyFullMetadata(ctx, req, a)
 	return a, nil
 }
 
@@ -285,6 +286,10 @@ func isAvailabilityError(err error) bool {
 		errors.Is(err, ErrVideoRestricted) ||
 		errors.Is(err, ErrLoginRequired) ||
 		errors.Is(err, ErrLiveContent) ||
+		errors.Is(err, ErrLiveNotStarted) ||
+		errors.Is(err, ErrAgeRestricted) ||
+		errors.Is(err, ErrMembersOnly) ||
+		errors.Is(err, ErrGeoBlocked) ||
 		errors.Is(err, ErrNoAudioFormats)
 }
 
@@ -453,6 +458,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			c.warnSessionDowngrade(em, a)
 			// Report substitution only after the bytes arrive.
 			c.warnClientSubstitution(em, a)
+			c.applyFullMetadata(ctx, req, a)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -668,9 +674,15 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 // It is strictly single-video: a playlist URL returns ErrIsPlaylist (use
 // Enumerate and loop).
 //
-// When no processing is requested it downloads straight to the sink with no temp
-// file. When a cut, transcode, or loudness stage is requested it stages the source
-// to a temp file, runs the fused pipeline, and finalizes to the sink.
+// When no processing is requested (a nil ProcessSpec) it downloads the selected
+// source stream straight to the sink with no ffmpeg and no temp file: the bytes
+// are byte-identical to what YouTube served, so Result.SourceBytes ==
+// Result.OutputBytes, Result.OutputFormat == Result.SourceFormat, and
+// Result.Transcoded is false. A TranscodeSpec with FormatCopy is different: it
+// stream-copies through ffmpeg to remux into the target container, so no re-encode
+// happens but the bytes and container may change. When a cut, transcode, or
+// loudness stage is requested it stages the source to a temp file, runs the fused
+// pipeline, and finalizes to the sink.
 func (c *Client) Download(ctx context.Context, req Request) (res *Result, err error) {
 	em := newEmitter(req.Events, "")
 	defer func() { em.finish(res, err) }()
@@ -1009,18 +1021,64 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em
 }
 
 // videoMetadataFor returns the requested result metadata, or nil when metadata
-// was not requested.
+// was not requested. Chapters are populated only when Request.FullMetadata ran
+// the watch-page pass that fills them.
 func videoMetadataFor(req Request, v *youtube.Video) *VideoMetadata {
 	if !req.IncludeMetadata || v == nil {
 		return nil
 	}
 	return &VideoMetadata{
-		Author:      v.Author,
-		Duration:    v.Duration,
-		PublishDate: v.PublishDate,
-		Description: v.Description,
-		Formats:     v.Formats,
+		Author:       v.Author,
+		ChannelID:    v.ChannelID,
+		Duration:     v.Duration,
+		PublishDate:  v.PublishDate,
+		Description:  v.Description,
+		Availability: v.Availability,
+		Chapters:     v.Chapters,
+		Formats:      v.Formats,
 	}
+}
+
+// watchPageMeta runs the watch-page metadata fetch under the extraction timeout.
+// It is the shared fetch behind applyFullMetadata (download) and fullMetadataPass
+// (Info), each of which keeps its own error policy.
+func (c *Client) watchPageMeta(ctx context.Context, id string) (youtube.WatchPageMeta, error) {
+	mctx, cancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
+	defer cancel()
+	return c.yt.WatchPageMetadata(mctx, id)
+}
+
+// applyFullMetadata backfills the acquired video with watch-page chapters,
+// publish date, and availability when Request.FullMetadata is set. It runs after
+// a successful acquisition so an ingest gets full metadata in one call. It is
+// best-effort: a failure leaves the base metadata (a completed download is never
+// failed for an enrichment error). It is skipped without IncludeMetadata (which
+// discards the result anyway), under NoFallback (which forbids the watch page),
+// and when extraction already scraped the watch page.
+func (c *Client) applyFullMetadata(ctx context.Context, req Request, a *acquired) {
+	if !req.FullMetadata || !req.IncludeMetadata || req.NoFallback || a == nil || a.video == nil {
+		return
+	}
+	if a.attempt == youtube.AttemptWatchPage {
+		return // chapters and availability were already filled during extraction
+	}
+	meta, err := c.watchPageMeta(ctx, a.video.ID)
+	if err != nil {
+		c.log.DebugContext(ctx, "full-metadata watch-page pass failed; keeping base metadata", "err", err)
+		return
+	}
+	mergeWatchPageMeta(a.video, meta)
+}
+
+// mergeWatchPageMeta merges a watch-page metadata pass into v: PublishDate only
+// when v left it zero (the primary client may already carry it), plus Chapters
+// and Availability. It is shared by the download and Info enrichment paths.
+func mergeWatchPageMeta(v *youtube.Video, meta youtube.WatchPageMeta) {
+	if v.PublishDate.IsZero() {
+		v.PublishDate = meta.PublishDate
+	}
+	v.Chapters = meta.Chapters
+	v.Availability = youtube.AvailabilityFromUnlisted(meta.Unlisted)
 }
 
 // loudnessTarget returns the target LUFS, or 0 when no loudness work is requested.

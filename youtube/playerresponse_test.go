@@ -161,9 +161,16 @@ func TestPlayabilityClassification(t *testing.T) {
 		fixture string
 		want    error
 	}{
+		// LOGIN_REQUIRED with an age reason stays login-required; only
+		// AGE_CHECK_REQUIRED maps to ErrAgeRestricted.
 		{"login required", "player_login_required.json", waxerr.ErrLoginRequired},
 		{"private", "player_private.json", waxerr.ErrVideoRestricted},
 		{"unavailable", "player_unavailable.json", waxerr.ErrVideoUnavailable},
+		{"age restricted", "player_age_restricted.json", waxerr.ErrAgeRestricted},
+		// CONTENT_CHECK_REQUIRED is an interactive confirm gate, distinct from age.
+		{"content check", "player_content_check.json", waxerr.ErrLoginRequired},
+		{"members only", "player_members_only.json", waxerr.ErrMembersOnly},
+		{"geo blocked", "player_geo_blocked.json", waxerr.ErrGeoBlocked},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +182,58 @@ func TestPlayabilityClassification(t *testing.T) {
 				t.Fatalf("playabilityError = %v, want %v", perr, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifyUnplayableReason checks the reason-string mapping and that a
+// "remember"-style word does not false-match the members-only rule.
+func TestClassifyUnplayableReason(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   error
+	}{
+		{"available to this channel's members", waxerr.ErrMembersOnly},
+		{"not available in your country", waxerr.ErrGeoBlocked},
+		{"blocked in your region", waxerr.ErrGeoBlocked},
+		{"Remember to like and subscribe", waxerr.ErrVideoUnavailable}, // not members
+		{"This video is unavailable", waxerr.ErrVideoUnavailable},
+	}
+	for _, tc := range cases {
+		if got := classifyUnplayableReason(tc.reason); !errors.Is(got, tc.want) {
+			t.Errorf("classifyUnplayableReason(%q) = %v, want %v", tc.reason, got, tc.want)
+		}
+	}
+}
+
+// TestPlayabilityLiveStates covers the OK-status live/upcoming split and
+// LIVE_STREAM_OFFLINE, which do not come from a fixture with a status.
+func TestPlayabilityLiveStates(t *testing.T) {
+	upcoming := &playerResponse{}
+	upcoming.PlayabilityStatus.Status = "OK"
+	upcoming.VideoDetails.IsUpcoming = true
+	if perr := upcoming.playabilityError(); !errors.Is(perr, waxerr.ErrLiveNotStarted) {
+		t.Errorf("upcoming = %v, want ErrLiveNotStarted", perr)
+	}
+
+	live := &playerResponse{}
+	live.PlayabilityStatus.Status = "OK"
+	live.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow = true
+	if perr := live.playabilityError(); !errors.Is(perr, waxerr.ErrLiveContent) {
+		t.Errorf("live = %v, want ErrLiveContent", perr)
+	}
+
+	offline := &playerResponse{}
+	offline.PlayabilityStatus.Status = "LIVE_STREAM_OFFLINE"
+	if perr := offline.playabilityError(); !errors.Is(perr, waxerr.ErrLiveNotStarted) {
+		t.Errorf("offline = %v, want ErrLiveNotStarted", perr)
+	}
+
+	// A completed livestream VOD (isLiveContent, not live, not upcoming) is allowed.
+	vod := &playerResponse{}
+	vod.PlayabilityStatus.Status = "OK"
+	vod.VideoDetails.IsLiveContent = true
+	if perr := vod.playabilityError(); perr != nil {
+		t.Errorf("completed VOD = %v, want nil (allowed)", perr)
 	}
 }
 

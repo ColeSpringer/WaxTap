@@ -36,4 +36,37 @@
 //
 // Callers can work entirely through waxtap, using names such as
 // [BestAudio], [ErrVideoUnavailable], and [POTokenProvider].
+//
+// # Identity anchors
+//
+// [Video.ID] (the 11-character video ID) and [Video.ChannelID] (the UC channel
+// ID) are the canonical, stable YouTube identifiers. Callers that persist or
+// deduplicate should key on these rather than on titles or URLs. [Video.URL] is
+// the canonical watch URL derived from [Video.ID].
+//
+// # Availability errors: skip vs. fail
+//
+// Info and Download return typed availability sentinels for videos that exist but
+// cannot be delivered. A consumer iterating a feed should treat these as "skip
+// this item and continue," not as a hard failure, because retrying or updating
+// the tool will not help:
+//
+//   - [ErrLiveContent]: the stream is currently live (retry after it ends)
+//   - [ErrLiveNotStarted]: an upcoming premiere or offline stream (retry later)
+//   - [ErrLoginRequired]: sign-in or an interactive confirm gate
+//   - [ErrAgeRestricted]: age-gated (rare, since the default client bypasses age-gating)
+//   - [ErrVideoRestricted]: private (maps a consumer's ErrPrivate)
+//   - [ErrMembersOnly]: channel-members only
+//   - [ErrGeoBlocked]: blocked in the request IP's region
+//   - [ErrVideoUnavailable]: removed or generic-unavailable (maps a consumer's ErrRemoved)
+//   - [ErrNoAudioFormats]: no audio rendition exists
+//
+// Everything else is a hard error the consumer should surface: extraction and
+// cipher maintenance signals ([ErrExtractionFailed], [ErrCipherSolve],
+// [ErrPlaylistParse]), rate limiting ([ErrRateLimited]), incomplete delivery
+// ([ErrIncompleteStream], [ErrURLExpired]), token preconditions ([ErrNeedsPOToken]),
+// and network or I/O failures. Match sentinels with errors.Is; a [PlayabilityError]
+// (via errors.As / errors.AsType) carries YouTube's Status and Reason for finer
+// classification. Members-only and geo-blocked matching is best-effort under the
+// default en/US locale.
 package waxtap
