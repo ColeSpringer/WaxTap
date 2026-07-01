@@ -117,12 +117,18 @@ func (r *progressReporter) printAbove(msg string) {
 
 // writeLineLocked draws s in place, padding to erase any longer previous line.
 func (r *progressReporter) writeLineLocked(s string) {
+	r.lastLen = overwriteLine(r.w, s, r.lastLen)
+}
+
+// overwriteLine writes s after a carriage return and pads with spaces to erase a
+// longer previous line. It returns len(s) for the next overwrite.
+func overwriteLine(w io.Writer, s string, prevLen int) int {
 	pad := ""
-	if d := r.lastLen - len(s); d > 0 {
+	if d := prevLen - len(s); d > 0 {
 		pad = strings.Repeat(" ", d)
 	}
-	fmt.Fprintf(r.w, "\r%s%s", s, pad)
-	r.lastLen = len(s)
+	fmt.Fprintf(w, "\r%s%s", s, pad)
+	return len(s)
 }
 
 // clearLocked erases the current in-place line on a TTY.
@@ -131,6 +137,39 @@ func (r *progressReporter) clearLocked() {
 		fmt.Fprintf(r.w, "\r%s\r", strings.Repeat(" ", r.lastLen))
 	}
 	r.lastLen = 0
+}
+
+// listHeartbeat owns the transient status line used by download --list while
+// enumeration and enrichment are running. Enrichment callbacks can run from
+// multiple goroutines, so writes share one lock.
+type listHeartbeat struct {
+	w       io.Writer
+	mu      sync.Mutex
+	lastLen int
+}
+
+// write updates the transient line. A nil receiver disables the heartbeat.
+func (h *listHeartbeat) write(s string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastLen = overwriteLine(h.w, s, h.lastLen)
+}
+
+// finish ends the transient line with a newline. It is safe to call on nil or
+// after the line has already been finished.
+func (h *listHeartbeat) finish() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastLen > 0 {
+		fmt.Fprint(h.w, "\n")
+		h.lastLen = 0
+	}
 }
 
 // bar renders a [###---] progress bar of the given inner width.

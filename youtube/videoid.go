@@ -116,16 +116,19 @@ func extractVideoID(input string, allowLoose bool) (string, error) {
 	if playlistID.MatchString(s) {
 		return "", waxerr.ErrIsPlaylist
 	}
-	// Classify the malformed token. Anything shorter than an ID is too short; an
-	// all-ID-character token that reached here is too long (idExact already handled
-	// the exactly-11 case, so it can only be longer); anything else is malformed.
+	// Keep malformed bare IDs on the same length-specific errors used by URL IDs.
+	return "", classifyMalformedID(s)
+}
+
+// classifyMalformedID returns the most specific error for an invalid ID token.
+func classifyMalformedID(s string) error {
 	switch {
 	case len(s) < idLen:
-		return "", waxerr.ErrVideoIDTooShort
+		return waxerr.ErrVideoIDTooShort
 	case idCharsOnly(s):
-		return "", waxerr.ErrVideoIDTooLong
+		return waxerr.ErrVideoIDTooLong
 	default:
-		return "", waxerr.ErrInvalidVideoID
+		return waxerr.ErrInvalidVideoID
 	}
 }
 
@@ -185,7 +188,8 @@ func validateID(candidate string) (string, error) {
 	if idExact.MatchString(candidate) {
 		return candidate, nil
 	}
-	return "", waxerr.ErrInvalidVideoID
+	// Match bare-ID error hints for URL path and query forms too.
+	return "", classifyMalformedID(candidate)
 }
 
 // errNotYouTubeURL reports an unrelated URL while retaining the

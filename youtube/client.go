@@ -528,7 +528,9 @@ const (
 // pages through continuations until exhausted or maxItems (<= 0 means all) is
 // reached. Per-page failures after the first page are collected in Playlist.Errors
 // rather than discarding the entries already gathered.
-func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int) (*Playlist, error) {
+//
+// onPage reports the running entry count after each successfully appended page.
+func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int, onPage func(int)) (*Playlist, error) {
 	// Reject negative caps instead of treating them as an unlimited request.
 	if maxItems < 0 {
 		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, maxItems)
@@ -563,6 +565,9 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 	pl.Title = meta.title
 	pl.Author = meta.author
 	truncated := c.appendPlaylistItems(pl, items, maxItems)
+	if onPage != nil {
+		onPage(len(pl.Entries))
+	}
 
 	for token != "" && !reachedLimit(pl, maxItems) {
 		if err := ctx.Err(); err != nil {
@@ -580,6 +585,9 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, maxItems int)
 			break
 		}
 		truncated = c.appendPlaylistItems(pl, items, maxItems)
+		if onPage != nil {
+			onPage(len(pl.Entries))
+		}
 	}
 
 	// Continuation tokens are page-granular. Only expose one when the current

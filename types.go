@@ -478,6 +478,14 @@ type EnumerateOptions struct {
 	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
 	// Successful calls update their entries; failures are added to Playlist.Errors.
 	Enrich bool
+
+	// OnProgress reports the running entry count after each playlist page. It is
+	// optional and never triggers downloads.
+	OnProgress func(items int)
+	// OnEnrichProgress reports each completed InfoBasic refresh when Enrich is set.
+	// Calls are serialized in increasing done-count order. The final call reaches
+	// (total, total) unless context cancellation stops enrichment early.
+	OnEnrichProgress func(done, total int)
 }
 
 // Stage identifies a pipeline stage in an Event.

@@ -147,6 +147,8 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 			"max-items", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
 			return err
 		}
+		// A watch?v=X&list=Y URL downloads only the video; note the dropped playlist.
+		noteDroppedPlaylist(env, arg, "pass the playlist URL to download every item, or add --list to enumerate")
 		return runSingleDownload(cmd.Context(), env, df, arg)
 	case hasPlaylist || errors.Is(idErr, waxtap.ErrIsPlaylist):
 		return runPlaylistDownload(cmd.Context(), env, df, arg)
@@ -228,6 +230,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if cmd.Flags().Changed("loudness-target") && !df.normalize {
 		return usagef("--loudness-target requires --normalize")
 	}
+	if err := rejectEmptySponsorBlock(cmd, df.sbCats); err != nil {
+		return err
+	}
 	if cmd.Flags().Changed("sponsorblock-on-error") && df.sbCats == "" {
 		return usagef("--sponsorblock-on-error requires --sponsorblock")
 	}
@@ -303,7 +308,22 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		return usagef("--out cannot be used with a playlist; use --dir")
 	}
 	if df.listOnly {
-		pl, err := env.client.Enumerate(ctx, url, waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true})
+		opts := waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true}
+		// Listing performs enumeration and enrichment before printing any rows. On
+		// an interactive stderr, show a transient status line for those network
+		// phases. JSON, quiet, piped stderr, and verbose mode stay untouched.
+		var hb *listHeartbeat
+		if isTerminal(env.errOut) && !env.jsonMode() && !env.quiet() && !env.cfg.verbose {
+			hb = &listHeartbeat{w: env.errOut}
+			opts.OnProgress = func(items int) {
+				hb.write(fmt.Sprintf("enumerating... %d items", items))
+			}
+			opts.OnEnrichProgress = func(done, total int) {
+				hb.write(fmt.Sprintf("enriching... %d/%d items", done, total))
+			}
+		}
+		pl, err := env.client.Enumerate(ctx, url, opts)
+		hb.finish() // safe when hb is nil; ends the transient line before output/error
 		if err != nil {
 			return err
 		}

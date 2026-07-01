@@ -56,6 +56,36 @@ func TestWarnChannelLayout(t *testing.T) {
 	}
 }
 
+// TestNoteDroppedPlaylist verifies the stderr note for watch URLs that also carry
+// a playlist. Bare IDs, plain video URLs, and --quiet stay silent.
+func TestNoteDroppedPlaylist(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		quiet    bool
+		wantNote bool
+	}{
+		{"watch with list", "https://www.youtube.com/watch?v=dummyVideo0&list=PLtest123456789", false, true},
+		{"plain video url", "https://www.youtube.com/watch?v=dummyVideo0", false, false},
+		{"bare video id", "dummyVideo0", false, false},
+		{"watch with list but quiet", "https://www.youtube.com/watch?v=dummyVideo0&list=PLtest123456789", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := &appEnv{out: io.Discard, errOut: &buf, cfg: &appConfig{quiet: tc.quiet}}
+			noteDroppedPlaylist(env, tc.input, "download the playlist with --list")
+			got := buf.String()
+			switch {
+			case tc.wantNote && !strings.Contains(got, "ignoring playlist PLtest123456789"):
+				t.Errorf("note = %q, want it to name the dropped playlist", got)
+			case !tc.wantNote && got != "":
+				t.Errorf("note = %q, want none", got)
+			}
+		})
+	}
+}
+
 func TestWarnContainerExtMismatch(t *testing.T) {
 	res := func(outPath, srcExt string) *waxtap.Result {
 		return &waxtap.Result{OutputPath: outPath, SourceFormat: waxtap.Format{Extension: srcExt}}

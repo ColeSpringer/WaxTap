@@ -6,8 +6,9 @@
 //
 //   - Copy: stream-copy the retained spans and concatenate them. No re-encode,
 //     but boundaries snap to packet/frame edges. Some containers, notably raw
-//     FLAC, keep a stale duration header after a copy even though the audio
-//     is trimmed correctly; accurate mode avoids that.
+//     FLAC, can keep source duration metadata after a copy. The audio is trimmed,
+//     but some players report the old length. Smart mode upgrades raw FLAC cuts
+//     to a lossless FLAC encode to avoid that container issue.
 //   - Accurate: trim sample-exactly and re-encode through a -filter_complex
 //     graph, so boundaries are exact. Required for a crossfade.
 //   - Smart (default): copy when no encode is involved, accurate when a

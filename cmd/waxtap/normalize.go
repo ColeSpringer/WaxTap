@@ -99,6 +99,11 @@ func newNormalizeCmd() *cobra.Command {
 				return runMeasure(cmd, env, source, itag, codec, sourcePolicy, noFallback, layout, target)
 			}
 
+			// The write path validates stdout output and the source before format
+			// inference. The measure path validates URL sources through dispatchProcess.
+			if err := preflightProcessOutput(source, explicit); err != nil {
+				return err
+			}
 			// Check the output path before format inference so a directory gets a
 			// useful error instead of a missing file extension error.
 			if err := rejectDirOutput(explicit); err != nil {

@@ -54,6 +54,26 @@ func validateProcessSource(source string) error {
 	return nil
 }
 
+// rejectStdoutOutput rejects `-o -` on a process command. Only download streams
+// raw media to stdout; transcode, normalize, and cut write files. explicit is the
+// merged positional/--out value.
+func rejectStdoutOutput(explicit string) error {
+	if explicit == "-" {
+		return usagef("stdout streaming (-o -) is only supported by download; give a file path")
+	}
+	return nil
+}
+
+// preflightProcessOutput keeps early process-command validation in one order:
+// reject stdout output first, then validate the source. It must run before format
+// inference so input mistakes are not hidden by format errors.
+func preflightProcessOutput(source, explicit string) error {
+	if err := rejectStdoutOutput(explicit); err != nil {
+		return err
+	}
+	return validateProcessSource(source)
+}
+
 // dispatchProcess runs a ProcessSpec against a local file or a YouTube URL and
 // returns the Result. A live progress reporter is attached for the duration.
 // noFallback applies only to URL sources.
@@ -70,6 +90,9 @@ func dispatchProcess(ctx context.Context, env *appEnv, source string, sel waxtap
 	if err := validateProcessSource(source); err != nil {
 		return nil, err
 	}
+	// A watch?v=X&list=Y URL processes only the video. The note makes that explicit
+	// for process commands, matching info, formats, and download.
+	noteDroppedPlaylist(env, source, "processing only this video; the playlist is ignored")
 	return env.client.Download(ctx, waxtap.Request{URL: source, Audio: sel, SourcePolicy: policy, NoFallback: noFallback, ProcessSpec: spec})
 }
 
@@ -181,6 +204,8 @@ func newCutCmd() *cobra.Command {
 				explicit = args[1]
 			}
 
+			// Check directory input before generic source validation so the user sees
+			// the specific directory message instead of a missing-file fallback.
 			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
 				return usagef("cut does not support a directory input; pass a single file or a YouTube URL")
 			}
@@ -188,6 +213,20 @@ func newCutCmd() *cobra.Command {
 				return err
 			}
 			if err := validateItag(cmd, itag); err != nil {
+				return err
+			}
+			// Keep empty SponsorBlock validation before source validation so this flag
+			// error is reported consistently across cut, download, and preview.
+			if err := rejectEmptySponsorBlock(cmd, sbCats); err != nil {
+				return err
+			}
+			// Reject stdout output, invalid sources, and directory outputs before
+			// parsing cut format details. These direct input errors should not be
+			// masked by bitrate or format inference.
+			if err := preflightProcessOutput(source, explicit); err != nil {
+				return err
+			}
+			if err := rejectDirOutput(explicit); err != nil {
 				return err
 			}
 
@@ -224,14 +263,29 @@ func newCutCmd() *cobra.Command {
 			spec := waxtap.ProcessSpec{Cut: cs, Channels: layout, Downmix: doDownmix}
 			newExt := ""
 			var tf waxtap.TranscodeFormat // FormatCopy when no transcode is requested
-			if cmd.Flags().Changed("bitrate") && format == "" {
+			// Choose the transcode format once. An explicit --format wins. Re-encoding
+			// cuts can also use a recognized output extension, which lets
+			// `cut in.flac --crossfade 500ms -o out.mp3` work without a separate
+			// --format. Plain copy cuts treat the extension only as a container hint,
+			// and copy/remux pseudo-formats are not valid output extensions.
+			haveFormat := false
+			if format != "" {
+				if tf, err = parseTranscodeFormat(format); err != nil {
+					return err
+				}
+				haveFormat = true
+			} else if mode == waxtap.CutAccurate || crossfade > 0 {
+				if ext := strings.TrimPrefix(filepath.Ext(explicit), "."); ext != "" {
+					if f, perr := parseTranscodeFormat(ext); perr == nil && f != waxtap.FormatCopy {
+						tf, haveFormat = f, true
+					}
+				}
+			}
+			// Checked after inference so --bitrate pairs with an inferred lossy format.
+			if cmd.Flags().Changed("bitrate") && !haveFormat {
 				return usagef("--bitrate requires --format")
 			}
-			if format != "" {
-				var terr error
-				if tf, terr = parseTranscodeFormat(format); terr != nil {
-					return terr
-				}
+			if haveFormat {
 				spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}
 				newExt = transcodeExt(tf)
 			}
@@ -339,6 +393,11 @@ func newTranscodeCmd() *cobra.Command {
 				return err
 			}
 
+			// Validate stdout output and the source before format inference so direct
+			// input errors are not hidden by "specify --format".
+			if err := preflightProcessOutput(source, explicit); err != nil {
+				return err
+			}
 			// Check the output path before format inference so a directory gets a
 			// useful error instead of a missing file extension error.
 			if err := rejectDirOutput(explicit); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -106,6 +107,63 @@ func TestSponsorBlockArgsMisparse(t *testing.T) {
 				if err == nil {
 					t.Errorf("ValidateArgs(%v) = nil, want the base validator to reject the surplus", tc.args)
 				}
+			}
+		})
+	}
+}
+
+// TestRejectEmptySponsorBlock verifies that an explicitly empty --sponsorblock
+// value is rejected while bare, populated, and unset forms still pass.
+func TestRejectEmptySponsorBlock(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantReject bool
+	}{
+		{"explicit empty", []string{"--sponsorblock="}, true},
+		{"comma only", []string{"--sponsorblock=,"}, true},
+		{"spaced blanks", []string{"--sponsorblock=, ,"}, true},
+		{"bare flag", []string{"--sponsorblock"}, false},
+		{"real category", []string{"--sponsorblock=sponsor"}, false},
+		{"unset", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var val string
+			cmd := &cobra.Command{Use: "x"}
+			bindSponsorBlockFlag(cmd.Flags(), &val, "test")
+			if err := cmd.ParseFlags(tc.args); err != nil {
+				t.Fatalf("ParseFlags(%v): %v", tc.args, err)
+			}
+			err := rejectEmptySponsorBlock(cmd, val)
+			switch {
+			case tc.wantReject && (!isUsageError(err) || !strings.Contains(err.Error(), "needs at least one category")):
+				t.Errorf("rejectEmptySponsorBlock(%v) = %v, want the empty-category usage error", tc.args, err)
+			case !tc.wantReject && err != nil:
+				t.Errorf("rejectEmptySponsorBlock(%v) = %v, want nil", tc.args, err)
+			}
+		})
+	}
+}
+
+// TestEmptySponsorBlockRejectedByCommands verifies that preview, cut, and
+// download reject --sponsorblock= before network work. cut uses a missing source
+// on purpose so the flag error must precede source validation.
+func TestEmptySponsorBlockRejectedByCommands(t *testing.T) {
+	cases := [][]string{
+		{"sponsorblock", "dummyVideo0", "--sponsorblock="},
+		{"cut", "missing.flac", "--cut-range", "0-1", "--sponsorblock="},
+		{"download", "dummyVideo0", "--sponsorblock="},
+	}
+	for _, args := range cases {
+		t.Run(args[0], func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(args)
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "needs at least one category") {
+				t.Errorf("%v = %v, want the empty-category rejection", args, err)
 			}
 		})
 	}

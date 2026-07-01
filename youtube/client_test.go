@@ -768,7 +768,7 @@ func TestEnumerate(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +807,7 @@ func TestEnumerate_NegativeMaxItemsIsInvalidConfig(t *testing.T) {
 		t.Fatal("Enumerate must reject a negative cap before any request")
 		return nil, nil
 	}))
-	_, err := c.Enumerate(context.Background(), "PLtest", -1)
+	_, err := c.Enumerate(context.Background(), "PLtest", -1, nil)
 	if !errors.Is(err, waxerr.ErrInvalidConfig) {
 		t.Errorf("negative maxItems err = %v, want ErrInvalidConfig", err)
 	}
@@ -819,7 +819,7 @@ func TestEnumerate_BadRequestIsInvalidPlaylistID(t *testing.T) {
 	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return fixtureResp(http.StatusBadRequest, []byte(`{"error":{"code":400,"message":"Invalid value"}}`)), nil
 	}))
-	_, err := c.Enumerate(context.Background(), "PLbroken", 0)
+	_, err := c.Enumerate(context.Background(), "PLbroken", 0, nil)
 	if !errors.Is(err, waxerr.ErrInvalidPlaylistID) {
 		t.Fatalf("err = %v, want ErrInvalidPlaylistID", err)
 	}
@@ -832,7 +832,7 @@ func TestEnumerate_NotFoundIsPlaylistUnavailable(t *testing.T) {
 	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return fixtureResp(http.StatusNotFound, []byte(`{"error":{"code":404,"message":"Not Found"}}`)), nil
 	}))
-	_, err := c.Enumerate(context.Background(), "PLmissing", 0)
+	_, err := c.Enumerate(context.Background(), "PLmissing", 0, nil)
 	if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
 		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
 	}
@@ -846,7 +846,7 @@ func TestEnumerate_ForbiddenIsNotPlaylistUnavailable(t *testing.T) {
 	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return fixtureResp(http.StatusForbidden, []byte(`{"error":{"code":403,"message":"Forbidden"}}`)), nil
 	}))
-	_, err := c.Enumerate(context.Background(), "PLblocked", 0)
+	_, err := c.Enumerate(context.Background(), "PLblocked", 0, nil)
 	if errors.Is(err, waxerr.ErrPlaylistUnavailable) {
 		t.Fatalf("err = %v, want a 403 NOT mapped to ErrPlaylistUnavailable", err)
 	}
@@ -866,7 +866,7 @@ func TestEnumerate_MaxItemsAtPageBoundary(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 2)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +889,7 @@ func TestEnumerate_MaxItemsMidPageNoResume(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 1)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,7 +912,7 @@ func TestEnumerate_LegacyContinuationShape(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -946,7 +946,7 @@ func TestEnumerate_LockupShape(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -970,6 +970,47 @@ func TestEnumerate_LockupShape(t *testing.T) {
 	}
 }
 
+// TestEnumerate_OnPageProgress verifies that onPage reports the running entry
+// count once per playlist page.
+func TestEnumerate_OnPageProgress(t *testing.T) {
+	browse := readFixture(t, "playlist_browse_lockup.json")
+	lockupCont := readFixture(t, "playlist_continuation_lockup.json")
+	legacyCont := readFixture(t, "playlist_continuation.json")
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case bytes.Contains(body, []byte("LOCKUP_CONT_1")):
+			return fixtureResp(http.StatusOK, lockupCont), nil
+		case bytes.Contains(body, []byte("LOCKUP_CONT_2")):
+			return fixtureResp(http.StatusOK, legacyCont), nil
+		}
+		return fixtureResp(http.StatusOK, browse), nil
+	}))
+
+	var counts []int
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, func(n int) {
+		counts = append(counts, n)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One callback per page (initial + two continuations).
+	if len(counts) < 2 {
+		t.Fatalf("onPage called %d time(s), want one per page (>= 2)", len(counts))
+	}
+	for i := 1; i < len(counts); i++ {
+		if counts[i] < counts[i-1] {
+			t.Errorf("running counts must not decrease across pages: %v", counts)
+		}
+	}
+	if counts[len(counts)-1] <= counts[0] {
+		t.Errorf("running count did not advance across pages: %v", counts)
+	}
+	if last := counts[len(counts)-1]; last != len(pl.Entries) {
+		t.Errorf("final onPage count = %d, want %d (total entries)", last, len(pl.Entries))
+	}
+}
+
 // TestEnumerate_RetriesUnrecognizedInitialPage covers a browse response whose
 // JSON parses cleanly but does not expose a recognizable playlist shape. The
 // client should retry once before failing the whole enumeration.
@@ -985,7 +1026,7 @@ func TestEnumerate_RetriesUnrecognizedInitialPage(t *testing.T) {
 		return fixtureResp(http.StatusOK, browse), nil
 	}))
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 2)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,7 +1047,7 @@ func TestEnumerate_DoesNotRetryRateLimit(t *testing.T) {
 		return fixtureResp(http.StatusTooManyRequests, nil), nil
 	}))
 
-	_, err := c.Enumerate(context.Background(), "PLtest", 0)
+	_, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if !errors.Is(err, waxerr.ErrRateLimited) {
 		t.Fatalf("err = %v, want ErrRateLimited", err)
 	}
@@ -1039,7 +1080,7 @@ func TestEnumerate_HonorsConfiguredProfile(t *testing.T) {
 		})}}),
 	})
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

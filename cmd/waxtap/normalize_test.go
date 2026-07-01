@@ -113,7 +113,10 @@ func TestNormalizeWriteByDefaultNeedsOutput(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"file", []string{"missing.wav"}},
+		// An existing file with no output/--format: the "needs output" hint fires.
+		// A missing file is intercepted earlier by source validation and reported as
+		// "no such file", covered by TestProcessSourceCheckedBeforeCollision.
+		{"file", []string{f1}},
 		{"album", []string{"--album", f1, f2}},
 		{"directory", []string{emptyDir}},
 	}

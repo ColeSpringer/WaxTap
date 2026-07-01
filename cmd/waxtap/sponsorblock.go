@@ -23,6 +23,9 @@ func newSponsorBlockCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := rejectEmptySponsorBlock(cmd, categories); err != nil {
+				return err
+			}
 			cats, err := parseCategories(categories)
 			if err != nil {
 				return err
@@ -46,6 +49,22 @@ func newSponsorBlockCmd() *cobra.Command {
 	bindConfigFlags(cmd.Flags())
 	bindNetworkFlags(cmd.Flags())
 	return cmd
+}
+
+// rejectEmptySponsorBlock rejects --sponsorblock values with no categories after
+// comma splitting and trimming, such as `--sponsorblock=` or `--sponsorblock=, ,`.
+// A bare --sponsorblock still uses the flag's NoOptDefVal, and an unset flag is
+// ignored.
+func rejectEmptySponsorBlock(cmd *cobra.Command, value string) error {
+	if !cmd.Flags().Changed("sponsorblock") {
+		return nil
+	}
+	for _, part := range strings.Split(value, ",") {
+		if strings.TrimSpace(part) != "" {
+			return nil
+		}
+	}
+	return usagef("--sponsorblock needs at least one category; use a bare --sponsorblock (no =) for music_offtopic")
 }
 
 // parseCategories parses a comma-separated category list, validating each. An

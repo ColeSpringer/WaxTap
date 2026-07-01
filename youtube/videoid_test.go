@@ -57,14 +57,17 @@ func TestExtractVideoID(t *testing.T) {
 		// Eleven-character malformed tokens are invalid rather than too short.
 		{"eleven chars with stray symbol", "aaaaaaaaaa!", "", waxerr.ErrInvalidVideoID},
 		{"eleven symbol-heavy chars", "abc!@#=+;:_", "", waxerr.ErrInvalidVideoID},
-		{"bad id in watch param", "https://www.youtube.com/watch?v=short", "", waxerr.ErrInvalidVideoID},
+		{"bad id in watch param", "https://www.youtube.com/watch?v=short", "", waxerr.ErrVideoIDTooShort},
 		// An all-ID-character token of the wrong length is a length problem, not a
 		// truncation or an invalid-character one.
 		{"overlong bare token not truncated", id + "x", "", waxerr.ErrVideoIDTooLong},
 		{"overlong bare token plus more", id + "xy", "", waxerr.ErrVideoIDTooLong},
-		// The URL branch validates the path segment exactly, so an overlong segment
-		// stays invalid rather than too-long.
-		{"overlong id in youtu.be path", "https://youtu.be/" + id + "x", "", waxerr.ErrInvalidVideoID},
+		// The URL branch validates the path segment exactly and now classifies its
+		// shape, so an all-ID-character overlong segment is too-long and a short one
+		// is too-short, mirroring the bare-ID path.
+		{"overlong id in youtu.be path", "https://youtu.be/" + id + "x", "", waxerr.ErrVideoIDTooLong},
+		{"short id in youtu.be path", "https://youtu.be/short", "", waxerr.ErrVideoIDTooShort},
+		{"short id in shorts path", "https://www.youtube.com/shorts/abc", "", waxerr.ErrVideoIDTooShort},
 
 		// A non-YouTube host is not a video reference, even with a valid-looking ID.
 		{"non-youtube host", "https://example.com/watch?v=" + id, "", waxerr.ErrInvalidVideoID},

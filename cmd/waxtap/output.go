@@ -18,6 +18,7 @@ import (
 
 	"github.com/colespringer/waxtap"
 	"github.com/colespringer/waxtap/internal/tempfile"
+	"github.com/colespringer/waxtap/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -350,6 +351,15 @@ const (
 func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
 		env.info("note: WEB metadata via the watch-page fallback (no PO token)\n")
+	}
+}
+
+// noteDroppedPlaylist reports a list= parameter that the current command will not
+// process. hint gives the command-specific next step for handling the whole
+// playlist. The note stays on stderr, keeping JSON and -o - stdout parseable.
+func noteDroppedPlaylist(env *appEnv, input, hint string) {
+	if id, err := youtube.ExtractPlaylistID(input); err == nil {
+		env.info("note: ignoring playlist %s; %s\n", id, hint)
 	}
 }
 

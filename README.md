@@ -55,8 +55,9 @@ the first SmartScreen prompt.
 Media commands accept a YouTube URL or bare video or playlist ID. `cut`,
 `transcode`, and `normalize` also accept local files. Every command has `--help`,
 and `--json` provides a stable scriptable contract (`schemaVersion` 1). `info
---show-url` adds a signed, expiring stream URL to the JSON `url` field; treat any
-captured output as sensitive.
+--show-url` adds a signed, expiring stream URL at `resolved.url`, plus
+`resolved.expiresAt` and `resolved.contentLength`; treat captured output as
+sensitive.
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio

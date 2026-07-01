@@ -189,7 +189,7 @@ func TestEnumerate_FallbackProfileUsesChromeMajor(t *testing.T) {
 		})),
 	})
 
-	pl, err := c.Enumerate(context.Background(), "PLtest", 0)
+	pl, err := c.Enumerate(context.Background(), "PLtest", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

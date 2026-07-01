@@ -33,6 +33,7 @@ func newFormatsCmd() *cobra.Command {
 				env.info("note: requested %s; listing %s formats from the watch-page fallback\n", info.SubstitutedFrom, info.Client)
 			}
 			emitWatchPageBreadcrumb(env, info)
+			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
 			video := info.Video
 			formats := audioFormats(video.Formats)
 			if env.jsonMode() {

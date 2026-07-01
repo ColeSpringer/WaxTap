@@ -238,6 +238,42 @@ func TestWebContextFormatsCarryDrcAndTrack(t *testing.T) {
 	}
 }
 
+func TestWebContextFormatsSkipDegenerate(t *testing.T) {
+	// A malformed player context can include entries WaxTap cannot stream: a
+	// non-positive itag, a non-audio MIME, or an empty MIME. Each is dropped before
+	// SABR selection sees the renditions.
+	pc := sampleContext()
+	pc.AudioFormats = []potoken.PlayerContextFormat{
+		{Itag: 251, MimeType: `audio/webm; codecs="opus"`, Bitrate: 143452, AudioChannels: 2, AudioSampleRate: 48000},
+		{Itag: 0, MimeType: `audio/mp4; codecs="mp4a.40.2"`},     // non-positive itag
+		{Itag: 137, MimeType: `video/mp4; codecs="avc1.640028"`}, // non-audio MIME
+		{Itag: 250, MimeType: ""}, // empty MIME
+	}
+	c := webContextClient(pc, nil)
+	ext, err := c.ExtractWebContext(context.Background(), "v")
+	if err != nil {
+		t.Fatalf("ExtractWebContext: %v", err)
+	}
+	if len(ext.rawAudio) != 1 || ext.rawAudio[0].Itag != 251 {
+		t.Fatalf("rawAudio = %+v, want only the itag-251 audio entry", ext.rawAudio)
+	}
+}
+
+func TestWebContextAllDegenerateFails(t *testing.T) {
+	// When every entry is unusable, the context yields ErrExtractionFailed instead
+	// of an empty rendition set.
+	pc := sampleContext()
+	pc.AudioFormats = []potoken.PlayerContextFormat{
+		{Itag: 0, MimeType: `audio/webm; codecs="opus"`},
+		{Itag: 137, MimeType: `video/mp4`},
+		{Itag: 250, MimeType: ""},
+	}
+	c := webContextClient(pc, nil)
+	if _, err := c.ExtractWebContext(context.Background(), "v"); !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Errorf("err = %v, want ErrExtractionFailed for an all-degenerate context", err)
+	}
+}
+
 func TestExpiresAtFromURL(t *testing.T) {
 	got := expiresAtFromURL("https://rr3.googlevideo.com/videoplayback?expire=1781138473&n=x")
 	if want := time.Unix(1781138473, 0); !got.Equal(want) {

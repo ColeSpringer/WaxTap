@@ -401,12 +401,12 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 	if err != nil {
 		return nil, err
 	}
-	pl, err := c.yt.Enumerate(ctx, id, opts.MaxItems)
+	pl, err := c.yt.Enumerate(ctx, id, opts.MaxItems, opts.OnProgress)
 	if err != nil {
 		return nil, err
 	}
 	if opts.Enrich {
-		if err := c.enrichEntries(ctx, pl); err != nil {
+		if err := c.enrichEntries(ctx, pl, opts.OnEnrichProgress); err != nil {
 			return pl, err
 		}
 	}
@@ -416,14 +416,22 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 // enrichEntries refreshes playlist entries with InfoBasic. Each worker owns one
 // entry; only pl.Errors is shared. Ordinary item failures stay on the playlist,
 // but context cancellation is returned to the caller.
-func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
+//
+// onProgress reports each completed entry, successful or failed. Calls are
+// serialized under a dedicated progress lock and arrive in increasing done-count
+// order. The final call reaches (total, total) unless context cancellation stops
+// enrichment early.
+func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress func(done, total int)) error {
 	limit := c.opts.Concurrency.Downloads
 	if limit <= 0 {
 		limit = 4
 	}
+	total := len(pl.Entries)
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var progressMu sync.Mutex
+	progressDone := 0
 	for i := range pl.Entries {
 		if ctx.Err() != nil {
 			break
@@ -432,6 +440,17 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist) error {
 		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
+			// The semaphore release is registered after this defer, so it runs first.
+			// A slow progress callback cannot occupy a worker slot, and progressMu
+			// stays separate from the playlist error lock.
+			defer func() {
+				if onProgress != nil {
+					progressMu.Lock()
+					progressDone++
+					onProgress(progressDone, total)
+					progressMu.Unlock()
+				}
+			}()
 			defer func() { <-sem }()
 			v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
 			if err != nil {

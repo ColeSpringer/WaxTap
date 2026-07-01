@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/potoken"
@@ -119,6 +120,14 @@ func (c *Client) webContextProfile(version string) ClientProfile {
 func webContextFormats(formats []potoken.PlayerContextFormat) []rawFormat {
 	out := make([]rawFormat, 0, len(formats))
 	for _, f := range formats {
+		// Ignore player-context entries WaxTap cannot request: missing itag,
+		// non-audio MIME, or empty MIME. This mirrors the player-response audio
+		// filter and normalizes whitespace/case because external contexts are less
+		// predictable than YouTube's JSON. If every entry is dropped, the existing
+		// empty-format guard returns ErrExtractionFailed for fallback.
+		if f.Itag <= 0 || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(f.MimeType)), "audio/") {
+			continue
+		}
 		rf := rawFormat{
 			Itag:             f.Itag,
 			MimeType:         f.MimeType,

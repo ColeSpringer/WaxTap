@@ -234,6 +234,21 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 			transcoding = true
 			remux = false
 		}
+		// Raw FLAC is a special copy-cut case. ffmpeg can stream-copy the audio, but
+		// the FLAC muxer keeps the source STREAMINFO total_samples, so players see
+		// the old duration after a trim. A downmix or crossfade already re-encodes
+		// and writes fresh metadata. For a pure smart cut, upgrade to a lossless FLAC
+		// encode; for explicit copy/remux, ask the caller to re-encode or use .mka
+		// when a true stream copy is required.
+		if effectiveCut && spec.Codec == transcode.CodecCopy && fold == 0 && spec.Crossfade == 0 &&
+			ext == "flac" && strings.EqualFold(res.SourceCodec, "flac") {
+			if remux || spec.CutMode == cut.ModeCopy {
+				return Result{}, fmt.Errorf("%w: a stream-copy cut into raw FLAC leaves a stale duration header; re-encode (smart/accurate mode or --format flac) or use a Matroska (.mka) container for a true copy", waxerr.ErrIncompatibleSpec)
+			}
+			spec.Codec = transcode.CodecFLAC
+			transcoding = true
+			remux = false
+		}
 	}
 
 	// A downmix into a compatible container uses the source codec family when no

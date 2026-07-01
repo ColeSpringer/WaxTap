@@ -45,6 +45,7 @@ func newInfoCmd() *cobra.Command {
 				return err
 			}
 			emitWatchPageBreadcrumb(env, info)
+			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
 			video := info.Video
 
 			var resolved *waxtap.ResolvedStream

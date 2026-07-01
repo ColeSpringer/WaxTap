@@ -581,8 +581,11 @@ func TestRunCutExtensionChangeTranscodes(t *testing.T) {
 func TestRunCutSameContainerCopies(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()
-	in := synthSine(t, dir, "in.flac", 4, "flac")
-	out := filepath.Join(dir, "out.flac")
+	// Matroska reports the true post-copy duration, so a same-container smart cut
+	// stream-copies cleanly. Raw FLAC is deliberately excluded here: the pipeline
+	// escalates a raw-.flac smart cut to a re-encode, covered separately.
+	in := synthSine(t, dir, "in.mka", 4, "flac")
+	out := filepath.Join(dir, "out.mka")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
 		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
@@ -595,6 +598,63 @@ func TestRunCutSameContainerCopies(t *testing.T) {
 	}
 	if !res.Cut || !fileExists(out) {
 		t.Errorf("cut should have applied and written output: %+v", res)
+	}
+}
+
+// TestRunSmartCutFlacReencodes verifies that a smart cut from raw FLAC to raw
+// FLAC upgrades to a lossless re-encode with a correct duration header.
+func TestRunSmartCutFlacReencodes(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 4, "flac")
+	out := filepath.Join(dir, "out.flac")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Cut || !res.Transcoded || res.OutputCodec != transcode.CodecFLAC {
+		t.Errorf("smart FLAC cut result = %+v, want a flac re-encode with Cut", res)
+	}
+	// The header must reflect the trimmed length (~3s), not the 4s source.
+	if d := probeDuration(t, r, out); d < 2700*time.Millisecond || d > 3300*time.Millisecond {
+		t.Errorf("output duration = %v, want ~3s (stale header would report ~4s)", d)
+	}
+	if a, _ := res.OutputProbe.AudioStream(); a.CodecName != "flac" {
+		t.Errorf("output codec = %q, want flac", a.CodecName)
+	}
+}
+
+// TestRunCopyCutFlacRejected verifies that explicit copy/remux into raw FLAC is
+// rejected instead of writing a file with stale duration metadata.
+func TestRunCopyCutFlacRejected(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 4, "flac")
+
+	specs := map[string]Spec{
+		"cut-mode copy": {
+			Remove:  []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+			Codec:   transcode.CodecCopy,
+			CutMode: cut.ModeCopy,
+		},
+		"format copy": {
+			Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+			Codec:  transcode.CodecCopy,
+			Remux:  true,
+		},
+	}
+	for name, spec := range specs {
+		out := filepath.Join(dir, "out.flac")
+		_, err := Run(context.Background(), r, in, out, spec, nil)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("%s into .flac err = %v, want ErrIncompatibleSpec", name, err)
+		}
+		if fileExists(out) {
+			t.Errorf("%s wrote output despite rejection", name)
+		}
 	}
 }
 
