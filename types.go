@@ -467,7 +467,7 @@ type Result struct {
 	SourceBytes int64 // bytes read from the acquired or local source
 	OutputBytes int64 // bytes delivered to the output sink
 
-	Transcoded          bool            // audio was re-encoded or remuxed
+	Transcoded          bool            // audio was re-encoded (not stream-copied); a copy/remux stays false
 	CutApplied          bool            // at least one time range was removed
 	SponsorBlockApplied bool            // SponsorBlock contributed a removed range
 	LoudnessMeasured    bool            // measured != normalized

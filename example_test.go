@@ -246,3 +246,39 @@ func Example_errors() {
 	// category: video unavailable
 	// status: UNPLAYABLE
 }
+
+// ExampleNewSidecarPOTokenProvider wires a running WaxSeal sidecar into a client
+// for full WEB SABR audio: a PO-token provider plus an attested player-context
+// provider, both pointed at the same host so the token mint and the stream share
+// egress. NewSidecarSessionProvider (adopted /session) is the alternative to the
+// player-context handoff. See MAINTENANCE.md for the sidecar wire contracts.
+func ExampleNewSidecarPOTokenProvider() {
+	// The PO-token and player-context endpoints must share a host with the
+	// download so the IP-bound token stays valid. Each accepts a base URL or a
+	// full endpoint; add WithSidecarAPIKey for an authenticated sidecar.
+	poToken, err := waxtap.NewSidecarPOTokenProvider("http://127.0.0.1:4416")
+	if err != nil {
+		log.Fatal(err)
+	}
+	playerContext, err := waxtap.NewSidecarPlayerContextProvider("http://127.0.0.1:4416")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client, err := waxtap.New(waxtap.Options{
+		POTokenProvider:       poToken,
+		PlayerContextProvider: playerContext,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	res, err := client.Download(context.Background(), waxtap.Request{
+		URL:         "https://www.youtube.com/watch?v=VIDEO_ID_01",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile("track.opus")},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("delivered %d bytes via %s\n", res.OutputBytes, res.Client)
+}

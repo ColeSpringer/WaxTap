@@ -57,6 +57,14 @@ func newNormalizeCmd() *cobra.Command {
 					measure: measure, target: target, format: format, bitrate: bitrate, dir: dir, collisionStr: collisionStr,
 				})
 			}
+			// Reject an explicitly empty --out/--dir (usually an unset $VAR) before the
+			// single-file or directory path applies its default. It runs after the
+			// measure-mode check (which owns these flags when measuring) and after the
+			// --album branch (which requires --dir and rejects --out, so album keeps
+			// its own specific errors instead of the generic "omit it" hint).
+			if err := rejectEmptyFlags(cmd, "out", "dir"); err != nil {
+				return err
+			}
 
 			source := args[0]
 			explicit := out

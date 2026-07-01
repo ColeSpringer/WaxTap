@@ -162,3 +162,17 @@ func bindCollisionFlag(f *pflag.FlagSet, collisionStr *string) {
 func bindBitrateFlag(f *pflag.FlagSet, bitrate *int) {
 	f.IntVar(bitrate, "bitrate", 0, "target bitrate in bits per second for lossy formats (0 uses the preset default)")
 }
+
+// rejectEmptyFlags errors when any named string flag is explicitly set to an
+// empty or whitespace-only value (usually an unset shell/env $VAR); omitting the
+// flag uses the default. Unknown names are skipped, so it is safe to pass a flag
+// a command lacks.
+func rejectEmptyFlags(cmd *cobra.Command, names ...string) error {
+	for _, name := range names {
+		f := cmd.Flags().Lookup(name)
+		if f != nil && f.Changed && strings.TrimSpace(f.Value.String()) == "" {
+			return usagef("empty --%s path; omit it to use the default location", name)
+		}
+	}
+	return nil
+}

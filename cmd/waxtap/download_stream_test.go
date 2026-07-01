@@ -64,6 +64,34 @@ func TestResolveStdoutSink(t *testing.T) {
 	})
 }
 
+// TestResolveRejectsEmptyPathFlags checks that an explicitly empty
+// --out/--dir/--output-template (usually an unset shell/env $VAR) is a usage
+// error rather than a silent fallback to the default output location.
+func TestResolveRejectsEmptyPathFlags(t *testing.T) {
+	newDF := func() (*downloadFlags, *cobra.Command) {
+		df := &downloadFlags{}
+		cmd := &cobra.Command{Use: "download"}
+		bindDownloadFlags(cmd, df)
+		return df, cmd
+	}
+	cases := []struct{ name, flag, val string }{
+		{"empty out", "out", ""},
+		{"whitespace out", "out", "   "},
+		{"empty dir", "dir", ""},
+		{"empty output-template", "output-template", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			df, cmd := newDF()
+			mustSet(t, cmd, tc.flag, tc.val)
+			err := df.resolve(cmd, testResolveEnv())
+			if !isUsageError(err) || !strings.Contains(err.Error(), "empty --"+tc.flag+" path") {
+				t.Fatalf("resolve err = %v, want an empty --%s usage error", err, tc.flag)
+			}
+		})
+	}
+}
+
 // TestStreamPreStreamErrorStaysOffStdout is the single-seam guard: when streaming
 // to stdout, a failure before any audio is written (here an invalid target, which
 // fails in resolveItem) must render to stderr and come back alreadyRendered so main

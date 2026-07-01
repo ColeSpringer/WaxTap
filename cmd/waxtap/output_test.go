@@ -207,7 +207,7 @@ func TestExitCodeFor(t *testing.T) {
 }
 
 func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
-	se := &sidecarError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", err: &net.OpError{Op: "dial", Err: errFake("refused")}}
+	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", Err: &net.OpError{Op: "dial", Err: errFake("refused")}}
 	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
 	if got := exitCodeFor(wrapped); got != 9 {
 		t.Errorf("unreachable PO-token sidecar exit = %d, want 9 (a dead sidecar is a network failure)", got)
@@ -227,7 +227,7 @@ func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
 
 func TestClassifyError_SidecarAuth(t *testing.T) {
 	for _, status := range []int{401, 403} {
-		sre := &sidecarResponseError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", statusCode: status}
+		sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", StatusCode: status}
 		c := classifyError(sre)
 		if c.exitCode != 2 || c.code != "invalid-config" {
 			t.Errorf("status %d = %+v, want invalid-config/2", status, c)
@@ -237,7 +237,7 @@ func TestClassifyError_SidecarAuth(t *testing.T) {
 		}
 	}
 	// Wrapped sidecar responses retain the authentication hint.
-	wrapped := fmt.Errorf("%w: %w", waxtap.ErrNeedsPOToken, &sidecarResponseError{label: "bgutil", endpoint: "http://h/get_pot", statusCode: 401})
+	wrapped := fmt.Errorf("%w: %w", waxtap.ErrNeedsPOToken, &waxtap.SidecarResponseError{Label: "bgutil", Endpoint: "http://h/get_pot", StatusCode: 401})
 	if c := classifyError(wrapped); !strings.Contains(c.hint, "--api-key") {
 		t.Errorf("wrapped 401 hint = %q, want it to mention --api-key", c.hint)
 	}
@@ -362,7 +362,7 @@ func TestClassifyError_SidecarResponse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sre := &sidecarResponseError{label: "session endpoint", endpoint: "http://127.0.0.1:4416/session", statusCode: tc.status, reason: "x"}
+			sre := &waxtap.SidecarResponseError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", StatusCode: tc.status, Reason: "x"}
 			prov := &waxtap.ProviderError{Endpoint: "session", Cause: sre}
 			if c := classifyError(prov); c.exitCode != tc.exit || c.code != tc.code {
 				t.Errorf("provider %s = %+v, want exit %d and code %s", tc.name, c, tc.exit, tc.code)
@@ -376,13 +376,18 @@ func TestClassifyError_SidecarResponse(t *testing.T) {
 }
 
 func TestFriendlyError_Sidecar429NamesSidecar(t *testing.T) {
-	sre := &sidecarResponseError{label: "bgutil PO-token server", endpoint: "http://user:pass@127.0.0.1:4417/get_pot?key=secret", statusCode: 429}
+	sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://user:pass@127.0.0.1:4417/get_pot?key=secret", StatusCode: 429}
 	msg := friendlyError(sre)
-	if !strings.Contains(msg, "sidecar") {
-		t.Errorf("msg = %q, want it to attribute throttling to the sidecar", msg)
+	// The message names the specific provider (distinct from YouTube) and status;
+	// the "check the sidecar's rate limits" advisory now rides on the hint channel.
+	if !strings.Contains(msg, "bgutil PO-token server") || !strings.Contains(msg, "429") {
+		t.Errorf("msg = %q, want it to attribute throttling to the named sidecar", msg)
 	}
 	if strings.Contains(msg, "secret") || strings.Contains(msg, "user:pass") {
 		t.Errorf("msg = %q, want the endpoint redacted without query or user info", msg)
+	}
+	if h := classifyError(sre).hint; !strings.Contains(h, "rate limit") {
+		t.Errorf("hint = %q, want a sidecar rate-limit advisory", h)
 	}
 	if yt := friendlyError(waxtap.ErrRateLimited); !strings.Contains(yt, "YouTube") {
 		t.Errorf("YouTube rate-limit msg = %q, want it to name YouTube", yt)
@@ -657,7 +662,7 @@ func TestFriendlyError_ProxyAndInvalidPlaylist(t *testing.T) {
 }
 
 func TestFriendlyError_SidecarUnreachableBeatsPOToken(t *testing.T) {
-	se := &sidecarError{label: "bgutil PO-token server", endpoint: "http://127.0.0.1:4417/get_pot", err: errors.New("connection refused")}
+	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", Err: errors.New("connection refused")}
 	// The YouTube layer wraps provider failures with ErrNeedsPOToken.
 	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
 	msg := friendlyError(wrapped)

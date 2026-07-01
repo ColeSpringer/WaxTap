@@ -448,9 +448,9 @@ func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id strin
 // Enumerate expands a playlist or channel URL into entries without downloading
 // media. A channel reference (a bare UC ID, or a /channel/, /@handle, /c/, or
 // /user/ URL, with any trailing tab stripped) resolves to the channel's uploads
-// feed, which is newest-first and historically omits Shorts and live streams.
-// EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an archive
-// cursor. With Enrich set, InfoBasic calls refresh entries at bounded
+// feed, which is newest-first and lists Shorts and past live streams as ordinary
+// entries. EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an
+// archive cursor. With Enrich set, InfoBasic calls refresh entries at bounded
 // concurrency. Successful calls update their entries; item-level failures are
 // added to Playlist.Errors.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {

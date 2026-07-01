@@ -137,6 +137,47 @@ func TestNormalizeWriteByDefaultNeedsOutput(t *testing.T) {
 	}
 }
 
+// TestNormalizeAlbumEmptyFlagsKeepAlbumMessage verifies that an explicitly empty
+// --dir/--out in album mode keeps album's specific requirement errors rather than
+// the generic empty-path hint. --album requires --dir and rejects --out, so "omit
+// it to use the default location" would be misleading.
+func TestNormalizeAlbumEmptyFlagsKeepAlbumMessage(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.wav")
+	f2 := filepath.Join(dir, "b.wav")
+	for _, p := range []string{f1, f2} {
+		if err := os.WriteFile(p, []byte("fixture"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"empty --dir", []string{"--album", "--format", "flac", "--dir", "", f1, f2}, "pass --dir"},
+		{"empty --out", []string{"--album", "--format", "flac", "--out", "", f1, f2}, "not used with --album"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newNormalizeCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if _, ok := errors.AsType[*usageError](err); !ok {
+				t.Fatalf("normalize %v: err = %v (%T), want *usageError", tc.args, err, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("normalize %v: message = %q, want album-specific %q", tc.args, err, tc.want)
+			}
+			if strings.Contains(err.Error(), "omit it to use the default location") {
+				t.Errorf("normalize %v: message = %q, leaked the generic empty-path hint", tc.args, err)
+			}
+		})
+	}
+}
+
 // TestValidateNormalizeModeFlags checks flags whose validity depends on mode.
 func TestValidateNormalizeModeFlags(t *testing.T) {
 	writeFlags := []struct{ name, val string }{

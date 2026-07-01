@@ -375,16 +375,16 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	if err != nil {
 		return waxtap.Options{}, err
 	}
-	// A configured PO-token URL enables WEB/GVS tokens. The provider uses its own
-	// dedicated client (see bgutilProvider), not hc, so token traffic is never
+	// A configured PO-token URL enables WEB/GVS tokens. The constructor builds a
+	// provider with its own dedicated client, not hc, so token traffic is never
 	// proxied through --proxy/--insecure.
 	var poProvider waxtap.POTokenProvider
 	if a.potokenURL != "" {
-		endpoint, err := buildSidecarURL(a.potokenURL, "/get_pot")
+		p, err := waxtap.NewSidecarPOTokenProvider(a.potokenURL, waxtap.WithSidecarAPIKey(a.apiKey))
 		if err != nil {
 			return waxtap.Options{}, usagef("invalid --potoken-url %q: %v", a.potokenURL, err)
 		}
-		poProvider = newBgutilProvider(endpoint, a.apiKey)
+		poProvider = p
 	}
 
 	// The attested WEB /player-context path streams full WEB audio Go-side. It
@@ -395,11 +395,11 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		if a.potokenURL == "" {
 			return waxtap.Options{}, usagef("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
 		}
-		endpoint, err := buildSidecarURL(a.playerContextURL, "/player-context")
+		p, err := waxtap.NewSidecarPlayerContextProvider(a.playerContextURL, waxtap.WithSidecarAPIKey(a.apiKey))
 		if err != nil {
 			return waxtap.Options{}, usagef("invalid --player-context-url %q: %v", a.playerContextURL, err)
 		}
-		pcProvider = newPlayerContextProvider(endpoint, a.apiKey)
+		pcProvider = p
 	}
 
 	// External session adoption: a pull-based --session-url provider, or a static
@@ -458,18 +458,18 @@ func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSes
 		if a.visitorData != "" || a.cookiesPath != "" {
 			return nil, nil, usagef("--session-url cannot be combined with --visitor-data/--cookies")
 		}
-		endpoint, err := buildSidecarURL(a.sessionURL, "/session")
+		p, err := waxtap.NewSidecarSessionProvider(a.sessionURL, waxtap.WithSidecarAPIKey(a.apiKey))
 		if err != nil {
 			return nil, nil, usagef("invalid --session-url %q: %v", a.sessionURL, err)
 		}
-		return nil, newHTTPSessionProvider(endpoint, a.apiKey), nil
+		return nil, p, nil
 	case a.visitorData != "" || a.cookiesPath != "":
 		if a.visitorData == "" {
 			return nil, nil, usagef("--cookies requires --visitor-data: adoption needs the browser's exact visitorData")
 		}
 		var cookies []*http.Cookie
 		if a.cookiesPath != "" {
-			parsed, err := parseNetscapeCookies(a.cookiesPath)
+			parsed, err := waxtap.ParseNetscapeCookies(a.cookiesPath)
 			if err != nil {
 				// An unreadable --cookies file is invalid CLI input. The underlying
 				// error already identifies the file.

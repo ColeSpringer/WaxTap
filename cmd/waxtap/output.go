@@ -244,7 +244,7 @@ func classifyError(err error) classifiedError {
 	c := classifiedError{message: cleanMessage(friendlyError(err)), exitCode: 1, code: "error"}
 	// Classify invalid sidecar responses by status, including responses wrapped in
 	// ErrNeedsPOToken.
-	sre, hasSidecarResp := errors.AsType[*sidecarResponseError](err)
+	sre, hasSidecarResp := errors.AsType[*waxtap.SidecarResponseError](err)
 	switch {
 	case errors.Is(err, context.Canceled):
 		c.exitCode, c.code = 130, "canceled"
@@ -255,8 +255,8 @@ func classifyError(err error) classifiedError {
 		case hasSidecarResp:
 			// The sidecar responded, so classify the failure by its HTTP status or
 			// response content.
-			c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
-			c.hint = sidecarAuthHint(sre.statusCode)
+			c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
+			c.hint = sidecarAuthHint(sre.StatusCode)
 		case isSidecarConnection(err):
 			c.exitCode, c.code, c.hint = 9, "network", "start the PO-token sidecar or correct --potoken-url"
 		default:
@@ -328,8 +328,8 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code, c.hint = 9, "network", "check the proxy is reachable and that --proxy is a correct URL"
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
-		c.exitCode, c.code = sidecarResponseExit(sre.statusCode)
-		c.hint = sidecarAuthHint(sre.statusCode)
+		c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
+		c.hint = sidecarAuthHint(sre.StatusCode)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
 	case isConnectionError(err):
@@ -423,14 +423,12 @@ func friendlyError(err error) string {
 	if isProxyError(err) {
 		return "proxy connection failed (check --proxy)"
 	}
-	if se, ok := errors.AsType[*sidecarError](err); ok {
-		return fmt.Sprintf("%s unreachable at %s", se.label, redactURL(se.endpoint))
+	// The sidecar error types self-redact their endpoint, so their Error() is safe
+	// to surface directly; the 429 rate-limit advisory rides on sidecarAuthHint.
+	if se, ok := errors.AsType[*waxtap.SidecarError](err); ok {
+		return se.Error()
 	}
-	if sre, ok := errors.AsType[*sidecarResponseError](err); ok {
-		// Name the sidecar so this is distinguishable from YouTube rate limiting.
-		if sre.statusCode == http.StatusTooManyRequests {
-			return fmt.Sprintf("%s at %s returned HTTP 429; check the sidecar's rate limits", sre.label, redactURL(sre.endpoint))
-		}
+	if sre, ok := errors.AsType[*waxtap.SidecarResponseError](err); ok {
 		return sre.Error()
 	}
 	// A typed playlist-unavailable error carries YouTube's own reason (no URL), so
@@ -548,14 +546,19 @@ func isProviderError(err error) bool {
 
 // isSidecarConnection reports whether err contains a sidecar connection failure.
 func isSidecarConnection(err error) bool {
-	_, ok := errors.AsType[*sidecarError](err)
+	_, ok := errors.AsType[*waxtap.SidecarError](err)
 	return ok
 }
 
-// sidecarAuthHint returns guidance for sidecar authentication failures.
+// sidecarAuthHint returns guidance for a sidecar response status: authentication
+// help for 401/403 and a rate-limit advisory for 429. It rides the c.hint channel
+// so package main needs no redact helper for the 429 message.
 func sidecarAuthHint(status int) string {
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
 		return "the sidecar requires authentication; set or verify --api-key"
+	case http.StatusTooManyRequests:
+		return "check the sidecar's rate limits"
 	}
 	return ""
 }

@@ -158,6 +158,37 @@ func TestRejectStdoutOutput(t *testing.T) {
 	}
 }
 
+// TestRejectEmptyPathFlags checks that an explicitly empty --out/--dir (usually
+// an unset shell/env $VAR) is a usage error on the process commands instead of a
+// silent fallback to the beside-input default.
+func TestRejectEmptyPathFlags(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	if err := os.WriteFile(in, []byte("placeholder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"transcode -o empty", "out", []string{"transcode", in, "-f", "flac", "-o", ""}},
+		{"transcode -o whitespace", "out", []string{"transcode", in, "-f", "flac", "-o", "   "}},
+		{"transcode --dir empty", "dir", []string{"transcode", in, "-f", "flac", "--dir", ""}},
+		{"normalize -o empty", "out", []string{"normalize", in, "-f", "flac", "-o", ""}},
+		{"normalize --dir empty", "dir", []string{"normalize", in, "-f", "flac", "--dir", ""}},
+		{"cut -o empty", "out", []string{"cut", in, "--cut-range", "0-1", "-o", ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runProcessCmd(t, tc.args...)
+			if err == nil || !strings.Contains(err.Error(), "empty --"+tc.flag+" path") {
+				t.Errorf("%v = %v, want an empty --%s usage error", tc.args, err, tc.flag)
+			}
+		})
+	}
+}
+
 // TestChannelURLErrorPrecedence verifies that channel URLs fail as channel URLs,
 // even when output-format validation would also fail later.
 func TestChannelURLErrorPrecedence(t *testing.T) {

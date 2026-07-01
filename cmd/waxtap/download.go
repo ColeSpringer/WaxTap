@@ -192,6 +192,13 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 			return err
 		}
 	}
+	// An explicitly empty path flag (usually an unset shell/env $VAR) would
+	// silently fall back to the default location; reject it before that default
+	// is applied. --output-template has a non-empty default and validates an
+	// empty string, so Changed distinguishes it too.
+	if err := rejectEmptyFlags(cmd, "out", "dir", "output-template"); err != nil {
+		return err
+	}
 	if err := validateItag(cmd, df.itag); err != nil {
 		return err
 	}

@@ -113,7 +113,7 @@ type Result struct {
 
 	Cut              bool            // an effective cut was rendered
 	Removed          time.Duration   // audio removed by the cut
-	Transcoded       bool            // a re-encode to a new codec ran
+	Transcoded       bool            // a re-encode ran (not a stream copy/remux)
 	OutputCodec      transcode.Codec // codec written to OutputPath
 	LoudnessMeasured bool            // input loudness was measured
 	LoudnessApplied  bool            // normalization was applied

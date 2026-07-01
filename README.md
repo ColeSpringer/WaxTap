@@ -80,7 +80,8 @@ waxtap doctor
 ```
 
 Channel and playlist enumeration returns entries in feed order; a channel's
-uploads feed is newest-first and historically omits Shorts and live streams.
+uploads feed is newest-first and lists Shorts and past live streams as ordinary
+entries.
 
 Directory inputs are supported by `transcode` and `normalize`; use `-r` to
 recurse, `--dir` for an output directory, and `--force` to re-encode files that
@@ -149,15 +150,19 @@ func main() {
 
 The default `Download` (a nil `ProcessSpec`) delivers the source stream
 byte-for-byte: no ffmpeg, `SourceBytes == OutputBytes`, and `Transcoded` false.
-`Client.Enumerate` expands a playlist or channel URL, with `Skip`/`Stop`
+Library selection starts from `LayoutAny`, so it can rank a surround track
+highest; pass `WithChannels(LayoutStereo)` to match the CLI (see Operational
+notes). `Client.Enumerate` expands a playlist or channel URL, with `Skip`/`Stop`
 predicates for an archive cursor; `Info(..., WithFullMetadata())` and
 `Request.FullMetadata` add publish date and chapters. Availability failures
 (`ErrVideoUnavailable`, `ErrAgeRestricted`, `ErrMembersOnly`, `ErrGeoBlocked`,
 `ErrLiveContent`, `ErrLiveNotStarted`, and siblings) are typed sentinels a feed
 consumer should skip rather than treat as fatal; see the package doc's
-skip-vs-fail taxonomy. See [`example_test.go`](example_test.go) for streaming,
-local processing, playlists, SponsorBlock, album measurement, and metadata
-examples.
+skip-vs-fail taxonomy. For full WEB SABR audio, wire a running sidecar through
+`NewSidecarPOTokenProvider`/`NewSidecarPlayerContextProvider`/`NewSidecarSessionProvider`
+(see PO tokens and WEB). See [`example_test.go`](example_test.go) for streaming,
+local processing, playlists, SponsorBlock, album measurement, metadata, and WEB
+SABR examples.
 
 ## Configuration
 
@@ -269,6 +274,14 @@ waxtap download <url> --client web \
   --session-url http://127.0.0.1:4416/session \
   --potoken-url http://127.0.0.1:4416/get_pot
 ```
+
+Library callers get the same handoff without reimplementing the sidecar wire
+format: `waxtap.NewSidecarPOTokenProvider`, `NewSidecarPlayerContextProvider`,
+and `NewSidecarSessionProvider` build providers for `Options.POTokenProvider`,
+`PlayerContextProvider`, and `SessionProvider`. Each takes a base URL or full
+endpoint plus an optional `WithSidecarAPIKey`, and `ParseNetscapeCookies` loads a
+static session from a browser `cookies.txt`. See `ExampleNewSidecarPOTokenProvider`
+in [`example_test.go`](example_test.go).
 
 Session adoption requires a single-client chain. Static adoption is also
 available with `--visitor-data` and optional `--cookies`; visitor data is sent

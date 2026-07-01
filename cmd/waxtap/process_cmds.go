@@ -220,6 +220,12 @@ func newCutCmd() *cobra.Command {
 			if err := rejectEmptySponsorBlock(cmd, sbCats); err != nil {
 				return err
 			}
+			// An explicitly empty --out (usually an unset $VAR) would derive a
+			// beside-input name instead; reject it before resolving the output. cut
+			// has no --dir (it rejects directory input), so only --out applies.
+			if err := rejectEmptyFlags(cmd, "out"); err != nil {
+				return err
+			}
 			// Reject stdout output, invalid sources, and directory outputs before
 			// parsing cut format details. These direct input errors should not be
 			// masked by bitrate or format inference.
@@ -376,6 +382,11 @@ func newTranscodeCmd() *cobra.Command {
 				explicit = args[1]
 			}
 
+			// Reject an explicitly empty --out/--dir (usually an unset $VAR) for
+			// both file and directory inputs, before either path applies its default.
+			if err := rejectEmptyFlags(cmd, "out", "dir"); err != nil {
+				return err
+			}
 			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
 				return runDirectoryTranscode(cmd, env, directoryTranscodeParams{
 					root: source, explicit: explicit, dir: dir, recursive: recursive,
