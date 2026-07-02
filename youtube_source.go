@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/colespringer/waxtap/cut"
-	"github.com/colespringer/waxtap/download"
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/internal/pipeline"
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2/cut"
+	"github.com/colespringer/waxtap/v2/download"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/internal/pipeline"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube"
 )
 
 // SponsorBlockSegments returns skip segments for videoURL using the client's

@@ -17,8 +17,8 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // sabrPlayerJSON is a minimal SABR-only /player response: URL-less audio plus a

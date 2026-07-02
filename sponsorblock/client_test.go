@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 const testVideoID = "testVideo01"

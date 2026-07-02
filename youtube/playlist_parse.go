@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // playlistMeta is the playlist-level metadata pulled from a browse response.

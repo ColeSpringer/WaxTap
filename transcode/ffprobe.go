@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // ProbeResult is the parsed subset of ffprobe's -show_format -show_streams JSON:

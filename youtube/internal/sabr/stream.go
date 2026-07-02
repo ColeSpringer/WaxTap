@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/dumpfile"
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/internal/iox"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/dumpfile"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/internal/iox"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Defaults applied by Open when a Config field is left zero.

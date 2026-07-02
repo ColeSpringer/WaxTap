@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
 )
 
 func TestJSONUnescape(t *testing.T) {

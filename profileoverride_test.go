@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // writeOverride writes content to a temp file and returns its path.

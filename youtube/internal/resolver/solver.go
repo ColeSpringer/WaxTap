@@ -10,7 +10,7 @@ import (
 	"github.com/dop251/goja/parser"
 	"github.com/dop251/goja/token"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // This file runs YouTube's own player to solve the signature and n-parameter

@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/cut"
-	"github.com/colespringer/waxtap/normalize"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/cut"
+	"github.com/colespringer/waxtap/v2/normalize"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Stage identifies a processing stage for progress events. The facade maps these

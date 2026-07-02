@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // ExampleClient_Download downloads the best audio stream to a file. With no

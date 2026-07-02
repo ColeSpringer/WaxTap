@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 	"github.com/spf13/cobra"
 )
 

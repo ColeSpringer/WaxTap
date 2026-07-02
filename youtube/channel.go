@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // channelIDRe matches a canonical UC channel ID (UC + 22 ID characters).

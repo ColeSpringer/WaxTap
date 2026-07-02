@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // playerResponse is the subset of the InnerTube /player response WaxTap needs.

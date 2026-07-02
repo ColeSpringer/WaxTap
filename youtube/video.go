@@ -3,7 +3,7 @@ package youtube
 import (
 	"time"
 
-	"github.com/colespringer/waxtap/format"
+	"github.com/colespringer/waxtap/v2/format"
 )
 
 // Video is the extracted metadata model. YouTube exposes channel metadata rather

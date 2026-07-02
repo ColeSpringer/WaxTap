@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // ffprobe accepts an empty raw FLAC by extension and reports an audio stream

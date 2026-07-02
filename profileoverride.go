@@ -8,8 +8,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/youtube"
 )
 
 // profileOverrideFile is the JSON schema of a client-profile override file. It

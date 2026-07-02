@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube/internal/resolver"
-	"github.com/colespringer/waxtap/youtube/internal/sabr"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v2/youtube/internal/sabr"
 )
 
 // Limit retries so a bad endpoint or token provider cannot loop indefinitely.

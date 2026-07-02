@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 const testChannelID = "UCabcdefghijklmnopqrstuv" // UC + 22 chars

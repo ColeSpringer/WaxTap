@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/colespringer/waxtap/transcode"
+	"github.com/colespringer/waxtap/v2/transcode"
 )
 
 // defaultTruePeak is the true-peak ceiling (dBTP) used when applying

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/cut"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/cut"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 func newTestRunner(t *testing.T) *transcode.Runner {

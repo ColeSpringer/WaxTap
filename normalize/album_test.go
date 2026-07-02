@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/cut"
-	"github.com/colespringer/waxtap/transcode"
+	"github.com/colespringer/waxtap/v2/cut"
+	"github.com/colespringer/waxtap/v2/transcode"
 )
 
 func TestAlbumGainFilter(t *testing.T) {

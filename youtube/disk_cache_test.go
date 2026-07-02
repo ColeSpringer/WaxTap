@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
 )
 
 // stubTransport serves a synthetic watch/embed page and base.js, counting base.js

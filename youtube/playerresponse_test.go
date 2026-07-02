@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // TestToFormat_DRCPresenceMapsAbsentToNo verifies YouTube's presence-based DRC

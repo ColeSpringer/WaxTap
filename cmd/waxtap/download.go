@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v2/youtube"
 	"github.com/spf13/cobra"
 )
 

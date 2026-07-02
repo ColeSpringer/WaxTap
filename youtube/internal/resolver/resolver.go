@@ -15,7 +15,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // Context carries everything the resolver needs to turn a candidate into a

@@ -12,15 +12,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/cut"
-	"github.com/colespringer/waxtap/download"
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/internal/pipeline"
-	"github.com/colespringer/waxtap/internal/tempfile"
-	"github.com/colespringer/waxtap/normalize"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2/cut"
+	"github.com/colespringer/waxtap/v2/download"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/internal/pipeline"
+	"github.com/colespringer/waxtap/v2/internal/tempfile"
+	"github.com/colespringer/waxtap/v2/normalize"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube"
 )
 
 // transcodeCodec maps a public TranscodeFormat to a transcode.Codec.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // TestSolve_CompileErrPropagates checks that a body the solver cannot prepare

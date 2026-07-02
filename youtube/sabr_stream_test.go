@@ -12,8 +12,8 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // UMP part ids and protobuf field numbers used to craft SABR responses. They

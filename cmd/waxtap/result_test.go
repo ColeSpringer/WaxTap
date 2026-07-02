@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // TestResultJSONFormatOmission verifies that sourceFormat is always present and

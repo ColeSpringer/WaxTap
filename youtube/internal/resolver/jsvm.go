@@ -8,7 +8,7 @@ import (
 
 	"github.com/dop251/goja"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // errCipherTimeout is the cause attached when cipher JS exceeds its execution

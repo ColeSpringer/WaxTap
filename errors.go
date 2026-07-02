@@ -1,6 +1,6 @@
 package waxtap
 
-import "github.com/colespringer/waxtap/waxerr"
+import "github.com/colespringer/waxtap/v2/waxerr"
 
 // Re-exported sentinel errors. The canonical definitions live in package waxerr;
 // match them with errors.Is.

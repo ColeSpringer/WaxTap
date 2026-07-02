@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/youtube"
 	"github.com/spf13/cobra"
 )
 

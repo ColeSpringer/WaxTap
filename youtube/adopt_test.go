@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // fakeSessionProvider is a stub potoken.SessionProvider that counts calls and can

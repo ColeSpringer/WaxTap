@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/colespringer/waxtap/internal/dumpfile"
+	"github.com/colespringer/waxtap/v2/internal/dumpfile"
 )
 
 // dumpEnvVar names the directory for env-gated diagnostic artifacts. When it is

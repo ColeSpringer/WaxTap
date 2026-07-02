@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 func probedInfo() *waxtap.InfoResult {

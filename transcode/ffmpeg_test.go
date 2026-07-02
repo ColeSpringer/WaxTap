@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 func TestBuildCommand_Copy(t *testing.T) {

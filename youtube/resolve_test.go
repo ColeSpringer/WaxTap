@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
 )
 
 // fakeResolver records what it was asked to resolve and returns a canned stream.

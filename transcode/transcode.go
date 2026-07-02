@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/colespringer/waxtap/internal/tempfile"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/tempfile"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Result reports a completed transcode.

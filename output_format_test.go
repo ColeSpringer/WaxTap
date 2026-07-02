@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/pipeline"
-	"github.com/colespringer/waxtap/transcode"
+	"github.com/colespringer/waxtap/v2/internal/pipeline"
+	"github.com/colespringer/waxtap/v2/transcode"
 )
 
 // TestNewProcessResultCopyCutDurationBaseline covers a copy-mode cut whose output

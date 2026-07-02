@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // ToWriter streams src to w in order, with bounded memory and no temp file. If

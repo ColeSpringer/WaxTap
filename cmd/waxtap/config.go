@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )

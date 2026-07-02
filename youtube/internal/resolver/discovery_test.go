@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/colespringer/waxtap/internal/clientident"
+	"github.com/colespringer/waxtap/v2/internal/clientident"
 )
 
 // TestPlayer_DiscoveryUserAgent verifies the configured and default User-Agents

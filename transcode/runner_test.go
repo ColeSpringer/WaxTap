@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // newTestRunner builds a Runner, skipping the test when ffmpeg/ffprobe are not

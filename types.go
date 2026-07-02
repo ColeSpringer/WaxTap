@@ -6,10 +6,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/sponsorblock"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/sponsorblock"
+	"github.com/colespringer/waxtap/v2/youtube"
 )
 
 // Audio format model and selectors (package format).

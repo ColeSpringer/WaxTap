@@ -1,4 +1,4 @@
-module github.com/colespringer/waxtap
+module github.com/colespringer/waxtap/v2
 
 go 1.26.3
 

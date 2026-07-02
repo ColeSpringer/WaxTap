@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // tokenOrigin serves payload but rejects requests whose ?tok= is not currently

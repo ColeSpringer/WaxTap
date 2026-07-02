@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/clientident"
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v2/internal/clientident"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
 )
 
 // fastTransport wraps rt in an httpx.Client configured for short retries.

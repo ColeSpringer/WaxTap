@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // emitResult prints a single Result as human text or JSON.

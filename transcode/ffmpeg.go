@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Defaults applied by NewRunner when a RunnerConfig field is left zero.

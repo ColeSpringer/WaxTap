@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Graph builds an ffmpeg -filter_complex graph that trims [0:a:0] to the keep

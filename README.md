@@ -32,8 +32,8 @@ The stable facade is the root `waxtap` package. YouTube code is isolated under
 ## Install
 
 ```sh
-go install github.com/colespringer/waxtap/cmd/waxtap@latest   # CLI
-go get github.com/colespringer/waxtap                         # library
+go install github.com/colespringer/waxtap/v2/cmd/waxtap@latest   # CLI
+go get github.com/colespringer/waxtap/v2                         # library
 ```
 
 [Release archives](https://github.com/colespringer/waxtap/releases/latest) hold
@@ -117,7 +117,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 func main() {

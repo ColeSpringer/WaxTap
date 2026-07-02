@@ -3,8 +3,8 @@ package waxtap
 import (
 	"testing"
 
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/transcode"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/transcode"
 )
 
 // TestSelectIndexHonorsChannelPreference is the index-mismatch core of the

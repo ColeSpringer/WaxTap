@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 func TestExtPossiblyCodec(t *testing.T) {

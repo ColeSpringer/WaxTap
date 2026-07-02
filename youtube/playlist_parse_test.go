@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // TestParseBrowseInitial_LockupShape covers the 2025 A/B layout: items served

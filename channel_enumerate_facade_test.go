@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // minimalBrowse is a one-entry playlist browse response with no continuation.

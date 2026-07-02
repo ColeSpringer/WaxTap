@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/colespringer/waxtap/internal/clientident"
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2/internal/clientident"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // ClientProfile identifies an InnerTube client such as ANDROID_VR, iOS, or WEB.

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // noteEnv returns an environment that captures informational output.

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/format"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube"
+	"github.com/colespringer/waxtap/v2/format"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube"
 )
 
 func TestRefreshFailure(t *testing.T) {

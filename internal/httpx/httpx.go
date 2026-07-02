@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Default tuning, applied by New when a Config field is left zero.

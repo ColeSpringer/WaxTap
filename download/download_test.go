@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // newTestDownloader builds a Downloader with fast backoffs for tests.

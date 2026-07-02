@@ -26,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/tempfile"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/tempfile"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Mode selects how a cut is rendered. The facade maps waxtap.CutMode onto these.

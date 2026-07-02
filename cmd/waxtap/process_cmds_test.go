@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/v2"
 )
 
 // TestProcessSourceCheckedBeforeCollision verifies that a missing input is

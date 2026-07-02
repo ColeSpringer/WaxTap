@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/colespringer/waxtap/internal/cache"
-	"github.com/colespringer/waxtap/internal/clientident"
-	"github.com/colespringer/waxtap/internal/diskcache"
-	"github.com/colespringer/waxtap/internal/httpx"
-	"github.com/colespringer/waxtap/potoken"
-	"github.com/colespringer/waxtap/waxerr"
-	"github.com/colespringer/waxtap/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v2/internal/cache"
+	"github.com/colespringer/waxtap/v2/internal/clientident"
+	"github.com/colespringer/waxtap/v2/internal/diskcache"
+	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
 )
 
 // Client performs YouTube extraction. It holds configuration and injected

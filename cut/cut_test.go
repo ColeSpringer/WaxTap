@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 func TestResolveMode(t *testing.T) {

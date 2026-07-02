@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/colespringer/waxtap/internal/pipeline"
-	"github.com/colespringer/waxtap/normalize"
-	"github.com/colespringer/waxtap/transcode"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/internal/pipeline"
+	"github.com/colespringer/waxtap/v2/normalize"
+	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // Process runs the transcode/cut/normalize pipeline on a local file, with no

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/v2/potoken"
 )
 
 // TestNew_InvalidConfigSentinel verifies that configuration validation errors

@@ -16,7 +16,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 func baseConfig(d HTTPDoer) Config {

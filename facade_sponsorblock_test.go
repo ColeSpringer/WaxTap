@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/sponsorblock"
+	"github.com/colespringer/waxtap/v2/sponsorblock"
 )
 
 // TestSponsorBlockBaseURLTrimmed verifies a whitespace-padded SponsorBlock BaseURL

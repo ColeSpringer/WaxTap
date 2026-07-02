@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 func liveURL() string {

@@ -11,7 +11,7 @@ import (
 	"github.com/dop251/goja"
 	"github.com/dop251/goja/parser"
 
-	"github.com/colespringer/waxtap/waxerr"
+	"github.com/colespringer/waxtap/v2/waxerr"
 )
 
 // readPlayerSynth returns the synthetic whole-player fixture used across the

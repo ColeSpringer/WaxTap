@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap"
-	"github.com/colespringer/waxtap/internal/iox"
-	"github.com/colespringer/waxtap/internal/tempfile"
+	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v2/internal/iox"
+	"github.com/colespringer/waxtap/v2/internal/tempfile"
 )
 
 func TestJSONFloatNonFinite(t *testing.T) {
