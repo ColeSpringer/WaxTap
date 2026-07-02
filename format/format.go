@@ -196,6 +196,10 @@ type AudioSelector struct {
 	itag   int
 	codec  string
 	layout ChannelLayout
+	// explicitLayout distinguishes an unset layout from an explicit
+	// WithChannels(LayoutAny), both of which store LayoutAny. WithDefaultChannels
+	// reads it so a facade default does not override a caller's explicit choice.
+	explicitLayout bool
 }
 
 // BestAudio selects the best audio stream. It prefers the original track,
@@ -216,6 +220,23 @@ func Codec(codec string) AudioSelector { return AudioSelector{kind: selCodec, co
 // it. If no candidate matches the layout, normal ranking applies.
 func (s AudioSelector) WithChannels(layout ChannelLayout) AudioSelector {
 	s.layout = layout
+	s.explicitLayout = true
+	return s
+}
+
+// WithDefaultChannels returns a copy of the selector with layout applied only
+// when the caller did not already set a preference with WithChannels. It lets a
+// facade impose a default (WaxTap uses stereo) while still honoring an explicit
+// WithChannels(LayoutAny) opt-in to any-fidelity ranking.
+//
+// It exists mainly for WaxTap's own root-package Download and Resolve seams, which
+// cannot read the unexported explicitLayout field directly, but it is a valid
+// public helper for any caller wanting a "this layout unless one was already
+// chosen" selector.
+func (s AudioSelector) WithDefaultChannels(layout ChannelLayout) AudioSelector {
+	if !s.explicitLayout {
+		s.layout = layout
+	}
 	return s
 }
 

@@ -12,7 +12,7 @@ import (
 func TestTranslateConfigSymbols(t *testing.T) {
 	goSymbols := []string{
 		"ProfileOverridePath", "ChromeMajor", "PerHostQPS", "Cooldown", "Options.",
-		"VisitorData", "POTokenProvider", "PlayerContextProvider",
+		"VisitorData", "POTokenProvider", "PlayerContextProvider", "SponsorBlock BaseURL",
 	}
 	cases := []struct {
 		in        string
@@ -26,6 +26,7 @@ func TestTranslateConfigSymbols(t *testing.T) {
 		{`set Options.Client (e.g. "web") or a single-client ProfileOverridePath`, []string{"--client", "--profile-override"}},
 		{"PlayerContextProvider requires a POTokenProvider", []string{"--player-context-url", "--potoken-url"}},
 		{"adopted Session requires a non-empty VisitorData", []string{"--visitor-data"}},
+		{`invalid SponsorBlock BaseURL "not-a-url": must use http or https`, []string{"--sponsorblock-url"}},
 	}
 	for _, tc := range cases {
 		got := translateConfigSymbols(tc.in)
@@ -97,6 +98,11 @@ func TestConfigSymbolTranslation(t *testing.T) {
 			name:      "session needs uniform client chain",
 			opts:      waxtap.Options{Session: &waxtap.POTokenSession{VisitorData: "abc"}},
 			wantFlags: []string{"--client", "--profile-override"},
+		},
+		{
+			name:      "sponsorblock base url scheme",
+			opts:      waxtap.Options{SponsorBlock: waxtap.SponsorBlockOptions{BaseURL: "not-a-url"}},
+			wantFlags: []string{"--sponsorblock-url"},
 		},
 	}
 	for _, tc := range cases {

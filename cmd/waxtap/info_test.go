@@ -166,3 +166,53 @@ func TestWatchPageBreadcrumb(t *testing.T) {
 		}
 	})
 }
+
+// TestInfoLiveStatusJSON covers the additive liveStatus/availability keys. They
+// surface a was-live VOD and an unlisted video, but stay absent for a normal video
+// (with or without --full), keeping the schemaVersion-1 output byte-identical.
+func TestInfoLiveStatusJSON(t *testing.T) {
+	t.Run("helpers emit only new signals", func(t *testing.T) {
+		if got := infoLiveStatus(waxtap.LiveNone); got != "" {
+			t.Errorf("infoLiveStatus(LiveNone) = %q, want empty", got)
+		}
+		if got := infoLiveStatus(waxtap.LiveWasLive); got != "was_live" {
+			t.Errorf("infoLiveStatus(LiveWasLive) = %q, want was_live", got)
+		}
+		if got := infoAvailability(waxtap.AvailabilityUnknown); got != "" {
+			t.Errorf("infoAvailability(Unknown) = %q, want empty", got)
+		}
+		// --full resolves a normal video to Public; it must not gain a key.
+		if got := infoAvailability(waxtap.AvailabilityPublic); got != "" {
+			t.Errorf("infoAvailability(Public) = %q, want empty (byte-identity)", got)
+		}
+		if got := infoAvailability(waxtap.AvailabilityUnlisted); got != "unlisted" {
+			t.Errorf("infoAvailability(Unlisted) = %q, want unlisted", got)
+		}
+	})
+
+	emit := func(v *waxtap.Video) string {
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
+		if err := emitInfoJSON(env, &waxtap.InfoResult{Video: v, Client: "ANDROID_VR"}, 0, errors.New("no best"), nil); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+
+	t.Run("normal video omits both keys", func(t *testing.T) {
+		got := emit(&waxtap.Video{ID: "dummyVideo0", LiveStatus: waxtap.LiveNone, Availability: waxtap.AvailabilityPublic})
+		if strings.Contains(got, "liveStatus") || strings.Contains(got, "availability") {
+			t.Errorf("a normal video must not gain liveStatus/availability keys:\n%s", got)
+		}
+	})
+
+	t.Run("was-live and unlisted gain keys", func(t *testing.T) {
+		got := emit(&waxtap.Video{ID: "dummyVideo0", LiveStatus: waxtap.LiveWasLive, Availability: waxtap.AvailabilityUnlisted})
+		if !strings.Contains(got, `"liveStatus": "was_live"`) {
+			t.Errorf("want liveStatus was_live:\n%s", got)
+		}
+		if !strings.Contains(got, `"availability": "unlisted"`) {
+			t.Errorf("want availability unlisted:\n%s", got)
+		}
+	})
+}

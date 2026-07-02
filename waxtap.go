@@ -88,6 +88,17 @@ func New(opts Options) (*Client, error) {
 	if opts.PlayerContextProvider != nil && opts.POTokenProvider == nil {
 		return nil, configErr("PlayerContextProvider requires a POTokenProvider: the WEB stream binds a GVS PO token to the context's visitorData")
 	}
+	// A malformed SponsorBlock BaseURL would otherwise reach the HTTP client and
+	// surface as an unclassified error at fetch time; reject it here so every path
+	// (sponsorblock, cut, download) fails as invalid config at construction. Normalize
+	// first with the same helper the client applies, then validate that value, so what
+	// is validated is exactly what the client will fetch.
+	if opts.SponsorBlock.BaseURL != "" {
+		opts.SponsorBlock.BaseURL = sponsorblock.NormalizeBaseURL(opts.SponsorBlock.BaseURL)
+		if _, err := validateHTTPBaseURL(opts.SponsorBlock.BaseURL); err != nil {
+			return nil, configErr("invalid SponsorBlock BaseURL %q: %v", opts.SponsorBlock.BaseURL, err)
+		}
+	}
 
 	// Resolve the client strategy chain: a single forced Client, a file override,
 	// or (nil) the built-in default chain.
@@ -308,9 +319,10 @@ func WithNoFallback() ReadOption {
 
 // WithChannels sets the channel preference Info and InfoResult use to pick the
 // best-audio row they resolve and probe, matching the row a default download
-// would select. The zero value (LayoutAny) imposes no preference, so a surround
-// track may rank highest. Resolve takes an explicit AudioSelector and ignores
-// this option.
+// would select. The facade defaults to stereo; pass WithChannels(LayoutSurround)
+// for surround or WithChannels(LayoutAny) to rank purely by fidelity with no
+// channel preference (a surround track may then rank highest). Resolve takes an
+// explicit AudioSelector and ignores this option.
 func WithChannels(layout ChannelLayout) ReadOption {
 	return func(o *readOptions) { o.layout = layout }
 }
@@ -330,8 +342,17 @@ func WithFullMetadata() ReadOption {
 	return func(o *readOptions) { o.fullMetadata = true }
 }
 
+// defaultFacadeLayout is the channel layout the Download, Info, and Resolve facades
+// impose when the caller expresses no preference, keeping the three selection seams
+// identical. Callers opt out with WithChannels(LayoutAny). See
+// TestFacadeDefaultsToStereo.
+const defaultFacadeLayout = LayoutStereo
+
 func newReadOptions(opts []ReadOption) readOptions {
-	var ro readOptions
+	// Info/InfoResult default the resolved+probed best-audio row to the facade layout,
+	// matching Download; WithChannels(LayoutAny) overrides it. Resolve also calls this
+	// but ignores ro.layout (it selects from its explicit AudioSelector).
+	ro := readOptions{layout: defaultFacadeLayout}
 	for _, opt := range opts {
 		opt(&ro)
 	}
@@ -559,8 +580,10 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 }
 
 // Resolve selects and resolves an audio stream without downloading it. The zero
-// AudioSelector means best audio. Direct streams include a temporary googlevideo
-// URL and its request metadata. SABR streams set IsSABR and leave URL empty.
+// AudioSelector means best audio, defaulting to stereo like Download; pass
+// BestAudio().WithChannels(LayoutSurround) for surround or WithChannels(LayoutAny)
+// for any-fidelity. Direct streams include a temporary googlevideo URL and its
+// request metadata. SABR streams set IsSABR and leave URL empty.
 //
 // It is exposed for diagnostics: the CLI's info --show-url and doctor. Most
 // callers use Download or Stream, which never expose the raw URL.
@@ -576,7 +599,7 @@ func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector, opt
 	if err != nil {
 		return ResolvedStream{}, err
 	}
-	idx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, ext.Video().Formats)
+	idx, err := selectIndex(sel.WithDefaultChannels(defaultFacadeLayout), MinimizeLoss(), format.Target{}, ext.Video().Formats)
 	if err != nil {
 		return ResolvedStream{}, err
 	}

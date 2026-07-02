@@ -2,8 +2,8 @@ package resolver
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/colespringer/waxtap/internal/cache"
 	"github.com/colespringer/waxtap/internal/clientident"
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -401,7 +402,22 @@ func (p *Player) get(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: rawURL}
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxPlayerBytes))
+	// Cap the read so an over-limit body fails clearly instead of silently truncating
+	// into corrupt JavaScript the cipher solver would later reject with a cryptic
+	// error. Classify a cap breach as an extraction failure, like the other
+	// resolve-path errors here.
+	buf, err := iox.ReadAllCapped(resp.Body, maxPlayerBytes, "player resource")
+	if err != nil {
+		if errors.Is(err, iox.ErrResponseTooLarge) {
+			return nil, fmt.Errorf("%w: %v", waxerr.ErrExtractionFailed, err)
+		}
+		return nil, err
+	}
+	// get serves both base.js and the watch/embed discovery page. This fires only on
+	// a real fetch (not a cache hit), so it marks the happy path: base.js is fetched
+	// to decode n during stream resolution.
+	p.log.DebugContext(ctx, "player resource fetched", "url", rawURL, "bytes", len(buf))
+	return buf, nil
 }
 
 // absolutePlayerURL upgrades a root-relative player path to an absolute URL.

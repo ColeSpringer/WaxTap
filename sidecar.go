@@ -95,19 +95,30 @@ func NewSidecarSessionProvider(baseURL string, opts ...SidecarOption) (POTokenSe
 	return newHTTPSessionProvider(endpoint, applySidecarOptions(opts).apiKey), nil
 }
 
+// validateHTTPBaseURL parses base and requires an http or https scheme and a
+// host, the same check sidecar URLs use. It returns the parsed URL so callers
+// can build on it without reparsing.
+func validateHTTPBaseURL(base string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("must use http or https")
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("missing host")
+	}
+	return u, nil
+}
+
 // buildSidecarURL validates a sidecar URL and appends defaultPath when the URL
 // does not already contain an endpoint path. Existing query parameters are
 // preserved.
 func buildSidecarURL(base, defaultPath string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(base))
+	u, err := validateHTTPBaseURL(base)
 	if err != nil {
 		return "", err
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("must use http or https")
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("missing host")
 	}
 	if u.Path == "" || u.Path == "/" {
 		u.Path = defaultPath

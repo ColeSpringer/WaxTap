@@ -17,6 +17,14 @@ func emitResult(env *appEnv, res *waxtap.Result) error {
 	return nil
 }
 
+// measureOnly reports whether res is a pure loudness measurement: loudness was
+// measured and no transcode, cut, or normalization altered the media. Callers add
+// their own OutputPath check, since a measure-only run may write an unaltered copy
+// (download --measure-loudness) or nothing at all (normalize --measure-loudness).
+func measureOnly(res *waxtap.Result) bool {
+	return res.LoudnessMeasured && !res.Transcoded && !res.CutApplied && !res.LoudnessApplied
+}
+
 func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	// Quiet mode prints only the output path to stdout and routes warnings to
 	// stderr, so callers can capture the path directly. A measure-only run has an
@@ -39,9 +47,17 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 		}
 		env.printf("Video ID: %s\n", res.VideoID)
 	}
-	if res.OutputPath != "" {
+	// A measure-only run that sank to io.Discard (normalize --measure-loudness) has
+	// no output path and meaningless OutputBytes, so name the intent instead of a
+	// phantom write. A measure-only run streaming to stdout (download -o -) also has
+	// an empty OutputPath but did deliver the audio, so audioStream excludes it.
+	measured := measureOnly(res) && res.OutputPath == "" && !env.audioStream
+	switch {
+	case measured:
+		env.printf("Output:   none (measurement only)\n")
+	case res.OutputPath != "":
 		env.printf("Output:   %s\n", res.OutputPath)
-	} else {
+	default:
 		env.printf("Output:   (streamed)\n")
 	}
 
@@ -52,7 +68,10 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	if res.Transcoded {
 		env.printf("Encoded:  %s\n", formatLabel(res.OutputFormat))
 	}
-	if res.SourceBytes > 0 || res.OutputBytes > 0 {
+	switch {
+	case measured:
+		env.printf("Size:     %s analyzed\n", humanBytes(res.SourceBytes))
+	case res.SourceBytes > 0 || res.OutputBytes > 0:
 		env.printf("Size:     %s in, %s out\n", humanBytes(res.SourceBytes), humanBytes(res.OutputBytes))
 	}
 

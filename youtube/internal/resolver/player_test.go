@@ -3,6 +3,7 @@ package resolver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/potoken"
+	"github.com/colespringer/waxtap/waxerr"
 )
 
 const testBaseJSPath = "/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"
@@ -488,5 +490,47 @@ func TestPlayerResolve_DiscoveryEmbedFallback(t *testing.T) {
 	}
 	if embedHits != 1 {
 		t.Errorf("embed page hits = %d, want 1 (watch lacked base.js)", embedHits)
+	}
+}
+
+// bodyDoer serves a fixed body of the given size on a 200 so the size guard in
+// get can be exercised without a fixture file.
+func bodyDoer(n int) doerFunc {
+	return func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(bytes.NewReader(make([]byte, n))),
+			Header:     make(http.Header),
+		}, nil
+	}
+}
+
+// TestPlayerGet_TruncationGuard confirms an over-cap player response is rejected
+// with a clear error rather than silently truncated and handed to the cipher
+// solver as corrupt JavaScript; a body exactly at the cap still reads back whole.
+func TestPlayerGet_TruncationGuard(t *testing.T) {
+	const rawURL = "https://www.youtube.com/s/player/x/base.js"
+
+	p := New(Config{HTTP: bodyDoer(maxPlayerBytes + 16)})
+	_, err := p.get(context.Background(), rawURL)
+	if err == nil {
+		t.Fatal("get on an over-cap body = nil error, want a truncation error")
+	}
+	if !errors.Is(err, waxerr.ErrExtractionFailed) {
+		t.Errorf("err = %v, want it to wrap ErrExtractionFailed", err)
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("err = %v, want it to mention truncation", err)
+	}
+
+	// The cap is inclusive: a body of exactly maxPlayerBytes is not truncated.
+	atCap := New(Config{HTTP: bodyDoer(maxPlayerBytes)})
+	buf, err := atCap.get(context.Background(), rawURL)
+	if err != nil {
+		t.Fatalf("get on an at-cap body: %v", err)
+	}
+	if len(buf) != maxPlayerBytes {
+		t.Errorf("len(buf) = %d, want %d (whole body, not truncated)", len(buf), maxPlayerBytes)
 	}
 }

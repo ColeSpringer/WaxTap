@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,36 @@ import (
 
 	"github.com/colespringer/waxtap/sponsorblock"
 )
+
+// TestSponsorBlockBaseURLTrimmed verifies a whitespace-padded SponsorBlock BaseURL
+// is accepted by New and the trimmed value reaches the client, so a stray space
+// does not slip past the guard and fail later at fetch time. A scheme-less value is
+// still rejected as invalid config.
+func TestSponsorBlockBaseURLTrimmed(t *testing.T) {
+	if u, err := validateHTTPBaseURL("  https://sponsor.example  "); err != nil {
+		t.Fatalf("validateHTTPBaseURL(padded) = %v", err)
+	} else if u.String() != "https://sponsor.example" {
+		t.Errorf("parsed URL = %q, want the trimmed https://sponsor.example", u.String())
+	}
+	if _, err := New(Options{SponsorBlock: SponsorBlockOptions{BaseURL: "sponsor.example"}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("New(scheme-less) = %v, want ErrInvalidConfig", err)
+	}
+	// End to end: a padded server URL still fetches because New trimmed it; the raw
+	// value would fail http.NewRequest with a control-character error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Options{SponsorBlock: SponsorBlockOptions{BaseURL: "  " + srv.URL + "  "}})
+	if err != nil {
+		t.Fatalf("New(padded server URL): %v", err)
+	}
+	cs := &CutSpec{SponsorBlock: []Category{CategorySponsor}}
+	if _, _, err := c.collectRanges(context.Background(), cs, sbVideoID, newEmitter(nil, "")); err != nil {
+		t.Fatalf("collectRanges with a padded BaseURL = %v; the trim must reach the client", err)
+	}
+}
 
 const sbVideoID = "abcdef12345"
 

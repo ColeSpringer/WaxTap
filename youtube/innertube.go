@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -205,7 +205,7 @@ func (c *Client) innertubePost(ctx context.Context, p ClientProfile, s *session,
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: endpoint}
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	return iox.ReadAllCapped(resp.Body, maxResponseBytes, "innertube response")
 }
 
 // httpGet fetches rawURL with the profile's user agent and the session's consent
@@ -227,5 +227,5 @@ func (c *Client) httpGet(ctx context.Context, p ClientProfile, s *session, rawUR
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: rawURL}
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	return iox.ReadAllCapped(resp.Body, maxResponseBytes, "watch-page response")
 }

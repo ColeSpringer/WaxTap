@@ -110,3 +110,81 @@ func TestRenderResultHumanWarningDedup(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderResultHumanMeasureOnly verifies that a measure-only run with no output
+// path names the measurement instead of printing a phantom write, while a
+// measure-only run that wrote an unaltered copy is left unchanged.
+func TestRenderResultHumanMeasureOnly(t *testing.T) {
+	render := func(res *waxtap.Result) string {
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+		renderResultHuman(env, res)
+		return out.String()
+	}
+
+	t.Run("no output path names the measurement", func(t *testing.T) {
+		// normalize --measure-loudness sinks to io.Discard: empty OutputPath, but
+		// OutputBytes equals the input size. The old shared printer reported that as a
+		// real write.
+		out := render(&waxtap.Result{
+			SourceKind: waxtap.SourceLocalFile, InputPath: "/in.flac", LoudnessMeasured: true,
+			SourceFormat: waxtap.Format{Codec: "flac", Extension: "flac"},
+			SourceBytes:  86700, OutputBytes: 86700,
+		})
+		if !strings.Contains(out, "Output:   none (measurement only)") {
+			t.Errorf("want the measurement-only output line:\n%s", out)
+		}
+		if !strings.Contains(out, "analyzed") {
+			t.Errorf("want a Size line marked analyzed:\n%s", out)
+		}
+		if strings.Contains(out, " in, ") {
+			t.Errorf("must not print a phantom in/out size:\n%s", out)
+		}
+		if strings.Contains(out, "(streamed)") {
+			t.Errorf("a measure-only local run is not a stream:\n%s", out)
+		}
+	})
+
+	t.Run("download measure-only with an unaltered copy is unchanged", func(t *testing.T) {
+		// download --measure-loudness writes the copy, so OutputPath is set and the
+		// normal Output/Size lines still apply.
+		out := render(&waxtap.Result{
+			SourceKind: waxtap.SourceYouTube, VideoID: "dummyVideo0", LoudnessMeasured: true,
+			OutputPath:   "/out.opus",
+			SourceFormat: waxtap.Format{Itag: 251, Codec: "opus"},
+			SourceBytes:  86700, OutputBytes: 86700,
+		})
+		if !strings.Contains(out, "Output:   /out.opus") {
+			t.Errorf("a written copy should still show its path:\n%s", out)
+		}
+		if !strings.Contains(out, " in, ") {
+			t.Errorf("a written copy should still show in/out sizes:\n%s", out)
+		}
+		if strings.Contains(out, "measurement only") {
+			t.Errorf("a written copy is not measurement-only output:\n%s", out)
+		}
+	})
+
+	t.Run("download measure-only streaming to stdout shows streamed, not measurement-only", func(t *testing.T) {
+		// download --measure-loudness -o - streams the audio to stdout (a real writer
+		// sink), leaving OutputPath empty like a discarded measurement. audioStream
+		// distinguishes it so the summary does not claim nothing was output.
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}, audioStream: true}
+		renderResultHuman(env, &waxtap.Result{
+			SourceKind: waxtap.SourceYouTube, VideoID: "dummyVideo0", LoudnessMeasured: true,
+			SourceFormat: waxtap.Format{Itag: 251, Codec: "opus"},
+			SourceBytes:  86700, OutputBytes: 86700,
+		})
+		got := out.String()
+		if !strings.Contains(got, "(streamed)") {
+			t.Errorf("a stdout stream should render as streamed:\n%s", got)
+		}
+		if !strings.Contains(got, " in, ") {
+			t.Errorf("a stdout stream should still show in/out sizes:\n%s", got)
+		}
+		if strings.Contains(got, "measurement only") || strings.Contains(got, "analyzed") {
+			t.Errorf("delivered audio must not be labeled measurement-only:\n%s", got)
+		}
+	})
+}

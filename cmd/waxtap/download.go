@@ -414,6 +414,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	if df.streamW != nil {
 		se := *env
 		se.out = env.errOut
+		se.audioStream = true
 		rep = &se
 		defer func() {
 			if err == nil {
@@ -599,7 +600,7 @@ func channelCountLabel(ch int) string {
 // measureNote reports the output path for a measure-only run. Processing
 // operations suppress the note because the output is no longer an unaltered copy.
 func measureNote(env *appEnv, res *waxtap.Result) {
-	if res.LoudnessMeasured && !res.Transcoded && !res.CutApplied && !res.LoudnessApplied && res.OutputPath != "" {
+	if measureOnly(res) && res.OutputPath != "" {
 		env.info("note: wrote unaltered copy to %s\n", res.OutputPath)
 	}
 }

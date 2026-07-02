@@ -667,9 +667,23 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: 320000}}); err != nil {
 		t.Errorf("realistic 320 kbps bitrate = %v, want nil", err)
 	}
-	// ffmpeg ignores bitrate for lossless targets, so the upper bound does not apply.
+	// A kbps value or a 1-10 quality scale mistakenly passed as bps is implausibly
+	// low; reject it so ffmpeg does not silently fall back to a default encode.
+	for _, bps := range []int{1, 5, 128, 320} {
+		if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: bps}}); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("implausibly low bitrate %d = %v, want ErrIncompatibleSpec", bps, err)
+		}
+	}
+	// The floor itself is a permitted (if tiny) intentional encode.
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: minPlausibleBitrate}}); err != nil {
+		t.Errorf("bitrate at the plausibility floor = %v, want nil", err)
+	}
+	// ffmpeg ignores bitrate for lossless targets, so neither bound applies.
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, Bitrate: maxBitrate + 1}}); err != nil {
 		t.Errorf("high bitrate on a lossless target = %v, want nil (ignored, not an error)", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, Bitrate: 1}}); err != nil {
+		t.Errorf("low bitrate on a lossless target = %v, want nil (ignored, not an error)", err)
 	}
 }
 

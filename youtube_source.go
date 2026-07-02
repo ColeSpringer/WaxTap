@@ -343,6 +343,8 @@ func (c *Client) selectAndResolve(ctx context.Context, req Request, target forma
 	if err != nil {
 		return nil, Format{}, youtube.MediaPlan{}, err
 	}
+	c.log.DebugContext(ctx, "stream resolved",
+		"itag", video.Formats[idx].Itag, "codec", video.Formats[idx].Codec, "contentLength", video.Formats[idx].ContentLength)
 	return video, video.Formats[idx], plan, nil
 }
 
@@ -354,7 +356,11 @@ func (c *Client) selectSourceIndex(req Request, target format.Target, formats []
 			return idx, nil
 		}
 	}
-	idx, err := selectIndex(req.Audio, req.SourcePolicy, target, formats)
+	// The facade defaults audio selection to stereo so a bare Request does not hand
+	// back a surround track; a caller opts into any-fidelity with
+	// Audio: BestAudio().WithChannels(LayoutAny). The pinned-itag re-selection above
+	// is an itag selector and ignores layout, so this only shapes the first pick.
+	idx, err := selectIndex(req.Audio.WithDefaultChannels(defaultFacadeLayout), req.SourcePolicy, target, formats)
 	if err != nil {
 		return -1, err
 	}
@@ -459,6 +465,8 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// Report substitution only after the bytes arrive.
 			c.warnClientSubstitution(em, a)
 			c.applyFullMetadata(ctx, req, a)
+			c.log.DebugContext(ctx, "download complete",
+				"client", a.client, "itag", a.fmtSel.Itag, "bytes", res.BytesWritten)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -673,6 +681,11 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 // Download acquires and processes a single YouTube video to the configured sink.
 // It is strictly single-video: a playlist URL returns ErrIsPlaylist (use
 // Enumerate and loop).
+//
+// Audio selection defaults to stereo, so a bare Request (zero Audio) yields the
+// best stereo track rather than a surround one. Set
+// Audio: BestAudio().WithChannels(LayoutSurround) for surround, or
+// WithChannels(LayoutAny) to rank purely by fidelity.
 //
 // When no processing is requested (a nil ProcessSpec) it downloads the selected
 // source stream straight to the sink with no ffmpeg and no temp file: the bytes

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/colespringer/waxtap/internal/cache"
 	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -97,11 +97,23 @@ type Config struct {
 	CacheTTL time.Duration
 }
 
-// New returns a Client, filling unset Config fields with defaults.
+// NormalizeBaseURL cleans a SponsorBlock base URL for concatenation: it removes
+// surrounding whitespace (which would fail http.NewRequest) and a trailing slash
+// (which would produce a "//api/skipSegments" path some servers 404 or redirect).
+// It is the single normalization the client and the WaxTap facade both apply, so
+// the validated value and the fetched value agree. It does not validate the scheme
+// or host.
+func NormalizeBaseURL(base string) string {
+	return strings.TrimSuffix(strings.TrimSpace(base), "/")
+}
+
+// New returns a Client, filling unset Config fields with defaults. BaseURL is
+// normalized via NormalizeBaseURL so endpoint builds a clean URL regardless of the
+// caller.
 func New(cfg Config) *Client {
 	c := &Client{
 		http:    cfg.HTTP,
-		baseURL: cfg.BaseURL,
+		baseURL: NormalizeBaseURL(cfg.BaseURL),
 		log:     cfg.Logger,
 	}
 	if c.http == nil {
@@ -209,7 +221,7 @@ func (c *Client) get(ctx context.Context, videoID string, categories []Category)
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, nil
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	b, err := iox.ReadAllCapped(resp.Body, maxResponseBytes, "SponsorBlock response")
 	if err != nil {
 		return nil, 0, err
 	}

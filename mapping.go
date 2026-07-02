@@ -95,6 +95,11 @@ const (
 // audio bitrates.
 const maxBitrate = 3_000_000 // bits/sec
 
+// minPlausibleBitrate rejects a kbps value or a 1-10 quality scale mistakenly
+// passed as bits/sec (e.g. 128 or 5 instead of 128000), all of which fall well
+// below 1000. It still permits an intentional sub-8-kbps voice encode.
+const minPlausibleBitrate = 1000 // bits/sec
+
 // ValidateProcessSpec checks a ProcessSpec without acquiring or processing media.
 // Invalid specs return an error that wraps [ErrIncompatibleSpec].
 // [Client.Download], [Client.Stream], and [Client.Process] call it automatically;
@@ -190,8 +195,11 @@ func validateBitrate(t *TranscodeSpec) error {
 	if t.Bitrate < 0 {
 		return fmt.Errorf("%w: transcode bitrate must be >= 0, got %d", waxerr.ErrIncompatibleSpec, t.Bitrate)
 	}
-	// The upper bound applies only where bitrate is used. ffmpeg ignores it for
-	// lossless and copy targets, so a high value there is harmless, not an error.
+	// The bounds apply only where bitrate is used. ffmpeg ignores it for lossless
+	// and copy targets, so an out-of-range value there is harmless, not an error.
+	if t.Bitrate > 0 && t.Bitrate < minPlausibleBitrate && !transcodeCodec(t.Format).IsLossless() {
+		return fmt.Errorf("%w: transcode bitrate %d bps is implausibly low (min %d); bitrate is in bits per second, e.g. 128000 for 128 kbps", waxerr.ErrIncompatibleSpec, t.Bitrate, minPlausibleBitrate)
+	}
 	if t.Bitrate > maxBitrate && !transcodeCodec(t.Format).IsLossless() {
 		return fmt.Errorf("%w: transcode bitrate %d bps is implausibly high (max %d)", waxerr.ErrIncompatibleSpec, t.Bitrate, maxBitrate)
 	}

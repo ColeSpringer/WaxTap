@@ -291,9 +291,11 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 
 		ext, perr := c.extractProfile(ctx, sess, profile, videoID, i)
 		if perr == nil {
+			msg := "extraction succeeded"
 			if i > 0 {
-				c.log.DebugContext(ctx, "extracted via fallback client", "client", profile.Name)
+				msg = "extraction succeeded via fallback client"
 			}
+			c.log.DebugContext(ctx, msg, "client", profile.Name, "attempt", i)
 			return ext, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {

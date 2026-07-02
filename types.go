@@ -67,9 +67,10 @@ const (
 // non-DRC audio, higher reported quality tiers, Opus within a tier, and finally
 // higher effective bitrate.
 //
-// With no channel preference it may rank a surround track highest. The CLI
-// constrains this by defaulting to --channels stereo; library callers that want
-// the same should call WithChannels(LayoutStereo).
+// The selector itself imposes no channel preference, but the Download, Info, and
+// Resolve facades apply a stereo default to it, so client.Download(Request{URL})
+// yields stereo. Call WithChannels(LayoutSurround) for surround, or
+// WithChannels(LayoutAny) to let a surround track rank highest.
 func BestAudio() AudioSelector { return format.BestAudio() }
 
 // Itag selects the stream with the exact itag.
@@ -195,12 +196,12 @@ type ProcessSpec struct {
 	Cut       *CutSpec       // nil = no cut
 	Loudness  *LoudnessSpec  // nil = no loudness work
 
-	// Channels is the Downmix target layout. When Downmix is set it must be
-	// LayoutMono or LayoutStereo; pairing Downmix with LayoutAny is a hard error.
-	// LayoutAny, the zero value, means no downmix target, so Downmix must be false
-	// and a surround source is delivered with all its channels (the CLI instead
-	// defaults to --channels stereo). For YouTube requests, set the same preference
-	// on Audio with WithChannels to favor a native track before processing.
+	// Channels is the Downmix target layout, applied after probing. When Downmix is
+	// set it must be LayoutMono or LayoutStereo; pairing Downmix with LayoutAny is a
+	// hard error. LayoutAny, the zero value, means no downmix target, so Downmix must
+	// be false. For YouTube requests, prefer setting the layout on Audio with
+	// WithChannels to pick a native track; audio selection already defaults to stereo,
+	// so downmix is only needed when a caller opts into a surround source.
 	Channels ChannelLayout
 	// Downmix reduces a source with more channels to Channels after probing. It
 	// never adds channels and does nothing when the source already fits the
@@ -235,7 +236,9 @@ type Request struct {
 	// URL is a YouTube video URL or bare video ID.
 	URL string
 
-	// Audio selects which audio stream to take. The zero value is BestAudio.
+	// Audio selects which audio stream to take. The zero value is BestAudio, which
+	// the facade defaults to stereo; use BestAudio().WithChannels(LayoutSurround) for
+	// surround or WithChannels(LayoutAny) to rank purely by fidelity.
 	Audio AudioSelector
 	// SourcePolicy controls source selection when transcoding. The zero value is
 	// MinimizeLoss.

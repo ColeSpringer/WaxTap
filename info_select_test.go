@@ -40,6 +40,67 @@ func TestSelectIndexHonorsChannelPreference(t *testing.T) {
 	}
 }
 
+// TestFacadeDefaultsToStereo pins the F5 contract by driving the real seam code, so
+// dropping the default wiring from a seam fails this test rather than shipping green:
+//   - Download: the actual selectSourceIndex on a bare Request must pick stereo.
+//   - Info: newReadOptions must seed the facade default, overridable by WithChannels.
+//   - Resolve: the zero AudioSelector, transformed as Resolve transforms it, picks
+//     stereo (selector-level: Resolve needs a live extraction to run end to end).
+//
+// Opting into surround or any-fidelity still reaches the surround track. The
+// format-package ranking is unchanged (see TestSelectIndexHonorsChannelPreference).
+func TestFacadeDefaultsToStereo(t *testing.T) {
+	c := newOfflineClient(t)
+	// The 6ch/256k track outranks 2ch/160k on bitrate under LayoutAny, so a missing
+	// default would hand back surround.
+	formats := []Format{
+		{Itag: 251, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, AverageBitrate: 160000, IsOriginal: Yes},
+		{Itag: 338, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 6, AverageBitrate: 256000, IsOriginal: Yes},
+	}
+
+	// Download seam: the actual selection path a Request takes inside Download/Stream.
+	download := func(t *testing.T, req Request) Format {
+		t.Helper()
+		idx, err := c.selectSourceIndex(req, format.Target{}, formats, 0)
+		if err != nil {
+			t.Fatalf("selectSourceIndex: %v", err)
+		}
+		return formats[idx]
+	}
+	if f := download(t, Request{}); f.Itag != 251 || f.Channels != 2 {
+		t.Errorf("bare Request selected itag %d (%dch), want the stereo itag 251", f.Itag, f.Channels)
+	}
+	if f := download(t, Request{Audio: BestAudio().WithChannels(LayoutAny)}); f.Channels != 6 {
+		t.Errorf("Request WithChannels(LayoutAny) selected %dch, want the 6ch surround track", f.Channels)
+	}
+	if f := download(t, Request{Audio: BestAudio().WithChannels(LayoutSurround)}); f.Channels != 6 {
+		t.Errorf("Request WithChannels(LayoutSurround) selected %dch, want 6ch surround", f.Channels)
+	}
+
+	// Info seam: newReadOptions seeds the facade default, and WithChannels overrides it.
+	if got := newReadOptions(nil).layout; got != defaultFacadeLayout {
+		t.Errorf("newReadOptions default layout = %v, want the facade default %v", got, defaultFacadeLayout)
+	}
+	if got := newReadOptions([]ReadOption{WithChannels(LayoutAny)}).layout; got != LayoutAny {
+		t.Errorf("WithChannels(LayoutAny) read option layout = %v, want LayoutAny (override honored)", got)
+	}
+
+	// Cross-seam agreement: the selector Info builds from its default, and the one
+	// Resolve wraps a zero selector into, both land on the same stereo itag as Download.
+	agree := func(t *testing.T, name string, sel AudioSelector) {
+		t.Helper()
+		idx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, formats)
+		if err != nil {
+			t.Fatalf("%s selectIndex: %v", name, err)
+		}
+		if formats[idx].Itag != 251 {
+			t.Errorf("%s selected itag %d, want the stereo itag 251", name, formats[idx].Itag)
+		}
+	}
+	agree(t, "info", BestAudio().WithChannels(newReadOptions(nil).layout))
+	agree(t, "resolve", AudioSelector{}.WithDefaultChannels(defaultFacadeLayout))
+}
+
 // TestProbeMutationShiftsSelection shows why InfoResult must return the index it
 // probed: applyProbe mutates the selected row in place, and re-selecting on the
 // mutated slice can land on a different near-tie row. The probed numbers live on

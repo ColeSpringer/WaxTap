@@ -184,6 +184,8 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		PublishDate     string        `json:"publishDate,omitempty"`
 		IsLive          bool          `json:"isLive"`
 		IsUpcoming      bool          `json:"isUpcoming"`
+		LiveStatus      string        `json:"liveStatus,omitempty"`
+		Availability    string        `json:"availability,omitempty"`
 		ChapterCount    int           `json:"chapterCount"`
 		Chapters        []chapterJSON `json:"chapters,omitempty"`
 		Formats         []formatJSON  `json:"formats"`
@@ -203,6 +205,11 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		// the JSON shape is unchanged.
 		IsLive:     v.LiveStatus == waxtap.LiveNow,
 		IsUpcoming: v.LiveStatus == waxtap.LiveUpcoming,
+		// liveStatus/availability are additive and omitempty: they surface a was-live
+		// VOD or an unlisted video the booleans cannot express, while a normal video
+		// (with or without --full) stays byte-identical. See the helpers below.
+		LiveStatus:   infoLiveStatus(v.LiveStatus),
+		Availability: infoAvailability(v.Availability),
 		// chapterCount is unchanged; the chapters array is additive and only present
 		// when a watch-page pass (info --full) populated it, so the schema stays 1.
 		ChapterCount: len(v.Chapters),
@@ -227,6 +234,28 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		}
 	}
 	return env.emitJSON(out)
+}
+
+// infoLiveStatus renders a Video's live status for --json, emitting only the new
+// signal. A returned Video is only ever LiveNone or LiveWasLive (live/upcoming are
+// error sentinels), so LiveNone maps to "" and normal-video output is unchanged;
+// a completed livestream emits "was_live".
+func infoLiveStatus(s waxtap.LiveStatus) string {
+	if s == waxtap.LiveNone {
+		return ""
+	}
+	return s.String()
+}
+
+// infoAvailability renders a Video's availability for --json, emitting only the new
+// signal, "unlisted". AvailabilityUnknown (no watch-page pass) and AvailabilityPublic
+// (which --full resolves for a normal video) both map to "", so existing output stays
+// byte-identical.
+func infoAvailability(a waxtap.Availability) string {
+	if a == waxtap.AvailabilityUnlisted {
+		return a.String()
+	}
+	return ""
 }
 
 type resolvedJSON struct {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/internal/tempfile"
 )
 
@@ -176,7 +177,8 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrMembersOnly, 3},
 		{waxtap.ErrGeoBlocked, 3},
 		{waxtap.ErrExtractionFailed, 4},
-		{waxtap.ErrPlaylistParse, 4}, // maintainer-must-act, same class as extraction
+		{fmt.Errorf("fetch: %w", iox.ErrResponseTooLarge), 4}, // over-cap body = anomalous extraction failure (player/innertube/SABR agree)
+		{waxtap.ErrPlaylistParse, 4},                          // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
 		{waxtap.ErrFFmpegNotFound, 6},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures

@@ -107,6 +107,15 @@ func extractVideoID(input string, allowLoose bool) (string, error) {
 	// Strict callers skip that extraction, so a file path that embeds an
 	// 11-character run is rejected here.
 	if allowLoose {
+		// A bare UC channel ID or @handle is a channel, not a video. Classify it in
+		// the loose (target) path only, and above idFromLooseText so an @handle whose
+		// body is an 11-character run is not mis-extracted as a video ID. The strict
+		// path (process sources) deliberately skips this so a mistyped @-prefixed or
+		// UC-shaped local path reports "no such file" rather than "that is a channel".
+		// Real 11-character IDs never reach here (idExact matched them above).
+		if isChannelID(s) || isHandle(s) {
+			return "", waxerr.ErrIsChannel
+		}
 		if id, ok := idFromLooseText(s); ok {
 			return id, nil
 		}

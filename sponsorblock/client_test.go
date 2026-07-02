@@ -49,6 +49,29 @@ func TestFetchSegments_HashPrefixRoute(t *testing.T) {
 	}
 }
 
+// TestFetchSegments_NormalizesBaseURL verifies a BaseURL with a trailing slash (or
+// surrounding whitespace) does not produce a double-slash //api path that some
+// servers 404 or redirect, and still reaches the endpoint cleanly.
+func TestFetchSegments_NormalizesBaseURL(t *testing.T) {
+	var lastPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(Config{HTTP: httpx.New(httpx.Config{HTTPClient: srv.Client()}), BaseURL: "  " + srv.URL + "/  "})
+	if _, err := c.FetchSegments(context.Background(), testVideoID, []Category{CategoryMusicOffTopic}); err != nil {
+		t.Fatalf("FetchSegments with a padded trailing-slash BaseURL: %v", err)
+	}
+	if strings.HasPrefix(lastPath, "//") {
+		t.Errorf("request path = %q, want no leading double slash from a trailing-slash BaseURL", lastPath)
+	}
+	if !strings.HasPrefix(lastPath, "/api/skipSegments/") {
+		t.Errorf("request path = %q, want a clean /api/skipSegments/ route", lastPath)
+	}
+}
+
 func TestFetchSegments_NotFoundIsEmpty(t *testing.T) {
 	c, _ := serveJSON(t, http.StatusNotFound, "Not Found")
 	segs, err := c.FetchSegments(context.Background(), testVideoID, nil)

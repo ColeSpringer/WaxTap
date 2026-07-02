@@ -715,6 +715,32 @@ func TestWithChannels_AnyIsNeutral(t *testing.T) {
 	}
 }
 
+func TestWithDefaultChannels_AppliesOnlyWhenUnset(t *testing.T) {
+	cands := []Format{
+		audchan(258, "mp4a.40.2", 387000, 6),
+		audchan(140, "mp4a.40.2", 128000, 2),
+	}
+	pick := func(sel AudioSelector) int {
+		idx, err := sel.Select(cands, MinimizeLoss(), Target{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cands[idx].Itag
+	}
+	// No explicit layout set: the default applies, selecting the native stereo track.
+	if got := pick(BestAudio().WithDefaultChannels(LayoutStereo)); got != 140 {
+		t.Errorf("default stereo chose itag %d, want 140 (native stereo)", got)
+	}
+	// An explicit WithChannels wins over the default, in both directions. The default
+	// is a no-op because explicitLayout is already set.
+	if got := pick(BestAudio().WithChannels(LayoutAny).WithDefaultChannels(LayoutStereo)); got != 258 {
+		t.Errorf("explicit LayoutAny chose itag %d, want the neutral winner 258", got)
+	}
+	if got := pick(BestAudio().WithChannels(LayoutSurround).WithDefaultChannels(LayoutStereo)); got != 258 {
+		t.Errorf("explicit LayoutSurround chose itag %d, want 258", got)
+	}
+}
+
 func TestWithChannels_NoExactMatchPrefersFewerChannels(t *testing.T) {
 	// Without a mono track, stereo loses less information than 5.1 in a downmix.
 	cands := []Format{

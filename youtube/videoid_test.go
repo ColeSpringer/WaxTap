@@ -49,6 +49,11 @@ func TestExtractVideoID(t *testing.T) {
 		{"channel id", "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv", "", waxerr.ErrIsChannel},
 		{"user channel", "https://www.youtube.com/user/Blender", "", waxerr.ErrIsChannel},
 
+		// Bare channel IDs and @handles are channels too, mirroring the URL branch so
+		// info/formats can guide the caller instead of rejecting an overlong ID.
+		{"bare channel id", "UCabcdefghijklmnopqrstuv", "", waxerr.ErrIsChannel},
+		{"bare handle", "@Blender", "", waxerr.ErrIsChannel},
+
 		{"hostless id with trailing junk", id + "&feature=share", id, nil},
 
 		{"too short", "abc", "", waxerr.ErrVideoIDTooShort},
@@ -176,6 +181,29 @@ func TestExtractVideoID_ChannelMessage(t *testing.T) {
 	// A channel URL must not be misclassified as a malformed video ID.
 	if errors.Is(err, waxerr.ErrInvalidVideoID) {
 		t.Errorf("channel URL should not unwrap to ErrInvalidVideoID: %v", err)
+	}
+}
+
+// TestExtractVideoID_BareChannel confirms the loose (target) path classifies a
+// bare UC id or @handle as a channel, including an @handle whose body is an
+// 11-character run (which must not be mis-extracted as a video ID). The strict
+// (process-source) path deliberately does not classify a bare channel, so a
+// mistyped @-prefixed or UC-shaped local path reports a missing file instead.
+func TestExtractVideoID_BareChannel(t *testing.T) {
+	// "@elevenchars" has an exactly-11-character body; the loose extractor must still
+	// report a channel rather than returning "elevenchars" as a video ID.
+	for _, in := range []string{"UCabcdefghijklmnopqrstuv", "@Blender", "@elevenchars"} {
+		if _, err := ExtractVideoID(in); !errors.Is(err, waxerr.ErrIsChannel) {
+			t.Errorf("ExtractVideoID(%q) err = %v, want ErrIsChannel", in, err)
+		}
+	}
+	// Strict skips channel classification, so these fall to the shape-appropriate
+	// video-ID length error, which the process commands map to "no such file".
+	if _, err := ExtractVideoIDStrict("@Blender"); !errors.Is(err, waxerr.ErrVideoIDTooShort) {
+		t.Errorf("ExtractVideoIDStrict(@Blender) err = %v, want ErrVideoIDTooShort", err)
+	}
+	if _, err := ExtractVideoIDStrict("UCabcdefghijklmnopqrstuv"); !errors.Is(err, waxerr.ErrVideoIDTooLong) {
+		t.Errorf("ExtractVideoIDStrict(UC...) err = %v, want ErrVideoIDTooLong", err)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap"
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/internal/tempfile"
 	"github.com/colespringer/waxtap/youtube"
 	"github.com/spf13/cobra"
@@ -36,6 +37,11 @@ type appEnv struct {
 	out    io.Writer // stdout: command results (human or JSON)
 	errOut io.Writer // stderr: progress, logs, errors
 	log    *slog.Logger
+	// audioStream is set when stdout carries streamed audio (download -o -). A
+	// measure-only run to a real writer sink leaves OutputPath empty just like a
+	// discarded measurement, so the renderer uses this to print "(streamed)" rather
+	// than "none (measurement only)".
+	audioStream bool
 }
 
 func (e *appEnv) jsonMode() bool { return e.cfg.json }
@@ -299,7 +305,10 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 4, "stale-parser"
 	case errors.Is(err, waxtap.ErrCipherSolve):
 		c.exitCode, c.code, c.hint = 4, "cipher-solve", cipherSolveHint
-	case errors.Is(err, waxtap.ErrExtractionFailed):
+	case errors.Is(err, waxtap.ErrExtractionFailed),
+		// An over-cap response body (iox truncation guard) is an anomalous extraction
+		// failure, classified the same as any other so player/innertube/SABR agree.
+		errors.Is(err, iox.ErrResponseTooLarge):
 		c.exitCode, c.code = 4, "extraction-failed"
 	case errors.Is(err, waxtap.ErrIncompatibleSpec):
 		c.exitCode, c.code = 2, "incompatible-spec"
@@ -308,7 +317,7 @@ func classifyError(err error) classifiedError {
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		c.exitCode, c.code, c.hint = 2, "is-playlist", "the download command expands playlist URLs automatically; info/formats take a single video"
 	case errors.Is(err, waxtap.ErrIsChannel):
-		c.exitCode, c.code, c.hint = 2, "is-channel", "open a specific video from the channel; WaxTap does not enumerate channels"
+		c.exitCode, c.code, c.hint = 2, "is-channel", "open a specific video, or run `waxtap download <channel> --list` to list its uploads"
 	case errors.Is(err, waxtap.ErrInvalidVideoID),
 		errors.Is(err, waxtap.ErrVideoIDTooShort),
 		errors.Is(err, waxtap.ErrVideoIDTooLong),
@@ -447,7 +456,7 @@ func friendlyError(err error) string {
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "that is a playlist URL, not a single video"
 	case errors.Is(err, waxtap.ErrIsChannel):
-		return "that is a channel URL, not a single video; open a specific video"
+		return "that is a channel, not a single video; open a specific video"
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
 	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
@@ -516,6 +525,7 @@ var configSymbolReplacer = strings.NewReplacer(
 	// config.go currently catches these conflicts before waxtap.New does.
 	"PlayerContextProvider requires a POTokenProvider", "--player-context-url requires --potoken-url",
 	"non-empty VisitorData", "non-empty --visitor-data",
+	"invalid SponsorBlock BaseURL", "invalid --sponsorblock-url",
 )
 
 // translateConfigSymbols rewrites Go option field names in a config error message

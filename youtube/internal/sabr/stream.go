@@ -23,6 +23,7 @@ import (
 
 	"github.com/colespringer/waxtap/internal/dumpfile"
 	"github.com/colespringer/waxtap/internal/httpx"
+	"github.com/colespringer/waxtap/internal/iox"
 	"github.com/colespringer/waxtap/waxerr"
 )
 
@@ -850,7 +851,7 @@ func (s *stream) post() ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: s.serverURL}
 	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRoundBytes))
+	respBody, err := iox.ReadAllCapped(resp.Body, maxRoundBytes, "SABR response")
 	if err != nil {
 		return nil, err
 	}
