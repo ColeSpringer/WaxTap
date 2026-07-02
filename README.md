@@ -1,11 +1,9 @@
 # WaxTap
 
-WaxTap downloads and processes YouTube audio. It is available as a Go library
-and as the `waxtap` command-line tool. Both use the same processing core.
-
-Processing is opt-in: transcode, cut time ranges, remove SponsorBlock segments,
-measure loudness, or normalize loudness. A plain download keeps the selected
-source stream without re-encoding.
+WaxTap downloads and processes YouTube audio. It ships as a Go library and the
+`waxtap` CLI, both on the same processing core. Processing is opt-in: transcode,
+cut time ranges, drop SponsorBlock segments, measure or normalize loudness. A
+plain download keeps the selected source stream without re-encoding.
 
 > WaxTap targets public videos. Private, age-restricted, and login-gated videos
 > are expected failures, not bypass targets. YouTube changes without notice; see
@@ -13,54 +11,42 @@ source stream without re-encoding.
 
 ## Highlights
 
-- Pure-Go YouTube extraction using InnerTube and goja; no `yt-dlp` dependency.
-- Token-free ANDROID_VR is the default client. Forced iOS delivery is
-  best-effort. Full WEB audio is opt-in and requires an attested identity.
-- Context cancellation, bounded memory, per-operation timeouts, resilient
-  ranged downloads, and atomic output.
+- Pure-Go extraction via InnerTube and goja. No `yt-dlp` dependency.
+- Token-free ANDROID_VR is the default. Full WEB audio is opt-in and needs an
+  attested identity; forced iOS delivery is best-effort.
 - One ffmpeg pass can combine cuts, SponsorBlock removal, normalization, and
   transcoding.
-- Lossless formats such as FLAC are still re-encodes of YouTube's lossy source.
+- Lossless output such as FLAC is still a re-encode of YouTube's lossy source.
   Only copy/remux avoids re-encoding.
 
-The stable library facade is the root `waxtap` package. YouTube-specific code is
-isolated under `youtube`; processing lives under `cut`, `normalize`,
-`transcode`, and `internal/pipeline`.
+The stable facade is the root `waxtap` package. YouTube code is isolated under
+`youtube`; processing lives in `cut`, `normalize`, `transcode`, and
+`internal/pipeline`.
 
 ## Requirements
 
 - Go 1.26+
 - `ffmpeg` and `ffprobe` for transcoding, cutting, normalization, and probing.
-  Plain metadata and keep-source downloads do not need them.
+  Metadata and keep-source downloads do not need them.
 
 ## Install
 
 ```sh
-# CLI
-go install github.com/colespringer/waxtap/cmd/waxtap@latest
-
-# Library
-go get github.com/colespringer/waxtap
+go install github.com/colespringer/waxtap/cmd/waxtap@latest   # CLI
+go get github.com/colespringer/waxtap                         # library
 ```
 
-[Release archives](https://github.com/colespringer/waxtap/releases/latest)
-contain Linux, macOS, and Windows binaries for amd64 and arm64. Extract the
-archive, put `waxtap` or `waxtap.exe` on `PATH`, and run `waxtap --help`.
-Unsigned macOS binaries may need
-`xattr -d com.apple.quarantine /path/to/waxtap`; Windows may require approving
-the first SmartScreen prompt.
+[Release archives](https://github.com/colespringer/waxtap/releases/latest) hold
+Linux, macOS, and Windows binaries for amd64 and arm64. Put `waxtap` on `PATH`
+and run `waxtap --help`. Unsigned macOS binaries may need
+`xattr -d com.apple.quarantine /path/to/waxtap`; Windows may prompt SmartScreen.
 
 ## CLI
 
-Media commands accept a YouTube URL or bare video or playlist ID; `download`
-also accepts a channel URL (a `/channel/`, `/@handle`, `/c/`, or `/user/` link,
-or a bare `UC` ID), which resolves to the channel's uploads feed. `cut`,
-`transcode`, and `normalize` also accept local files. Every command has `--help`,
-and `--json` provides a stable scriptable contract (`schemaVersion` 1). `info
---show-url` adds a signed, expiring stream URL at `resolved.url`, plus
-`resolved.expiresAt` and `resolved.contentLength`; treat captured output as
-sensitive. `info --full` adds the publish date and chapters via a token-free
-watch-page fetch.
+Media commands accept a YouTube URL or bare video or playlist ID. `download`
+also accepts a channel URL or bare `UC` ID, resolving to the channel's uploads
+feed. `cut`, `transcode`, and `normalize` also take local files. Every command
+has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 1).
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
@@ -74,32 +60,42 @@ waxtap normalize song.wav --loudness-target -14 --format flac -o song.flac
 waxtap normalize --album --format flac --dir ./normalized ./album/*.flac
 
 waxtap download <playlist-url> -d ./music --download-archive archive.txt
-waxtap download <channel-url> -d ./music         # the channel's uploads feed
-waxtap download <channel-url> --list             # list entries, no download
+waxtap download <channel-url> -d ./music        # channel uploads, newest first
+waxtap download <channel-url> --list            # list entries, no download
 waxtap doctor
 ```
 
-Channel and playlist enumeration returns entries in feed order; a channel's
-uploads feed is newest-first and lists Shorts and past live streams as ordinary
-entries.
+`info --show-url` adds a signed, expiring stream URL and content length under
+`resolved.*`; treat that output as sensitive. `info --full` adds publish date
+and chapters via a token-free watch-page fetch.
 
-Directory inputs are supported by `transcode` and `normalize`; use `-r` to
-recurse, `--dir` for an output directory, and `--force` to re-encode files that
-already match the target codec. Album normalization preserves relative track
-loudness. Loudness values use EBU R128: integrated loudness in LUFS, true peak
-in dBTP, and range in LU.
+`transcode` and `normalize` also take directories: `-r` recurses, `--dir` sets
+an output directory, and `--force` re-encodes files already in the target
+codec. Album normalization preserves relative track loudness. Loudness uses EBU
+R128 (integrated LUFS, true peak dBTP, range LU).
+
+### Notes
+
+- `--channels mono|stereo|surround|any` picks a native layout, defaulting to
+  stereo. `--downmix` allows surround-to-stereo/mono; it never upmixes.
+- `--no-fallback` disables watch-page, WEB-context, and incomplete-download
+  fallbacks. Results report the client that actually delivered.
+- Playlist downloads support `--concurrency`, pacing, attempt limits, collision
+  policies, and yt-dlp-compatible `--download-archive` files.
+- `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
+  cache; `--no-cache` disables it.
 
 ### Exit codes
 
-The CLI maps failures to stable process exit codes. The same class appears in
-`--json` as `error.code`.
+The CLI maps failures to stable exit codes. The same class appears in `--json`
+as `error.code`. Run `waxtap exit-codes` for the built-in table.
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
 | 1 | unclassified error |
 | 2 | invalid request/config, including a playlist or channel URL passed to a video command, unsupported input, or unavailable requested format |
-| 3 | unavailable/restricted video (private, age-restricted, members-only, geo-blocked, removed) or playlist, login required, live or upcoming content, or no audio |
+| 3 | unavailable/restricted video or playlist (private, age-restricted, members-only, geo-blocked, removed), login required, live or upcoming, or no audio |
 | 4 | extraction, cipher, or playlist parsing failure; WaxTap may need an update |
 | 5 | rate limited |
 | 6 | ffmpeg/ffprobe not found |
@@ -109,13 +105,8 @@ The CLI maps failures to stable process exit codes. The same class appears in
 | 10 | local I/O failure |
 | 130 | canceled with SIGINT |
 
-Run `waxtap exit-codes` for the built-in table. Malformed targets exit 2; a
-well-formed but nonexistent or private video can only be classified after a
-network request and exits 3.
-
-Sidecar failures are classified by cause: a configuration-related 4xx exits 2,
-HTTP 429 exits 5, and an unreachable endpoint, server failure, or invalid
-response exits 9.
+Malformed targets exit 2; a well-formed but nonexistent or private video can
+only be classified after a network request and exits 3.
 
 ## Library
 
@@ -148,36 +139,32 @@ func main() {
 }
 ```
 
-The default `Download` (a nil `ProcessSpec`) delivers the source stream
-byte-for-byte: no ffmpeg, `SourceBytes == OutputBytes`, and `Transcoded` false.
-Library selection starts from `LayoutAny`, so it can rank a surround track
-highest; pass `WithChannels(LayoutStereo)` to match the CLI (see Operational
-notes). `Client.Enumerate` expands a playlist or channel URL, with `Skip`/`Stop`
-predicates for an archive cursor; `Info(..., WithFullMetadata())` and
-`Request.FullMetadata` add publish date and chapters. Availability failures
-(`ErrVideoUnavailable`, `ErrAgeRestricted`, `ErrMembersOnly`, `ErrGeoBlocked`,
-`ErrLiveContent`, `ErrLiveNotStarted`, and siblings) are typed sentinels a feed
-consumer should skip rather than treat as fatal; see the package doc's
-skip-vs-fail taxonomy. For full WEB SABR audio, wire a running sidecar through
-`NewSidecarPOTokenProvider`/`NewSidecarPlayerContextProvider`/`NewSidecarSessionProvider`
-(see PO tokens and WEB). See [`example_test.go`](example_test.go) for streaming,
-local processing, playlists, SponsorBlock, album measurement, metadata, and WEB
-SABR examples.
+A default `Download` (nil `ProcessSpec`) delivers the source stream
+byte-for-byte: no ffmpeg, `SourceBytes == OutputBytes`, `Transcoded` false.
+Library selection starts from `LayoutAny` and can rank a surround track highest;
+pass `WithChannels(LayoutStereo)` to match the CLI. `Client.Enumerate` expands a
+playlist or channel URL with `Skip`/`Stop` predicates for an archive cursor, and
+`WithFullMetadata()` adds publish date and chapters.
+
+Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
+`ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and
+siblings) are typed sentinels a feed consumer should skip rather than treat as
+fatal; see the package doc's skip-vs-fail taxonomy. For full WEB SABR audio,
+wire a sidecar through `NewSidecarPOTokenProvider`,
+`NewSidecarPlayerContextProvider`, or `NewSidecarSessionProvider` (see below).
+[`example_test.go`](example_test.go) covers streaming, local processing,
+playlists, SponsorBlock, album measurement, metadata, and WEB SABR.
 
 ## Configuration
 
-From highest to lowest, CLI configuration precedence is: explicit flag,
-`WAXTAP_*` environment variable, JSON config file, then built-in default. The
-default file is `config.json` under `os.UserConfigDir()/waxtap`; override it
-with `--config` or `WAXTAP_CONFIG`. Unknown JSON keys and malformed environment
-values are errors.
+CLI precedence, highest to lowest: explicit flag, `WAXTAP_*` environment
+variable, JSON config file, built-in default. The default file is `config.json`
+under `os.UserConfigDir()/waxtap`; override with `--config` or `WAXTAP_CONFIG`.
+Unknown JSON keys and malformed environment values are errors.
 
-`--json`, `--quiet`, and `--verbose` are global. Other flags appear only on
-commands that use them.
-
-### Config keys
-
-Keys with no flag are config/environment only. Timeout values are seconds.
+`--json`, `--quiet`, and `--verbose` are global. Other flags appear only on the
+commands that use them. Timeout values are seconds; keys with no flag are
+config/environment only.
 
 | Config key | Environment variable | Flag |
 |---|---|---|
@@ -211,87 +198,35 @@ Keys with no flag are config/environment only. Timeout values are seconds.
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
 | `chunkTimeoutSeconds` | `WAXTAP_CHUNK_TIMEOUT` | - |
 
-### Operational notes
-
-- `--client web|ios|android_vr|web_embedded` forces one built-in client.
-  `--profile-override` replaces the full client chain, and `--chrome-major`
-  refreshes only the built-in WEB-family identity. Avoid forcing `--client ios`
-  for audio downloads: metadata usually resolves, but media delivery is
-  unreliable and can fail even on short clips. Use android_vr or an attested WEB
-  profile for audio.
-- `--channels mono|stereo|surround|any` selects a native layout when possible and
-  defaults to stereo. `--downmix` permits surround-to-mono/stereo conversion; it
-  never upmixes. Library callers start with `LayoutAny`, which can rank a
-  surround track highest; pass `WithChannels` to match the CLI's constraint.
-- Available metadata varies by client: WEB exposes the published date, while iOS
-  exposes DRC (loudness-normalized) format variants. This is expected.
-- `--no-fallback` disables watch-page, WEB-context, and incomplete-download
-  fallbacks. Results report the client that actually delivered them.
-- Playlist downloads support `--concurrency`, pacing, attempt limits, collision
-  policies, and yt-dlp-compatible `--download-archive` files. WaxTap writes
-  `youtube <id>` entries and also reads bare-ID entries.
-- `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
-  cache. Set `WAXTAP_DUMP_DIR` or `WAXTAP_SABR_DUMP_DIR` for diagnostic dumps.
-- Sidecar URL flags accept a base URL or full endpoint. `--api-key` sends
-  `X-API-Key`; sidecars bypass `--proxy`, do not follow redirects, and should
-  use HTTPS when remote.
-
 ## PO tokens and WEB
 
-ANDROID_VR is the token-free default for public videos. WEB-family clients use
-URL-less SABR/UMP audio. Complete WEB delivery requires:
-
-1. A GVS-scope PO-token provider (`Options.POTokenProvider` or
-   `--potoken-url`).
-2. An attested identity from either a `/player-context` handoff or adopted
-   `/session`.
-3. A shared egress IP for the attesting service and the download.
-
-A PO token by itself is not a portable way to lift the WEB preview cap. Full WEB
-audio can work when WaxTap and WaxSeal share the same attested egress.
+ANDROID_VR is token-free for public videos. WEB-family clients use URL-less
+SABR/UMP audio, and complete delivery needs three things together: a GVS-scope
+PO-token provider (`Options.POTokenProvider` or `--potoken-url`), an attested
+identity (a `/player-context` handoff or an adopted `/session`), and a shared
+egress IP for the attesting service and the download. A PO token alone does not
+lift the WEB preview cap.
 
 ```sh
-# Attested player context
-waxtap download <url> \
-  --player-context-url http://127.0.0.1:4416 \
-  --potoken-url http://127.0.0.1:4416
-
-# Adopt a guest browser session
-waxtap download <url> --client web \
-  --session-url http://127.0.0.1:4417/session \
-  --potoken-url http://127.0.0.1:4417
-```
-
-If one sidecar exposes all three routes, you can configure both WEB handoff paths
-in one command. WaxTap tries the attested player context first. If that path
-fails or caps, the WEB client chain can still use the adopted session from
-`--session-url`.
-
-```sh
-# Player context first, adopted WEB session as fallback
+# Attested player context, adopted WEB session as fallback
 waxtap download <url> --client web \
   --player-context-url http://127.0.0.1:4416/player-context \
   --session-url http://127.0.0.1:4416/session \
   --potoken-url http://127.0.0.1:4416/get_pot
 ```
 
-Library callers get the same handoff without reimplementing the sidecar wire
-format: `waxtap.NewSidecarPOTokenProvider`, `NewSidecarPlayerContextProvider`,
-and `NewSidecarSessionProvider` build providers for `Options.POTokenProvider`,
-`PlayerContextProvider`, and `SessionProvider`. Each takes a base URL or full
-endpoint plus an optional `WithSidecarAPIKey`, and `ParseNetscapeCookies` loads a
-static session from a browser `cookies.txt`. See `ExampleNewSidecarPOTokenProvider`
-in [`example_test.go`](example_test.go).
-
-Session adoption requires a single-client chain. Static adoption is also
-available with `--visitor-data` and optional `--cookies`; visitor data is sent
-verbatim, and login cookies are discarded. See [MAINTENANCE.md](MAINTENANCE.md)
-for sidecar contracts and SABR diagnostics.
+WaxTap tries the attested player context first; if it fails or caps, the WEB
+chain can use the adopted session. Static adoption is also available with
+`--visitor-data` and optional `--cookies`. Library callers get the same handoff
+via the `NewSidecar*` providers, each taking a base URL or full endpoint plus an
+optional `WithSidecarAPIKey`; `ParseNetscapeCookies` loads a static session from
+a browser `cookies.txt`. See [MAINTENANCE.md](MAINTENANCE.md) for sidecar
+contracts and SABR diagnostics.
 
 ## Maintenance
 
-Use `waxtap doctor` for a low-cost extraction, resolution, and byte-read health
-check. Use `waxtap doctor --full` to verify complete delivery. The
+`waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
+check; `waxtap doctor --full` verifies complete delivery. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
 failures, SABR changes, fixtures, and releases.
 
