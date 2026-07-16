@@ -1,4 +1,4 @@
-package waxtap_test
+package tests
 
 import (
 	"context"

@@ -3,7 +3,7 @@
 // Live integration tests for the facade. They are excluded from the default
 // build; run them with:
 //
-//	go test -tags=integration .
+//	go test -tags=integration ./tests/
 //
 // These make real YouTube requests and are more brittle than the offline tests.
 // Useful environment variables:
@@ -12,7 +12,7 @@
 // They prove the end-to-end MVP path: extract -> select -> resolve -> download.
 // When the current network requires a PO token but none is configured, they skip
 // (an expected environment condition, not a failure).
-package waxtap_test
+package tests
 
 import (
 	"context"
