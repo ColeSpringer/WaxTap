@@ -14,26 +14,28 @@ plain download keeps the selected source stream without re-encoding.
 - Pure-Go extraction via InnerTube and goja. No `yt-dlp` dependency.
 - Token-free ANDROID_VR is the default. Full WEB audio is opt-in and needs an
   attested identity; forced iOS delivery is best-effort.
-- One ffmpeg pass can combine cuts, SponsorBlock removal, normalization, and
-  transcoding.
+- One pure-Go pass can combine cuts, SponsorBlock removal, normalization, and
+  transcoding, via the WaxFlow audio engine.
 - Lossless output such as FLAC is still a re-encode of YouTube's lossy source.
   Only copy/remux avoids re-encoding.
 
 The stable facade is the root `waxtap` package. YouTube code is isolated under
-`youtube`; processing lives in `cut`, `normalize`, `transcode`, and
-`internal/pipeline`.
+`youtube`; audio processing lives in `internal/media` (a WaxFlow-backed engine)
+and `internal/pipeline`.
 
 ## Requirements
 
 - Go 1.26+
-- `ffmpeg` and `ffprobe` for transcoding, cutting, normalization, and probing.
-  Metadata and keep-source downloads do not need them.
+
+WaxTap is a single static binary with no external runtime dependency: all audio
+work (transcode, cut, normalize, probe) runs in-process via the pure-Go WaxFlow
+engine.
 
 ## Install
 
 ```sh
-go install github.com/colespringer/waxtap/v2/cmd/waxtap@latest   # CLI
-go get github.com/colespringer/waxtap/v2                         # library
+go install github.com/colespringer/waxtap/v3/cmd/waxtap@latest   # CLI
+go get github.com/colespringer/waxtap/v3                         # library
 ```
 
 [Release archives](https://github.com/colespringer/waxtap/releases/latest) hold
@@ -46,7 +48,7 @@ and run `waxtap --help`. Unsigned macOS binaries may need
 Media commands accept a YouTube URL or bare video or playlist ID. `download`
 also accepts a channel URL or bare `UC` ID, resolving to the channel's uploads
 feed. `cut`, `transcode`, and `normalize` also take local files. Every command
-has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 1).
+has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 2).
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
@@ -98,7 +100,7 @@ as `error.code`. Run `waxtap exit-codes` for the built-in table.
 | 3 | unavailable/restricted video or playlist (private, age-restricted, members-only, geo-blocked, removed), login required, live or upcoming, or no audio |
 | 4 | extraction, cipher, or playlist parsing failure; WaxTap may need an update |
 | 5 | rate limited |
-| 6 | ffmpeg/ffprobe not found |
+| 6 | retired (formerly ffmpeg/ffprobe not found) |
 | 7 | incomplete stream or expired stream URL |
 | 8 | PO token required, missing, rejected, or not minted |
 | 9 | network failure, including an unreachable proxy or sidecar |
@@ -117,7 +119,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 func main() {
@@ -140,7 +142,7 @@ func main() {
 ```
 
 A default `Download` (nil `ProcessSpec`) delivers the source stream
-byte-for-byte: no ffmpeg, `SourceBytes == OutputBytes`, `Transcoded` false.
+byte-for-byte: no processing, `SourceBytes == OutputBytes`, `Transcoded` false.
 Library selection starts from `LayoutAny` and can rank a surround track highest;
 pass `WithChannels(LayoutStereo)` to match the CLI. `Client.Enumerate` expands a
 playlist or channel URL with `Skip`/`Stop` predicates for an archive cursor, and
@@ -190,7 +192,7 @@ config/environment only.
 | `channels` | `WAXTAP_CHANNELS` | `--channels` |
 | `downmix` | `WAXTAP_DOWNMIX` | `--downmix` |
 | `downloadConcurrency` | `WAXTAP_DOWNLOAD_CONCURRENCY` | `--concurrency` (download) |
-| `ffmpegProcs` | `WAXTAP_FFMPEG_PROCS` | - |
+| `procs` | `WAXTAP_PROCS` | - |
 | `chunkParallelism` | `WAXTAP_CHUNKS` | - |
 | `extractionTimeoutSeconds` | `WAXTAP_EXTRACTION_TIMEOUT` | - |
 | `resolveTimeoutSeconds` | `WAXTAP_RESOLVE_TIMEOUT` | - |

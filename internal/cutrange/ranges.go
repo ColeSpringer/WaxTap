@@ -1,10 +1,10 @@
-package cut
+package cutrange
 
 import (
 	"sort"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/sponsorblock"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
 )
 
 // Range is a half-open [Start, End) time span. End must be greater than Start to

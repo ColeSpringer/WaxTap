@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 func TestHeaderRange_Apply(t *testing.T) {

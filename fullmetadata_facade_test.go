@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // fullMetaPlayerJSON is an ANDROID_VR-style /player response: no microformat, so

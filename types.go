@@ -6,10 +6,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/sponsorblock"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 // Audio format model and selectors (package format).
@@ -226,9 +226,19 @@ type ProcessSpec struct {
 	// YouTube downloads. It has no effect on local-file processing.
 	IncludeMetadata bool
 
-	// Threads limits ffmpeg's worker threads for processing operations. Zero lets
-	// ffmpeg choose.
-	Threads int
+	// EmbedThumbnail embeds the YouTube thumbnail as front-cover art in the
+	// written audio file, when the output format can carry a picture. It is
+	// off by default and applies to YouTube downloads only (a local file has no
+	// thumbnail). A fetch or embed failure never fails the download.
+	EmbedThumbnail bool
+
+	// EmbedMetadata writes basic tags (title, artist, date, chapters) into the
+	// written audio file, when the output format can carry them. It is off by
+	// default and applies to YouTube downloads only. On the default token-free
+	// path only title and artist are reliably available; date and chapters land
+	// only when richer metadata is present (see FullMetadata). A failure never
+	// fails the download.
+	EmbedMetadata bool
 }
 
 // Request is a YouTube acquisition + processing request.
@@ -289,8 +299,8 @@ const (
 	FormatVorbis                        // Vorbis audio
 )
 
-// TranscodeSpec requests ffmpeg processing. An explicit FormatCopy stream-copies
-// through ffmpeg to remux into the destination container; a nil TranscodeSpec
+// TranscodeSpec requests re-encoding. An explicit FormatCopy remuxes (container
+// copy, no re-encode) into the destination container; a nil TranscodeSpec
 // keeps the selected source bytes untouched.
 type TranscodeSpec struct {
 	// Format selects the output preset.
@@ -315,8 +325,8 @@ const (
 	CutAccurate
 )
 
-// SponsorBlockErrorPolicy governs SponsorBlock fetch failures only (ffmpeg
-// cut/transcode failures are always hard errors).
+// SponsorBlockErrorPolicy governs SponsorBlock fetch failures only (cut and
+// transcode failures are always hard errors).
 type SponsorBlockErrorPolicy uint8
 
 const (
@@ -373,7 +383,7 @@ type LoudnessInfo struct {
 	IntegratedLUFS float64 // integrated loudness, LUFS
 	TruePeakDBTP   float64 // true peak, dBTP
 	LRA            float64 // loudness range, LU
-	Threshold      float64 // relative gating threshold, LUFS
+	SamplePeakDB   float64 // sample peak, dBFS
 }
 
 // MarshalJSON encodes non-finite measurements as JSON null because encoding/json
@@ -391,8 +401,8 @@ func (l LoudnessInfo) MarshalJSON() ([]byte, error) {
 		IntegratedLUFS *float64
 		TruePeakDBTP   *float64
 		LRA            *float64
-		Threshold      *float64
-	}{finite(l.IntegratedLUFS), finite(l.TruePeakDBTP), finite(l.LRA), finite(l.Threshold)})
+		SamplePeakDB   *float64
+	}{finite(l.IntegratedLUFS), finite(l.TruePeakDBTP), finite(l.LRA), finite(l.SamplePeakDB)})
 }
 
 // LoudnessResult reports loudness measurements. WaxTap returns LUFS/true-peak
@@ -552,7 +562,7 @@ const (
 	StageResolving                // resolving the selected media stream
 	StageDownloading              // transferring source bytes
 	StageStaging                  // preparing a local working file
-	StageProbing                  // inspecting media with ffprobe
+	StageProbing                  // inspecting media
 	StageAnalyzing                // measuring loudness
 	StageCutting                  // removing time ranges
 	StageNormalizing              // applying loudness normalization
@@ -615,6 +625,7 @@ const (
 	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
 	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
 	WarnWebContextRetry                        // WEB player-context was capped (status 2); retried once with a fresh context
+	WarnMetadataEmbed                          // an --embed-thumbnail/--embed-metadata post-pass failed; audio delivered untagged
 )
 
 func (w WarningCode) String() string {
@@ -641,6 +652,8 @@ func (w WarningCode) String() string {
 		return "incomplete-fallback"
 	case WarnWebContextRetry:
 		return "web-context-retry"
+	case WarnMetadataEmbed:
+		return "metadata-embed-failed"
 	default:
 		return "unknown"
 	}

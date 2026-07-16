@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/colespringer/waxtap/v2/internal/iox"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/iox"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 const (

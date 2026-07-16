@@ -1,14 +1,14 @@
 // Package pipeline runs WaxTap's source-agnostic audio processing on a staged
 // local file: it cuts time ranges, normalizes loudness, and transcodes, fusing
-// whatever is requested into a single ffmpeg encode.
+// whatever is requested into a single WaxFlow pass.
 //
 // The facade acquires the input (a YouTube download staged to a temp file, or a
-// local file) and a transcode.Runner, then calls [Run]. The pipeline never knows
+// local file) and a media.Runner, then calls [Run]. The pipeline never knows
 // where the audio came from, so the YouTube and local-file paths share it.
 //
 // The stages are probe, optional loudness analysis, one fused processing pass,
 // and an optional output loudness measurement. Analysis includes any requested
-// cut and downmix so loudnorm measures the audio that will be encoded.
+// cut so the gain matches the audio that will be encoded.
 package pipeline
 
 import (
@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/cut"
-	"github.com/colespringer/waxtap/v2/normalize"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/media/loudness"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // Stage identifies a processing stage for progress events. The facade maps these
@@ -66,16 +66,16 @@ type Loudness struct {
 type Spec struct {
 	// Remove lists [Start, End) spans to cut. Spans are clamped to the probed
 	// duration and merged before processing. An empty slice means no cut.
-	Remove    []cut.Range
-	CutMode   cut.Mode      // rendering strategy for effective cuts
+	Remove    []cutrange.Range
+	CutMode   media.Mode    // rendering strategy for effective cuts
 	Crossfade time.Duration // overlap applied at each splice
 	// RejectEmptyRemoval rejects a non-empty Remove when every span lies outside
 	// the media. The check runs before output is written.
 	RejectEmptyRemoval bool
 
-	// Codec is the transcode target. transcode.CodecCopy means keep the source
-	// codec (no re-encode unless a cut, loudness apply, or downmix forces one).
-	Codec   transcode.Codec
+	// Codec is the transcode target. media.CodecCopy means keep the source codec
+	// (no re-encode unless a cut, loudness apply, or downmix forces one).
+	Codec   media.Codec
 	Bitrate int // target bits per second for lossy codecs
 
 	// Downmix reduces sources with more channels to this count. Supported values
@@ -83,17 +83,14 @@ type Spec struct {
 	// family when possible.
 	Downmix int
 
-	// Remux requests a stream copy through ffmpeg even when Codec is CodecCopy,
-	// for an explicit copy/remux into the output container (which strips non-audio
-	// streams). The zero Spec, with Remux false, is a no-op that leaves the input
-	// untouched. It is ignored when a re-encode or cut already runs.
+	// Remux requests a container copy even when Codec is CodecCopy, for an
+	// explicit copy/remux into the output container. The zero Spec, with Remux
+	// false, is a no-op that leaves the input untouched. It is ignored when a
+	// re-encode or cut already runs.
 	Remux bool
 
 	// Loudness controls measurement/normalization. Nil means no loudness work.
 	Loudness *Loudness
-
-	// Threads limits ffmpeg's worker threads. Zero lets ffmpeg choose.
-	Threads int
 }
 
 // Result reports what the pipeline did.
@@ -111,22 +108,21 @@ type Result struct {
 	// re-probing. It is 0 when the input duration is unknown.
 	SourceDuration time.Duration
 
-	Cut              bool            // an effective cut was rendered
-	Removed          time.Duration   // audio removed by the cut
-	Transcoded       bool            // a re-encode ran (not a stream copy/remux)
-	OutputCodec      transcode.Codec // codec written to OutputPath
-	LoudnessMeasured bool            // input loudness was measured
-	LoudnessApplied  bool            // normalization was applied
+	Cut              bool          // an effective cut was rendered
+	Removed          time.Duration // audio removed by the cut
+	Transcoded       bool          // a re-encode ran (not a container copy)
+	OutputCodec      media.Codec   // codec written to OutputPath
+	LoudnessMeasured bool          // input loudness was measured
+	LoudnessApplied  bool          // normalization was applied
 
-	InputLoudness  *normalize.Loudness // measured post-cut input loudness
-	OutputLoudness *normalize.Loudness // measured output loudness, set only on Apply
+	InputLoudness  *loudness.Loudness // measured post-cut input loudness
+	OutputLoudness *loudness.Loudness // measured output loudness, set only on Apply
 
-	// OutputProbe is an ffprobe of the written OutputPath, populated whenever an
-	// output file was produced (transcode, remux, downmix, or copy-mode cut). It is
-	// nil for a measure-only or no-op spec (OutputPath == "") and nil when the probe
-	// failed. Callers read it for authoritative output rate/channels/bitrate/
-	// duration/size.
-	OutputProbe *transcode.ProbeResult
+	// OutputProbe is a probe of the written OutputPath, populated whenever an
+	// output file was produced. It is nil for a measure-only or no-op spec and
+	// nil when the probe failed. Callers read it for authoritative output
+	// rate/channels/duration/size.
+	OutputProbe *media.ProbeResult
 }
 
 // Run processes input per spec, writing any output to output. It returns a
@@ -134,7 +130,7 @@ type Result struct {
 // no-op), Result.OutputPath is "" and output is not written.
 //
 // emit receives stage transitions and may be nil.
-func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Spec, emit func(Stage)) (Result, error) {
+func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, emit func(Stage)) (Result, error) {
 	send := func(s Stage) {
 		if emit != nil {
 			emit(s)
@@ -150,8 +146,8 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 
 	apply := spec.Loudness != nil && spec.Loudness.Apply
 	measure := spec.Loudness != nil
-	transcoding := spec.Codec != transcode.CodecCopy
-	// An explicit stream-copy remux (Codec is Copy but Remux was requested). A
+	transcoding := spec.Codec != media.CodecCopy
+	// An explicit container copy (Codec is Copy but Remux was requested). A
 	// re-encode supersedes it, so it only matters in the pure-copy case.
 	remux := spec.Remux && !transcoding
 
@@ -164,17 +160,17 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	// Resolve the cut against the real duration. A cut is only "effective" when it
 	// removes something; an empty SponsorBlock result or fully-clamped ranges fall
 	// through to a plain transcode (or no-op) so a requested transcode still runs.
-	var keeps []cut.Range
+	var keeps []cutrange.Range
 	effectiveCut := false
 	if len(spec.Remove) > 0 {
 		if total <= 0 {
 			return Result{}, fmt.Errorf("%w: cannot cut input with unknown duration", waxerr.ErrUnsupportedInput)
 		}
-		keeps = cut.Keeps(spec.Remove, total)
+		keeps = cutrange.Keeps(spec.Remove, total)
 		if len(keeps) == 0 {
 			return Result{}, fmt.Errorf("%w: cut would remove the entire track", waxerr.ErrIncompatibleSpec)
 		}
-		effectiveCut = cut.OutputDuration(keeps, 0) < total
+		effectiveCut = cutrange.OutputDuration(keeps, 0) < total
 		// Reject caller-supplied spans that do not intersect the media before
 		// opening the output.
 		if !effectiveCut && spec.RejectEmptyRemoval {
@@ -183,20 +179,18 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		}
 	}
 	if effectiveCut && spec.Crossfade > 0 {
-		if err := cut.ValidateCrossfade(keeps, spec.Crossfade); err != nil {
+		if err := media.ValidateCrossfade(keeps, spec.Crossfade); err != nil {
 			return Result{}, err
 		}
 	}
 
 	var res Result
-	res.OutputCodec = transcode.CodecCopy
+	res.OutputCodec = media.CodecCopy
 	res.SourceDuration = total
-	srcSampleRate, srcChannels, srcBitrate := 0, 0, 0
+	srcChannels := 0
 	if audio, ok := probe.AudioStream(); ok {
 		res.SourceCodec = audio.CodecName
-		srcSampleRate = audio.SampleRate
 		srcChannels = audio.Channels
-		srcBitrate = audio.BitRate
 	}
 
 	// Reduce the channel count only when the source exceeds the requested target.
@@ -205,26 +199,19 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		fold = spec.Downmix
 	}
 
-	// Resolve container compatibility before choosing an encoder for downmixing.
-	// Automatic processing may select the container's default codec, while an
-	// explicitly requested stream copy must fail.
-	//
-	// stageExt gives ffmpeg a muxer hint when the final path has no usable
-	// extension.
-	stageExt := ""
-	if spec.Codec == transcode.CodecCopy && (effectiveCut || remux || fold > 0) {
+	// Resolve container compatibility before choosing an encoder. Automatic
+	// processing may select the container's default codec; an explicitly
+	// requested container copy must fail on an incompatible extension.
+	if spec.Codec == media.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
-		// A remux can infer a container from the source codec. Copy cuts still need
-		// an explicit container because they create intermediate concat segments.
-		if (remux || effectiveCut) && fold == 0 && (ext == "" || ext == "copy") {
-			if effectiveCut {
-				return Result{}, fmt.Errorf("%w: cannot stream-copy %s without a container extension; choose one that fits the source (%s)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), containerSuggestion(res.SourceCodec))
-			}
-			stageExt = copyContainerExt(res.SourceCodec)
+		// A copy cut writes into the container named by the output extension.
+		if effectiveCut && fold == 0 && (ext == "" || ext == "copy") {
+			return Result{}, fmt.Errorf("%w: cannot copy %s without a container extension; choose one that fits the source (%s)",
+				waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), containerSuggestion(res.SourceCodec))
 		}
 		if !containerAccepts(ext, res.SourceCodec) {
-			if remux || spec.CutMode == cut.ModeCopy {
-				return Result{}, fmt.Errorf("%w: cannot stream-copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)
+			if remux || spec.CutMode == media.ModeCopy {
+				return Result{}, fmt.Errorf("%w: cannot copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)
 			}
 			c, ok := containerCodec(ext)
 			if !ok {
@@ -234,57 +221,36 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 			transcoding = true
 			remux = false
 		}
-		// Raw FLAC is a special copy-cut case. ffmpeg can stream-copy the audio, but
-		// the FLAC muxer keeps the source STREAMINFO total_samples, so players see
-		// the old duration after a trim. A downmix or crossfade already re-encodes
-		// and writes fresh metadata. For a pure smart cut, upgrade to a lossless FLAC
-		// encode; for explicit copy/remux, ask the caller to re-encode or use .mka
-		// when a true stream copy is required.
-		if effectiveCut && spec.Codec == transcode.CodecCopy && fold == 0 && spec.Crossfade == 0 &&
-			ext == "flac" && strings.EqualFold(res.SourceCodec, "flac") {
-			if remux || spec.CutMode == cut.ModeCopy {
-				return Result{}, fmt.Errorf("%w: a stream-copy cut into raw FLAC leaves a stale duration header; re-encode (smart/accurate mode or --format flac) or use a Matroska (.mka) container for a true copy", waxerr.ErrIncompatibleSpec)
-			}
-			spec.Codec = transcode.CodecFLAC
-			transcoding = true
-			remux = false
-		}
 	}
 
 	// A downmix into a compatible container uses the source codec family when no
 	// transcode target was requested.
-	if fold > 0 && spec.Codec == transcode.CodecCopy {
+	if fold > 0 && spec.Codec == media.CodecCopy {
 		c, ok := sourceEncodeCodec(res.SourceCodec)
 		if !ok {
 			return Result{}, fmt.Errorf("%w: cannot downmix %s without a transcode target (pass --format)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
 		}
 		spec.Codec = c
-		if spec.Bitrate == 0 && !c.IsLossless() {
-			spec.Bitrate = srcBitrate // 0 falls back to the preset default
-		}
 		transcoding = true
 		remux = false
 	}
 
-	// Measure after applying the requested cut and downmix. Reusing the same
-	// filters keeps the measured and encoded audio equivalent.
-	var measured normalize.Loudness
+	// A copy cut that survived container resolution stays lossless: WaxTap
+	// cut-remuxes it (kept codec, byte-identical packets) and re-encodes only if
+	// WaxFlow declines the source codec.
+	copyCut := effectiveCut && spec.Codec == media.CodecCopy
+
+	// Measure after resolving the cut. The composed cut audio is measured, so the
+	// gain matches the encoded bytes.
+	var measured loudness.Loudness
 	if measure {
 		send(StageAnalyzing)
+		// Fold the measurement to the downmix target so the gain is computed on the
+		// audio the encode will meter (fold is 0 when no downmix applies).
 		if effectiveCut {
-			graph := cut.Graph(keeps, spec.Crossfade, total, "pre")
-			sink := "pre"
-			if fold > 0 {
-				graph += ";[pre]" + foldFilter(fold) + "[folded]"
-				sink = "folded"
-			}
-			measured, err = normalize.MeasureComplex(ctx, r, input, graph, sink, spec.Threads)
+			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, fold)
 		} else {
-			var pre []string
-			if fold > 0 {
-				pre = []string{foldFilter(fold)}
-			}
-			measured, err = normalize.Measure(ctx, r, input, pre, spec.Threads)
+			measured, err = loudness.Measure(ctx, r, input, fold)
 		}
 		if err != nil {
 			return Result{}, err
@@ -300,17 +266,9 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 		return res, nil
 	}
 
-	// Preserve the source sample rate because loudnorm otherwise outputs 192 kHz.
-	enc := transcode.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, StageExt: stageExt, Threads: spec.Threads}
-	switch {
-	case fold > 0 && apply:
-		// Fold before loudnorm so its true-peak limiter bounds fold clipping.
-		enc.Filters = []string{foldFilter(fold), normalize.ApplyFilter(spec.Loudness.Target, measured, srcSampleRate)}
-	case fold > 0:
-		// No loudnorm: fold via -ac with ffmpeg's normalized downmix coefficients.
-		enc.Channels = fold
-	case apply:
-		enc.Filters = []string{normalize.ApplyFilter(spec.Loudness.Target, measured, srcSampleRate)}
+	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, Channels: fold}
+	if apply {
+		enc.GainDB = loudness.GainFor(spec.Loudness.Target, measured)
 	}
 
 	if apply {
@@ -318,17 +276,33 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	}
 	if effectiveCut {
 		send(StageCutting)
-		cres, err := cut.Render(ctx, r, input, output, cut.Spec{
-			Remove:    spec.Remove,
-			Mode:      spec.CutMode,
-			Crossfade: spec.Crossfade,
-			Encode:    enc,
+		fallback := enc
+		if copyCut {
+			// The re-encode fallback (when cut-remux declines the source codec)
+			// keeps the source family, staying lossless for a lossless source.
+			if c, ok := sourceEncodeCodec(res.SourceCodec); ok {
+				fallback.Codec = c
+			}
+		}
+		cres, err := r.Render(ctx, input, output, media.CutSpec{
+			Keeps:       keeps,
+			Total:       total,
+			Crossfade:   spec.Crossfade,
+			CopyCut:     copyCut,
+			RequireCopy: spec.CutMode == media.ModeCopy || remux,
+			Encode:      fallback,
 		})
 		if err != nil {
 			return Result{}, err
 		}
 		res.Cut = cres.Applied
 		res.Removed = cres.Removed
+		// A copy cut that fell back to a re-encode (cut-remux declined the source
+		// codec) reports the encode it actually produced.
+		if copyCut && cres.Mode == media.ModeAccurate {
+			transcoding = true
+			spec.Codec = fallback.Codec
+		}
 	} else {
 		send(StageTranscoding)
 		if _, err := r.Transcode(ctx, input, output, enc); err != nil {
@@ -342,57 +316,47 @@ func Run(ctx context.Context, r *transcode.Runner, input, output string, spec Sp
 	res.OutputCodec = spec.Codec
 
 	// Post-measure the written output so callers can report the achieved loudness.
-	// It is best-effort: the apply already succeeded, so a measurement failure
-	// must not fail the job.
+	// Best-effort: the apply already succeeded, so a measurement failure must not
+	// fail the job.
 	if apply {
 		send(StageAnalyzing)
-		if out, merr := normalize.Measure(ctx, r, output, nil, spec.Threads); merr == nil {
+		// The output is already at the target layout, so measure it as-is (0).
+		if out, merr := loudness.Measure(ctx, r, output, 0); merr == nil {
 			res.OutputLoudness = &out
 		}
 	}
 
-	// Probe the written output so callers can report authoritative output numbers
-	// (sample rate, channels, bitrate, duration, size). Best-effort: the write
-	// already succeeded, so a probe failure must not fail the job. Reaching here
-	// means a real file was produced; the measure-only/no-op early return above
-	// left OutputPath empty and never probes.
+	// Probe the written output so callers can report authoritative output numbers.
+	// Best-effort: the write already succeeded, so a probe failure must not fail
+	// the job.
 	if op, perr := r.Probe(ctx, output); perr == nil {
 		res.OutputProbe = &op
 	}
 	return res, nil
 }
 
-// foldFilter returns an ffmpeg filter that uses libswresample's normalized
-// downmix matrix. It is used when downmixing must precede another filter.
-func foldFilter(channels int) string {
-	if channels == 1 {
-		return "aformat=channel_layouts=mono"
-	}
-	return "aformat=channel_layouts=stereo"
-}
-
-// sourceEncodeCodec maps a probed source codec name to the transcode.Codec that
-// re-encodes in the same family, so a downmix with no transcode target keeps the
+// sourceEncodeCodec maps a probed source codec name to the media.Codec that
+// re-encodes in the same family, so a downmix or a declined cut-remux keeps the
 // source codec. It reports false for codecs WaxTap cannot encode.
-func sourceEncodeCodec(name string) (transcode.Codec, bool) {
+func sourceEncodeCodec(name string) (media.Codec, bool) {
 	switch strings.ToLower(name) {
 	case "opus":
-		return transcode.CodecOpus, true
+		return media.CodecOpus, true
 	case "aac":
-		return transcode.CodecAAC, true
+		return media.CodecAAC, true
 	case "vorbis":
-		return transcode.CodecVorbis, true
+		return media.CodecVorbis, true
 	case "mp3":
-		return transcode.CodecMP3, true
+		return media.CodecMP3, true
 	case "flac":
-		return transcode.CodecFLAC, true
+		return media.CodecFLAC, true
 	case "alac":
-		return transcode.CodecALAC, true
+		return media.CodecALAC, true
 	}
 	if strings.HasPrefix(strings.ToLower(name), "pcm") {
-		return transcode.CodecWAV, true
+		return media.CodecWAV, true
 	}
-	return transcode.CodecCopy, false
+	return media.CodecCopy, false
 }
 
 // sourceCodecLabel formats a probed codec name for error messages.
@@ -410,7 +374,7 @@ func containerExt(output string) string {
 }
 
 // formatRanges renders removal ranges as "start-end" pairs for an error message.
-func formatRanges(rs []cut.Range) string {
+func formatRanges(rs []cutrange.Range) string {
 	parts := make([]string, len(rs))
 	for i, r := range rs {
 		parts[i] = r.Start.Round(time.Second).String() + "-" + r.End.Round(time.Second).String()
@@ -418,60 +382,39 @@ func formatRanges(rs []cut.Range) string {
 	return strings.Join(parts, ", ")
 }
 
-// containerAccepts reports whether the container named by ext can stream-copy the
-// given ffprobe codec. The compatibility table lives in transcode so copy-time
-// and encode-time checks use the same rules. Unknown extensions are left for
-// ffmpeg to validate.
+// containerAccepts reports whether the container named by ext can hold the given
+// codec unchanged. Unknown extensions are left permissive.
 func containerAccepts(ext, codec string) bool {
-	return transcode.ContainerAccepts(ext, codec)
+	return media.ContainerAccepts(ext, codec)
 }
 
 // containerSuggestion lists conventional container extensions for a probed source
 // codec. It falls back to a broad list when the codec is unknown.
 func containerSuggestion(codec string) string {
-	if exts := transcode.ContainersFor(codec); len(exts) > 0 {
+	if exts := media.ContainersFor(codec); len(exts) > 0 {
 		return strings.Join(exts, "/")
 	}
 	return ".webm/.m4a/.ogg/.mka"
 }
 
-// copyContainerExt returns a container extension suitable for a stream copy of
-// codec. Only the staged file uses this extension.
-func copyContainerExt(codec string) string {
-	switch strings.ToLower(codec) {
-	case "opus":
-		return "webm"
-	case "aac", "alac":
-		return "m4a"
-	case "vorbis":
-		return "ogg"
-	case "mp3":
-		return "mp3"
-	case "flac":
-		return "flac"
-	default:
-		return "mka" // Matroska accepts the remaining codecs WaxTap handles
-	}
-}
-
 // containerCodec returns the default encoder for a container extension. It
 // reports false for an unknown extension.
-func containerCodec(ext string) (transcode.Codec, bool) {
+func containerCodec(ext string) (media.Codec, bool) {
 	switch ext {
 	case "flac":
-		return transcode.CodecFLAC, true
+		return media.CodecFLAC, true
 	case "wav":
-		return transcode.CodecWAV, true
+		return media.CodecWAV, true
 	case "mp3":
-		return transcode.CodecMP3, true
+		return media.CodecMP3, true
 	case "m4a", "mp4", "m4b", "aac":
-		return transcode.CodecAAC, true
+		return media.CodecAAC, true
 	case "ogg", "oga":
-		return transcode.CodecVorbis, true
+		return media.CodecVorbis, true
 	case "opus":
-		return transcode.CodecOpus, true
+		return media.CodecOpus, true
 	case "webm", "mka", "mkv":
-		return transcode.CodecOpus, true
+		return media.CodecOpus, true
 	}
-	return transcode.CodecCopy, false
+	return media.CodecCopy, false
 }

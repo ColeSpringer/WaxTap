@@ -5,11 +5,11 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/spf13/cobra"
 )
 
@@ -46,8 +46,7 @@ func newDoctorCmd() *cobra.Command {
 				candidates = []string{videoID}
 			}
 
-			ffmpegPath, _ := exec.LookPath("ffmpeg")
-			rep := &doctorReport{FFmpegPath: ffmpegPath, ForcedIOS: strings.EqualFold(env.cfg.client, "ios")}
+			rep := &doctorReport{Formats: media.OutputFormats(), ForcedIOS: strings.EqualFold(env.cfg.client, "ios")}
 
 			var lastErr error
 			for _, id := range candidates {
@@ -84,13 +83,13 @@ func newDoctorCmd() *cobra.Command {
 }
 
 type doctorReport struct {
-	FFmpegPath string
-	Healthy    bool
-	VideoID    string
-	Itag       int
-	Bytes      int64
-	Full       bool
-	ForcedIOS  bool
+	Formats   []string // audio formats the in-process engine can produce
+	Healthy   bool
+	VideoID   string
+	Itag      int
+	Bytes     int64
+	Full      bool
+	ForcedIOS bool
 }
 
 // runDoctorCheck performs one candidate's check, filling rep on success.
@@ -136,11 +135,7 @@ func runDoctorCheck(ctx context.Context, env *appEnv, id string, full bool, rep 
 }
 
 func renderDoctorHuman(env *appEnv, rep *doctorReport, lastErr error) {
-	if rep.FFmpegPath != "" {
-		env.printf("ffmpeg:   found (%s)\n", rep.FFmpegPath)
-	} else {
-		env.printf("ffmpeg:   not found (processing commands unavailable)\n")
-	}
+	env.printf("engine:   pure-Go (formats: %s)\n", strings.Join(rep.Formats, ", "))
 	if rep.Healthy {
 		mode := "range read"
 		if rep.Full {
@@ -169,21 +164,21 @@ func doctorIOSBestEffortNote(rep *doctorReport) string {
 
 func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 	out := struct {
-		SchemaVersion int    `json:"schemaVersion"`
-		Healthy       bool   `json:"healthy"`
-		FFmpegFound   bool   `json:"ffmpegFound"`
-		FFmpegPath    string `json:"ffmpegPath,omitempty"`
-		VideoID       string `json:"videoId,omitempty"`
-		Itag          int    `json:"itag,omitempty"`
-		Bytes         int64  `json:"bytes,omitempty"`
-		FullDownload  bool   `json:"fullDownload"`
-		Note          string `json:"note,omitempty"`
-		Error         string `json:"error,omitempty"`
+		SchemaVersion int      `json:"schemaVersion"`
+		Healthy       bool     `json:"healthy"`
+		Engine        string   `json:"engine"`
+		Formats       []string `json:"formats"`
+		VideoID       string   `json:"videoId,omitempty"`
+		Itag          int      `json:"itag,omitempty"`
+		Bytes         int64    `json:"bytes,omitempty"`
+		FullDownload  bool     `json:"fullDownload"`
+		Note          string   `json:"note,omitempty"`
+		Error         string   `json:"error,omitempty"`
 	}{
 		SchemaVersion: schemaVersion,
 		Healthy:       rep.Healthy,
-		FFmpegFound:   rep.FFmpegPath != "",
-		FFmpegPath:    rep.FFmpegPath,
+		Engine:        "waxflow",
+		Formats:       rep.Formats,
 		VideoID:       rep.VideoID,
 		Itag:          rep.Itag,
 		Bytes:         rep.Bytes,

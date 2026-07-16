@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -159,8 +159,15 @@ func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
 // copy target, so a user who set it deliberately gets a signal instead of silence.
 // Call it once per invocation with the parsed format, not per batch item.
 func warnBitrateIgnoredIfLossless(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
-	if bitrate > 0 && isLosslessFormat(tf) {
+	if bitrate <= 0 {
+		return
+	}
+	switch {
+	case isLosslessFormat(tf):
 		env.info("note: --bitrate is ignored for lossless and copy targets\n")
+	case tf == waxtap.FormatVorbis:
+		// Vorbis is quality-driven (VBR); WaxFlow has no ABR rate control.
+		env.info("note: --bitrate is ignored for Vorbis, which is quality-driven (VBR)\n")
 	}
 }
 
@@ -444,12 +451,12 @@ func newTranscodeCmd() *cobra.Command {
 			// is pending, stream-copy it instead of encoding it again. This avoids
 			// unnecessary work and an extra lossy pass for MP3, AAC, Opus, and Vorbis.
 			//
-			// The shortcut only works when ffmpeg can infer the output container from
+			// The shortcut only works when the output extension names a container from
 			// the extension. Codec-name paths such as .alac rely on the encode preset
 			// to provide a muxer, and stream copy has no preset.
 			remuxNoop := false
 			if !force && spec.Transcode != nil && targetCodecFamily(tf) != "" && !batchTransforms(spec) &&
-				isLocalFile(source) && transcode.CanInferContainer(outPath) {
+				isLocalFile(source) && media.CanInferContainer(outPath) {
 				// Check the requested format before rewriting to copy, so an
 				// incompatible extension such as opus into .flac is still rejected.
 				if err := waxtap.ValidateProcessSpec(spec); err != nil {
@@ -490,7 +497,7 @@ func newTranscodeCmd() *cobra.Command {
 	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input (default: beside each input)")
 	f.BoolVarP(&recursive, "recursive", "r", false, "recurse into subdirectories for a directory input")
 	f.BoolVar(&force, "force", false, "re-encode even when the source already matches the target format")
-	f.IntVar(&concurrency, "concurrency", 0, "parallel ffmpeg jobs (0 runs serially)")
+	f.IntVar(&concurrency, "concurrency", 0, "parallel jobs (0 runs serially)")
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
 	bindPlayerExtractionFlags(f)

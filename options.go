@@ -37,7 +37,7 @@ type Options struct {
 	// MaxTempBytes limits temporary staging bytes. Zero disables the limit.
 	MaxTempBytes int64
 
-	Concurrency Concurrency // limits parallel network and ffmpeg work
+	Concurrency Concurrency // limits parallel network and audio-processing work
 	Timeouts    Timeouts    // sets per-operation deadlines
 	Retry       RetryPolicy // tunes HTTP retries and backoff
 	Politeness  Politeness  // limits request rate and applies cooldowns
@@ -128,22 +128,22 @@ type Concurrency struct {
 	// Chunks is the max parallel ranged chunks within a single download. Kept
 	// low by default, especially for CLI playlist runs.
 	Chunks int
-	// FFmpeg limits concurrent ffmpeg/ffprobe processes, guarding local CPU
-	// independently from network parallelism. Zero selects a conservative default
-	// (GOMAXPROCS); a negative value disables the limit.
-	FFmpeg int
+	// Procs limits concurrent in-process audio operations (transcode, remux,
+	// analyze), guarding local CPU independently from network parallelism. Each
+	// operation is one goroutine, so this bounds CPU and peak memory. Zero selects
+	// a conservative default (GOMAXPROCS); a negative value disables the limit.
+	Procs int
 }
 
 // Timeouts are per-operation deadlines applied through context. There is no
 // single global download cap; each operation gets its own budget. A zero field
 // means WaxTap adds no extra deadline for that operation.
 type Timeouts struct {
-	Extraction     time.Duration // player-response fetch + parse
-	Resolve        time.Duration // stream-URL resolution (incl. cipher JS)
-	WebContext     time.Duration // per attested /player-context fetch, mid-stream re-fetches included
-	SponsorBlock   time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
-	ChunkRetry     time.Duration // per-chunk deadline for ranged downloads
-	FFmpegShutdown time.Duration // grace period before killing ffmpeg on cancel
+	Extraction   time.Duration // player-response fetch + parse
+	Resolve      time.Duration // stream-URL resolution (incl. cipher JS)
+	WebContext   time.Duration // per attested /player-context fetch, mid-stream re-fetches included
+	SponsorBlock time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
+	ChunkRetry   time.Duration // per-chunk deadline for ranged downloads
 }
 
 // RetryPolicy tunes HTTP retry/backoff.

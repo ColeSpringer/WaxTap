@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 func TestValidateItag(t *testing.T) {

@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/cut"
-	"github.com/colespringer/waxtap/v2/download"
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/internal/httpx"
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/download"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 // SponsorBlockSegments returns skip segments for videoURL using the client's
@@ -688,12 +688,12 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 // WithChannels(LayoutAny) to rank purely by fidelity.
 //
 // When no processing is requested (a nil ProcessSpec) it downloads the selected
-// source stream straight to the sink with no ffmpeg and no temp file: the bytes
+// source stream straight to the sink with no processing and no temp file: the bytes
 // are byte-identical to what YouTube served, so Result.SourceBytes ==
 // Result.OutputBytes, Result.OutputFormat == Result.SourceFormat, and
 // Result.Transcoded is false. A TranscodeSpec with FormatCopy is different: it
-// stream-copies through ffmpeg to remux into the target container, so no re-encode
-// happens but the bytes and container may change. When a cut, transcode, or
+// remuxes into the target container, so no re-encode happens but the bytes and
+// container may change. When a cut, transcode, or
 // loudness stage is requested it stages the source to a temp file, runs the fused
 // pipeline, and finalizes to the sink.
 func (c *Client) Download(ctx context.Context, req Request) (res *Result, err error) {
@@ -859,11 +859,21 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return "", nil, err
 	}
 
+	eo := embedOptions{thumbnail: req.EmbedThumbnail, metadata: req.EmbedMetadata}
+	// The delivered file's extension: the post-pass must not remux into a container
+	// the extension would then misname. A Writer sink has no path, hence no
+	// extension constraint.
+	embedExt := ""
+	if req.Output.kind == outputFile {
+		embedExt = strings.ToLower(strings.TrimPrefix(filepath.Ext(req.Output.path), "."))
+	}
+
 	// A SponsorBlock-only request can resolve to no ranges. In that case, deliver
-	// the staged source unchanged without requiring ffmpeg. Explicit FormatCopy
-	// still goes through ffmpeg because it asks for a remux, and a downmix needs the
-	// probe to decide whether to fold.
+	// the staged source with no re-encode. Explicit FormatCopy still remuxes, and a
+	// downmix needs the probe to decide whether to fold. An embed post-pass may
+	// still tag the staged source in place.
 	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil && !req.Downmix {
+		c.embedMetadata(ctx, srcPath, embedExt, a.video, eo, em)
 		res := &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      a.video.ID,
@@ -877,10 +887,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return srcPath, res, nil
 	}
 
-	runner, err := c.ffmpeg()
-	if err != nil {
-		return "", nil, err
-	}
+	runner := c.engine()
 
 	out := pipeOut
 	if out == "" {
@@ -897,8 +904,9 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	if deliver == "" {
 		deliver = srcPath // measure-only/no-op: deliver the original source
 	}
+	c.embedMetadata(ctx, deliver, embedExt, a.video, eo, em)
 
-	var explicit []cut.Range
+	var explicit []cutrange.Range
 	if req.Cut != nil {
 		explicit = cutRanges(req.Cut.Ranges)
 	}
@@ -917,7 +925,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 // and, separately, the SponsorBlock-derived ranges (so the caller can set
 // SponsorBlockApplied). A fetch failure is fatal only under FailDownload;
 // otherwise it logs a ProceedUncut warning and continues.
-func (c *Client) collectRanges(ctx context.Context, cs *CutSpec, videoID string, em *emitter) (all, sbRanges []cut.Range, err error) {
+func (c *Client) collectRanges(ctx context.Context, cs *CutSpec, videoID string, em *emitter) (all, sbRanges []cutrange.Range, err error) {
 	if cs == nil {
 		return nil, nil, nil
 	}
@@ -941,7 +949,7 @@ func (c *Client) collectRanges(ctx context.Context, cs *CutSpec, videoID string,
 		return explicit, nil, nil
 	}
 
-	sbRanges = cut.RangesFromSegments(segs)
+	sbRanges = cutrange.RangesFromSegments(segs)
 	all = append(explicit, sbRanges...)
 	return all, sbRanges, nil
 }

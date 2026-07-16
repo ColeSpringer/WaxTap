@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 func TestExtPossiblyCodec(t *testing.T) {
@@ -269,7 +269,7 @@ func TestRepresentativeError(t *testing.T) {
 	pathErr := &fs.PathError{Op: "open", Path: "/x", Err: errors.New("boom")} // exit 10
 	outcomes := []batchOutcome{
 		{err: waxtap.ErrUnsupportedInput}, // exit 2
-		{err: waxtap.ErrFFmpegNotFound},   // exit 6
+		{err: waxtap.ErrRateLimited},      // exit 5
 		{err: pathErr},                    // exit 10 (most serious)
 		{status: statusOK},                // no error
 	}
@@ -300,13 +300,4 @@ func TestBatchConcurrency(t *testing.T) {
 			t.Errorf("batchConcurrency(over) = %d, %v; want %d, nil", got, err, maxConcurrency)
 		}
 	})
-}
-
-func TestBatchThreadCap(t *testing.T) {
-	if got := batchThreadCap(1); got != 0 {
-		t.Errorf("serial cap = %d, want 0 (ffmpeg chooses)", got)
-	}
-	if got := batchThreadCap(1000); got != 1 {
-		t.Errorf("over-subscribed cap = %d, want at least 1", got)
-	}
 }

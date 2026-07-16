@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestFacade_CopyDownloadPreservesBytesAndFillsMetadata checks the copy path: a

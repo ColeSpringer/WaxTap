@@ -11,9 +11,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
 
 // audioExts lists the case-insensitive file extensions accepted for directory
@@ -177,7 +177,7 @@ func batchTransforms(spec waxtap.ProcessSpec) bool {
 
 // extPossiblyCodec reports whether ext can contain the given codec family. It
 // only filters probe candidates; every possible match is still confirmed with
-// ffprobe. General-purpose and unknown containers return true.
+// a probe. General-purpose and unknown containers return true.
 func extPossiblyCodec(ext, family string) bool {
 	switch ext {
 	case ".flac":
@@ -272,7 +272,7 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 	seenOut := map[string]string{}
 	fam := targetCodecFamily(tf)
 
-	// Probe candidates before planning so ffprobe calls can run in parallel.
+	// Probe candidates before planning so the probes can run in parallel.
 	// A failed probe leaves the file scheduled for normal processing.
 	codecs := batchProbeCodecs(ctx, inputs, fam, force || batchTransforms(spec), probeCodec)
 
@@ -349,15 +349,6 @@ func measureJobs(inputs []string) []batchJob {
 		jobs[i] = batchJob{index: i, input: in, action: actProcess}
 	}
 	return jobs
-}
-
-// batchThreadCap returns the per-job ffmpeg thread cap. Serial runs return zero
-// and let ffmpeg choose.
-func batchThreadCap(concurrency int) int {
-	if concurrency <= 1 {
-		return 0
-	}
-	return max(1, runtime.NumCPU()/concurrency)
 }
 
 // copyThrough copies src to dst using the same staged-output path as other writes.

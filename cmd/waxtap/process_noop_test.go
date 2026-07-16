@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxtap/v3/internal/media"
 )
 
 // runTranscode executes the transcode command through the root command (so the
@@ -23,29 +27,35 @@ func runTranscode(t *testing.T, args ...string) (stdout, stderr string, err erro
 	return outBuf.String(), errBuf.String(), err
 }
 
-// ffprobeCodec returns the first audio stream's codec name.
-func ffprobeCodec(t *testing.T, path string) string {
+// probeCodec returns the first audio stream's codec name via the in-process
+// engine (no external tools).
+func probeCodec(t *testing.T, path string) string {
 	t.Helper()
-	out, err := exec.Command("ffprobe", "-hide_banner", "-loglevel", "error",
-		"-select_streams", "a:0", "-show_entries", "stream=codec_name",
-		"-of", "default=nokey=1:noprint_wrappers=1", path).Output()
+	r := media.NewRunner(media.RunnerConfig{})
+	pr, err := r.Probe(context.Background(), path)
 	if err != nil {
-		t.Fatalf("ffprobe %s: %v", path, err)
+		t.Fatalf("probe %s: %v", path, err)
 	}
-	return strings.TrimSpace(string(out))
+	a, _ := pr.AudioStream()
+	return a.CodecName
 }
 
-// pcmMD5 decodes a file's audio to raw PCM and hashes it, so a stream copy and a
-// re-encode of the same source are distinguishable (a lossy re-encode changes the
-// samples; a copy does not).
+// pcmMD5 decodes a file's audio to PCM (a WAV) and hashes it, so a stream copy
+// and a re-encode of the same source are distinguishable (a lossy re-encode
+// changes the samples; a copy decodes to the same PCM).
 func pcmMD5(t *testing.T, path string) string {
 	t.Helper()
-	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-i", path, "-map", "0:a:0", "-f", "md5", "-").Output()
-	if err != nil {
-		t.Fatalf("ffmpeg md5 %s: %v", path, err)
+	r := media.NewRunner(media.RunnerConfig{})
+	wav := filepath.Join(t.TempDir(), "decoded.wav")
+	if _, err := r.Transcode(context.Background(), path, wav, media.Spec{Codec: media.CodecWAV}); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
 	}
-	return strings.TrimSpace(string(out))
+	b, err := os.ReadFile(wav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // transcodedFalse reports whether a --json transcode result says no encoding was
@@ -62,7 +72,6 @@ func transcodedFalse(t *testing.T, stdout string) bool {
 }
 
 func TestTranscodeSameFormatRemux(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.flac")
 	synthAudio(t, in, "flac")
@@ -75,7 +84,7 @@ func TestTranscodeSameFormatRemux(t *testing.T) {
 	if !transcodedFalse(t, stdout) {
 		t.Errorf("same-format flac should not re-encode (want transcoded:false):\n%s", stdout)
 	}
-	if c := ffprobeCodec(t, out); c != "flac" {
+	if c := probeCodec(t, out); c != "flac" {
 		t.Errorf("output codec = %q, want flac", c)
 	}
 	if a, b := pcmMD5(t, in), pcmMD5(t, out); a != b {
@@ -93,7 +102,6 @@ func TestTranscodeSameFormatRemux(t *testing.T) {
 }
 
 func TestTranscodeContainerChangeRemux(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.webm")
 	synthAudio(t, in, "libopus") // opus in a WebM container
@@ -103,25 +111,24 @@ func TestTranscodeContainerChangeRemux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("container-change remux: %v", err)
 	}
-	// transcoded:false proves the opus stream was copied, not re-encoded; ffprobe
+	// transcoded:false proves the opus stream was copied, not re-encoded; a probe
 	// confirms the .opus output is a valid opus file (not mislabeled). The decoded
 	// PCM is not compared: opus preskip handling differs across containers even for
 	// a pure stream copy, so it is not a reliable cross-container equality check.
 	if !transcodedFalse(t, stdout) {
 		t.Errorf("opus source -> .opus should remux, not re-encode:\n%s", stdout)
 	}
-	if c := ffprobeCodec(t, out); c != "opus" {
+	if c := probeCodec(t, out); c != "opus" {
 		t.Errorf("output codec = %q, want opus", c)
 	}
 }
 
 func TestTranscodeSameFormatNonInferableExtReEncodes(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.m4a")
 	synthAudio(t, in, "alac") // ALAC source in an MP4 container
 
-	// .alac names a codec, not a container ffmpeg can infer. A stream copy has no
+	// .alac names a codec, not a container WaxTap can infer. A stream copy has no
 	// forced muxer, so the same-format shortcut must not run here. The normal ALAC
 	// encode provides the MP4 muxer, and ALAC remains lossless.
 	out := filepath.Join(dir, "out.alac")
@@ -132,7 +139,7 @@ func TestTranscodeSameFormatNonInferableExtReEncodes(t *testing.T) {
 	if transcodedFalse(t, stdout) {
 		t.Errorf(".alac output must re-encode (a copy has no forced muxer), got transcoded:false:\n%s", stdout)
 	}
-	if c := ffprobeCodec(t, out); c != "alac" {
+	if c := probeCodec(t, out); c != "alac" {
 		t.Errorf("output codec = %q, want alac", c)
 	}
 
@@ -148,7 +155,6 @@ func TestTranscodeSameFormatNonInferableExtReEncodes(t *testing.T) {
 }
 
 func TestTranscodeProbeFailureNotCopiedThrough(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	// A file with an audio extension but unreadable content: ProbeCodec fails, so
 	// the no-op shortcut must fall through to the encode rather than copying
@@ -169,7 +175,6 @@ func TestTranscodeProbeFailureNotCopiedThrough(t *testing.T) {
 }
 
 func TestTranscodeQuietPrintsOnlyPath(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.flac")
 	synthAudio(t, in, "flac")
@@ -205,7 +210,6 @@ func TestTranscodeQuietPrintsOnlyPath(t *testing.T) {
 }
 
 func TestTranscodeForceBitrateDownmixBypassRemux(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.mp3")
 	synthAudio(t, in, "libmp3lame")

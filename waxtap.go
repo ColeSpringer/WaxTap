@@ -13,14 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/download"
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/internal/clientident"
-	"github.com/colespringer/waxtap/v2/internal/httpx"
-	"github.com/colespringer/waxtap/v2/sponsorblock"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/download"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/clientident"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 // configErr wraps a configuration message with ErrInvalidConfig.
@@ -38,8 +38,8 @@ const cacheDirName = "waxtap"
 //
 // The same httpx.Client backs extraction, media download, and SponsorBlock. Its
 // per-host limiter is shared by all request paths, while each host keeps its own
-// schedule. The ffmpeg Runner is created lazily on first use, so metadata calls
-// and keep-source downloads work without ffmpeg installed.
+// schedule. The audio engine is created lazily on first use, and WaxTap needs no
+// external tools: it is a single static binary.
 type Client struct {
 	opts Options
 	log  *slog.Logger
@@ -50,8 +50,7 @@ type Client struct {
 	sb *sponsorblock.Client
 
 	runnerOnce sync.Once
-	runner     *transcode.Runner
-	runnerErr  error
+	runner     *media.Runner
 
 	// WEB player-context provider cooldown (see acquire): after a provider
 	// failure, the attempt is skipped until webCtxDownUntil.
@@ -244,27 +243,28 @@ func resolveCacheDir(opts Options, log *slog.Logger) string {
 	return filepath.Join(base, cacheDirName)
 }
 
-// ffmpeg returns the shared transcode runner, creating it on first use. Metadata
-// calls and source-only downloads do not require ffmpeg on PATH.
-func (c *Client) ffmpeg() (*transcode.Runner, error) {
+// engine returns the shared in-process audio engine, creating it on first use.
+// Metadata calls and source-only downloads do not need it.
+func (c *Client) engine() *media.Runner {
 	c.runnerOnce.Do(func() {
-		// Options.Concurrency.FFmpeg uses zero for the default limit, while
+		// Options.Concurrency.Procs uses zero for the default limit, while
 		// RunnerConfig uses zero for unlimited. Translate that once at the facade
-		// boundary.
-		procs := c.opts.Concurrency.FFmpeg
+		// boundary. The default binds WaxFlow operation count to GOMAXPROCS: each
+		// operation is one goroutine, so this maps op count onto cores without
+		// oversubscription and caps peak memory.
+		procs := c.opts.Concurrency.Procs
 		switch {
 		case procs == 0:
 			procs = runtime.GOMAXPROCS(0)
 		case procs < 0:
 			procs = 0 // RunnerConfig treats 0 as unlimited
 		}
-		c.runner, c.runnerErr = transcode.NewRunner(transcode.RunnerConfig{
-			MaxProcs:      procs,
-			ShutdownGrace: c.opts.Timeouts.FFmpegShutdown,
-			Logger:        c.log,
+		c.runner = media.NewRunner(media.RunnerConfig{
+			MaxProcs: procs,
+			Logger:   c.log,
 		})
 	})
-	return c.runner, c.runnerErr
+	return c.runner
 }
 
 // InfoResult contains extracted video metadata and the client that produced it.
@@ -288,7 +288,7 @@ type InfoResult struct {
 	// metadata came from. When false, an empty Chapters slice or Unknown
 	// Availability means enrichment did not run, not that the video has none.
 	FullMetadata bool
-	// Probed reports that InfoProbe ran ffprobe on the resolved best-audio stream,
+	// Probed reports that InfoProbe probed the resolved best-audio stream,
 	// so that row's sample rate, channels, bitrate, and duration are authoritative.
 	// It is false for SABR streams, which have no direct URL to probe.
 	Probed bool
@@ -375,8 +375,8 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth, opts ...
 // InfoBasic returns extracted metadata and candidate formats. InfoResolved
 // additionally resolves the best-audio format, surfacing resolution errors (such
 // as ErrNeedsPOToken) and filling in its content length. InfoProbe additionally
-// runs ffprobe on that resolved stream and fills its authoritative sample rate,
-// channel count, bitrate, and duration (network-expensive, and requires ffmpeg).
+// probes that resolved stream and fills its authoritative sample rate, channel
+// count, and duration (network-expensive: it stages the stream to a temp file).
 // The signed stream URLs themselves are not returned through Video; use Download
 // or Stream to fetch bytes.
 func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, opts ...ReadOption) (*InfoResult, error) {
@@ -432,13 +432,11 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		video.Formats[idx].ContentLength = rs.ContentLength
 	}
 
-	// ffprobe cannot inspect SABR streams because they have no direct URL.
+	// A probe reads a local file, so the remote row is staged first. SABR streams
+	// have no direct URL and cannot be staged.
 	if depth >= InfoProbe && rs.Probeable() {
-		runner, ferr := c.ffmpeg()
-		if ferr != nil {
-			return nil, ferr
-		}
-		probe, perr := runner.ProbeURL(ctx, rs.URL, rs.Headers)
+		runner := c.engine()
+		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx])
 		if perr != nil {
 			return nil, perr
 		}
@@ -446,6 +444,25 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		res.Probed = true
 	}
 	return res, nil
+}
+
+// probeRemote stages a resolved stream to a temp file and probes it locally,
+// which sidesteps ranged-HTTP probing and any container header-size cliff (a
+// moov-at-end MP4 or a large Matroska SeekHead just works on a full local file).
+// The cost is that it downloads the whole audio stream once (tens of MB) to read
+// a header, which the info --probe diagnostic accepts; a lazy ranged-HTTP Source
+// is the future optimization if that cost ever bites.
+func (c *Client) probeRemote(ctx context.Context, runner *media.Runner, rs youtube.ResolvedStream, f Format) (media.ProbeResult, error) {
+	dir, err := c.makeJobDir()
+	if err != nil {
+		return media.ProbeResult{}, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "probe"+sourceExt(f))
+	if _, err := c.dl.ToFile(ctx, toSource(rs), path, nil, nil); err != nil {
+		return media.ProbeResult{}, err
+	}
+	return runner.Probe(ctx, path)
 }
 
 // fullMetadataPass runs the token-free watch-page metadata fetch and merges
@@ -623,7 +640,7 @@ const (
 	// These signed googlevideo URLs are temporary and sensitive; the CLI omits
 	// them from human output unless --show-url is given.
 	InfoResolved
-	// InfoProbe additionally runs ffprobe on the selected format only. This is
+	// InfoProbe additionally probes the selected format only. This is
 	// network-expensive (it reads the remote signed URL) and is never run on
 	// every candidate.
 	InfoProbe

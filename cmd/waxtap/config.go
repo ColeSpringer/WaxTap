@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -34,7 +34,6 @@ const (
 	defaultWebContextTimeout   = 20 * time.Second
 	defaultSponsorBlockTimeout = 10 * time.Second
 	defaultChunkTimeout        = 120 * time.Second
-	defaultFFmpegShutdown      = 5 * time.Second
 )
 
 // appConfig holds resolved configuration after merging flags, environment, and
@@ -55,7 +54,7 @@ type appConfig struct {
 	cooldown   time.Duration
 	hl, gl     string
 
-	ffmpegProcs      int
+	procs            int
 	chunks           int
 	downloads        int
 	sbBaseURL        string
@@ -91,7 +90,7 @@ type fileConfig struct {
 	CooldownSec         *float64 `json:"cooldownSeconds"`
 	HL                  *string  `json:"hl"`
 	GL                  *string  `json:"gl"`
-	FFmpegProcs         *int     `json:"ffmpegProcs"`
+	Procs               *int     `json:"procs"`
 	Chunks              *int     `json:"chunkParallelism"`
 	Downloads           *int     `json:"downloadConcurrency"`
 	SponsorBlockBaseURL *string  `json:"sponsorBlockBaseURL"`
@@ -152,7 +151,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		hl:         str("hl", fc.HL, ec.HL, ""),
 		gl:         str("gl", fc.GL, ec.GL, ""),
 
-		ffmpegProcs:      coalesceInt(0, fc.FFmpegProcs, ec.FFmpegProcs, nil),
+		procs:            coalesceInt(0, fc.Procs, ec.Procs, nil),
 		chunks:           coalesceInt(0, fc.Chunks, ec.Chunks, nil),
 		downloads:        coalesceInt(0, fc.Downloads, ec.Downloads, nil),
 		sbBaseURL:        str("sponsorblock-url", fc.SponsorBlockBaseURL, ec.SponsorBlockBaseURL, ""),
@@ -310,7 +309,11 @@ func envOverlay() (fileConfig, error) {
 	ec.CooldownSec = getFloat("WAXTAP_COOLDOWN")
 	ec.HL = getStr("WAXTAP_HL")
 	ec.GL = getStr("WAXTAP_GL")
-	ec.FFmpegProcs = getInt("WAXTAP_FFMPEG_PROCS")
+	// WAXTAP_PROCS bounds concurrent audio operations; WAXTAP_FFMPEG_PROCS is a
+	// deprecated alias kept for compatibility.
+	if ec.Procs = getInt("WAXTAP_PROCS"); ec.Procs == nil {
+		ec.Procs = getInt("WAXTAP_FFMPEG_PROCS")
+	}
 	ec.Chunks = getInt("WAXTAP_CHUNKS")
 	ec.Downloads = getInt("WAXTAP_DOWNLOAD_CONCURRENCY")
 	ec.SponsorBlockBaseURL = getStr("WAXTAP_SPONSORBLOCK_BASE_URL")
@@ -427,15 +430,14 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		Concurrency: waxtap.Concurrency{
 			Downloads: a.downloads,
 			Chunks:    a.chunks,
-			FFmpeg:    a.ffmpegProcs,
+			Procs:     a.procs,
 		},
 		Timeouts: waxtap.Timeouts{
-			Extraction:     a.extractionTimeout,
-			Resolve:        a.resolveTimeout,
-			WebContext:     a.webContextTimeout,
-			SponsorBlock:   a.sponsorBlockTimeout,
-			ChunkRetry:     a.chunkTimeout,
-			FFmpegShutdown: defaultFFmpegShutdown,
+			Extraction:   a.extractionTimeout,
+			Resolve:      a.resolveTimeout,
+			WebContext:   a.webContextTimeout,
+			SponsorBlock: a.sponsorBlockTimeout,
+			ChunkRetry:   a.chunkTimeout,
 		},
 		Retry: waxtap.RetryPolicy{
 			MaxRetries:   3,

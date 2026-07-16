@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 const testBaseJSPath = "/s/player/abcd1234ef/player_ias.vflset/en_US/base.js"

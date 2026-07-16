@@ -1,8 +1,10 @@
-module github.com/colespringer/waxtap/v2
+module github.com/colespringer/waxtap/v3
 
 go 1.26
 
 require (
+	github.com/colespringer/waxflow v0.0.0-20260716152333-d6c56fdb679e
+	github.com/colespringer/waxlabel v1.0.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9

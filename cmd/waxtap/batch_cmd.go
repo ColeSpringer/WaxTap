@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 )
 
@@ -70,7 +70,7 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 	if err != nil {
 		return err
 	}
-	processFn := fileProcessFn(env, spec, batchThreadCap(concurrency))
+	processFn := fileProcessFn(env, spec)
 	outcomes := runBatchJobs(ctx, jobs, concurrency, processFn, batchProgress(env, len(jobs)))
 	emitBatchProcess(env, outcomes, ignored, transcodeExt(tf))
 	return batchExit(ctx, outcomes)
@@ -123,14 +123,12 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 	}
 
 	if p.measure {
-		threadCap := batchThreadCap(concurrency)
 		measureFn := func(ctx context.Context, input, _ string) (*waxtap.Result, error) {
 			return env.client.Process(ctx, waxtap.ProcessRequest{
 				Input: input,
 				ProcessSpec: waxtap.ProcessSpec{
 					Loudness: &waxtap.LoudnessSpec{Mode: waxtap.LoudnessMeasureOnly},
 					Output:   waxtap.ToWriter(io.Discard),
-					Threads:  threadCap,
 				},
 			})
 		}
@@ -170,17 +168,16 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 	if err != nil {
 		return err
 	}
-	processFn := fileProcessFn(env, spec, batchThreadCap(concurrency))
+	processFn := fileProcessFn(env, spec)
 	outcomes := runBatchJobs(ctx, jobs, concurrency, processFn, batchProgress(env, len(jobs)))
 	emitBatchProcess(env, outcomes, ignored, transcodeExt(tf))
 	return batchExit(ctx, outcomes)
 }
 
 // fileProcessFn returns a processor that gives each job its own output path.
-func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec, threadCap int) func(context.Context, string, string) (*waxtap.Result, error) {
+func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec) func(context.Context, string, string) (*waxtap.Result, error) {
 	return func(ctx context.Context, input, output string) (*waxtap.Result, error) {
 		s := spec
-		s.Threads = threadCap
 		s.Output = waxtap.ToFile(output)
 		return env.client.Process(ctx, waxtap.ProcessRequest{Input: input, ProcessSpec: s})
 	}

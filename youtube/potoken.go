@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube/internal/resolver"
 )
 
 // This file holds the PO-token lookup shared by extraction and resolution.

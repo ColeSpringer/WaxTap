@@ -2,41 +2,62 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"testing"
+
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/mediatest"
 )
 
-func requireFFmpeg(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not installed")
-	}
-	if _, err := exec.LookPath("ffprobe"); err != nil {
-		t.Skip("ffprobe not installed")
+// synthCodecFor maps a legacy ffmpeg encoder name to a media.Codec.
+func synthCodecFor(encoder string) media.Codec {
+	switch encoder {
+	case "flac":
+		return media.CodecFLAC
+	case "libmp3lame":
+		return media.CodecMP3
+	case "libopus":
+		return media.CodecOpus
+	case "libvorbis":
+		return media.CodecVorbis
+	case "aac":
+		return media.CodecAAC
+	case "alac":
+		return media.CodecALAC
+	default: // pcm_s16le, wav
+		return media.CodecWAV
 	}
 }
 
-// synthAudio writes a one-second sine fixture encoded with the given ffmpeg codec.
+// synthAudio writes a one-second sine fixture in the codec named by encoder,
+// through the in-process engine over a pure-Go WAV (no external tools). The
+// container follows path's extension.
 func synthAudio(t *testing.T, path, encoder string) {
 	t.Helper()
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=" + strconv.Itoa(1),
-		"-ac", "2", "-c:a", encoder, path,
+	wav := mediatest.SineWAV(1, 2)
+	c := synthCodecFor(encoder)
+	if c == media.CodecWAV {
+		if err := os.WriteFile(path, wav, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
-	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
-		t.Fatalf("synth %s: %v: %s", path, err, b)
+	src := filepath.Join(t.TempDir(), "src.wav")
+	if err := os.WriteFile(src, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := media.NewRunner(media.RunnerConfig{})
+	if _, err := r.Transcode(context.Background(), src, path, media.Spec{Codec: c}); err != nil {
+		t.Fatalf("synth %s (%s): %v", path, encoder, err)
 	}
 }
 
 // TestBatchTranscodeCommandIntegration covers re-encoding, unchanged copies, and
 // ignored non-audio files.
 func TestBatchTranscodeCommandIntegration(t *testing.T) {
-	requireFFmpeg(t)
 	root := t.TempDir()
 	synthAudio(t, filepath.Join(root, "a.flac"), "flac")
 	synthAudio(t, filepath.Join(root, "b.mp3"), "libmp3lame") // already mp3 -> copy-through
@@ -69,7 +90,6 @@ func TestBatchTranscodeCommandIntegration(t *testing.T) {
 }
 
 func TestBatchForceReencodesNoOp(t *testing.T) {
-	requireFFmpeg(t)
 	root := t.TempDir()
 	synthAudio(t, filepath.Join(root, "b.mp3"), "libmp3lame")
 	outDir := filepath.Join(root, "out")
@@ -91,7 +111,6 @@ func TestBatchForceReencodesNoOp(t *testing.T) {
 }
 
 func TestBatchNormalizeMeasureIntegration(t *testing.T) {
-	requireFFmpeg(t)
 	root := t.TempDir()
 	synthAudio(t, filepath.Join(root, "a.flac"), "flac")
 	synthAudio(t, filepath.Join(root, "b.wav"), "pcm_s16le")

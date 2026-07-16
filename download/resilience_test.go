@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/internal/httpx"
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // noHTTPRetryDownloader lets retryable statuses reach the download layer by

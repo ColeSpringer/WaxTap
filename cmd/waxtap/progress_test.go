@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // Non-TTY progress is line-oriented. A download transition has no byte data, so

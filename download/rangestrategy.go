@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // RangeStrategy describes the wire format for byte ranges and the checks needed

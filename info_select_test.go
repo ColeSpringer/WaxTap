@@ -3,8 +3,8 @@ package waxtap
 import (
 	"testing"
 
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/media"
 )
 
 // TestSelectIndexHonorsChannelPreference is the index-mismatch core of the
@@ -119,8 +119,8 @@ func TestProbeMutationShiftsSelection(t *testing.T) {
 	}
 
 	// A probe of the selected row corrects its bitrate below the runner-up's.
-	applyProbe(&formats[idx], transcode.ProbeResult{
-		Streams: []transcode.ProbeStream{{CodecType: "audio", SampleRate: 48000, Channels: 2, BitRate: 180000}},
+	applyProbe(&formats[idx], media.ProbeResult{
+		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 48000, Channels: 2, BitRate: 180000}},
 	})
 
 	reIdx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, formats)

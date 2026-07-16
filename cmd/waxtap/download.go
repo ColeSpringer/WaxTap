@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -43,6 +43,9 @@ type downloadFlags struct {
 	normalize  bool
 	measure    bool
 	loudTarget float64
+
+	embedThumbnail bool
+	embedMetadata  bool
 
 	sourcePolicy  string
 	archivePath   string
@@ -99,6 +102,8 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode)")
 	f.BoolVar(&df.measure, "measure-loudness", false, "measure loudness without altering the audio (still writes the downloaded file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
+	f.BoolVar(&df.embedThumbnail, "embed-thumbnail", false, "embed the YouTube thumbnail as cover art (when the format supports it)")
+	f.BoolVar(&df.embedMetadata, "embed-metadata", false, "write basic tags (title, artist, date, chapters) into the output")
 	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
 	f.BoolVar(&df.writeInfoJSON, "write-info-json", false, "write a <output>.info.json sidecar")
@@ -222,7 +227,7 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 		// Refuse to flood a terminal with binary audio when the user forgot to
 		// redirect; piping or a file redirect is required.
 		if isTerminal(env.out) {
-			return usagef("refusing to write audio to the terminal; redirect to a file (e.g. > track.opus) or pipe to another command (e.g. | ffprobe -)")
+			return usagef("refusing to write audio to the terminal; redirect to a file (e.g. > track.opus) or pipe to another command (e.g. | mpv -)")
 		}
 		df.streamW = env.out
 	}
@@ -553,8 +558,8 @@ func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
 }
 
 // warnContainerExtMismatch reports when a keep-source download uses an output
-// extension that names a different container. Operations that run ffmpeg remux
-// the stream into the requested container and cannot produce this mismatch.
+// extension that names a different container. A transcode or remux muxes into
+// the requested container and cannot produce this mismatch.
 func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result) {
 	if _, has, _ := df.transcodeFormat(); has {
 		return // a --format (copy/transcode) muxes to the named container
@@ -568,6 +573,12 @@ func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result
 	}
 	outExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(res.OutputPath), "."))
 	srcExt := strings.ToLower(res.SourceFormat.Extension)
+	// A cover-art embed remuxes a WebM source to its Ogg container and names the
+	// output to match, so that WebM->Ogg change is expected, not a mismatch. Other
+	// keep-source deliveries are not remuxed, so their mismatch still warns.
+	if df.embedThumbnail && srcExt == "webm" {
+		return
+	}
 	if outExt == "" || sameContainer(outExt, srcExt) {
 		return
 	}
@@ -663,7 +674,13 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from
 // the flags, without an Output.
 func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
-	spec := waxtap.ProcessSpec{Channels: df.layout, Downmix: df.downmix, IncludeMetadata: df.writeInfoJSON}
+	spec := waxtap.ProcessSpec{
+		Channels:        df.layout,
+		Downmix:         df.downmix,
+		IncludeMetadata: df.writeInfoJSON,
+		EmbedThumbnail:  df.embedThumbnail,
+		EmbedMetadata:   df.embedMetadata,
+	}
 	tf, hasTranscode, err := df.transcodeFormat()
 	if err != nil {
 		return spec, err
@@ -832,7 +849,30 @@ func (env *appEnv) namingData(ctx context.Context, url string, df *downloadFlags
 			if e := video.Formats[idx].Extension; e != "" {
 				td.Ext = e
 			}
+			if df.embedThumbnail {
+				// WebM carries tags but not cover art, so name a keep-source Opus/Vorbis
+				// download for its cover-capable Ogg container; the embed post-pass
+				// remuxes it to match.
+				td.Ext = coverContainerExt(td.Ext, video.Formats[idx].Codec)
+			}
 		}
 	}
 	return td, nil
+}
+
+// coverContainerExt maps a keep-source container extension to a cover-art-capable
+// one when the source is WebM (which cannot hold a picture): Opus-in-WebM becomes
+// .opus and Vorbis-in-WebM becomes .ogg. Every other extension is returned as is.
+func coverContainerExt(ext, codec string) string {
+	if strings.ToLower(ext) != "webm" {
+		return ext
+	}
+	c := strings.ToLower(codec)
+	switch {
+	case strings.Contains(c, "opus"):
+		return "opus"
+	case strings.Contains(c, "vorbis"):
+		return "ogg"
+	}
+	return ext
 }

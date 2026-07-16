@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/internal/iox"
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/iox"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
+	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,7 @@ import (
 // the pre-1.0 baseline. Non-transcoded local results omit the redundant
 // outputFormat field, and local formats omit itag because they do not come from a
 // YouTube format.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -268,8 +268,6 @@ func classifyError(err error) classifiedError {
 		default:
 			c.exitCode, c.code, c.hint = 8, "needs-po-token", poTokenHint
 		}
-	case errors.Is(err, waxtap.ErrFFmpegNotFound):
-		c.exitCode, c.code, c.hint = 6, "ffmpeg-not-found", "install ffmpeg (it bundles ffprobe) to use download/cut/transcode/normalize processing"
 	case errors.Is(err, waxtap.ErrRateLimited):
 		c.exitCode, c.code = 5, "rate-limited"
 	case errors.Is(err, waxtap.ErrIncompleteStream):
@@ -451,8 +449,6 @@ func friendlyError(err error) string {
 		// Library errors name Go option fields. Present the corresponding CLI flags
 		// while preserving the wrapped error and its exit-code classification.
 		return translateConfigSymbols(err.Error())
-	case errors.Is(err, waxtap.ErrFFmpegNotFound):
-		return "ffmpeg/ffprobe not found on PATH"
 	case errors.Is(err, waxtap.ErrIsPlaylist):
 		return "that is a playlist URL, not a single video"
 	case errors.Is(err, waxtap.ErrIsChannel):

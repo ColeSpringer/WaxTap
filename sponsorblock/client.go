@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/internal/cache"
-	"github.com/colespringer/waxtap/v2/internal/httpx"
-	"github.com/colespringer/waxtap/v2/internal/iox"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/cache"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/internal/iox"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 const (

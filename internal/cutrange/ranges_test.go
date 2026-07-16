@@ -1,10 +1,10 @@
-package cut
+package cutrange
 
 import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/sponsorblock"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
 )
 
 // s builds a duration from whole seconds for readable range literals.

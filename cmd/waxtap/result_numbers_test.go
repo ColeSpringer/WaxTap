@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestResultJSONOutputFormatNumbers checks that a transcoded YouTube result emits

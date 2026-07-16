@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestProcessAlbumValidation covers checks that run before ffmpeg is needed.
+// TestProcessAlbumValidation covers checks that run before the engine is needed.
 func TestProcessAlbumValidation(t *testing.T) {
 	c, err := New(Options{})
 	if err != nil {

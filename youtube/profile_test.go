@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v3/potoken"
 )
 
 // profileByName returns the named profile from the default strategy chain.

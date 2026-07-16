@@ -4,67 +4,78 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/cut"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/mediatest"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
-func newTestRunner(t *testing.T) *transcode.Runner {
+func newTestRunner(t *testing.T) *media.Runner {
 	t.Helper()
-	r, err := transcode.NewRunner(transcode.RunnerConfig{ShutdownGrace: 2 * time.Second})
-	if err != nil {
-		if errors.Is(err, waxerr.ErrFFmpegNotFound) {
-			t.Skip("ffmpeg/ffprobe not installed")
-		}
-		t.Fatalf("NewRunner: %v", err)
-	}
+	r := media.NewRunner(media.RunnerConfig{})
 	return r
 }
 
-func synthSine(t *testing.T, dir, name string, seconds int, encoder string) string {
+// codecFor maps a fixture codec name to a media.Codec.
+func codecFor(name string) media.Codec {
+	switch name {
+	case "flac":
+		return media.CodecFLAC
+	case "aac":
+		return media.CodecAAC
+	case "opus":
+		return media.CodecOpus
+	case "vorbis":
+		return media.CodecVorbis
+	case "mp3":
+		return media.CodecMP3
+	case "alac":
+		return media.CodecALAC
+	default:
+		return media.CodecWAV
+	}
+}
+
+// synth writes a pure-Go WAV sine and, when codec != "wav", transcodes it to name
+// through the in-process engine. This replaces the old ffmpeg lavfi fixtures, so
+// the suite needs no external tools.
+func synth(t *testing.T, dir, name string, seconds, channels int, codec string) string {
 	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not installed")
-	}
 	out := filepath.Join(dir, name)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "lavfi",
-		"-i", "sine=frequency=440:sample_rate=44100:duration=" + strconv.Itoa(seconds),
-		"-af", "volume=-6dB", "-ac", "2", "-c:a", encoder, out,
+	wav := mediatest.SineWAV(seconds, channels)
+	if codec == "wav" {
+		if err := os.WriteFile(out, wav, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return out
 	}
-	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
-		t.Fatalf("synth sine: %v: %s", err, b)
+	src := filepath.Join(t.TempDir(), "src.wav") // separate dir: never pollute the fixture dir
+	if err := os.WriteFile(src, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRunner(t)
+	if _, err := r.Transcode(context.Background(), src, out, media.Spec{Codec: codecFor(codec)}); err != nil {
+		t.Fatalf("synth %s (%s): %v", name, codec, err)
 	}
 	return out
 }
 
-// synthSurround writes a steady sine upmixed to 5.1, for downmix tests.
-func synthSurround(t *testing.T, dir, name string, seconds int, encoder string) string {
+func synthSine(t *testing.T, dir, name string, seconds int, codec string) string {
 	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not installed")
-	}
-	out := filepath.Join(dir, name)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "lavfi",
-		"-i", "sine=frequency=440:sample_rate=44100:duration=" + strconv.Itoa(seconds),
-		"-af", "volume=-6dB", "-ac", "6", "-c:a", encoder, out,
-	}
-	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
-		t.Fatalf("synth surround: %v: %s", err, b)
-	}
-	return out
+	return synth(t, dir, name, seconds, 2, codec)
 }
 
-func probeDuration(t *testing.T, r *transcode.Runner, path string) time.Duration {
+// synthSurround writes a steady sine as 6 channels, for downmix tests.
+func synthSurround(t *testing.T, dir, name string, seconds int, codec string) string {
+	t.Helper()
+	return synth(t, dir, name, seconds, 6, codec)
+}
+
+func probeDuration(t *testing.T, r *media.Runner, path string) time.Duration {
 	t.Helper()
 	pr, err := r.Probe(context.Background(), path)
 	if err != nil {
@@ -73,7 +84,7 @@ func probeDuration(t *testing.T, r *transcode.Runner, path string) time.Duration
 	return pr.Format.Duration
 }
 
-func probeChannels(t *testing.T, r *transcode.Runner, path string) int {
+func probeChannels(t *testing.T, r *media.Runner, path string) int {
 	t.Helper()
 	pr, err := r.Probe(context.Background(), path)
 	if err != nil {
@@ -124,11 +135,11 @@ func TestRunTranscode(t *testing.T) {
 	out := filepath.Join(dir, "out.mp3")
 
 	emit, seen := recordStages()
-	res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecMP3}, emit)
+	res, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecMP3}, emit)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.OutputPath != out || !res.Transcoded || res.OutputCodec != transcode.CodecMP3 {
+	if res.OutputPath != out || !res.Transcoded || res.OutputCodec != media.CodecMP3 {
 		t.Errorf("transcode result = %+v", res)
 	}
 	if !fileExists(out) {
@@ -149,7 +160,7 @@ func TestRunPopulatesOutputProbe(t *testing.T) {
 
 	t.Run("transcode populates the probe", func(t *testing.T) {
 		out := filepath.Join(dir, "out.mp3")
-		res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecMP3, Bitrate: 128000}, nil)
+		res, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecMP3, Bitrate: 128000}, nil)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -184,8 +195,8 @@ func TestRunCutFusedTranscode(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
-		Codec:  transcode.CodecFLAC,
+		Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		Codec:  media.CodecFLAC,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -203,9 +214,9 @@ func TestRunRemux(t *testing.T) {
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
 
-	// An explicit copy remux runs ffmpeg -c copy and produces output.
+	// An explicit copy remux rewrites the container without re-encoding.
 	out := filepath.Join(dir, "out.mka")
-	res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
+	res, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecCopy, Remux: true}, nil)
 	if err != nil {
 		t.Fatalf("Run remux: %v", err)
 	}
@@ -218,7 +229,7 @@ func TestRunRemux(t *testing.T) {
 
 	// Copy without Remux is a no-op: no output, deliver the source unchanged.
 	out2 := filepath.Join(dir, "out2.mka")
-	res2, err := Run(context.Background(), r, in, out2, Spec{Codec: transcode.CodecCopy}, nil)
+	res2, err := Run(context.Background(), r, in, out2, Spec{Codec: media.CodecCopy}, nil)
 	if err != nil {
 		t.Fatalf("Run no-op: %v", err)
 	}
@@ -234,7 +245,7 @@ func TestRunRemuxExtensionlessInfersContainer(t *testing.T) {
 
 	// Extensionless and .copy destinations infer a container from the source codec.
 	for _, out := range []string{filepath.Join(dir, "out"), filepath.Join(dir, "out.copy")} {
-		res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
+		res, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecCopy, Remux: true}, nil)
 		if err != nil {
 			t.Fatalf("remux to %q = %v, want success (inferred container)", out, err)
 		}
@@ -255,9 +266,9 @@ func TestRunCopyCutWithoutContainerRejected(t *testing.T) {
 	// The removal creates two copied segments and exercises the multi-range path.
 	for _, out := range []string{filepath.Join(dir, "mytrack"), filepath.Join(dir, "mytrack.copy")} {
 		_, err := Run(context.Background(), r, in, out, Spec{
-			Codec:   transcode.CodecCopy,
-			CutMode: cut.ModeSmart,
-			Remove:  []cut.Range{{Start: 800 * time.Millisecond, End: 1200 * time.Millisecond}},
+			Codec:   media.CodecCopy,
+			CutMode: media.ModeSmart,
+			Remove:  []cutrange.Range{{Start: 800 * time.Millisecond, End: 1200 * time.Millisecond}},
 		}, nil)
 		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 			t.Errorf("copy cut to %q = %v, want ErrIncompatibleSpec", out, err)
@@ -277,8 +288,8 @@ func TestRunNoOpCutStillTranscodes(t *testing.T) {
 	out := filepath.Join(dir, "out.mp3")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: 10 * time.Second, End: 20 * time.Second}}, // beyond EOF: clamps away
-		Codec:  transcode.CodecMP3,
+		Remove: []cutrange.Range{{Start: 10 * time.Second, End: 20 * time.Second}}, // beyond EOF: clamps away
+		Codec:  media.CodecMP3,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -298,8 +309,8 @@ func TestRunCutLoudnessApply(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove:   []cut.Range{{Start: time.Second, End: 2 * time.Second}},
-		Codec:    transcode.CodecFLAC,
+		Remove:   []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		Codec:    media.CodecFLAC,
 		Loudness: &Loudness{Apply: true, Target: -14},
 	}, nil)
 	if err != nil {
@@ -324,7 +335,7 @@ func TestRunLoudnessApplyWithoutTranscodeRejected(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	_, err := Run(context.Background(), r, in, out, Spec{
-		Codec:    transcode.CodecCopy,
+		Codec:    media.CodecCopy,
 		Loudness: &Loudness{Apply: true, Target: -14},
 	}, nil)
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
@@ -339,8 +350,8 @@ func TestRunWholeTrackRemovedRejected(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	_, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: 0, End: time.Hour}},
-		Codec:  transcode.CodecFLAC,
+		Remove: []cutrange.Range{{Start: 0, End: time.Hour}},
+		Codec:  media.CodecFLAC,
 	}, nil)
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 		t.Errorf("whole-track removal err = %v, want ErrIncompatibleSpec", err)
@@ -361,7 +372,7 @@ func TestRunDownmixSurroundToStereo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.Transcoded || res.OutputCodec != transcode.CodecFLAC {
+	if !res.Transcoded || res.OutputCodec != media.CodecFLAC {
 		t.Errorf("downmix result = %+v, want a flac re-encode", res)
 	}
 	if got := probeChannels(t, r, out); got != 2 {
@@ -395,11 +406,11 @@ func TestRunDownmixWithTranscode(t *testing.T) {
 	}
 	out := filepath.Join(dir, "out.mp3")
 
-	res, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecMP3, Downmix: 2}, nil)
+	res, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecMP3, Downmix: 2}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.Transcoded || res.OutputCodec != transcode.CodecMP3 {
+	if !res.Transcoded || res.OutputCodec != media.CodecMP3 {
 		t.Errorf("downmix+transcode result = %+v", res)
 	}
 	if got := probeChannels(t, r, out); got != 2 {
@@ -408,8 +419,8 @@ func TestRunDownmixWithTranscode(t *testing.T) {
 }
 
 func TestRunDownmixWithNormalize(t *testing.T) {
-	// The fold runs before loudnorm, so the normalized, folded output measures at
-	// the target (and ffmpeg accepts the fused fold,loudnorm chain).
+	// The fold runs before the gain, so the normalized, folded output measures at
+	// the target.
 	r := newTestRunner(t)
 	dir := t.TempDir()
 	in := synthSurround(t, dir, "in.flac", 3, "flac")
@@ -419,7 +430,7 @@ func TestRunDownmixWithNormalize(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Codec:    transcode.CodecFLAC,
+		Codec:    media.CodecFLAC,
 		Downmix:  2,
 		Loudness: &Loudness{Apply: true, Target: -14},
 	}, nil)
@@ -430,7 +441,7 @@ func TestRunDownmixWithNormalize(t *testing.T) {
 		t.Fatalf("downmix+normalize result = %+v", res)
 	}
 	if got := probeChannels(t, r, out); got != 2 {
-		t.Errorf("output channels = %d, want 2 (folded before loudnorm)", got)
+		t.Errorf("output channels = %d, want 2 (folded before the gain)", got)
 	}
 	if got := res.OutputLoudness.IntegratedLUFS; got < -16 || got > -12 {
 		t.Errorf("output loudness = %v, want within 2 LU of -14", got)
@@ -440,7 +451,7 @@ func TestRunDownmixWithNormalize(t *testing.T) {
 func TestRunDownmixIntoIncompatibleContainer(t *testing.T) {
 	// Downmix-only (no explicit transcode) into a container that cannot hold the
 	// source codec must encode to the container's codec, not pick the FLAC source
-	// encoder and fail inside ffmpeg.
+	// encoder and fail at the muxer.
 	r := newTestRunner(t)
 	dir := t.TempDir()
 	in := synthSurround(t, dir, "in.flac", 2, "flac")
@@ -453,7 +464,7 @@ func TestRunDownmixIntoIncompatibleContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.Transcoded || res.OutputCodec != transcode.CodecMP3 {
+	if !res.Transcoded || res.OutputCodec != media.CodecMP3 {
 		t.Errorf("downmix into mp3 result = %+v, want an mp3 encode", res)
 	}
 	if got := probeChannels(t, r, out); got != 2 {
@@ -470,7 +481,7 @@ func TestRunRejectsEmptyExplicitCut(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	_, err := Run(context.Background(), r, in, out, Spec{
-		Remove:             []cut.Range{{Start: 999 * time.Second, End: 1000 * time.Second}},
+		Remove:             []cutrange.Range{{Start: 999 * time.Second, End: 1000 * time.Second}},
 		RejectEmptyRemoval: true,
 	}, nil)
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
@@ -478,20 +489,6 @@ func TestRunRejectsEmptyExplicitCut(t *testing.T) {
 	}
 	if fileExists(out) {
 		t.Error("a rejected cut must not write output")
-	}
-}
-
-func TestRunDownmixUnsupportedSourceCodec(t *testing.T) {
-	// WaxTap has no AC-3 encoder preset, so a downmix without a transcode target
-	// must return ErrIncompatibleSpec before invoking ffmpeg.
-	r := newTestRunner(t)
-	dir := t.TempDir()
-	in := synthSurround(t, dir, "in.ac3", 2, "ac3")
-	out := filepath.Join(dir, "out.ac3")
-
-	_, err := Run(context.Background(), r, in, out, Spec{Downmix: 2}, nil)
-	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-		t.Errorf("unsupported-codec downmix err = %v, want ErrIncompatibleSpec", err)
 	}
 }
 
@@ -526,15 +523,15 @@ func TestContainerAccepts(t *testing.T) {
 
 func TestContainerTablesConsistent(t *testing.T) {
 	// Each container's default encoder must produce a codec accepted by that
-	// container. codecName maps presets to representative ffprobe codec names.
-	codecName := map[transcode.Codec]string{
-		transcode.CodecFLAC:   "flac",
-		transcode.CodecAAC:    "aac",
-		transcode.CodecMP3:    "mp3",
-		transcode.CodecOpus:   "opus",
-		transcode.CodecVorbis: "vorbis",
-		transcode.CodecWAV:    "pcm_s16le",
-		transcode.CodecALAC:   "alac",
+	// container. codecName maps presets to representative codec names.
+	codecName := map[media.Codec]string{
+		media.CodecFLAC:   "flac",
+		media.CodecAAC:    "aac",
+		media.CodecMP3:    "mp3",
+		media.CodecOpus:   "opus",
+		media.CodecVorbis: "vorbis",
+		media.CodecWAV:    "pcm_s16le",
+		media.CodecALAC:   "alac",
 	}
 	for _, ext := range []string{"flac", "wav", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "mka", "mkv"} {
 		c, ok := containerCodec(ext)
@@ -561,12 +558,12 @@ func TestRunCutExtensionChangeTranscodes(t *testing.T) {
 	// AAC cannot be stream-copied into FLAC, so an automatic cut encodes with the
 	// destination container's default codec.
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+		Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.Transcoded || res.OutputCodec != transcode.CodecFLAC || !res.Cut {
+	if !res.Transcoded || res.OutputCodec != media.CodecFLAC || !res.Cut {
 		t.Errorf("extension-change cut result = %+v, want a flac encode with Cut", res)
 	}
 	pr, err := r.Probe(context.Background(), out)
@@ -581,14 +578,14 @@ func TestRunCutExtensionChangeTranscodes(t *testing.T) {
 func TestRunCutSameContainerCopies(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()
-	// Matroska reports the true post-copy duration, so a same-container smart cut
-	// stream-copies cleanly. Raw FLAC is deliberately excluded here: the pipeline
-	// escalates a raw-.flac smart cut to a re-encode, covered separately.
-	in := synthSine(t, dir, "in.mka", 4, "flac")
+	// Opus is on WaxFlow's cut-remux allowlist, so a same-container smart cut is a
+	// lossless packet copy (no re-encode). FLAC is deliberately excluded here: it is
+	// off the allowlist and escalates to a re-encode, covered separately.
+	in := synthSine(t, dir, "in.mka", 4, "opus")
 	out := filepath.Join(dir, "out.mka")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+		Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -610,12 +607,12 @@ func TestRunSmartCutFlacReencodes(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	res, err := Run(context.Background(), r, in, out, Spec{
-		Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
+		Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.Cut || !res.Transcoded || res.OutputCodec != transcode.CodecFLAC {
+	if !res.Cut || !res.Transcoded || res.OutputCodec != media.CodecFLAC {
 		t.Errorf("smart FLAC cut result = %+v, want a flac re-encode with Cut", res)
 	}
 	// The header must reflect the trimmed length (~3s), not the 4s source.
@@ -636,13 +633,13 @@ func TestRunCopyCutFlacRejected(t *testing.T) {
 
 	specs := map[string]Spec{
 		"cut-mode copy": {
-			Remove:  []cut.Range{{Start: time.Second, End: 2 * time.Second}},
-			Codec:   transcode.CodecCopy,
-			CutMode: cut.ModeCopy,
+			Remove:  []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+			Codec:   media.CodecCopy,
+			CutMode: media.ModeCopy,
 		},
 		"format copy": {
-			Remove: []cut.Range{{Start: time.Second, End: 2 * time.Second}},
-			Codec:  transcode.CodecCopy,
+			Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+			Codec:  media.CodecCopy,
 			Remux:  true,
 		},
 	}
@@ -665,15 +662,15 @@ func TestRunForcedCopyIncompatibleContainerRejected(t *testing.T) {
 	out := filepath.Join(dir, "out.flac")
 
 	// An explicit remux of aac into a flac container is impossible: fail cleanly.
-	_, err := Run(context.Background(), r, in, out, Spec{Codec: transcode.CodecCopy, Remux: true}, nil)
+	_, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecCopy, Remux: true}, nil)
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 		t.Errorf("forced copy into incompatible container err = %v, want ErrIncompatibleSpec", err)
 	}
 
 	// --cut-mode copy into an incompatible container is likewise rejected.
 	_, err = Run(context.Background(), r, in, out, Spec{
-		Remove:  []cut.Range{{Start: time.Second, End: 2 * time.Second}},
-		CutMode: cut.ModeCopy,
+		Remove:  []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		CutMode: media.ModeCopy,
 	}, nil)
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 		t.Errorf("forced cut-copy into incompatible container err = %v, want ErrIncompatibleSpec", err)

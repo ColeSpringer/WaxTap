@@ -12,36 +12,36 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/cut"
-	"github.com/colespringer/waxtap/v2/download"
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
-	"github.com/colespringer/waxtap/v2/normalize"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/download"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/media/loudness"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
-// transcodeCodec maps a public TranscodeFormat to a transcode.Codec.
-func transcodeCodec(f TranscodeFormat) transcode.Codec {
+// transcodeCodec maps a public TranscodeFormat to a media.Codec.
+func transcodeCodec(f TranscodeFormat) media.Codec {
 	switch f {
 	case FormatFLAC:
-		return transcode.CodecFLAC
+		return media.CodecFLAC
 	case FormatALAC:
-		return transcode.CodecALAC
+		return media.CodecALAC
 	case FormatWAV:
-		return transcode.CodecWAV
+		return media.CodecWAV
 	case FormatMP3:
-		return transcode.CodecMP3
+		return media.CodecMP3
 	case FormatAAC:
-		return transcode.CodecAAC
+		return media.CodecAAC
 	case FormatOpus:
-		return transcode.CodecOpus
+		return media.CodecOpus
 	case FormatVorbis:
-		return transcode.CodecVorbis
+		return media.CodecVorbis
 	default:
-		return transcode.CodecCopy
+		return media.CodecCopy
 	}
 }
 
@@ -55,7 +55,7 @@ func transcodeTarget(t *TranscodeSpec) format.Target {
 		return format.Target{}
 	}
 	c := transcodeCodec(t.Format)
-	if c == transcode.CodecCopy {
+	if c == media.CodecCopy {
 		return format.Target{}
 	}
 	if c.IsLossless() {
@@ -73,14 +73,14 @@ func transcodeTarget(t *TranscodeSpec) format.Target {
 	}
 }
 
-// cutRanges maps public TimeRanges to cut.Ranges.
-func cutRanges(rs []TimeRange) []cut.Range {
+// cutRanges maps public TimeRanges to cutrange.Ranges.
+func cutRanges(rs []TimeRange) []cutrange.Range {
 	if len(rs) == 0 {
 		return nil
 	}
-	out := make([]cut.Range, len(rs))
+	out := make([]cutrange.Range, len(rs))
 	for i, r := range rs {
-		out[i] = cut.Range{Start: r.Start, End: r.End}
+		out[i] = cutrange.Range{Start: r.Start, End: r.End}
 	}
 	return out
 }
@@ -107,7 +107,7 @@ const minPlausibleBitrate = 1000 // bits/sec
 func ValidateProcessSpec(s ProcessSpec) error { return validateProcessSpec(s) }
 
 // validateProcessSpec rejects unsupported ProcessSpec combinations before
-// acquisition or ffmpeg work begins.
+// acquisition or audio processing begins.
 func validateProcessSpec(s ProcessSpec) error {
 	if s.Downmix && s.Channels != LayoutMono && s.Channels != LayoutStereo {
 		return fmt.Errorf("%w: downmix requires Channels mono or stereo, got %s", waxerr.ErrIncompatibleSpec, s.Channels)
@@ -137,7 +137,7 @@ func validateOutputContainer(s ProcessSpec) error {
 	if s.Transcode == nil || s.Output.kind != outputFile {
 		return nil
 	}
-	return transcode.CheckOutputContainer(transcodeCodec(s.Transcode.Format), s.Output.path)
+	return media.CheckOutputContainer(transcodeCodec(s.Transcode.Format), s.Output.path)
 }
 
 // validateCutEncodeNeed rejects copy-mode cuts that cannot be described by the
@@ -150,7 +150,7 @@ func validateOutputContainer(s ProcessSpec) error {
 // encode after probing and the cut is valid without --format. When no fold is
 // needed, the pipeline still applies its copy-mode checks before writing.
 func validateCutEncodeNeed(s ProcessSpec) error {
-	if !cutRequested(s.Cut) || s.Downmix || transcodeCodec(specFormat(s.Transcode)) != transcode.CodecCopy {
+	if !cutRequested(s.Cut) || s.Downmix || transcodeCodec(specFormat(s.Transcode)) != media.CodecCopy {
 		return nil
 	}
 	switch {
@@ -195,7 +195,7 @@ func validateBitrate(t *TranscodeSpec) error {
 	if t.Bitrate < 0 {
 		return fmt.Errorf("%w: transcode bitrate must be >= 0, got %d", waxerr.ErrIncompatibleSpec, t.Bitrate)
 	}
-	// The bounds apply only where bitrate is used. ffmpeg ignores it for lossless
+	// The bounds apply only where bitrate is used. It is ignored for lossless
 	// and copy targets, so an out-of-range value there is harmless, not an error.
 	if t.Bitrate > 0 && t.Bitrate < minPlausibleBitrate && !transcodeCodec(t.Format).IsLossless() {
 		return fmt.Errorf("%w: transcode bitrate %d bps is implausibly low (min %d); bitrate is in bits per second, e.g. 128000 for 128 kbps", waxerr.ErrIncompatibleSpec, t.Bitrate, minPlausibleBitrate)
@@ -215,22 +215,22 @@ func downmixChannels(layout ChannelLayout, downmix bool) int {
 	return layout.ChannelCount()
 }
 
-// cutMode maps a public CutMode to a cut.Mode.
-func cutMode(m CutMode) cut.Mode {
+// cutMode maps a public CutMode to a media.Mode.
+func cutMode(m CutMode) media.Mode {
 	switch m {
 	case CutCopy:
-		return cut.ModeCopy
+		return media.ModeCopy
 	case CutAccurate:
-		return cut.ModeAccurate
+		return media.ModeAccurate
 	default:
-		return cut.ModeSmart
+		return media.ModeSmart
 	}
 }
 
 // pipelineSpec builds the internal pipeline spec from a ProcessSpec and the
 // resolved removal ranges (explicit ranges plus any from SponsorBlock).
-func pipelineSpec(s ProcessSpec, ranges []cut.Range) pipeline.Spec {
-	ps := pipeline.Spec{Remove: ranges, Downmix: downmixChannels(s.Channels, s.Downmix), Threads: s.Threads}
+func pipelineSpec(s ProcessSpec, ranges []cutrange.Range) pipeline.Spec {
+	ps := pipeline.Spec{Remove: ranges, Downmix: downmixChannels(s.Channels, s.Downmix)}
 	if s.Cut != nil {
 		ps.CutMode = cutMode(s.Cut.Mode)
 		ps.Crossfade = s.Cut.Crossfade
@@ -257,14 +257,14 @@ func pipelineSpec(s ProcessSpec, ranges []cut.Range) pipeline.Spec {
 // sponsorBlockContributed reports whether SponsorBlock removed additional audio
 // after clamping and merging. Segments that fall outside the media duration, or
 // that are already covered by explicit ranges, do not count as applied work.
-func sponsorBlockContributed(explicit, sbRanges []cut.Range, pres pipeline.Result) bool {
+func sponsorBlockContributed(explicit, sbRanges []cutrange.Range, pres pipeline.Result) bool {
 	if !pres.Cut || len(sbRanges) == 0 || pres.SourceDuration <= 0 {
 		return false
 	}
 	total := pres.SourceDuration
-	combined := append(append([]cut.Range{}, explicit...), sbRanges...)
-	explicitKept := cut.OutputDuration(cut.Keeps(explicit, total), 0)
-	combinedKept := cut.OutputDuration(cut.Keeps(combined, total), 0)
+	combined := append(append([]cutrange.Range{}, explicit...), sbRanges...)
+	explicitKept := cutrange.OutputDuration(cutrange.Keeps(explicit, total), 0)
+	combinedKept := cutrange.OutputDuration(cutrange.Keeps(combined, total), 0)
 	return combinedKept < explicitKept
 }
 
@@ -285,13 +285,15 @@ func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments 
 	}
 }
 
-// needsProcessing reports whether the spec needs ffmpeg and a staged input. When
+// needsProcessing reports whether the spec needs audio processing and a staged input. When
 // false, a download can stream straight to the sink with no temp file. Any
 // non-nil Transcode counts, including an explicit FormatCopy remux (distinct from
 // a nil Transcode, which keeps the source bytes). A downmix request also counts:
-// the fold needs a probe to decide and an encode to apply.
+// the fold needs a probe to decide and an encode to apply. An embed request also
+// counts: the metadata post-pass rewrites a staged file, so even a keep-source
+// download to a Writer stages first.
 func needsProcessing(s ProcessSpec) bool {
-	return cutRequested(s.Cut) || s.Transcode != nil || s.Loudness != nil || s.Downmix
+	return cutRequested(s.Cut) || s.Transcode != nil || s.Loudness != nil || s.Downmix || embedRequested(s)
 }
 
 // toSource maps a resolved stream to a download Source, selecting the query-range
@@ -365,11 +367,11 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 	return res
 }
 
-// applyProbe fills a candidate Format with authoritative values from an ffprobe
-// of its resolved stream (InfoProbe depth) or written output. It overwrites only
-// the measured numeric fields and duration, leaving the codec id from the player
-// response, which is more specific than ffprobe's normalized name.
-func applyProbe(f *Format, pr transcode.ProbeResult) {
+// applyProbe fills a candidate Format with authoritative values from a probe of
+// its resolved stream (InfoProbe depth) or written output. It overwrites only the
+// measured numeric fields and duration, leaving the codec id from the player
+// response, which is more specific than the probe's normalized name.
+func applyProbe(f *Format, pr media.ProbeResult) {
 	if a, ok := pr.AudioStream(); ok {
 		if a.SampleRate > 0 {
 			f.SampleRate = a.SampleRate
@@ -387,7 +389,7 @@ func applyProbe(f *Format, pr transcode.ProbeResult) {
 	if pr.Format.Duration > 0 {
 		f.Duration = pr.Format.Duration
 	}
-	// ffprobe often leaves the audio-stream bitrate zero for VBR/lossless. Fall back
+	// A probe often leaves the audio-stream bitrate zero for VBR/lossless. Fall back
 	// to the container bitrate, then a size/duration estimate, so both the
 	// info --probe row and a download's OutputFormat report a usable bitrate.
 	if f.Bitrate == 0 {
@@ -402,8 +404,8 @@ func applyProbe(f *Format, pr transcode.ProbeResult) {
 
 // outputFormat describes the transcode output. A copy keeps the source format;
 // otherwise the codec and extension come from the target codec's preset.
-func outputFormat(c transcode.Codec, src Format) Format {
-	if c == transcode.CodecCopy {
+func outputFormat(c media.Codec, src Format) Format {
+	if c == media.CodecCopy {
 		return src
 	}
 	return Format{Codec: c.String(), Extension: c.Extension()}
@@ -411,7 +413,7 @@ func outputFormat(c transcode.Codec, src Format) Format {
 
 // toLoudnessInfo maps an internal loudness measurement to the public info type,
 // preserving nil.
-func toLoudnessInfo(l *normalize.Loudness) *LoudnessInfo {
+func toLoudnessInfo(l *loudness.Loudness) *LoudnessInfo {
 	if l == nil {
 		return nil
 	}
@@ -420,12 +422,12 @@ func toLoudnessInfo(l *normalize.Loudness) *LoudnessInfo {
 }
 
 // loudnessInfo maps an internal loudness value to the public info type.
-func loudnessInfo(l normalize.Loudness) LoudnessInfo {
+func loudnessInfo(l loudness.Loudness) LoudnessInfo {
 	return LoudnessInfo{
 		IntegratedLUFS: l.IntegratedLUFS,
 		TruePeakDBTP:   l.TruePeakDBTP,
 		LRA:            l.LRA,
-		Threshold:      l.Threshold,
+		SamplePeakDB:   l.SamplePeakDB,
 	}
 }
 
@@ -459,7 +461,7 @@ func sourceExt(f Format) string {
 // codec's extension for a re-encode, or the source extension for a copy.
 func outputExt(t *TranscodeSpec, srcExt string) string {
 	c := transcodeCodec(specFormat(t))
-	if c == transcode.CodecCopy {
+	if c == media.CodecCopy {
 		return srcExt
 	}
 	return "." + c.Extension()

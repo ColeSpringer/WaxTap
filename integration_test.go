@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 func liveURL() string {
@@ -67,7 +67,7 @@ func TestLive_DownloadBestAudio(t *testing.T) {
 }
 
 // TestLive_DownloadTranscodeFLAC exercises the fused pipeline end to end: download
-// then transcode to FLAC. Requires ffmpeg.
+// then transcode to FLAC.
 func TestLive_DownloadTranscodeFLAC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -87,9 +87,6 @@ func TestLive_DownloadTranscodeFLAC(t *testing.T) {
 	})
 	if err != nil {
 		skipIfTokenGated(t, err)
-		if errors.Is(err, waxerr.ErrFFmpegNotFound) {
-			t.Skip("ffmpeg not installed")
-		}
 		t.Fatalf("Download+transcode: %v", err)
 	}
 	if !res.Transcoded || res.OutputFormat.Codec != "flac" {
@@ -97,8 +94,8 @@ func TestLive_DownloadTranscodeFLAC(t *testing.T) {
 	}
 }
 
-// TestLive_InfoProbe resolves and ffprobes the best-audio format, filling its
-// authoritative sample rate and channel count. Requires ffmpeg.
+// TestLive_InfoProbe resolves and probes the best-audio format, filling its
+// authoritative sample rate and channel count.
 func TestLive_InfoProbe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -111,9 +108,6 @@ func TestLive_InfoProbe(t *testing.T) {
 	video, err := client.Info(ctx, liveURL(), waxtap.InfoProbe)
 	if err != nil {
 		skipIfTokenGated(t, err)
-		if errors.Is(err, waxerr.ErrFFmpegNotFound) {
-			t.Skip("ffmpeg not installed")
-		}
 		t.Fatalf("Info(InfoProbe): %v", err)
 	}
 	// At least one format should now carry probed sample rate and channels.

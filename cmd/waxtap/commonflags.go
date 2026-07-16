@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/sponsorblock"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +39,8 @@ func newNormalizeCmd() *cobra.Command {
 			"writing output. With --album, normalization applies a shared gain to\n" +
 			"every track while preserving track-to-track differences. Use --album\n" +
 			"--measure-loudness to analyze the files as one set.\n\n" +
-			"Normalization uses one ffmpeg loudnorm pass with true-peak limiting.\n" +
+			"Normalization measures EBU R128 loudness and applies a scalar gain with\n" +
+			"true-peak limiting.\n" +
 			"A loud source may therefore land slightly below the target (for\n" +
 			"example, -14.9 for -14).",
 		Args: cobra.MinimumNArgs(1),
@@ -174,7 +175,7 @@ func newNormalizeCmd() *cobra.Command {
 	f.StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy for a URL input: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
 	bindCollisionFlag(f, &collisionStr)
 	f.BoolVarP(&recursive, "recursive", "r", false, "recurse into subdirectories for a directory input")
-	f.IntVar(&concurrency, "concurrency", 0, "parallel ffmpeg jobs (0 runs serially)")
+	f.IntVar(&concurrency, "concurrency", 0, "parallel jobs (0 runs serially)")
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
 	bindPlayerExtractionFlags(f)
@@ -356,6 +357,6 @@ func albumInfoJSON(l waxtap.LoudnessInfo) loudnessInfoJSON {
 		IntegratedLUFS: jsonFloat(l.IntegratedLUFS),
 		TruePeakDBTP:   jsonFloat(l.TruePeakDBTP),
 		LRA:            jsonFloat(l.LRA),
-		Threshold:      jsonFloat(l.Threshold),
+		SamplePeakDB:   jsonFloat(l.SamplePeakDB),
 	}
 }

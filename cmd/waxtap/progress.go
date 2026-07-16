@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // progressReporter renders a single download's stage and byte progress. On a

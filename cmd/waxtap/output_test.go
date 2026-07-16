@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/internal/iox"
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/iox"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
 
 func TestJSONFloatNonFinite(t *testing.T) {
@@ -180,7 +180,6 @@ func TestExitCodeFor(t *testing.T) {
 		{fmt.Errorf("fetch: %w", iox.ErrResponseTooLarge), 4}, // over-cap body = anomalous extraction failure (player/innertube/SABR agree)
 		{waxtap.ErrPlaylistParse, 4},                          // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
-		{waxtap.ErrFFmpegNotFound, 6},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
 		{waxtap.ErrNeedsPOToken, 8},     // distinct precondition failure
 		{&usageError{"bad"}, 2},
@@ -615,9 +614,6 @@ func TestRootSubcommandNamesMatchTree(t *testing.T) {
 }
 
 func TestErrorCode(t *testing.T) {
-	if got := errorCode(waxtap.ErrFFmpegNotFound); got != "ffmpeg-not-found" {
-		t.Errorf("errorCode(ffmpeg) = %q", got)
-	}
 	if got := errorCode(&usageError{"x"}); got != "usage" {
 		t.Errorf("errorCode(usage) = %q", got)
 	}

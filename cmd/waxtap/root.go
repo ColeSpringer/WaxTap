@@ -22,8 +22,8 @@ func newRootCmd() *cobra.Command {
 		Short: "Audio-focused YouTube downloader and local-audio processor",
 		Long: "WaxTap downloads the best available audio from YouTube (or processes a\n" +
 			"local file) and can transcode, cut time ranges, remove SponsorBlock\n" +
-			"segments, and measure or normalize loudness. Processing commands require\n" +
-			"ffmpeg and ffprobe on PATH.\n\n" +
+			"segments, and measure or normalize loudness. It is a single static binary\n" +
+			"with no external runtime dependency.\n\n" +
 			"Every command supports --json for a stable, scriptable output contract.",
 		// Keep --version in sync with the version subcommand, including
 		// go-install builds that rely on module build info.

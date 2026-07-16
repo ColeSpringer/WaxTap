@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v3/potoken"
 )
 
 func TestRedactURL(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // emitResult prints a single Result as human text or JSON.
@@ -135,7 +135,7 @@ type loudnessInfoJSON struct {
 	IntegratedLUFS jsonFloat `json:"integratedLufs"`
 	TruePeakDBTP   jsonFloat `json:"truePeakDbtp"`
 	LRA            jsonFloat `json:"lra"`
-	Threshold      jsonFloat `json:"threshold"`
+	SamplePeakDB   jsonFloat `json:"samplePeakDb"`
 }
 
 type loudnessJSON struct {
@@ -242,6 +242,6 @@ func loudnessInfoToJSON(l *waxtap.LoudnessInfo) *loudnessInfoJSON {
 		IntegratedLUFS: jsonFloat(l.IntegratedLUFS),
 		TruePeakDBTP:   jsonFloat(l.TruePeakDBTP),
 		LRA:            jsonFloat(l.LRA),
-		Threshold:      jsonFloat(l.Threshold),
+		SamplePeakDB:   jsonFloat(l.SamplePeakDB),
 	}
 }

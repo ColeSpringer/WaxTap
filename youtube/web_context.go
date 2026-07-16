@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube/internal/resolver"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube/internal/resolver"
 )
 
 // WebContextConfigured reports whether a WEB player-context provider is wired,

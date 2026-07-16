@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 )
 
@@ -78,7 +78,7 @@ func newInfoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
-	cmd.Flags().BoolVar(&probe, "probe", false, "ffprobe the selected stream for authoritative rate/channels/bitrate (requires ffmpeg)")
+	cmd.Flags().BoolVar(&probe, "probe", false, "probe the selected stream for authoritative rate/channels/duration")
 	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters) via a token-free watch-page pass")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
@@ -125,7 +125,7 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 			env.printf("  (original)")
 		}
 		if info.Probed {
-			// The row's numbers came from ffprobe of the resolved stream, not the
+			// The row's numbers came from a probe of the resolved stream, not the
 			// player manifest.
 			env.printf("  (probed)")
 		}

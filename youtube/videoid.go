@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // idLen is the fixed length of a YouTube video ID.

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/potoken"
+	"github.com/colespringer/waxtap/v3/potoken"
 )
 
 // SidecarOption configures a sidecar provider built by NewSidecarPOTokenProvider,

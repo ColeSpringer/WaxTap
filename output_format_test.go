@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
-	"github.com/colespringer/waxtap/v2/transcode"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
 )
 
 // TestNewProcessResultCopyCutDurationBaseline covers a copy-mode cut whose output
@@ -17,7 +17,7 @@ func TestNewProcessResultCopyCutDurationBaseline(t *testing.T) {
 		Cut:            true,
 		Removed:        90 * time.Second,
 		SourceDuration: 600 * time.Second,
-		OutputCodec:    transcode.CodecCopy,
+		OutputCodec:    media.CodecCopy,
 		// OutputProbe nil: the best-effort probe failed.
 	}
 	res := newProcessResult(SourceYouTube, p, src, 0)
@@ -35,9 +35,9 @@ func TestNewProcessResultCopyCutDurationBaseline(t *testing.T) {
 // probe's rate/channels/duration/size supersede the baseline and the source.
 func TestNewProcessResultProbeOverlay(t *testing.T) {
 	src := Format{Codec: "opus", Extension: "webm", Duration: 600 * time.Second}
-	probe := &transcode.ProbeResult{
-		Format: transcode.ProbeFormat{Duration: 505 * time.Second, Size: 8_000_000, BitRate: 126000},
-		Streams: []transcode.ProbeStream{
+	probe := &media.ProbeResult{
+		Format: media.ProbeFormat{Duration: 505 * time.Second, Size: 8_000_000, BitRate: 126000},
+		Streams: []media.ProbeStream{
 			{CodecType: "audio", SampleRate: 48000, Channels: 2, BitRate: 126000, Duration: 505 * time.Second},
 		},
 	}
@@ -45,7 +45,7 @@ func TestNewProcessResultProbeOverlay(t *testing.T) {
 		Cut:            true,
 		Removed:        90 * time.Second,
 		SourceDuration: 600 * time.Second,
-		OutputCodec:    transcode.CodecCopy,
+		OutputCodec:    media.CodecCopy,
 		OutputProbe:    probe,
 	}
 	res := newProcessResult(SourceYouTube, p, src, 0)
@@ -66,20 +66,20 @@ func TestNewProcessResultProbeOverlay(t *testing.T) {
 func TestNewProcessResultBitrateFallback(t *testing.T) {
 	src := Format{Codec: "opus", Extension: "webm", Duration: 10 * time.Second}
 
-	containerOnly := &transcode.ProbeResult{
-		Format:  transcode.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000, BitRate: 705000},
-		Streams: []transcode.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2 /* BitRate 0 */}},
+	containerOnly := &media.ProbeResult{
+		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000, BitRate: 705000},
+		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2 /* BitRate 0 */}},
 	}
-	res := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: transcode.CodecFLAC, OutputProbe: containerOnly}, src, 0)
+	res := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: media.CodecFLAC, OutputProbe: containerOnly}, src, 0)
 	if res.OutputFormat.Bitrate != 705000 {
 		t.Errorf("Bitrate = %d, want the container fallback 705000", res.OutputFormat.Bitrate)
 	}
 
-	noBitrate := &transcode.ProbeResult{
-		Format:  transcode.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000 /* BitRate 0 */},
-		Streams: []transcode.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2}},
+	noBitrate := &media.ProbeResult{
+		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000 /* BitRate 0 */},
+		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2}},
 	}
-	res2 := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: transcode.CodecFLAC, OutputProbe: noBitrate}, src, 0)
+	res2 := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: media.CodecFLAC, OutputProbe: noBitrate}, src, 0)
 	if want := int(float64(1_000_000) * 8 / 10); res2.OutputFormat.Bitrate != want {
 		t.Errorf("Bitrate = %d, want the size/duration estimate %d", res2.OutputFormat.Bitrate, want)
 	}

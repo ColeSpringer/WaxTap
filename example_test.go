@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // ExampleClient_Download downloads the best audio stream to a file. With no
@@ -33,7 +33,7 @@ func ExampleClient_Download() {
 }
 
 // ExampleClient_Download_transcodeAndSponsorBlock downloads a video, removes
-// SponsorBlock "music_offtopic" segments, and transcodes to FLAC in one ffmpeg
+// SponsorBlock "music_offtopic" segments, and transcodes to FLAC in one fused
 // pass. SourcePolicy defaults to MinimizeLoss.
 func ExampleClient_Download_transcodeAndSponsorBlock() {
 	client, err := waxtap.New(waxtap.Options{})

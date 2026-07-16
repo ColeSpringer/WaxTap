@@ -22,7 +22,9 @@ var exitCodeTable = []exitCodeEntry{
 	{3, "unavailable or restricted video (private, age-restricted, members-only, geo-blocked, removed), login required, live or upcoming content, no audio formats, unavailable or empty playlist"},
 	{4, "extraction, cipher, or playlist parsing failure (WaxTap may need an update)"},
 	{5, "rate limited"},
-	{6, "ffmpeg/ffprobe not found"},
+	// 6 is retired (formerly "ffmpeg/ffprobe not found"). WaxTap is now a single
+	// static binary with no external runtime dependency, so the code is left
+	// unused rather than renumbered to keep the taxonomy stable.
 	{7, "incomplete stream or expired stream URL (another client may work)"},
 	{8, "PO token required (none configured, mint failed, or YouTube rejected it)"},
 	{9, "network failure (dead --proxy, unreachable sidecar, or connection error)"},

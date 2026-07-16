@@ -6,9 +6,9 @@ import (
 	"sync"
 	"text/tabwriter"
 
-	"github.com/colespringer/waxtap/v2"
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 // syncWriter serializes per-item playlist output across parallel download

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/potoken"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 func sampleContext() potoken.PlayerContext {

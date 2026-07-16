@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
-func TestSchemaVersionIsOne(t *testing.T) {
-	if schemaVersion != 1 {
-		t.Errorf("schemaVersion = %d, want 1 (pre-1.0 baseline)", schemaVersion)
+func TestSchemaVersion(t *testing.T) {
+	// Bumped to 2 for the WaxFlow migration: the doctor --json reshaped and exit
+	// code 6 was retired.
+	if schemaVersion != 2 {
+		t.Errorf("schemaVersion = %d, want 2", schemaVersion)
 	}
 }
 

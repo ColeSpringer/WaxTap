@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // noteEnv returns an environment that captures informational output.
@@ -104,12 +104,12 @@ func TestWarnContainerExtMismatch(t *testing.T) {
 		{"m4a output on mp4 stream", &downloadFlags{}, res("/tmp/out.m4a", "mp4"), ""},
 		// A .opus extension usually implies Ogg, not WebM.
 		{"opus output on webm stream still warns", &downloadFlags{}, res("/tmp/out.opus", "webm"), "output path uses .opus, but the source container is .webm"},
-		// Any ffmpeg edit remuxes into the named container.
+		// Any processing edit remuxes into the named container.
 		{"cut remux suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/clip.mka", SourceFormat: waxtap.Format{Extension: "webm"}, CutApplied: true}, ""},
 		{"sponsorblock remux suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/clip.mka", SourceFormat: waxtap.Format{Extension: "webm"}, SponsorBlockApplied: true}, ""},
 		{"downmix transcode suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/out.ogg", SourceFormat: waxtap.Format{Extension: "webm"}, Transcoded: true}, ""},
 		{"loudness apply suppresses", &downloadFlags{}, &waxtap.Result{OutputPath: "/tmp/out.mka", SourceFormat: waxtap.Format{Extension: "webm"}, LoudnessApplied: true}, ""},
-		// A --format (copy or transcode) muxes to the named container via ffmpeg.
+		// A --format (copy or transcode) muxes to the named container.
 		{"format copy suppresses", &downloadFlags{format: "copy"}, res("/tmp/out.ogg", "webm"), ""},
 		{"format transcode suppresses", &downloadFlags{format: "flac"}, res("/tmp/out.flac", "webm"), ""},
 		{"no output path", &downloadFlags{}, res("", "webm"), ""},

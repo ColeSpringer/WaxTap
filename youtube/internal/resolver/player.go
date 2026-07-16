@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/internal/cache"
-	"github.com/colespringer/waxtap/v2/internal/clientident"
-	"github.com/colespringer/waxtap/v2/internal/iox"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/cache"
+	"github.com/colespringer/waxtap/v3/internal/clientident"
+	"github.com/colespringer/waxtap/v3/internal/iox"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // schemaVersion namespaces cached player programs and discovered player URLs.

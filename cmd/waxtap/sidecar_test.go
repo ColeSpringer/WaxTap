@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestWriteInfoSidecar_EnrichedDTO verifies the extended sidecar schema and

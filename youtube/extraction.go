@@ -140,7 +140,7 @@ type ResolvedStream struct {
 	IsSABR bool
 }
 
-// Probeable reports whether the stream has a direct URL suitable for ffprobe.
+// Probeable reports whether the stream has a direct URL suitable for a local probe.
 func (rs ResolvedStream) Probeable() bool {
 	return rs.URL != "" && !rs.IsSABR
 }

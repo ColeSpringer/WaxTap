@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // recordingLimiter records penalties and does not delay requests.

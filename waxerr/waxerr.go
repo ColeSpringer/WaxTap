@@ -112,8 +112,6 @@ var (
 	// ErrUnsupportedInput indicates a local input that is corrupt, unsupported,
 	// or has no usable audio stream.
 	ErrUnsupportedInput = errors.New("waxtap: unsupported or unreadable input")
-	// ErrFFmpegNotFound indicates the ffmpeg / ffprobe binaries were not found.
-	ErrFFmpegNotFound = errors.New("waxtap: ffmpeg/ffprobe not found")
 	// ErrInvalidConfig indicates invalid or conflicting configuration or option
 	// values.
 	ErrInvalidConfig = errors.New("waxtap: invalid configuration")

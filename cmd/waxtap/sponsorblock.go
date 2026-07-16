@@ -6,8 +6,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/sponsorblock"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
+	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 

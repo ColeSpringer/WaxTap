@@ -8,36 +8,35 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/cut"
-	"github.com/colespringer/waxtap/v2/download"
-	"github.com/colespringer/waxtap/v2/format"
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
-	"github.com/colespringer/waxtap/v2/sponsorblock"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/download"
+	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/mediatest"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
+	"github.com/colespringer/waxtap/v3/sponsorblock"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 func TestTranscodeCodecMapping(t *testing.T) {
 	cases := []struct {
 		f    TranscodeFormat
-		want transcode.Codec
+		want media.Codec
 	}{
-		{FormatCopy, transcode.CodecCopy},
-		{FormatFLAC, transcode.CodecFLAC},
-		{FormatALAC, transcode.CodecALAC},
-		{FormatWAV, transcode.CodecWAV},
-		{FormatMP3, transcode.CodecMP3},
-		{FormatAAC, transcode.CodecAAC},
-		{FormatOpus, transcode.CodecOpus},
-		{FormatVorbis, transcode.CodecVorbis},
+		{FormatCopy, media.CodecCopy},
+		{FormatFLAC, media.CodecFLAC},
+		{FormatALAC, media.CodecALAC},
+		{FormatWAV, media.CodecWAV},
+		{FormatMP3, media.CodecMP3},
+		{FormatAAC, media.CodecAAC},
+		{FormatOpus, media.CodecOpus},
+		{FormatVorbis, media.CodecVorbis},
 	}
 	for _, c := range cases {
 		if got := transcodeCodec(c.f); got != c.want {
@@ -212,25 +211,25 @@ func TestSelectIndex(t *testing.T) {
 
 func TestSponsorBlockContributed(t *testing.T) {
 	const total = 60 * time.Second
-	r := func(s, e int) cut.Range {
-		return cut.Range{Start: time.Duration(s) * time.Second, End: time.Duration(e) * time.Second}
+	r := func(s, e int) cutrange.Range {
+		return cutrange.Range{Start: time.Duration(s) * time.Second, End: time.Duration(e) * time.Second}
 	}
 	cut1 := pipeline.Result{Cut: true, SourceDuration: total}
 
 	cases := []struct {
 		name     string
-		explicit []cut.Range
-		sb       []cut.Range
+		explicit []cutrange.Range
+		sb       []cutrange.Range
 		pres     pipeline.Result
 		want     bool
 	}{
-		{"sb-only-removes", nil, []cut.Range{r(0, 5)}, cut1, true},
-		{"sb-adds-to-explicit", []cut.Range{r(0, 5)}, []cut.Range{r(50, 55)}, cut1, true},
-		{"sb-covered-by-explicit", []cut.Range{r(0, 10)}, []cut.Range{r(2, 6)}, cut1, false},
-		{"sb-clamps-away", nil, []cut.Range{r(100, 200)}, cut1, false},
-		{"no-sb", []cut.Range{r(0, 5)}, nil, cut1, false},
-		{"no-effective-cut", nil, []cut.Range{r(0, 5)}, pipeline.Result{Cut: false, SourceDuration: total}, false},
-		{"unknown-duration", nil, []cut.Range{r(0, 5)}, pipeline.Result{Cut: true, SourceDuration: 0}, false},
+		{"sb-only-removes", nil, []cutrange.Range{r(0, 5)}, cut1, true},
+		{"sb-adds-to-explicit", []cutrange.Range{r(0, 5)}, []cutrange.Range{r(50, 55)}, cut1, true},
+		{"sb-covered-by-explicit", []cutrange.Range{r(0, 10)}, []cutrange.Range{r(2, 6)}, cut1, false},
+		{"sb-clamps-away", nil, []cutrange.Range{r(100, 200)}, cut1, false},
+		{"no-sb", []cutrange.Range{r(0, 5)}, nil, cut1, false},
+		{"no-effective-cut", nil, []cutrange.Range{r(0, 5)}, pipeline.Result{Cut: false, SourceDuration: total}, false},
+		{"unknown-duration", nil, []cutrange.Range{r(0, 5)}, pipeline.Result{Cut: true, SourceDuration: 0}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -482,35 +481,50 @@ func TestProcessSkipIfExists(t *testing.T) {
 	}
 }
 
-func ffmpegOrSkip(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not installed")
-	}
-	if _, err := exec.LookPath("ffprobe"); err != nil {
-		t.Skip("ffprobe not installed")
+// synthCodec maps a fixture codec name to a media.Codec.
+func synthCodec(name string) media.Codec {
+	switch name {
+	case "flac":
+		return media.CodecFLAC
+	case "aac":
+		return media.CodecAAC
+	case "opus":
+		return media.CodecOpus
+	case "vorbis":
+		return media.CodecVorbis
+	case "mp3":
+		return media.CodecMP3
+	case "alac":
+		return media.CodecALAC
+	default:
+		return media.CodecWAV
 	}
 }
 
-// synthSine writes a steady stereo sine fixture (never committed).
-func synthSine(t *testing.T, dir, name string, seconds int, encoder string) string {
+// synthSine writes a steady stereo sine fixture in codec, via the in-process
+// engine over a pure-Go WAV (no external tools).
+func synthSine(t *testing.T, dir, name string, seconds int, codec string) string {
 	t.Helper()
-	ffmpegOrSkip(t)
 	out := filepath.Join(dir, name)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "lavfi",
-		"-i", "sine=frequency=440:sample_rate=44100:duration=" + strconv.Itoa(seconds),
-		"-af", "volume=-6dB", "-ac", "2", "-c:a", encoder, out,
+	wav := mediatest.SineWAV(seconds, 2)
+	if codec == "wav" {
+		if err := os.WriteFile(out, wav, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return out
 	}
-	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
-		t.Fatalf("synth sine: %v: %s", err, b)
+	src := filepath.Join(t.TempDir(), "src.wav") // separate dir: never pollute the fixture dir
+	if err := os.WriteFile(src, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := media.NewRunner(media.RunnerConfig{})
+	if _, err := r.Transcode(context.Background(), src, out, media.Spec{Codec: synthCodec(codec)}); err != nil {
+		t.Fatalf("synth %s (%s): %v", name, codec, err)
 	}
 	return out
 }
 
 func TestProcessLocalTranscode(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -535,7 +549,6 @@ func TestProcessLocalTranscode(t *testing.T) {
 }
 
 func TestProcessLocalCutTranscode(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 4, "flac")
@@ -555,7 +568,7 @@ func TestProcessLocalCutTranscode(t *testing.T) {
 	if !res.CutApplied {
 		t.Error("CutApplied = false, want true")
 	}
-	runner, _ := c.ffmpeg()
+	runner := c.engine()
 	probe, err := runner.Probe(context.Background(), out)
 	if err != nil {
 		t.Fatalf("probe output: %v", err)
@@ -668,7 +681,7 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 		t.Errorf("realistic 320 kbps bitrate = %v, want nil", err)
 	}
 	// A kbps value or a 1-10 quality scale mistakenly passed as bps is implausibly
-	// low; reject it so ffmpeg does not silently fall back to a default encode.
+	// low; reject it so the encoder does not silently fall back to a default rate.
 	for _, bps := range []int{1, 5, 128, 320} {
 		if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: bps}}); !errors.Is(err, ErrIncompatibleSpec) {
 			t.Errorf("implausibly low bitrate %d = %v, want ErrIncompatibleSpec", bps, err)
@@ -678,7 +691,7 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, Bitrate: minPlausibleBitrate}}); err != nil {
 		t.Errorf("bitrate at the plausibility floor = %v, want nil", err)
 	}
-	// ffmpeg ignores bitrate for lossless targets, so neither bound applies.
+	// bitrate is ignored for lossless targets, so neither bound applies.
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, Bitrate: maxBitrate + 1}}); err != nil {
 		t.Errorf("high bitrate on a lossless target = %v, want nil (ignored, not an error)", err)
 	}
@@ -729,7 +742,7 @@ func TestValidateProcessSpec_CheckOutputContainer(t *testing.T) {
 		{"opus in mka", FormatOpus, "out.mka"},
 		// WAV dual-name: canonical "wav" must satisfy the PCM-accepting branches.
 		{"wav in mka", FormatWAV, "out.mka"},
-		// Extension outside the table passes unchecked (ffmpeg validates).
+		// Extension outside the table passes unchecked (the muxer validates).
 		{"wav in w64", FormatWAV, "out.w64"},
 		{"flac in aiff", FormatFLAC, "out.aiff"},
 		// Force-muxed: codec-named and extensionless outputs are unconstrained.
@@ -848,7 +861,6 @@ func TestNew_RejectsUnknownClient(t *testing.T) {
 }
 
 func TestProcessRejectedCutPreservesExistingOutput(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 4, "flac")
@@ -877,7 +889,6 @@ func TestProcessRejectedCutPreservesExistingOutput(t *testing.T) {
 }
 
 func TestProcessExplicitCutOutOfRangeRejected(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 4, "flac")
@@ -901,7 +912,6 @@ func TestProcessExplicitCutOutOfRangeRejected(t *testing.T) {
 }
 
 func TestProcessRemuxExtensionlessInfersContainer(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
@@ -925,7 +935,7 @@ func TestProcessRemuxExtensionlessInfersContainer(t *testing.T) {
 			t.Fatalf("remux to %q wrote no output", out)
 		}
 		// The audio is stream-copied, so the codec is unchanged from the source.
-		runner, _ := c.ffmpeg()
+		runner := c.engine()
 		probe, perr := runner.Probe(context.Background(), out)
 		if perr != nil {
 			t.Fatalf("probe %q: %v", out, perr)
@@ -937,7 +947,6 @@ func TestProcessRemuxExtensionlessInfersContainer(t *testing.T) {
 }
 
 func TestProcessCopyCutWithoutContainerRejected(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -961,7 +970,6 @@ func TestProcessCopyCutWithoutContainerRejected(t *testing.T) {
 }
 
 func TestProcessTranscodeExtensionlessOutput(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
@@ -987,7 +995,6 @@ func TestProcessTranscodeExtensionlessOutput(t *testing.T) {
 }
 
 func TestProcessPartialOverlapCutSucceeds(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 4, "flac")
@@ -1011,7 +1018,6 @@ func TestProcessPartialOverlapCutSucceeds(t *testing.T) {
 }
 
 func TestProcessLocalCopyRemux(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -1032,7 +1038,7 @@ func TestProcessLocalCopyRemux(t *testing.T) {
 	}
 	// The audio was stream-copied (codec unchanged), but the container changed to
 	// the requested matroska, proving a real remux rather than a raw byte copy.
-	runner, _ := c.ffmpeg()
+	runner := c.engine()
 	probe, err := runner.Probe(context.Background(), out)
 	if err != nil {
 		t.Fatalf("probe remux output: %v", err)
@@ -1040,13 +1046,12 @@ func TestProcessLocalCopyRemux(t *testing.T) {
 	if a, _ := probe.AudioStream(); a.CodecName != "flac" {
 		t.Errorf("remux changed codec to %q, want flac (stream copy)", a.CodecName)
 	}
-	if !strings.Contains(probe.Format.FormatName, "matroska") {
-		t.Errorf("remux container = %q, want matroska", probe.Format.FormatName)
+	if probe.Format.Container != "mka" {
+		t.Errorf("remux container = %q, want mka (matroska)", probe.Format.Container)
 	}
 }
 
 func TestProcessLocalMeasureOnly(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -1078,7 +1083,6 @@ func TestProcessLocalMeasureOnly(t *testing.T) {
 // Output: it reports loudness, writes no file, leaves the input in place, and
 // still reaches StageFinalizing.
 func TestProcessMeasureOnlyNoOutput(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -1127,7 +1131,6 @@ func containsStage(stages []Stage, want Stage) bool {
 
 // TestMeasure exercises the Client.Measure convenience wrapper.
 func TestMeasure(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
@@ -1154,7 +1157,7 @@ func TestMeasure(t *testing.T) {
 // TestLoudnessInfoMarshalJSON verifies that non-finite measurements, such as
 // digital silence yielding -Inf, marshal as null instead of failing json.Marshal.
 func TestLoudnessInfoMarshalJSON(t *testing.T) {
-	b, err := json.Marshal(LoudnessInfo{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: -1.5, LRA: math.NaN(), Threshold: -24})
+	b, err := json.Marshal(LoudnessInfo{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: -1.5, LRA: math.NaN(), SamplePeakDB: -24})
 	if err != nil {
 		t.Fatalf("marshal non-finite LoudnessInfo: %v", err)
 	}
@@ -1171,8 +1174,8 @@ func TestLoudnessInfoMarshalJSON(t *testing.T) {
 	if m["TruePeakDBTP"] != -1.5 {
 		t.Errorf("TruePeakDBTP = %v, want -1.5 (finite preserved)", m["TruePeakDBTP"])
 	}
-	if m["Threshold"] != -24.0 {
-		t.Errorf("Threshold = %v, want -24 (finite preserved)", m["Threshold"])
+	if m["SamplePeakDB"] != -24.0 {
+		t.Errorf("SamplePeakDB = %v, want -24 (finite preserved)", m["SamplePeakDB"])
 	}
 }
 
@@ -1232,7 +1235,6 @@ func TestProcessNoOutputRequiresOutput(t *testing.T) {
 
 // TestMeasureNoScratchDir verifies that pure measurement does not touch TempDir.
 func TestMeasureNoScratchDir(t *testing.T) {
-	ffmpegOrSkip(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 2, "flac")
 	tempDir := filepath.Join(dir, "scratch-never-created")
@@ -1260,7 +1262,6 @@ func TestMeasureNoScratchDir(t *testing.T) {
 }
 
 func TestProcessLocalToWriter(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
@@ -1279,7 +1280,6 @@ func TestProcessLocalToWriter(t *testing.T) {
 }
 
 func TestProcessLocalLoudnessApply(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 3, "flac")
@@ -1309,7 +1309,6 @@ func TestProcessLocalLoudnessApply(t *testing.T) {
 }
 
 func TestProcessLoudnessApplyWithoutTranscodeRejected(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 1, "flac")
@@ -1325,7 +1324,6 @@ func TestProcessLoudnessApplyWithoutTranscodeRejected(t *testing.T) {
 }
 
 func TestMeasureAlbum(t *testing.T) {
-	ffmpegOrSkip(t)
 	c := newOfflineClient(t)
 	dir := t.TempDir()
 	a := synthSine(t, dir, "a.flac", 2, "flac")

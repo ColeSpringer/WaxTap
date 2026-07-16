@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/internal/httpx"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 )
 
 func TestEmitThrottleDedup(t *testing.T) {

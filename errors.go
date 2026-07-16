@@ -1,6 +1,6 @@
 package waxtap
 
-import "github.com/colespringer/waxtap/v2/waxerr"
+import "github.com/colespringer/waxtap/v3/waxerr"
 
 // Re-exported sentinel errors. The canonical definitions live in package waxerr;
 // match them with errors.Is.
@@ -63,7 +63,6 @@ var (
 	// Processing / local files.
 	ErrIncompatibleSpec = waxerr.ErrIncompatibleSpec
 	ErrUnsupportedInput = waxerr.ErrUnsupportedInput
-	ErrFFmpegNotFound   = waxerr.ErrFFmpegNotFound
 
 	// ErrInvalidConfig indicates invalid or conflicting library configuration.
 	ErrInvalidConfig = waxerr.ErrInvalidConfig

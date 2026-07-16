@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxtap/v2/waxerr"
-	"github.com/colespringer/waxtap/v2/youtube"
+	"github.com/colespringer/waxtap/v3/waxerr"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 func liveVideoID() string {

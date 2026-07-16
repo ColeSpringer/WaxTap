@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
-	"github.com/colespringer/waxtap/v2/normalize"
-	"github.com/colespringer/waxtap/v2/transcode"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/media/loudness"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // Process runs the transcode/cut/normalize pipeline on a local file, with no
@@ -18,7 +18,7 @@ import (
 // SponsorBlock is not used here: it is keyed by video ID, which a local file does
 // not have, so only explicit Cut.Ranges apply.
 //
-// The input is validated up front (ffprobe); a corrupt or non-audio file fails
+// The input is validated up front (probed); a corrupt or non-audio file fails
 // with ErrUnsupportedInput. Writing the output over the input is rejected unless
 // the caller targets a different path.
 //
@@ -50,10 +50,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		}
 	}
 
-	runner, err := c.ffmpeg()
-	if err != nil {
-		return nil, err
-	}
+	runner := c.engine()
 
 	srcExt := filepath.Ext(req.Input)
 	pipeOut := req.Output.path
@@ -141,10 +138,7 @@ func isMeasureOnlySpec(s ProcessSpec) bool {
 // such as "opus" or "aac". It returns ErrUnsupportedInput when the file has no
 // audio stream.
 func (c *Client) ProbeCodec(ctx context.Context, path string) (string, error) {
-	runner, err := c.ffmpeg()
-	if err != nil {
-		return "", err
-	}
+	runner := c.engine()
 	probe, err := runner.Probe(ctx, path)
 	if err != nil {
 		return "", err
@@ -168,8 +162,8 @@ type AlbumLoudnessResult struct {
 // uses Process with a measure-only spec and no Output, so no output or scratch
 // file is created.
 //
-// It requires ffmpeg. Use MeasureAlbum to measure several files as one album, or
-// Process with a LoudnessApply spec to normalize and write audio.
+// Use MeasureAlbum to measure several files as one album, or Process with a
+// LoudnessApply spec to normalize and write audio.
 func (c *Client) Measure(ctx context.Context, path string) (LoudnessInfo, error) {
 	res, err := c.Process(ctx, ProcessRequest{
 		Input:       path,
@@ -188,18 +182,13 @@ func (c *Client) Measure(ctx context.Context, path string) (LoudnessInfo, error)
 // track's loudness. It does not write output files; callers can use the album
 // value for ReplayGain tags or playback gain.
 //
-// It requires ffmpeg. Use ProcessAlbum to measure the album and write normalized
-// tracks. Callers that manage ffmpeg directly can build the gain filter with
-// [normalize.AlbumGainFilter].
+// Use ProcessAlbum to measure the album and write normalized tracks.
 func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudnessResult, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("waxtap.MeasureAlbum: no inputs")
 	}
-	runner, err := c.ffmpeg()
-	if err != nil {
-		return nil, err
-	}
-	album, perTrack, err := normalize.MeasureAlbum(ctx, runner, paths)
+	runner := c.engine()
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +222,7 @@ type AlbumProcessResult struct {
 // every track. The shared offset preserves track-to-track loudness differences;
 // per-track normalization would flatten them.
 //
-// Album processing requires ffmpeg and a non-copy transcode format. A silent
+// Album processing requires a non-copy transcode format. A silent
 // album applies a no-op gain, leaving each track unchanged apart from re-encoding.
 func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target float64, spec TranscodeSpec) (*AlbumProcessResult, error) {
 	if len(tracks) == 0 {
@@ -267,24 +256,21 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		}
 	}
 
-	runner, err := c.ffmpeg()
-	if err != nil {
-		return nil, err
-	}
+	runner := c.engine()
 
 	inputs := make([]string, len(tracks))
 	for i, t := range tracks {
 		inputs[i] = t.Input
 	}
-	album, perTrack, err := normalize.MeasureAlbum(ctx, runner, inputs)
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs)
 	if err != nil {
 		return nil, err
 	}
 
-	tspec := transcode.Spec{
+	tspec := media.Spec{
 		Codec:   transcodeCodec(spec.Format),
 		Bitrate: spec.Bitrate,
-		Filters: []string{normalize.AlbumGainFilter(target, album.IntegratedLUFS)},
+		GainDB:  loudness.AlbumGain(target, album.IntegratedLUFS),
 	}
 
 	res := &AlbumProcessResult{

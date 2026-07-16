@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestTranslateConfigSymbols covers each Go option field name that may appear in

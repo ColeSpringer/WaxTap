@@ -8,8 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/colespringer/waxtap/v2/internal/tempfile"
-	"github.com/colespringer/waxtap/v2/waxerr"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // chunkSpan is an inclusive byte range [start, end].

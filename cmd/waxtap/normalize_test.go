@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestAlbumTableHeaders guards the album table labels. Process output uses

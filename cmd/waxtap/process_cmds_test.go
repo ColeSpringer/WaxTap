@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxtap/v2"
+	"github.com/colespringer/waxtap/v3"
 )
 
 // TestProcessSourceCheckedBeforeCollision verifies that a missing input is
@@ -217,7 +217,6 @@ func TestChannelURLErrorPrecedence(t *testing.T) {
 // TestCutInfersFormatFromExtension verifies that re-encoding cuts can infer their
 // format from a recognized output extension.
 func TestCutInfersFormatFromExtension(t *testing.T) {
-	requireFFmpeg(t)
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.flac")
 	synthAudio(t, in, "flac") // 1s sine

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/colespringer/waxtap/v2/internal/httpx"
-	"github.com/colespringer/waxtap/v2/internal/pipeline"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
 )
 
 // emitter sends stage events to the caller and collects warnings for the Result.
