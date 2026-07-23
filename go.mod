@@ -3,7 +3,7 @@ module github.com/colespringer/waxtap/v3
 go 1.26
 
 require (
-	github.com/colespringer/waxflow v0.0.0-20260723010016-a8f83a5c2da9
+	github.com/colespringer/waxflow v0.0.0-20260723180713-0e17e9e853fb
 	github.com/colespringer/waxlabel v1.2.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/spf13/cobra v1.10.2
