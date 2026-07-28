@@ -128,7 +128,10 @@ func validateProcessSpec(s ProcessSpec) error {
 	if err := validateLoudness(s.Loudness); err != nil {
 		return err
 	}
-	return validateBitrate(s.Transcode)
+	if err := validateBitrate(s.Transcode); err != nil {
+		return err
+	}
+	return validateBitDepth(s.Transcode)
 }
 
 // validateOutputContainer rejects a file transcode when the output extension
@@ -208,6 +211,26 @@ func validateBitrate(t *TranscodeSpec) error {
 	return nil
 }
 
+// validateBitDepth rejects a requested output depth outside {0, 16, 24}.
+//
+// The honoring formats individually allow more (WAV and AIFF take 2..32, FLAC
+// 4..32, ALAC 16/20/24/32), so this is policy, not a codec limit: 16 and 24 are
+// the depths worth naming, and neither 32-bit integer nor the odd depths serve
+// the reason the knob exists, which is forcing integer output from a float
+// decode. The error says "want 16 or 24" so a rejected 32 does not read as a bug.
+func validateBitDepth(t *TranscodeSpec) error {
+	if t == nil {
+		return nil
+	}
+	switch t.BitDepth {
+	case 0, 16, 24:
+		return nil
+	default:
+		return fmt.Errorf("%w: transcode bit depth %d is not supported (want 16 or 24, or 0 to follow the source)",
+			waxerr.ErrIncompatibleSpec, t.BitDepth)
+	}
+}
+
 // downmixChannels returns the requested output channel count, or 0 when downmix
 // is disabled. validateProcessSpec rejects layouts without a fixed count.
 func downmixChannels(layout ChannelLayout, downmix bool) int {
@@ -243,14 +266,16 @@ func pipelineSpec(s ProcessSpec, ranges []cutrange.Range) pipeline.Spec {
 	if s.Transcode != nil {
 		ps.Codec = transcodeCodec(s.Transcode.Format)
 		ps.Bitrate = s.Transcode.Bitrate
+		ps.BitDepth = s.Transcode.BitDepth
 		// An explicit FormatCopy is a stream-copy remux (distinct from a nil
 		// Transcode, which keeps the source bytes untouched).
 		ps.Remux = s.Transcode.Format == FormatCopy
 	}
 	if s.Loudness != nil {
 		ps.Loudness = &pipeline.Loudness{
-			Apply:  s.Loudness.Mode == LoudnessApply,
-			Target: s.Loudness.Target,
+			Apply:     s.Loudness.Mode == LoudnessApply,
+			Target:    s.Loudness.Target,
+			PeakLimit: s.Loudness.PeakMode == PeakLimit,
 		}
 	}
 	return ps
@@ -285,6 +310,40 @@ func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments 
 	if cs != nil && cs.SponsorBlock != nil && sbHadSegments && len(cs.Ranges) == 0 && !pres.Cut && pres.SourceDuration > 0 {
 		em.warn(WarnRangesEmpty, "SponsorBlock segments fell outside the media; delivered uncut")
 	}
+}
+
+// loudnessClampWarnDB is the gain shortfall, in dB, that turns peak protection
+// from a detail into something the user needs told. Below it the miss is within
+// the noise of a lossy encode.
+const loudnessClampWarnDB = 1.0
+
+// warnLoudnessTargetMissed reports that PeakCap's true-peak clamp held the gain
+// back, so the delivered loudness is short of the target.
+//
+// It is derived from the clamp rather than from the achieved loudness on purpose.
+// pipeline.Result.OutputLoudness is best-effort, so comparing against it would
+// silently drop the warning whenever the post-measure fails, and a lossy encode
+// can miss the target by more than a LU for reasons that have nothing to do with
+// the ceiling, which would make the detail text a lie. Asking the loudness
+// package what its peak clamp held back, on the InputLoudness that fed it
+// (downmix fold included), is deterministic and correctly attributed.
+func warnLoudnessTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
+	if ls == nil || ls.Mode != LoudnessApply || ls.PeakMode == PeakLimit || pres.InputLoudness == nil {
+		return
+	}
+	// PeakShortfall reports only what the true-peak clamp cost, so the detail below
+	// can name that cause. It returns 0 for a non-finite measurement, so silence
+	// (-Inf, which would otherwise be an infinite shortfall) stays quiet.
+	short := loudness.PeakShortfall(ls.Target, *pres.InputLoudness)
+	if short <= loudnessClampWarnDB {
+		return
+	}
+	detail := fmt.Sprintf("true-peak capping at %g dBTP held the gain %.1f dB short of the %g LUFS target",
+		loudness.TruePeakCeilingDB, short, ls.Target)
+	if out := pres.OutputLoudness; out != nil && out.Finite() {
+		detail += fmt.Sprintf("; delivered %.1f LUFS", out.IntegratedLUFS)
+	}
+	em.warn(WarnLoudnessTargetMissed, detail+"; use --peak-mode limit to hit the target")
 }
 
 // needsProcessing reports whether the spec needs audio processing and a staged input. When

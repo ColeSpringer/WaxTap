@@ -2,10 +2,11 @@
 // the scalar gain that normalizes a track to a target.
 //
 // Measurement returns integrated loudness, true peak, loudness range, and sample
-// peak (ITU-R BS.1770-4 / EBU R128). [GainFor] is the closed form of ffmpeg's
-// linear-mode loudnorm: a single gain, clamped so the true peak stays under the
-// ceiling. The gain is handed to the media package as TranscodeOptions.GainDB,
-// fused into the encode.
+// peak (ITU-R BS.1770-4 / EBU R128). Two gain policies derive from it: [GainFor]
+// is the closed form of ffmpeg's linear-mode loudnorm, a single gain clamped so
+// the true peak stays under the ceiling, and [RawGain] is the same gain
+// unclamped, leaving the peaks to WaxFlow's limiter. The gain is handed to the
+// media package as TranscodeOptions.GainDB, fused into the encode.
 package loudness
 
 import (
@@ -123,7 +124,8 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 // exactly as linear-mode loudnorm does. It does not stack with WaxFlow's limiter:
 // the limiter engages only for a positive gain, so on an attenuating gain the
 // head-clamp is the sole peak control, and on a boosting gain GainFor has already
-// clamped under the ceiling.
+// clamped under the ceiling. The cost is that a loud source can land well short
+// of the target; [RawGain] is the other policy.
 func GainFor(target float64, m Loudness) float64 {
 	if math.IsInf(m.IntegratedLUFS, 0) || math.IsNaN(m.IntegratedLUFS) {
 		return 0
@@ -137,16 +139,44 @@ func GainFor(target float64, m Loudness) float64 {
 	return clamp(g, -maxGainDB, maxGainDB)
 }
 
-// AlbumGain is the raw target - albumIntegrated offset applied to every track,
-// preserving inter-track loudness differences. Unlike GainFor it is not
-// peak-clamped: WaxFlow's limiter guards each track's peaks at encode time. A
-// silent album (non-finite integrated) yields zero gain.
-func AlbumGain(target, albumIntegrated float64) float64 {
-	if math.IsInf(albumIntegrated, 0) || math.IsNaN(albumIntegrated) ||
+// PeakShortfall reports how many dB of gain the true-peak clamp held back: the
+// raw target offset minus the head-clamped gain, or 0 when the clamp did not
+// bind (an attenuating or already-headroom-fitting gain).
+//
+// It is deliberately not "target - integrated minus GainFor". GainFor also bounds
+// its result to +-maxGainDB, so that subtraction would attribute a maxGainDB
+// clamp to the peak ceiling and report a cause that did not apply. Only the head
+// clamp belongs to the peak ceiling, so only it is measured here. The two cannot
+// currently both bind on a real measurement (WaxFlow gates integrated loudness at
+// -70 LUFS and callers bound the target to -5, so the offset cannot reach 120),
+// but the caller states a cause in user-facing text and should not depend on
+// three constants staying where they are.
+func PeakShortfall(target float64, m Loudness) float64 {
+	if !m.Finite() || math.IsInf(target, 0) || math.IsNaN(target) {
+		return 0
+	}
+	want := target - m.IntegratedLUFS
+	head := TruePeakCeilingDB - m.TruePeakDBTP
+	if want <= head {
+		return 0
+	}
+	return want - head
+}
+
+// RawGain is the plain target - integrated offset, with no peak clamp: WaxFlow's
+// limiter guards the peaks at encode time. It hits the target where GainFor may
+// fall short, at the cost of transparency, and is the gain both PeakLimit
+// normalization and album normalization apply. Album mode has no other option; a
+// per-track clamp would destroy the inter-track spacing it exists to preserve.
+//
+// A non-finite integrated loudness (silence) yields zero gain, for the same
+// reason GainFor guards it: WaxFlow rejects a non-finite GainDB.
+func RawGain(target, integrated float64) float64 {
+	if math.IsInf(integrated, 0) || math.IsNaN(integrated) ||
 		math.IsInf(target, 0) || math.IsNaN(target) {
 		return 0
 	}
-	return clamp(target-albumIntegrated, -maxGainDB, maxGainDB)
+	return clamp(target-integrated, -maxGainDB, maxGainDB)
 }
 
 func clamp(v, lo, hi float64) float64 {

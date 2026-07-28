@@ -31,6 +31,23 @@ func rejectChangedFlags(cmd *cobra.Command, reason string, names ...string) erro
 	return nil
 }
 
+// transcodeFormatNames lists the encoded output formats --format accepts, in the
+// order help text and error messages present them. It is the one place the set is
+// written down, and TestTranscodeFormatParity pins it to the engine's
+// media.OutputFormats(): a format WaxFlow registers and WaxTap forgets to expose
+// is what produced the half-wired AIFF the 2026-07-28 pass found.
+var transcodeFormatNames = []string{"flac", "alac", "wav", "aiff", "mp3", "aac", "opus", "vorbis"}
+
+// formatChoices renders the --format choices for help text and errors. withCopy
+// prepends the copy pseudo-format, which remuxes rather than encoding, so the
+// commands that cannot remux (normalize, cut) leave it out.
+func formatChoices(withCopy bool) string {
+	if withCopy {
+		return "copy|" + strings.Join(transcodeFormatNames, "|")
+	}
+	return strings.Join(transcodeFormatNames, "|")
+}
+
 // parseTranscodeFormat maps a user codec name to a TranscodeFormat. An empty
 // string is the caller's signal for "no transcode" and is rejected here.
 func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
@@ -57,7 +74,7 @@ func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
 	case "vorbis", "ogg":
 		return waxtap.FormatVorbis, nil
 	default:
-		return 0, usagef("unknown transcode format %q (want copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis)", s)
+		return 0, usagef("unknown transcode format %q (want %s)", s, formatChoices(true))
 	}
 }
 
@@ -95,6 +112,18 @@ func parseCutMode(s string) (waxtap.CutMode, error) {
 		return waxtap.CutAccurate, nil
 	default:
 		return 0, usagef("invalid --cut-mode %q (want smart|copy|accurate)", s)
+	}
+}
+
+// parsePeakMode maps a mode name to a PeakMode.
+func parsePeakMode(s string) (waxtap.PeakMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "cap":
+		return waxtap.PeakCap, nil
+	case "limit":
+		return waxtap.PeakLimit, nil
+	default:
+		return 0, usagef("invalid --peak-mode %q (want cap|limit)", s)
 	}
 }
 

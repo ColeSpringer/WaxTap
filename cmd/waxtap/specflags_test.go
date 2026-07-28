@@ -1,10 +1,13 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/spf13/cobra"
 )
 
 func TestValidateItag(t *testing.T) {
@@ -162,6 +165,120 @@ func TestTranscodeExt(t *testing.T) {
 		if got := transcodeExt(f); got != want {
 			t.Errorf("transcodeExt(%v) = %q, want %q", f, got, want)
 		}
+	}
+}
+
+// formatParitySkip names engine output formats WaxTap deliberately does not
+// expose through --format, each with the reason. It is empty: every format
+// WaxFlow registers is reachable. Adding an entry is a decision, not a fix.
+var formatParitySkip = map[string]string{}
+
+// TestTranscodeFormatParity pins the CLI's format surface to the engine's.
+//
+// It covers the three tables reachable from this package: parseTranscodeFormat
+// (the entry point aiff was missing from, while doctor advertised it),
+// transcodeExt, and audioExts. TestTranscodeCodecParity in the waxtap package
+// covers transcodeCodec and Codec.String; the remaining hand-maintained tables
+// (isLosslessFormat, Codec.Extension/IsLossless, containerCodec,
+// ContainerAccepts, ContainersFor, extPossiblyCodec) are keyed on codecs and
+// extensions rather than format names and are checked in their own packages.
+func TestTranscodeFormatParity(t *testing.T) {
+	engine := map[string]bool{}
+	for _, name := range media.OutputFormats() {
+		engine[name] = true
+	}
+	exposed := map[string]bool{}
+	for _, name := range transcodeFormatNames {
+		exposed[name] = true
+	}
+
+	for name := range engine {
+		if reason, skipped := formatParitySkip[name]; skipped {
+			t.Logf("skipping %q: %s", name, reason)
+			continue
+		}
+		if !exposed[name] {
+			t.Errorf("the engine produces %q but --format does not offer it; wire it up or add it to formatParitySkip with a reason", name)
+			continue
+		}
+		tf, err := parseTranscodeFormat(name)
+		if err != nil {
+			t.Errorf("parseTranscodeFormat(%q) = %v, want the engine format to parse", name, err)
+			continue
+		}
+		ext := transcodeExt(tf)
+		if ext == "" {
+			t.Errorf("transcodeExt(%q) is empty; every encoded format needs an output extension", name)
+			continue
+		}
+		// A format WaxTap writes must be one directory processing reads back, or
+		// `transcode ./dir -f X` produces files its own next run calls ignored. This
+		// is the audioExts gap the 2026-07-28 pass found for .aiff.
+		if !audioExts["."+ext] {
+			t.Errorf("transcodeExt(%q) = %q but audioExts has no %q; directory processing would ignore its own output", name, ext, "."+ext)
+		}
+	}
+	for name := range exposed {
+		if !engine[name] {
+			t.Errorf("--format offers %q but the engine does not produce it", name)
+		}
+	}
+	for name := range formatParitySkip {
+		if !engine[name] {
+			t.Errorf("formatParitySkip names %q, which the engine no longer produces; drop the entry", name)
+		}
+	}
+}
+
+// TestFormatChoicesRendersOneList: the four --format help strings and the parse
+// error all come from transcodeFormatNames, so they cannot drift apart.
+func TestFormatChoicesRendersOneList(t *testing.T) {
+	if got, want := formatChoices(false), "flac|alac|wav|aiff|mp3|aac|opus|vorbis"; got != want {
+		t.Errorf("formatChoices(false) = %q, want %q", got, want)
+	}
+	if got, want := formatChoices(true), "copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis"; got != want {
+		t.Errorf("formatChoices(true) = %q, want %q", got, want)
+	}
+	// copy/remux is a pseudo-format: the commands that must encode omit it.
+	for _, c := range []struct {
+		name     string
+		cmd      *cobra.Command
+		wantCopy bool
+	}{
+		{"download", newDownloadCmd(), true},
+		{"transcode", newTranscodeCmd(), true},
+		{"cut", newCutCmd(), false},
+		{"normalize", newNormalizeCmd(), false},
+	} {
+		usage := c.cmd.Flags().Lookup("format").Usage
+		if !strings.Contains(usage, formatChoices(c.wantCopy)) {
+			t.Errorf("%s --format usage = %q, want the generated %q list", c.name, usage, formatChoices(c.wantCopy))
+		}
+		// Containment alone cannot catch a stray copy: formatChoices(false) is a
+		// substring of formatChoices(true), so the no-copy commands need the
+		// exclusion asserted directly.
+		if hasCopy := strings.Contains(usage, "copy"); hasCopy != c.wantCopy {
+			t.Errorf("%s --format usage mentions copy = %v, want %v (%s cannot remux)", c.name, hasCopy, c.wantCopy, c.name)
+		}
+	}
+}
+
+func TestParsePeakMode(t *testing.T) {
+	cases := map[string]waxtap.PeakMode{
+		"":        waxtap.PeakCap, // the flag default, and the zero value
+		"cap":     waxtap.PeakCap,
+		"CAP":     waxtap.PeakCap,
+		"limit":   waxtap.PeakLimit,
+		" Limit ": waxtap.PeakLimit,
+	}
+	for in, want := range cases {
+		got, err := parsePeakMode(in)
+		if err != nil || got != want {
+			t.Errorf("parsePeakMode(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	if _, err := parsePeakMode("clip"); err == nil {
+		t.Error("expected error for an unknown peak mode")
 	}
 }
 

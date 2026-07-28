@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/format"
 
@@ -578,6 +579,134 @@ func TestCheckOutputContainerAndInfer(t *testing.T) {
 	}
 	if !CanInferContainer("x.flac") || CanInferContainer("x.alac") || CanInferContainer("x") {
 		t.Error("CanInferContainer should accept .flac, reject codec-name/extensionless paths")
+	}
+}
+
+// formTypeOf returns an IFF file's form type, the 4 bytes after the FORM header
+// and length. It is what separates AIFF from AIFF-C; the leading magic is "FORM"
+// for both.
+func formTypeOf(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 12 {
+		t.Fatalf("%s is %d bytes, too short for an IFF header", path, len(b))
+	}
+	return string(b[8:12])
+}
+
+// probeSampleFormat reports the written file's sample type and depth. ProbeStream
+// carries neither, so this asks WaxFlow directly, the same way ffprobe's
+// sample_fmt/bits_per_raw_sample rows do in the manual sweep.
+func probeSampleFormat(t *testing.T, r *Runner, path string) audio.Format {
+	t.Helper()
+	src, closeSrc, err := openSource(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer closeSrc()
+	info, err := r.Engine().Probe(src, hintFor(path), nil)
+	if err != nil {
+		t.Fatalf("probe %s: %v", path, err)
+	}
+	return info.Default().Fmt
+}
+
+// TestBitDepthForcesIntegerOutput is F8's knob: decoding runs in float, so a
+// lossy source writes float WAV and 24-bit FLAC. BitDepth forces integer output
+// on the four formats that hold integer PCM, and the lossy rows drop it.
+func TestBitDepthForcesIntegerOutput(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	// An Opus round trip puts a genuine float stream in front of the encoders.
+	lossy := encodeFixture(t, r, dir, "lossy.opus", CodecOpus)
+
+	encode := func(name string, spec Spec) string {
+		t.Helper()
+		out := filepath.Join(dir, name)
+		if _, err := r.Transcode(context.Background(), lossy, out, spec); err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		return out
+	}
+
+	// The default: follow the decoded stream, which is float.
+	if f := probeSampleFormat(t, r, encode("f32.wav", Spec{Codec: CodecWAV})); f.Type != audio.Float {
+		t.Errorf("default WAV from a lossy source = %v/%d-bit, want float", f.Type, f.BitDepth)
+	}
+	if f := probeSampleFormat(t, r, encode("d24.flac", Spec{Codec: CodecFLAC})); f.Type != audio.Int || f.BitDepth != 24 {
+		t.Errorf("default FLAC from a lossy source = %v/%d-bit, want 24-bit int", f.Type, f.BitDepth)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		codec Codec
+		depth int
+	}{
+		{"i16.wav", CodecWAV, 16},
+		{"i24.wav", CodecWAV, 24},
+		{"i16.flac", CodecFLAC, 16},
+		{"i16.aiff", CodecAIFF, 16},
+		{"i24.aiff", CodecAIFF, 24},
+		{"i16.m4a", CodecALAC, 16},
+	} {
+		f := probeSampleFormat(t, r, encode(tc.name, Spec{Codec: tc.codec, BitDepth: tc.depth}))
+		if f.Type != audio.Int || f.BitDepth != tc.depth {
+			t.Errorf("%s = %v/%d-bit, want %d-bit int", tc.name, f.Type, f.BitDepth, tc.depth)
+		}
+	}
+
+	// A plain AIFF rather than AIFF-C float is what --bit-depth buys on the aiff
+	// row. The magic cannot show it: both variants open "FORM". The form type at
+	// offset 8 is the discriminator, AIFC for the float variant.
+	if got := formTypeOf(t, encode("f32b.aiff", Spec{Codec: CodecAIFF})); got != "AIFC" {
+		t.Errorf("default AIFF from a float source = %q, want AIFC (the float variant)", got)
+	}
+	if got := formTypeOf(t, encode("i16b.aiff", Spec{Codec: CodecAIFF, BitDepth: 16})); got != "AIFF" {
+		t.Errorf("16-bit AIFF form type = %q, want plain AIFF", got)
+	}
+
+	// The lossy rows zero the depth in their adjust hooks, so the request reaches
+	// the encoder and is dropped rather than failing.
+	for _, c := range []Codec{CodecMP3, CodecAAC, CodecOpus, CodecVorbis} {
+		if o := encodeOptions(Spec{Codec: c, BitDepth: 16}); o.BitDepth != 16 {
+			t.Errorf("%v encodeOptions dropped BitDepth before WaxFlow saw it: %+v", c, o)
+		}
+	}
+}
+
+// TestBitDepthMatchingSourceIsBitExact: asking for the depth a 16-bit source
+// already has must be a clean no-op. Neither the dither nor the widen branch
+// fires, so a WAV round trip has to return the same samples.
+func TestBitDepthMatchingSourceIsBitExact(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := wavFixture(t, 2, 2)
+
+	mid := filepath.Join(dir, "mid.flac")
+	if _, err := r.Transcode(context.Background(), in, mid, Spec{Codec: CodecFLAC, BitDepth: 16}); err != nil {
+		t.Fatalf("encode flac: %v", err)
+	}
+	out := filepath.Join(dir, "out.wav")
+	if _, err := r.Transcode(context.Background(), mid, out, Spec{Codec: CodecWAV, BitDepth: 16}); err != nil {
+		t.Fatalf("encode wav: %v", err)
+	}
+
+	src, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compare samples, not headers: WaxFlow's RIFF chunk layout need not match the
+	// fixture generator's canonical 44-byte one.
+	samples := src[44:]
+	if len(dst) < len(samples) || !bytes.Equal(samples, dst[len(dst)-len(samples):]) {
+		t.Error("--bit-depth 16 on an already-16-bit source was not bit-exact")
 	}
 }
 

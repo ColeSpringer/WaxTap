@@ -130,27 +130,89 @@ func TestWarnContainerExtMismatch(t *testing.T) {
 	}
 }
 
-func TestWarnBitrateIgnoredIfLossless(t *testing.T) {
+// noteKind classifies which of the two notes a warn helper emitted: none, the
+// flat "is ignored" claim, or the conditional copy-promotion wording.
+type noteKind int
+
+const (
+	noteNone noteKind = iota
+	noteIgnored
+	notePromotion
+)
+
+func kindOf(s string) noteKind {
+	switch {
+	case strings.Contains(s, "is ignored"):
+		return noteIgnored
+	case strings.Contains(s, "promoted to a re-encode"):
+		return notePromotion
+	default:
+		return noteNone
+	}
+}
+
+// TestWarnBitrateIgnored pins which targets get which note. Copy is the subtle
+// one: the pipeline promotes a copy to a real encode when the source codec cannot
+// enter the output container or a downmix is requested, and the promoted encode
+// honors --bitrate. `transcode x.opus --format copy --downmix --bitrate 32000`
+// really does re-encode at 32 kbps, so a flat "ignored" is a lie.
+func TestWarnBitrateIgnored(t *testing.T) {
 	cases := []struct {
 		name    string
 		tf      waxtap.TranscodeFormat
 		bitrate int
-		want    bool
+		want    noteKind
 	}{
-		{"flac with bitrate", waxtap.FormatFLAC, 320000, true},
-		{"alac with bitrate", waxtap.FormatALAC, 320000, true},
-		{"wav with bitrate", waxtap.FormatWAV, 320000, true},
-		{"copy with bitrate", waxtap.FormatCopy, 320000, true},
-		{"lossy mp3 with bitrate", waxtap.FormatMP3, 320000, false},
-		{"lossy opus with bitrate", waxtap.FormatOpus, 320000, false},
-		{"flac without bitrate", waxtap.FormatFLAC, 0, false},
+		{"flac with bitrate", waxtap.FormatFLAC, 320000, noteIgnored},
+		{"alac with bitrate", waxtap.FormatALAC, 320000, noteIgnored},
+		{"wav with bitrate", waxtap.FormatWAV, 320000, noteIgnored},
+		{"aiff with bitrate", waxtap.FormatAIFF, 320000, noteIgnored},
+		{"vorbis with bitrate", waxtap.FormatVorbis, 320000, noteIgnored},
+		{"copy with bitrate", waxtap.FormatCopy, 320000, notePromotion},
+		{"lossy mp3 with bitrate", waxtap.FormatMP3, 320000, noteNone},
+		{"lossy opus with bitrate", waxtap.FormatOpus, 320000, noteNone},
+		{"lossy aac with bitrate", waxtap.FormatAAC, 320000, noteNone},
+		{"flac without bitrate", waxtap.FormatFLAC, 0, noteNone},
+		{"copy without bitrate", waxtap.FormatCopy, 0, noteNone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			warnBitrateIgnoredIfLossless(noteEnv(&buf), tc.tf, tc.bitrate)
-			if got := strings.Contains(buf.String(), "--bitrate is ignored"); got != tc.want {
-				t.Errorf("note emitted=%v (%q), want %v", got, buf.String(), tc.want)
+			warnBitrateIgnored(noteEnv(&buf), tc.tf, tc.bitrate)
+			if got := kindOf(buf.String()); got != tc.want {
+				t.Errorf("note kind = %v (%q), want %v", got, buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestWarnBitDepthIgnored is the mirror: the lossy rows encode in the float
+// domain and always drop the depth, while copy is conditional for the same
+// promotion reason as --bitrate.
+func TestWarnBitDepthIgnored(t *testing.T) {
+	cases := []struct {
+		name     string
+		tf       waxtap.TranscodeFormat
+		bitDepth int
+		want     noteKind
+	}{
+		{"flac with depth", waxtap.FormatFLAC, 16, noteNone},
+		{"alac with depth", waxtap.FormatALAC, 16, noteNone},
+		{"wav with depth", waxtap.FormatWAV, 16, noteNone},
+		{"aiff with depth", waxtap.FormatAIFF, 16, noteNone},
+		{"copy with depth", waxtap.FormatCopy, 16, notePromotion},
+		{"lossy mp3 with depth", waxtap.FormatMP3, 16, noteIgnored},
+		{"lossy opus with depth", waxtap.FormatOpus, 16, noteIgnored},
+		{"lossy vorbis with depth", waxtap.FormatVorbis, 16, noteIgnored},
+		{"flac without depth", waxtap.FormatFLAC, 0, noteNone},
+		{"copy without depth", waxtap.FormatCopy, 0, noteNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			warnBitDepthIgnored(noteEnv(&buf), tc.tf, tc.bitDepth)
+			if got := kindOf(buf.String()); got != tc.want {
+				t.Errorf("note kind = %v (%q), want %v", got, buf.String(), tc.want)
 			}
 		})
 	}

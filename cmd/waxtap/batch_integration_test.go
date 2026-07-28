@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3/internal/media"
@@ -129,6 +130,55 @@ func TestBatchNormalizeMeasureIntegration(t *testing.T) {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Errorf("measure output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestBatchNormalizeReportsAggregatedWarnings: nothing in the batch path sets
+// ProcessSpec.Events, so a directory run used to print no warnings at all and a
+// library of loud masters could miss the target silently. The human summary now
+// carries distinct codes with counts.
+func TestBatchNormalizeReportsAggregatedWarnings(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"a.wav", "b.wav"} {
+		if err := os.WriteFile(filepath.Join(root, n), mediatest.QuietWithTransientWAV(6, 1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outDir := filepath.Join(root, "out")
+
+	cmd := newNormalizeCmd()
+	cmd.SetArgs([]string{root, "--format", "flac", "--dir", outDir})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("normalize dir: %v\n%s", err, buf.String())
+	}
+	got := buf.String()
+	if !strings.Contains(got, "loudness-target-missed (2)") {
+		t.Errorf("summary missing the aggregated warning count:\n%s", got)
+	}
+	// The count alone names the defect but not the fix, and the fix is why the
+	// warning exists. A representative detail has to come with it.
+	if !strings.Contains(got, "--peak-mode limit") {
+		t.Errorf("aggregated warning omits the remedy, leaving the batch user nowhere to go:\n%s", got)
+	}
+	// Per-file figures differ, so a shared detail must be labelled as an example.
+	if !strings.Contains(got, "e.g. a.wav") {
+		t.Errorf("aggregated warning does not name the file its numbers came from:\n%s", got)
+	}
+
+	// --peak-mode limit takes the full gain, so the same library reports nothing.
+	cmd = newNormalizeCmd()
+	cmd.SetArgs([]string{root, "--format", "flac", "--dir", filepath.Join(root, "lim"), "--peak-mode", "limit"})
+	buf.Reset()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("normalize dir --peak-mode limit: %v\n%s", err, buf.String())
+	}
+	if got := buf.String(); strings.Contains(got, "warnings:") {
+		t.Errorf("--peak-mode limit hit the target but still reported warnings:\n%s", got)
 	}
 }
 

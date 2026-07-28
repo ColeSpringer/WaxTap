@@ -58,6 +58,10 @@ func (s Stage) String() string {
 type Loudness struct {
 	Apply  bool    // normalize when true; measure only when false
 	Target float64 // target integrated loudness in LUFS for Apply
+	// PeakLimit applies the full gain and lets WaxFlow's true-peak limiter catch
+	// the overshoot. False, the zero value, caps the gain instead so the true peak
+	// stays under the ceiling, which is transparent but can miss the target.
+	PeakLimit bool
 }
 
 // Spec describes the processing to perform. The zero value is a pass-through:
@@ -75,8 +79,9 @@ type Spec struct {
 
 	// Codec is the transcode target. media.CodecCopy means keep the source codec
 	// (no re-encode unless a cut, loudness apply, or downmix forces one).
-	Codec   media.Codec
-	Bitrate int // target bits per second for lossy codecs
+	Codec    media.Codec
+	Bitrate  int // target bits per second for lossy codecs
+	BitDepth int // forced integer output depth; 0 follows the decoded stream
 
 	// Downmix reduces sources with more channels to this count. Supported values
 	// are 1 and 2. A downmix requires encoding; CodecCopy uses the source codec
@@ -266,9 +271,16 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		return res, nil
 	}
 
-	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, Channels: fold}
+	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth, Channels: fold}
 	if apply {
-		enc.GainDB = loudness.GainFor(spec.Loudness.Target, measured)
+		// The two peak policies differ only here: RawGain hits the target and hands
+		// the peaks to WaxFlow's limiter, GainFor holds the peak under the ceiling
+		// and may fall short.
+		if spec.Loudness.PeakLimit {
+			enc.GainDB = loudness.RawGain(spec.Loudness.Target, measured.IntegratedLUFS)
+		} else {
+			enc.GainDB = loudness.GainFor(spec.Loudness.Target, measured)
+		}
 	}
 
 	if apply {

@@ -163,6 +163,17 @@ func bindBitrateFlag(f *pflag.FlagSet, bitrate *int) {
 	f.IntVar(bitrate, "bitrate", 0, "target bitrate in bits per second for lossy formats (0 uses the preset default)")
 }
 
+// bindBitDepthFlag registers --bit-depth with the shared help text. Only the
+// integer-PCM formats honor it; the lossy encoders run in float and drop it.
+func bindBitDepthFlag(f *pflag.FlagSet, bitDepth *int) {
+	f.IntVar(bitDepth, "bit-depth", 0, "output bit depth for wav/aiff/flac/alac: 16 or 24 (0 follows the source)")
+}
+
+// bindPeakModeFlag registers --peak-mode with the shared help text.
+func bindPeakModeFlag(f *pflag.FlagSet, peakMode *string) {
+	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target)|limit (hits the target)")
+}
+
 // rejectEmptyFlags errors when any named string flag is explicitly set to an
 // empty or whitespace-only value (usually an unset shell/env $VAR); omitting the
 // flag uses the default. Unknown names are skipped, so it is safe to pass a flag

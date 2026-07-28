@@ -16,8 +16,10 @@ func newNormalizeCmd() *cobra.Command {
 	var (
 		measure      bool
 		target       float64
+		peakMode     string
 		format       string
 		bitrate      int
+		bitDepth     int
 		out          string
 		album        bool
 		dir          string
@@ -39,10 +41,15 @@ func newNormalizeCmd() *cobra.Command {
 			"writing output. With --album, normalization applies a shared gain to\n" +
 			"every track while preserving track-to-track differences. Use --album\n" +
 			"--measure-loudness to analyze the files as one set.\n\n" +
-			"Normalization measures EBU R128 loudness and applies a scalar gain with\n" +
-			"true-peak limiting.\n" +
-			"A loud source may therefore land slightly below the target (for\n" +
-			"example, -14.9 for -14).",
+			"Normalization measures EBU R128 loudness and applies a single scalar gain.\n" +
+			"--peak-mode cap (the default) caps that gain so the true peak stays under\n" +
+			"-1.0 dBTP, which is transparent but means a loud source can land well below\n" +
+			"the target: a source already peaking at 0 dBTP takes at most -1.0 dB of gain\n" +
+			"whatever the target, so the miss can be 10 LU or more. --peak-mode limit\n" +
+			"applies the full gain and lets the true-peak limiter catch the overshoot,\n" +
+			"hitting the target at the cost of transparency. --album always limits and\n" +
+			"rejects --peak-mode cap: one uniform gain cannot be clamped per track\n" +
+			"without destroying the relative track loudness album mode preserves.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
@@ -53,9 +60,15 @@ func newNormalizeCmd() *cobra.Command {
 				return err
 			}
 
+			pm, err := parsePeakMode(peakMode)
+			if err != nil {
+				return err
+			}
+
 			if album {
 				return runAlbum(cmd, env, args, albumParams{
-					measure: measure, target: target, format: format, bitrate: bitrate, dir: dir, collisionStr: collisionStr,
+					measure: measure, target: target, peakMode: pm, format: format,
+					bitrate: bitrate, bitDepth: bitDepth, dir: dir, collisionStr: collisionStr,
 				})
 			}
 			// Reject an explicitly empty --out/--dir (usually an unset $VAR) before the
@@ -82,8 +95,8 @@ func newNormalizeCmd() *cobra.Command {
 			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
 				return runDirectoryNormalize(cmd, env, directoryNormalizeParams{
 					root: source, explicit: explicit, dir: dir, recursive: recursive,
-					measure: measure, target: target, format: format, bitrate: bitrate,
-					channels: channels, downmix: downmix,
+					measure: measure, target: target, peakMode: pm, format: format,
+					bitrate: bitrate, bitDepth: bitDepth, channels: channels, downmix: downmix,
 					collisionStr: collisionStr, concurrency: concurrency,
 				})
 			}
@@ -130,8 +143,8 @@ func newNormalizeCmd() *cobra.Command {
 				return usagef("normalization re-encodes; copy is not a valid output format")
 			}
 			spec := waxtap.ProcessSpec{
-				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate},
-				Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: target},
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth},
+				Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: target, PeakMode: pm},
 				Channels:  layout,
 				Downmix:   doDownmix,
 			}
@@ -147,7 +160,8 @@ func newNormalizeCmd() *cobra.Command {
 				env.info("skipped (exists): %s\n", outPath)
 				return nil
 			}
-			warnBitrateIgnoredIfLossless(env, tf, bitrate)
+			warnBitrateIgnored(env, tf, bitrate)
+			warnBitDepthIgnored(env, tf, bitDepth)
 			spec.Output = waxtap.ToFile(outPath)
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
@@ -164,8 +178,10 @@ func newNormalizeCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.BoolVar(&measure, "measure-loudness", false, "measure loudness without writing output")
 	f.Float64Var(&target, "loudness-target", -14, "target integrated loudness (LUFS)")
-	f.StringVarP(&format, "format", "f", "", "output format: flac|alac|wav|aiff|mp3|aac|opus|vorbis")
+	bindPeakModeFlag(f, &peakMode)
+	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(false))
 	bindBitrateFlag(f, &bitrate)
+	bindBitDepthFlag(f, &bitDepth)
 	f.StringVarP(&out, "out", "o", "", "output file path for one input")
 	f.BoolVar(&album, "album", false, "treat all inputs as one album (group loudness)")
 	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input or --album")
@@ -188,7 +204,7 @@ func validateNormalizeModeFlags(cmd *cobra.Command, measure bool) error {
 	if !measure {
 		return nil
 	}
-	return rejectChangedFlags(cmd, "cannot be combined with --measure-loudness", "loudness-target", "format", "bitrate", "out", "dir", "collision", "channels", "downmix")
+	return rejectChangedFlags(cmd, "cannot be combined with --measure-loudness", "loudness-target", "peak-mode", "format", "bitrate", "bit-depth", "out", "dir", "collision", "channels", "downmix")
 }
 
 // validateNormalizeInputFlags rejects flags that do not apply to the selected
@@ -237,8 +253,10 @@ func runMeasure(cmd *cobra.Command, env *appEnv, source string, itag int, codec,
 type albumParams struct {
 	measure      bool
 	target       float64
+	peakMode     waxtap.PeakMode
 	format       string
 	bitrate      int
+	bitDepth     int
 	dir          string
 	collisionStr string
 }
@@ -246,6 +264,12 @@ type albumParams struct {
 func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) error {
 	if err := validateNormalizeInputFlags(cmd, p.measure, false, true); err != nil {
 		return err
+	}
+	// Album normalization applies one uniform gain, so it can only limit. Clamping
+	// per track would flatten the inter-track spacing album mode exists to
+	// preserve, so --peak-mode cap is refused rather than silently ignored.
+	if cmd.Flags().Changed("peak-mode") && p.peakMode == waxtap.PeakCap {
+		return usagef("--peak-mode cap is not supported with --album; a per-track peak clamp would destroy the relative track loudness album mode preserves")
 	}
 	for _, in := range inputs {
 		if !isLocalFile(in) {
@@ -290,7 +314,9 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 		}
 		tracks[i] = waxtap.AlbumTrack{Input: in, Output: outPath}
 	}
-	res, err := env.client.ProcessAlbum(cmd.Context(), tracks, p.target, waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate})
+	warnBitrateIgnored(env, tf, p.bitrate)
+	warnBitDepthIgnored(env, tf, p.bitDepth)
+	res, err := env.client.ProcessAlbum(cmd.Context(), tracks, p.target, waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth})
 	if err != nil {
 		return err
 	}

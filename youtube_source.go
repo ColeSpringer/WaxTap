@@ -899,6 +899,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return "", nil, err
 	}
 	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
+	warnLoudnessTargetMissed(em, req.Loudness, pres)
 
 	deliver := pres.OutputPath
 	if deliver == "" {

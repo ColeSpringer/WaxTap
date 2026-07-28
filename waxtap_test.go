@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -741,6 +742,77 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 	}
 	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, Bitrate: 1}}); err != nil {
 		t.Errorf("low bitrate on a lossless target = %v, want nil (ignored, not an error)", err)
+	}
+}
+
+// TestTranscodeCodecParity is the waxtap-side half of the format-parity check
+// (the CLI-side half is TestTranscodeFormatParity). transcodeCodec's default arm
+// returns CodecCopy, so a TranscodeFormat added without a case here degrades
+// silently into a remux instead of failing: the caller asks for an encode and
+// gets the source bytes. The table is pinned to the engine's own format list, so
+// a row registered upstream cannot pass unnoticed.
+func TestTranscodeCodecParity(t *testing.T) {
+	byEngineName := map[string]TranscodeFormat{
+		"flac":   FormatFLAC,
+		"alac":   FormatALAC,
+		"wav":    FormatWAV,
+		"aiff":   FormatAIFF,
+		"mp3":    FormatMP3,
+		"aac":    FormatAAC,
+		"opus":   FormatOpus,
+		"vorbis": FormatVorbis,
+	}
+	for _, name := range media.OutputFormats() {
+		f, ok := byEngineName[name]
+		if !ok {
+			t.Errorf("the engine produces %q but no TranscodeFormat maps to it", name)
+			continue
+		}
+		c := transcodeCodec(f)
+		if c == media.CodecCopy {
+			t.Errorf("transcodeCodec(%q) degraded to CodecCopy; the caller would get a remux, not an encode", name)
+			continue
+		}
+		if c.String() != name {
+			t.Errorf("transcodeCodec(%q).String() = %q, want the engine's own name", name, c.String())
+		}
+	}
+	for name := range byEngineName {
+		if !slices.Contains(media.OutputFormats(), name) {
+			t.Errorf("the table maps %q, which the engine no longer produces", name)
+		}
+	}
+	// Copy is the one format that must map to CodecCopy.
+	if c := transcodeCodec(FormatCopy); c != media.CodecCopy {
+		t.Errorf("transcodeCodec(FormatCopy) = %v, want CodecCopy", c)
+	}
+}
+
+func TestValidateProcessSpec_BitDepth(t *testing.T) {
+	spec := func(depth int) ProcessSpec {
+		return ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC, BitDepth: depth}}
+	}
+	// 16 and 24 are the policy, not the codec limit: WAV/AIFF take 2..32 and ALAC
+	// 16/20/24/32, but neither 32-bit integer nor the odd depths serve the reason
+	// the knob exists.
+	for _, d := range []int{0, 16, 24} {
+		if err := validateProcessSpec(spec(d)); err != nil {
+			t.Errorf("bit depth %d = %v, want nil", d, err)
+		}
+	}
+	for _, d := range []int{-1, 8, 20, 32, 1000} {
+		err := validateProcessSpec(spec(d))
+		if !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("bit depth %d = %v, want ErrIncompatibleSpec", d, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "want 16 or 24") {
+			t.Errorf("bit depth %d message = %q, want it to name the accepted depths", d, err)
+		}
+	}
+	// A lossy target ignores the depth, but an out-of-range request is still a
+	// mistake worth reporting rather than silently dropping.
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatMP3, BitDepth: 8}}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("bit depth 8 on a lossy target = %v, want ErrIncompatibleSpec", err)
 	}
 }
 

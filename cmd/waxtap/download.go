@@ -27,8 +27,9 @@ type downloadFlags struct {
 	template     string
 	collisionStr string
 
-	format  string
-	bitrate int
+	format   string
+	bitrate  int
+	bitDepth int
 
 	channels   string
 	downmix    bool
@@ -43,6 +44,7 @@ type downloadFlags struct {
 	normalize  bool
 	measure    bool
 	loudTarget float64
+	peakMode   string
 
 	embedThumbnail bool
 	embedMetadata  bool
@@ -94,14 +96,16 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
 	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
 	bindCollisionFlag(f, &df.collisionStr)
-	f.StringVarP(&df.format, "format", "f", "", "output format: copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis")
+	f.StringVarP(&df.format, "format", "f", "", "output format: "+formatChoices(true))
 	bindBitrateFlag(f, &df.bitrate)
+	bindBitDepthFlag(f, &df.bitDepth)
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
 	bindSponsorBlockFlag(f, &df.sbCats, "remove SponsorBlock categories (comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
 	bindCutFlags(f, &df.ranges, &df.cutMode, &df.crossfade, &df.sbOnError)
-	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode)")
+	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode; the default --peak-mode cap is transparent but a loud source can land well short of the target)")
 	f.BoolVar(&df.measure, "measure-loudness", false, "measure loudness without altering the audio (still writes the downloaded file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
+	bindPeakModeFlag(f, &df.peakMode)
 	f.BoolVar(&df.embedThumbnail, "embed-thumbnail", false, "embed the YouTube thumbnail as cover art (when the format supports it)")
 	f.BoolVar(&df.embedMetadata, "embed-metadata", false, "write basic tags (title, artist, date, chapters) into the output")
 	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
@@ -190,9 +194,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if df.listOnly {
 		if err := rejectChangedFlags(cmd, "cannot be used with --list",
 			"itag", "codec", "out", "dir", "output-template", "collision",
-			"format", "bitrate", "channels", "downmix", "cut-range", "sponsorblock",
+			"format", "bitrate", "bit-depth", "channels", "downmix", "cut-range", "sponsorblock",
 			"cut-mode", "crossfade", "sponsorblock-on-error", "normalize", "measure-loudness",
-			"loudness-target", "source-policy", "no-fallback", "download-archive",
+			"loudness-target", "peak-mode", "source-policy", "no-fallback", "download-archive",
 			"write-info-json", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
 			return err
 		}
@@ -238,12 +242,19 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if cmd.Flags().Changed("bitrate") && df.format == "" {
 		return usagef("--bitrate requires --format")
 	}
-	// Report this once per run, not once per playlist item.
+	if cmd.Flags().Changed("bit-depth") && df.format == "" {
+		return usagef("--bit-depth requires --format")
+	}
+	// Report these once per run, not once per playlist item.
 	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
-		warnBitrateIgnoredIfLossless(env, tf, df.bitrate)
+		warnBitrateIgnored(env, tf, df.bitrate)
+		warnBitDepthIgnored(env, tf, df.bitDepth)
 	}
 	if cmd.Flags().Changed("loudness-target") && !df.normalize {
 		return usagef("--loudness-target requires --normalize")
+	}
+	if cmd.Flags().Changed("peak-mode") && !df.normalize {
+		return usagef("--peak-mode requires --normalize")
 	}
 	if err := rejectEmptySponsorBlock(cmd, df.sbCats); err != nil {
 		return err
@@ -686,7 +697,7 @@ func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
 		return spec, err
 	}
 	if hasTranscode {
-		spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: df.bitrate}
+		spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: df.bitrate, BitDepth: df.bitDepth}
 	}
 	cut, err := df.buildCutSpec()
 	if err != nil {
@@ -741,11 +752,15 @@ func (df *downloadFlags) buildCutSpec() (*waxtap.CutSpec, error) {
 }
 
 func (df *downloadFlags) buildLoudnessSpec() (*waxtap.LoudnessSpec, error) {
+	pm, err := parsePeakMode(df.peakMode)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case df.normalize && df.measure:
 		return nil, usagef("--normalize and --measure-loudness are mutually exclusive")
 	case df.normalize:
-		return &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: df.loudTarget}, nil
+		return &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: df.loudTarget, PeakMode: pm}, nil
 	case df.measure:
 		// Carry the target so a measure-only JSON result does not report zero.
 		return &waxtap.LoudnessSpec{Mode: waxtap.LoudnessMeasureOnly, Target: df.loudTarget}, nil

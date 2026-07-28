@@ -109,8 +109,8 @@ func (c Codec) Extension() string {
 }
 
 // IsLossless reports whether c is a remux or a lossless encoder (FLAC, ALAC,
-// WAV, AIFF). WAV and AIFF keep the source bit depth (TranscodeOptions.BitDepth
-// 0), so they never truncate a higher-depth source.
+// WAV, AIFF). They keep the source bit depth unless Spec.BitDepth asks for a
+// specific one, so by default they never narrow a higher-depth source.
 func (c Codec) IsLossless() bool {
 	switch c {
 	case CodecCopy, CodecFLAC, CodecALAC, CodecWAV, CodecAIFF:
@@ -128,6 +128,10 @@ func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 		Format:   format,
 		Channels: spec.Channels, // 0 keeps the source layout; 1 or 2 downmixes
 		GainDB:   spec.GainDB,   // 0 is a no-op; positive engages the true-peak limiter
+		// 0 follows the decoded stream, so a lossy source yields float output.
+		// WaxFlow dithers a narrowing conversion (TPDF) rather than truncating; the
+		// lossy rows zero it in their adjust hooks, so it reaches wav/aiff/flac/alac.
+		BitDepth: spec.BitDepth,
 	}
 	switch spec.Codec {
 	case CodecMP3:

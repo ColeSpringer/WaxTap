@@ -309,6 +309,16 @@ type TranscodeSpec struct {
 	// Bitrate is the target bits per second for lossy presets (e.g. 256000).
 	// Zero selects the preset default. Ignored by lossless presets.
 	Bitrate int
+	// BitDepth forces integer output at 16 or 24 bits for the presets that hold
+	// integer PCM (WAV, AIFF, FLAC, ALAC). Zero, the default, follows the decoded
+	// stream, so a lossy source (which decodes to float) yields 32-bit float WAV
+	// and 24-bit FLAC. Narrowing is dithered, not truncated.
+	//
+	// The lossy presets encode in the float domain and ignore it silently, as does
+	// FormatCopy; only the CLI notes that. A value outside {0, 16, 24} is still
+	// rejected with ErrIncompatibleSpec even on a preset that would ignore it,
+	// because it is a mistake about a value the caller believes will apply.
+	BitDepth int
 }
 
 // CutMode selects how cuts are rendered.
@@ -370,6 +380,21 @@ const (
 	LoudnessApply
 )
 
+// PeakMode selects how normalization protects the true peak.
+type PeakMode uint8
+
+const (
+	// PeakCap clamps the gain so the true peak stays under -1.0 dBTP. It is
+	// transparent, but a source already peaking near 0 dBTP takes almost no gain
+	// whatever the target, so the achieved loudness can land well short of it.
+	PeakCap PeakMode = iota
+	// PeakLimit applies the full gain and lets the true-peak limiter catch the
+	// overshoot. It hits the target at the cost of transparency, and is what album
+	// normalization does (a per-track clamp would destroy the relative spacing
+	// album mode exists to preserve).
+	PeakLimit
+)
+
 // LoudnessSpec requests loudness measurement or normalization (EBU R128).
 type LoudnessSpec struct {
 	// Mode selects measurement or applied normalization.
@@ -377,6 +402,9 @@ type LoudnessSpec struct {
 	// Target is the target integrated loudness in LUFS for Apply (e.g. -14). The
 	// value is the caller's policy; WaxTap does not impose one.
 	Target float64
+	// PeakMode selects peak protection for Apply. The zero value, PeakCap, caps
+	// the gain to hold the true peak under the ceiling.
+	PeakMode PeakMode
 }
 
 // LoudnessInfo holds an EBU R128 measurement.
@@ -615,18 +643,19 @@ func (s Stage) String() string {
 type WarningCode uint8
 
 const (
-	WarnProceedUncut        WarningCode = iota // SponsorBlock fetch failed; delivered uncut
-	WarnFallbackProfile                        // a fallback client profile was used
-	WarnURLReResolved                          // an expired stream URL was re-resolved
-	WarnPlaylistEntryFailed                    // one playlist entry failed (others returned)
-	WarnRateLimitedRetried                     // a request was retried after a 429
-	WarnSponsorBlockEmpty                      // SponsorBlock matched no segments
-	WarnRangesEmpty                            // SponsorBlock segments all fell outside the media
-	WarnThrottled                              // a limiter/cooldown is active
-	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
-	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
-	WarnWebContextRetry                        // WEB player-context was capped (status 2); retried once with a fresh context
-	WarnMetadataEmbed                          // an --embed-thumbnail/--embed-metadata post-pass failed; audio delivered untagged
+	WarnProceedUncut         WarningCode = iota // SponsorBlock fetch failed; delivered uncut
+	WarnFallbackProfile                         // a fallback client profile was used
+	WarnURLReResolved                           // an expired stream URL was re-resolved
+	WarnPlaylistEntryFailed                     // one playlist entry failed (others returned)
+	WarnRateLimitedRetried                      // a request was retried after a 429
+	WarnSponsorBlockEmpty                       // SponsorBlock matched no segments
+	WarnRangesEmpty                             // SponsorBlock segments all fell outside the media
+	WarnThrottled                               // a limiter/cooldown is active
+	WarnWebContextFallback                      // WEB player-context failed; fell back to the configured chain
+	WarnIncompleteFallback                      // a client returned an incomplete stream; switched clients
+	WarnWebContextRetry                         // WEB player-context was capped (status 2); retried once with a fresh context
+	WarnMetadataEmbed                           // an --embed-thumbnail/--embed-metadata post-pass failed; audio delivered untagged
+	WarnLoudnessTargetMissed                    // peak capping held the gain back, so the loudness target was not reached
 )
 
 func (w WarningCode) String() string {
@@ -655,6 +684,8 @@ func (w WarningCode) String() string {
 		return "web-context-retry"
 	case WarnMetadataEmbed:
 		return "metadata-embed-failed"
+	case WarnLoudnessTargetMissed:
+		return "loudness-target-missed"
 	default:
 		return "unknown"
 	}

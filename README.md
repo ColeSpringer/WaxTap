@@ -82,6 +82,20 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   stereo. `--downmix` allows surround-to-stereo/mono; it never upmixes.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
   fallbacks. Results report the client that actually delivered.
+- Normalization applies one scalar gain. `--peak-mode cap` (the default) caps it
+  so the true peak stays under -1.0 dBTP: transparent, but a source already
+  peaking at 0 dBTP takes at most -1.0 dB whatever the target, so the miss can be
+  10 LU or more (reported as the `loudness-target-missed` warning).
+  `--peak-mode limit` applies the full gain and lets the true-peak limiter catch
+  the overshoot, hitting the target at the cost of transparency. `--album`
+  always limits and rejects `--peak-mode cap`, because one uniform gain cannot be
+  clamped per track without destroying the relative track loudness it preserves.
+- Decoding runs in float, so output depth follows the decoded stream: a lossy
+  source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
+  AIFF. That is lossless but larger, and some older DAWs and hardware players
+  reject float WAV. `--bit-depth 16|24` forces integer output for
+  wav/aiff/flac/alac; narrowing is dithered (TPDF), not truncated. The lossy
+  formats encode in float and ignore it.
 - Playlist downloads support `--concurrency`, pacing, attempt limits, collision
   policies, and yt-dlp-compatible `--download-archive` files.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS

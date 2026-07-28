@@ -18,20 +18,60 @@ func SineWAV(seconds, channels int) []byte {
 
 // ToneWAV returns a 16-bit PCM WAV of a sine at freqHz, at roughly -6 dBFS.
 func ToneWAV(freqHz float64, seconds, channels, rate int) []byte {
-	if channels < 1 {
-		channels = 1
-	}
 	if rate <= 0 {
 		rate = 44100
 	}
-	frames := seconds * rate
 	const amp = 0.5 // ~-6 dBFS
+	return pcmWAV(seconds*rate, channels, rate, func(i int) float64 {
+		return amp * math.Sin(2*math.Pi*freqHz*float64(i)/float64(rate))
+	})
+}
+
+// QuietWithTransientWAV returns a 16-bit PCM WAV of a quiet 440 Hz sine (~-40
+// dBFS) carrying one half-millisecond full-scale transient, 44100 Hz.
+//
+// The two are deliberately far apart: the transient puts the true peak at ~0 dBTP
+// while the body keeps the integrated loudness near -41 LUFS, so a peak-capped
+// normalization can take almost no gain and lands tens of LU short of a normal
+// target. It is the fixture for the two peak policies; a plain sine cannot show
+// the difference because its peak and loudness track each other.
+//
+// The transient is a half cycle of its own sine, not a window of the body's, so
+// it reaches exactly full scale at its midpoint whatever the body frequency is. A
+// window of the 440 Hz body would peak wherever its phase happened to land (0.97
+// at 44100 Hz), leaving the fixture's whole purpose resting on constants that
+// read as incidental.
+func QuietWithTransientWAV(seconds, channels int) []byte {
+	const (
+		rate      = 44100
+		bodyHz    = 440.0
+		quietAmp  = 0.01   // ~-40 dBFS
+		burstSecs = 0.0005 // long enough for the 4x-oversampled true-peak meter
+	)
+	frames := seconds * rate
+	burstFrames := int(math.Round(burstSecs * rate))
+	burstStart := frames / 2
+
+	return pcmWAV(frames, channels, rate, func(i int) float64 {
+		if i >= burstStart && i < burstStart+burstFrames {
+			// A half cycle across the burst: sin sweeps 0 to pi, touching 1.0 midway.
+			return math.Sin(math.Pi * float64(i-burstStart) / float64(burstFrames))
+		}
+		return quietAmp * math.Sin(2*math.Pi*bodyHz*float64(i)/float64(rate))
+	})
+}
+
+// pcmWAV builds a 16-bit WAV from a per-frame sample function in [-1, 1]. Every
+// channel carries the same signal.
+func pcmWAV(frames, channels, rate int, sampleAt func(i int) float64) []byte {
+	if channels < 1 {
+		channels = 1
+	}
 	data := make([]byte, frames*channels*2)
 	off := 0
-	for i := 0; i < frames; i++ {
-		v := amp * math.Sin(2*math.Pi*freqHz*float64(i)/float64(rate))
-		s := int16(math.Round(v * math.MaxInt16))
-		for c := 0; c < channels; c++ {
+	for i := range frames {
+		s := int16(math.Round(sampleAt(i) * math.MaxInt16))
+		for range channels {
 			binary.LittleEndian.PutUint16(data[off:], uint16(s))
 			off += 2
 		}

@@ -75,6 +75,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	// Local inputs have no SponsorBlock source, so no SponsorBlock segments were
 	// returned.
 	warnEmptyCut(em, req.Cut, pres, false)
+	warnLoudnessTargetMissed(em, req.Loudness, pres)
 
 	srcFmt := Format{
 		Codec:     pres.SourceCodec,
@@ -238,9 +239,19 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	if err := validateBitrate(&spec); err != nil {
 		return nil, err
 	}
+	if err := validateBitDepth(&spec); err != nil {
+		return nil, err
+	}
+	codec := transcodeCodec(spec.Format)
 	for _, t := range tracks {
 		if t.Input == "" || t.Output == "" {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: each track needs an input and an output path")
+		}
+		// Album processing builds its own media.Spec, so it never reaches the
+		// pipeline's container check. The CLI always names outputs stem +
+		// transcodeExt, but a library caller can pass any path.
+		if err := media.CheckOutputContainer(codec, t.Output); err != nil {
+			return nil, err
 		}
 	}
 	// Validate the whole album before the first write. Otherwise one track could
@@ -268,9 +279,13 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 
 	tspec := media.Spec{
-		Codec:   transcodeCodec(spec.Format),
-		Bitrate: spec.Bitrate,
-		GainDB:  loudness.AlbumGain(target, album.IntegratedLUFS),
+		Codec:    codec,
+		Bitrate:  spec.Bitrate,
+		BitDepth: spec.BitDepth,
+		// Album normalization always limits: one uniform gain, peaks left to
+		// WaxFlow's limiter. A per-track clamp would flatten the inter-track
+		// spacing album mode exists to preserve.
+		GainDB: loudness.RawGain(target, album.IntegratedLUFS),
 	}
 
 	res := &AlbumProcessResult{

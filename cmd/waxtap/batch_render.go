@@ -107,6 +107,60 @@ func emitBatchProcess(env *appEnv, outcomes []batchOutcome, ignored int, fmtName
 		}
 	}
 	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "encoded")
+	emitBatchWarningsHuman(env, outcomes)
+}
+
+// emitBatchWarningsHuman prints each distinct warning code with its count and
+// one representative detail.
+//
+// Nothing in the batch path sets ProcessSpec.Events, so live per-item warnings
+// never reach a directory run and --json item records were the only place they
+// showed up. Aggregating after the summary is deliberate: wiring Events into
+// batch specs would interleave warnings across concurrent jobs.
+//
+// The detail is not decoration. A code names the defect but not the remedy, and
+// for loudness-target-missed the remedy (--peak-mode limit) is the whole reason
+// the warning exists. It is the first occurrence, labelled with its file, since
+// per-file figures differ across a library.
+func emitBatchWarningsHuman(env *appEnv, outcomes []batchOutcome) {
+	type agg struct {
+		count  int
+		input  string // the file the sample detail came from
+		detail string
+	}
+	seen := map[string]*agg{}
+	var order []string
+	for _, o := range outcomes {
+		if o.result == nil {
+			continue
+		}
+		for _, w := range o.result.Warnings {
+			code := w.Code.String()
+			a, ok := seen[code]
+			if !ok {
+				a = &agg{input: o.input, detail: w.Detail}
+				seen[code] = a
+				order = append(order, code)
+			}
+			a.count++
+		}
+	}
+	if len(order) == 0 {
+		return
+	}
+	env.printf("warnings:\n")
+	for _, code := range order {
+		a := seen[code]
+		line := fmt.Sprintf("  %s (%d)", code, a.count)
+		if a.detail != "" {
+			// Name the file the numbers belong to when they cannot describe every hit.
+			if a.count > 1 {
+				line += fmt.Sprintf(" e.g. %s", filepath.Base(a.input))
+			}
+			line += ": " + a.detail
+		}
+		env.printf("%s\n", line)
+	}
 }
 
 // emitBatchMeasure writes a loudness table or NDJSON item records and a summary.

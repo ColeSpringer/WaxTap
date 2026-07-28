@@ -50,12 +50,66 @@ func TestGainForClampsToMax(t *testing.T) {
 	}
 }
 
-func TestAlbumGain(t *testing.T) {
-	if g := AlbumGain(-14, -20); math.Abs(g-6) > 1e-9 {
-		t.Errorf("AlbumGain = %v, want +6", g)
+func TestRawGain(t *testing.T) {
+	if g := RawGain(-14, -20); math.Abs(g-6) > 1e-9 {
+		t.Errorf("RawGain = %v, want +6", g)
 	}
-	if g := AlbumGain(-14, math.Inf(-1)); g != 0 {
-		t.Errorf("silent AlbumGain = %v, want 0", g)
+	if g := RawGain(-14, math.Inf(-1)); g != 0 {
+		t.Errorf("silent RawGain = %v, want 0", g)
+	}
+}
+
+func TestRawGainIgnoresTruePeak(t *testing.T) {
+	// The same measurement GainFor head-clamps to -1.5 dB. RawGain is the other
+	// peak policy: it asks for the full +16 and leaves the peak to the limiter.
+	m := Loudness{IntegratedLUFS: -30, TruePeakDBTP: 0.5}
+	if g := RawGain(-14, m.IntegratedLUFS); math.Abs(g-16) > 1e-9 {
+		t.Errorf("RawGain = %v, want +16 (unclamped)", g)
+	}
+	if g := GainFor(-14, m); g >= 0 {
+		t.Errorf("GainFor = %v, want a negative head-clamped gain for the same source", g)
+	}
+}
+
+func TestPeakShortfall(t *testing.T) {
+	// The clamp binds: want +29, head -1-0 = -1, so it costs 30 dB.
+	if got := PeakShortfall(-14, Loudness{IntegratedLUFS: -43, TruePeakDBTP: 0}); math.Abs(got-30) > 1e-9 {
+		t.Errorf("PeakShortfall = %v, want 30", got)
+	}
+	// Headroom to spare: want +6, head +9, nothing held back.
+	if got := PeakShortfall(-14, Loudness{IntegratedLUFS: -20, TruePeakDBTP: -10}); got != 0 {
+		t.Errorf("PeakShortfall with spare headroom = %v, want 0", got)
+	}
+	// Attenuating: the ceiling cannot hold back a negative gain.
+	if got := PeakShortfall(-23, Loudness{IntegratedLUFS: -9, TruePeakDBTP: -6}); got != 0 {
+		t.Errorf("attenuating PeakShortfall = %v, want 0", got)
+	}
+	// Silence measures -Inf, which would otherwise be an infinite shortfall.
+	if got := PeakShortfall(-14, Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)}); got != 0 {
+		t.Errorf("silent PeakShortfall = %v, want 0", got)
+	}
+}
+
+// TestPeakShortfallExcludesMaxGainClamp: GainFor bounds its result to maxGainDB
+// as well as to the peak ceiling, so target-integrated minus GainFor would blame
+// the ceiling for a maxGainDB clamp. PeakShortfall reports only the peak's share,
+// which is what the caller names in user-facing text.
+func TestPeakShortfallExcludesMaxGainClamp(t *testing.T) {
+	// A source far too quiet to reach the target within maxGainDB, with the peak
+	// equally far down so the head clamp has nothing to do: want +186, head +185.
+	// WaxFlow's -70 LUFS gate keeps a real measurement out of this range, so this
+	// is a guard against the constants moving, not a live case.
+	m := Loudness{IntegratedLUFS: -200, TruePeakDBTP: -186}
+	if g := GainFor(-14, m); g != maxGainDB {
+		t.Fatalf("GainFor = %v, want the maxGainDB clamp to bind for this fixture", g)
+	}
+	naive := (-14.0 - m.IntegratedLUFS) - GainFor(-14, m)
+	if naive <= 60 {
+		t.Fatalf("fixture does not exercise the maxGainDB clamp (naive shortfall %v)", naive)
+	}
+	// The peak's actual share is 1 dB, not the 66 dB the naive subtraction reports.
+	if got := PeakShortfall(-14, m); math.Abs(got-1) > 1e-9 {
+		t.Errorf("PeakShortfall = %v, want 1 (the head clamp's share, not maxGainDB's)", got)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/spf13/cobra"
 )
 
 // TestProcessSourceCheckedBeforeCollision verifies that a missing input is
@@ -241,6 +242,70 @@ func TestCutInfersFormatFromExtension(t *testing.T) {
 	err = runProcessCmd(t, "cut", in, "--cut-range", "0.3-0.5", "--crossfade", "100ms", "-o", filepath.Join(dir, "out.copy"))
 	if err == nil || !strings.Contains(err.Error(), "--format") {
 		t.Errorf("crossfade cut into .copy should still demand --format, got %v", err)
+	}
+}
+
+// TestBitDepthSurfaceAndGuards covers the flag's CLI seams: it exists on every
+// re-encoding command, it needs a format to apply to, and out-of-range values are
+// rejected with the exit-2 spec error rather than reaching the encoder.
+func TestBitDepthSurfaceAndGuards(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"download", newDownloadCmd()},
+		{"cut", newCutCmd()},
+		{"transcode", newTranscodeCmd()},
+		{"normalize", newNormalizeCmd()},
+	} {
+		if c.cmd.Flags().Lookup("bit-depth") == nil {
+			t.Errorf("%s should expose --bit-depth", c.name)
+		}
+	}
+
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	synthAudio(t, in, "flac")
+
+	// cut has no --format here, so the depth has nothing to apply to.
+	err := runProcessCmd(t, "cut", in, "--cut-range", "0.3-0.5", "--bit-depth", "16", "-o", filepath.Join(dir, "a.flac"))
+	if err == nil || !strings.Contains(err.Error(), "--bit-depth requires --format") {
+		t.Errorf("cut --bit-depth without --format = %v, want the requires-format usage error", err)
+	}
+
+	for _, depth := range []string{"8", "20", "32"} {
+		out := filepath.Join(dir, "d"+depth+".flac")
+		err := runProcessCmd(t, "transcode", in, "--format", "flac", "--bit-depth", depth, "-o", out)
+		if !errors.Is(err, waxtap.ErrIncompatibleSpec) {
+			t.Errorf("--bit-depth %s = %v, want ErrIncompatibleSpec", depth, err)
+		}
+	}
+	for _, depth := range []string{"16", "24"} {
+		out := filepath.Join(dir, "ok"+depth+".flac")
+		if err := runProcessCmd(t, "transcode", in, "--format", "flac", "--bit-depth", depth, "-o", out); err != nil {
+			t.Errorf("--bit-depth %s = %v, want success", depth, err)
+		}
+	}
+}
+
+// TestBitDepthDefeatsBatchCopyThrough: a file already in the target codec is
+// normally copied through untouched, which would silently drop a --bit-depth
+// request. batchTransforms sends it to the encoder instead.
+func TestBitDepthDefeatsBatchCopyThrough(t *testing.T) {
+	root := t.TempDir()
+	synthAudio(t, filepath.Join(root, "a.flac"), "flac")
+	outDir := filepath.Join(root, "out")
+
+	cmd := newTranscodeCmd()
+	cmd.SetArgs([]string{root, "--format", "flac", "--dir", outDir, "--bit-depth", "16"})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("transcode dir --bit-depth: %v\n%s", err, buf.String())
+	}
+	if got := buf.String(); strings.Contains(got, "copied:") {
+		t.Errorf("--bit-depth should force a re-encode, not a copy-through:\n%s", got)
 	}
 }
 

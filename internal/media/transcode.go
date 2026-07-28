@@ -15,12 +15,14 @@ import (
 )
 
 // Spec describes a transcode. Codec selects the output codec; Bitrate overrides
-// lossy preset defaults in bits per second; Channels downmixes (1 or 2) when
-// positive; GainDB applies a normalization gain (0 is a no-op). The zero value
-// is a container remux (CodecCopy) with no processing.
+// lossy preset defaults in bits per second; BitDepth forces integer output for
+// the codecs that hold integer PCM; Channels downmixes (1 or 2) when positive;
+// GainDB applies a normalization gain (0 is a no-op). The zero value is a
+// container remux (CodecCopy) with no processing.
 type Spec struct {
 	Codec    Codec
 	Bitrate  int
+	BitDepth int     // forced output depth (16 or 24); 0 follows the decoded stream
 	Channels int     // output channel count (downmix); 0 keeps the source layout
 	GainDB   float64 // scalar normalization gain in dB; 0 is a no-op
 }

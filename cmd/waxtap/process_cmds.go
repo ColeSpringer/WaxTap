@@ -148,27 +148,57 @@ func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 
 // isLosslessFormat reports whether a transcode preset ignores --bitrate. The CLI
 // keeps this small mirror because the TranscodeFormat-to-codec mapping is
-// unexported. FormatCopy is a remux, not an encoder, but it ignores --bitrate the
-// same way.
+// unexported. FormatCopy is a remux, not an encoder, so it is included; note that
+// a copy the pipeline promotes to a re-encode is no longer one (see
+// copyPromotionNote).
 func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
 	return tf == waxtap.FormatCopy || tf == waxtap.FormatFLAC ||
 		tf == waxtap.FormatALAC || tf == waxtap.FormatWAV ||
 		tf == waxtap.FormatAIFF
 }
 
-// warnBitrateIgnoredIfLossless notes that --bitrate has no effect on a lossless or
-// copy target, so a user who set it deliberately gets a signal instead of silence.
-// Call it once per invocation with the parsed format, not per batch item.
-func warnBitrateIgnoredIfLossless(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
+// copyPromotionNote is the shared reason --bitrate and --bit-depth cannot be
+// called "ignored" on a copy target: the pipeline promotes a copy to a real
+// encode when the source codec cannot enter the output container or a downmix is
+// requested, and it builds the encode spec after that promotion, so the value is
+// honored. `transcode x.opus --format copy --downmix --bitrate 32000` really does
+// re-encode at 32 kbps.
+//
+// "only where" is a necessary condition, not a sufficient one: a promotion to
+// Vorbis still drops --bitrate, and one to a lossy codec still drops --bit-depth.
+const copyPromotionNote = "reaches a copy target only where the copy is promoted to a re-encode (an output container the source codec cannot enter, or --downmix)"
+
+// warnBitrateIgnored notes when --bitrate will not reach the encoder, so a user
+// who set it deliberately gets a signal instead of silence. Call it once per
+// invocation with the parsed format, not per batch item.
+func warnBitrateIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
 	if bitrate <= 0 {
 		return
 	}
 	switch {
+	case tf == waxtap.FormatCopy:
+		env.info("note: --bitrate %s\n", copyPromotionNote)
 	case isLosslessFormat(tf):
-		env.info("note: --bitrate is ignored for lossless and copy targets\n")
+		env.info("note: --bitrate is ignored for lossless targets\n")
 	case tf == waxtap.FormatVorbis:
 		// Vorbis is quality-driven (VBR); WaxFlow has no ABR rate control.
 		env.info("note: --bitrate is ignored for Vorbis, which is quality-driven (VBR)\n")
+	}
+}
+
+// warnBitDepthIgnored notes when --bit-depth will not reach the encoder. Lossy
+// targets always drop it: those rows encode in the float domain. Copy is
+// conditional rather than ignored, so it gets copyPromotionNote instead. Call it
+// once per invocation with the parsed format, not per batch item.
+func warnBitDepthIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitDepth int) {
+	if bitDepth <= 0 {
+		return
+	}
+	switch {
+	case tf == waxtap.FormatCopy:
+		env.info("note: --bit-depth %s\n", copyPromotionNote)
+	case !isLosslessFormat(tf):
+		env.info("note: --bit-depth is ignored for lossy targets, which encode in the float domain\n")
 	}
 }
 
@@ -182,6 +212,7 @@ func newCutCmd() *cobra.Command {
 		sbOnError    string
 		format       string
 		bitrate      int
+		bitDepth     int
 		itag         int
 		codec        string
 		channels     string
@@ -299,8 +330,11 @@ func newCutCmd() *cobra.Command {
 			if cmd.Flags().Changed("bitrate") && !haveFormat {
 				return usagef("--bitrate requires --format")
 			}
+			if cmd.Flags().Changed("bit-depth") && !haveFormat {
+				return usagef("--bit-depth requires --format")
+			}
 			if haveFormat {
-				spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}
+				spec.Transcode = &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth}
 				newExt = transcodeExt(tf)
 			}
 
@@ -317,7 +351,8 @@ func newCutCmd() *cobra.Command {
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
-			warnBitrateIgnoredIfLossless(env, tf, bitrate)
+			warnBitrateIgnored(env, tf, bitrate)
+			warnBitDepthIgnored(env, tf, bitDepth)
 			spec.Output = waxtap.ToFile(outPath)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
@@ -336,8 +371,9 @@ func newCutCmd() *cobra.Command {
 	f.StringVarP(&out, "out", "o", "", "output file path")
 	bindCutFlags(f, &ranges, &cutMode, &crossfade, &sbOnError)
 	bindSponsorBlockFlag(f, &sbCats, "remove SponsorBlock categories (YouTube only; comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
-	f.StringVarP(&format, "format", "f", "", "also re-encode to: flac|alac|wav|aiff|mp3|aac|opus|vorbis")
+	f.StringVarP(&format, "format", "f", "", "also re-encode to: "+formatChoices(false))
 	bindBitrateFlag(f, &bitrate)
+	bindBitDepthFlag(f, &bitDepth)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
@@ -354,6 +390,7 @@ func newTranscodeCmd() *cobra.Command {
 		out          string
 		format       string
 		bitrate      int
+		bitDepth     int
 		itag         int
 		codec        string
 		channels     string
@@ -374,7 +411,12 @@ func newTranscodeCmd() *cobra.Command {
 			"re-encodes (no further loss); copy/remux is the only no-re-encode path.\n" +
 			"When both --format and an output extension are given, the extension must be\n" +
 			"a container that can hold the format (for example, mp3 uses .mp3 or .mka,\n" +
-			"not .flac).",
+			"not .flac).\n\n" +
+			"Decoding runs in float, so output depth follows the decoded stream: a lossy\n" +
+			"source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than\n" +
+			"plain AIFF. That is lossless but larger, and some older players reject float\n" +
+			"WAV. --bit-depth 16 or 24 forces integer output; narrowing is dithered, not\n" +
+			"truncated.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
@@ -398,7 +440,8 @@ func newTranscodeCmd() *cobra.Command {
 			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
 				return runDirectoryTranscode(cmd, env, directoryTranscodeParams{
 					root: source, explicit: explicit, dir: dir, recursive: recursive,
-					format: format, bitrate: bitrate, channels: channels, downmix: downmix,
+					format: format, bitrate: bitrate, bitDepth: bitDepth,
+					channels: channels, downmix: downmix,
 					collisionStr: collisionStr, force: force, concurrency: concurrency,
 				})
 			}
@@ -430,7 +473,11 @@ func newTranscodeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			spec := waxtap.ProcessSpec{Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate}, Channels: layout, Downmix: doDownmix}
+			spec := waxtap.ProcessSpec{
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth},
+				Channels:  layout,
+				Downmix:   doDownmix,
+			}
 
 			mc, err := collisionFor(cmd, collisionStr)
 			if err != nil {
@@ -445,7 +492,8 @@ func newTranscodeCmd() *cobra.Command {
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
-			warnBitrateIgnoredIfLossless(env, tf, bitrate)
+			warnBitrateIgnored(env, tf, bitrate)
+			warnBitDepthIgnored(env, tf, bitDepth)
 			spec.Output = waxtap.ToFile(outPath)
 
 			// If a local file already uses the requested codec and no other transform
@@ -488,8 +536,9 @@ func newTranscodeCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path (single file)")
-	f.StringVarP(&format, "format", "f", "", "output format: copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis")
+	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(true))
 	bindBitrateFlag(f, &bitrate)
+	bindBitDepthFlag(f, &bitDepth)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)

@@ -66,7 +66,7 @@ func TestAlbumTableHeaders(t *testing.T) {
 
 func TestNormalizeFlagSurface(t *testing.T) {
 	flags := newNormalizeCmd().Flags()
-	for _, name := range []string{"measure-loudness", "loudness-target", "format", "bitrate", "collision"} {
+	for _, name := range []string{"measure-loudness", "loudness-target", "peak-mode", "format", "bitrate", "collision"} {
 		if flags.Lookup(name) == nil {
 			t.Errorf("normalize should expose --%s", name)
 		}
@@ -84,6 +84,7 @@ func TestNormalizeFlagSurface(t *testing.T) {
 func TestNormalizeMeasureRejectsWriteFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"in.wav", "--measure-loudness", "--loudness-target", "-16"},
+		{"in.wav", "--measure-loudness", "--peak-mode", "limit"},
 		{"in.wav", "--measure-loudness", "--format", "flac"},
 		{"in.wav", "--measure-loudness", "--bitrate", "128000"},
 		{"in.wav", "--measure-loudness", "--out", "out.flac"},
@@ -236,6 +237,43 @@ func TestValidateNormalizeInputFlags(t *testing.T) {
 				t.Errorf("validateNormalizeInputFlags err = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestNormalizeAlbumPeakMode: album applies one uniform gain, so it can only
+// limit. An explicit --peak-mode cap is refused rather than silently ignored;
+// --peak-mode limit is redundant but honest, and passes.
+func TestNormalizeAlbumPeakMode(t *testing.T) {
+	dir := t.TempDir()
+	var inputs []string
+	for _, n := range []string{"a.flac", "b.flac"} {
+		p := filepath.Join(dir, n)
+		synthAudio(t, p, "flac")
+		inputs = append(inputs, p)
+	}
+	out := filepath.Join(dir, "out")
+
+	capArgs := append([]string{"--album", "--format", "flac", "--dir", out, "--peak-mode", "cap"}, inputs...)
+	cmd := newNormalizeCmd()
+	cmd.SetArgs(capArgs)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	if _, ok := errors.AsType[*usageError](err); !ok {
+		t.Fatalf("--album --peak-mode cap = %v (%T), want *usageError", err, err)
+	}
+	if !strings.Contains(err.Error(), "relative track loudness") {
+		t.Errorf("message = %q, want the album-spacing reason", err)
+	}
+
+	limitArgs := append([]string{"--album", "--format", "flac", "--dir", out, "--peak-mode", "limit"}, inputs...)
+	cmd = newNormalizeCmd()
+	cmd.SetArgs(limitArgs)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Errorf("--album --peak-mode limit = %v (it is what album already does)\n%s", err, buf.String())
 	}
 }
 

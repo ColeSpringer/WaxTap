@@ -172,11 +172,13 @@ func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
 }
 
 // batchTransforms reports whether the spec requires rewriting matching codecs.
+// A file already in the target codec is otherwise left alone or copied through,
+// which would silently drop a --bitrate or --bit-depth request.
 func batchTransforms(spec waxtap.ProcessSpec) bool {
 	if spec.Downmix || spec.Loudness != nil {
 		return true
 	}
-	return spec.Transcode != nil && spec.Transcode.Bitrate > 0
+	return spec.Transcode != nil && (spec.Transcode.Bitrate > 0 || spec.Transcode.BitDepth > 0)
 }
 
 // extPossiblyCodec reports whether ext can contain the given codec family. It
