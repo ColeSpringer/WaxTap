@@ -43,6 +43,11 @@ func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
 		return waxtap.FormatALAC, nil
 	case "wav":
 		return waxtap.FormatWAV, nil
+	case "aiff", "aif", "aifc", "afc":
+		// Four accepted spellings, one output extension. .aifc/.afc name the
+		// compressed-capable variant so a file of that type can be named as input;
+		// transcodeExt still delivers .aiff.
+		return waxtap.FormatAIFF, nil
 	case "mp3":
 		return waxtap.FormatMP3, nil
 	case "aac", "m4a":
@@ -52,7 +57,7 @@ func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
 	case "vorbis", "ogg":
 		return waxtap.FormatVorbis, nil
 	default:
-		return 0, usagef("unknown transcode format %q (want copy|flac|alac|wav|mp3|aac|opus|vorbis)", s)
+		return 0, usagef("unknown transcode format %q (want copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis)", s)
 	}
 }
 
@@ -66,6 +71,8 @@ func transcodeExt(f waxtap.TranscodeFormat) string {
 		return "m4a"
 	case waxtap.FormatWAV:
 		return "wav"
+	case waxtap.FormatAIFF:
+		return "aiff"
 	case waxtap.FormatMP3:
 		return "mp3"
 	case waxtap.FormatOpus:

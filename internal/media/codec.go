@@ -9,7 +9,7 @@ import (
 
 // Codec identifies an output audio encoding. CodecCopy rewrites the source
 // packets into a new container without re-encoding (a remux). The lossless
-// codecs (FLAC, ALAC, WAV) decode and encode; they are not stream copies.
+// codecs (FLAC, ALAC, WAV, AIFF) decode and encode; they are not stream copies.
 type Codec uint8
 
 const (
@@ -21,6 +21,7 @@ const (
 	CodecAAC                 // AAC-LC in .m4a
 	CodecOpus                // Opus (.opus)
 	CodecVorbis              // Vorbis (.ogg)
+	CodecAIFF                // lossless PCM (.aiff)
 )
 
 func (c Codec) String() string {
@@ -41,6 +42,8 @@ func (c Codec) String() string {
 		return "opus"
 	case CodecVorbis:
 		return "vorbis"
+	case CodecAIFF:
+		return "aiff"
 	default:
 		return fmt.Sprintf("codec(%d)", c)
 	}
@@ -75,6 +78,8 @@ func codecFormat(c Codec) (string, bool) {
 		return "opus", true
 	case CodecVorbis:
 		return "vorbis", true
+	case CodecAIFF:
+		return "aiff", true
 	default:
 		return "", false
 	}
@@ -96,17 +101,19 @@ func (c Codec) Extension() string {
 		return "opus"
 	case CodecVorbis:
 		return "ogg"
+	case CodecAIFF:
+		return "aiff"
 	default:
 		return ""
 	}
 }
 
 // IsLossless reports whether c is a remux or a lossless encoder (FLAC, ALAC,
-// WAV). WAV keeps the source bit depth (TranscodeOptions.BitDepth 0), so it never
-// truncates a higher-depth source.
+// WAV, AIFF). WAV and AIFF keep the source bit depth (TranscodeOptions.BitDepth
+// 0), so they never truncate a higher-depth source.
 func (c Codec) IsLossless() bool {
 	switch c {
-	case CodecCopy, CodecFLAC, CodecALAC, CodecWAV:
+	case CodecCopy, CodecFLAC, CodecALAC, CodecWAV, CodecAIFF:
 		return true
 	default:
 		return false

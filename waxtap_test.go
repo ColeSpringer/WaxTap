@@ -496,6 +496,8 @@ func synthCodec(name string) media.Codec {
 		return media.CodecMP3
 	case "alac":
 		return media.CodecALAC
+	case "aiff":
+		return media.CodecAIFF
 	default:
 		return media.CodecWAV
 	}
@@ -522,6 +524,48 @@ func synthSine(t *testing.T, dir, name string, seconds int, codec string) string
 		t.Fatalf("synth %s (%s): %v", name, codec, err)
 	}
 	return out
+}
+
+// TestIsMP4FileSniffsContainer covers the embed flatten reading the container the
+// file holds rather than its extension. An ALAC encode is MP4 whatever it is
+// named, and skipping the flatten there leaves the tags unwritten.
+func TestIsMP4FileSniffsContainer(t *testing.T) {
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// MP4 content under names an extension check would misread. A keep-source
+	// download is never container-checked (validateOutputContainer returns early
+	// with no Transcode spec), so `download URL -o out.flac --embed-metadata` does
+	// put AAC-in-MP4 bytes in a file named .flac. Deciding on the extension would
+	// skip the flatten and lose the tags.
+	for _, name := range []string{"mp4.alac", "mp4_noext", "mp4.m4a", "mp4.flac", "mp4.opus", "mp4.wav"} {
+		if got := c.isMP4File(ctx, synthSine(t, dir, name, 1, "alac")); !got {
+			t.Errorf("isMP4File(%q) = false, want true (ALAC always muxes into MP4)", name)
+		}
+	}
+	for _, name := range []string{"plain.flac", "plain.aiff", "plain.wav"} {
+		if got := c.isMP4File(ctx, synthSine(t, dir, name, 1, strings.TrimPrefix(filepath.Ext(name), "."))); got {
+			t.Errorf("isMP4File(%q) = true, want false", name)
+		}
+	}
+	// An unreadable file falls back to the extension. The embed pass only warns on
+	// error, so reporting false on a probe failure would cost the user their tags
+	// on a file whose name said MP4 all along.
+	if got := c.isMP4File(ctx, filepath.Join(dir, "missing.m4a")); !got {
+		t.Error("isMP4File(missing .m4a) = false; want the extension fallback")
+	}
+	if got := c.isMP4File(ctx, filepath.Join(dir, "missing.flac")); got {
+		t.Error("isMP4File(missing .flac) = true, want false")
+	}
+	// A truncated file will not probe but is still named MP4.
+	trunc := filepath.Join(dir, "trunc.m4a")
+	if err := os.WriteFile(trunc, []byte("not an mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.isMP4File(ctx, trunc); !got {
+		t.Error("isMP4File(unprobeable .m4a) = false; want the extension fallback")
+	}
 }
 
 func TestProcessLocalTranscode(t *testing.T) {
@@ -722,6 +766,13 @@ func TestValidateProcessSpec_CheckOutputContainer(t *testing.T) {
 		{"mp3 in wav", FormatMP3, "out.wav"},
 		{"flac in opus", FormatFLAC, "out.opus"},
 		{"opus in m4a", FormatOpus, "out.m4a"},
+		// .aiff is a real container now and is checked like any other. These three
+		// used to pass unchecked and write mismatched bytes.
+		{"flac in aiff", FormatFLAC, "out.aiff"},
+		{"wav in aiff", FormatWAV, "out.aiff"},
+		{"aiff in wav", FormatAIFF, "out.wav"},
+		// The aiff row has no alternate container, so Matroska cannot hold it.
+		{"aiff in mka", FormatAIFF, "out.mka"},
 	}
 	for _, c := range reject {
 		if err := validateProcessSpec(spec(c.f, c.out)); !errors.Is(err, ErrIncompatibleSpec) {
@@ -744,7 +795,8 @@ func TestValidateProcessSpec_CheckOutputContainer(t *testing.T) {
 		{"wav in mka", FormatWAV, "out.mka"},
 		// Extension outside the table passes unchecked (the muxer validates).
 		{"wav in w64", FormatWAV, "out.w64"},
-		{"flac in aiff", FormatFLAC, "out.aiff"},
+		{"aiff in aiff", FormatAIFF, "out.aiff"},
+		{"aiff in aif", FormatAIFF, "out.aif"},
 		// Force-muxed: codec-named and extensionless outputs are unconstrained.
 		{"alac in .alac", FormatALAC, "out.alac"},
 		{"flac extensionless", FormatFLAC, "out"},

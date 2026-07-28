@@ -35,6 +35,8 @@ func codecFor(name string) media.Codec {
 		return media.CodecMP3
 	case "alac":
 		return media.CodecALAC
+	case "aiff":
+		return media.CodecAIFF
 	default:
 		return media.CodecWAV
 	}
@@ -511,12 +513,47 @@ func TestContainerAccepts(t *testing.T) {
 		{"webm", "aac", false},
 		{"mka", "aac", true},
 		{"aac", "aac", true},
-		{"aac", "alac", false}, // raw ADTS is AAC-only, unlike .m4a
-		{"", "aac", true},      // unknown container: permissive
+		{"aac", "alac", false},      // raw ADTS is AAC-only, unlike .m4a
+		{"", "aac", true},           // unknown container: permissive
+		{"aiff", "pcm_s16le", true}, // a probed PCM source
+		{"aiff", "wav", false},      // CodecWAV is RIFF, which .aiff cannot hold
+		{"wav", "aiff", false},      // and the mirror
+		{"aif", "aiff", true},       // both output spellings
 	}
 	for _, c := range cases {
 		if got := containerAccepts(c.ext, c.codec); got != c.want {
 			t.Errorf("containerAccepts(%q,%q) = %v, want %v", c.ext, c.codec, got, c.want)
+		}
+	}
+}
+
+// TestSourceEncodeCodecPCMFollowsExtension covers the fallback a downmix or a
+// declined copy-cut takes. PCM has two container-defining encoders, so a .aiff
+// output has to reach CodecAIFF; every PCM source used to fall to CodecWAV and
+// write RIFF bytes whatever the file was named.
+func TestSourceEncodeCodecPCMFollowsExtension(t *testing.T) {
+	cases := []struct {
+		name, outExt string
+		want         media.Codec
+		ok           bool
+	}{
+		{"pcm_s16le", "aiff", media.CodecAIFF, true},
+		{"pcm_s16le", "aif", media.CodecAIFF, true},
+		{"pcm_s16le", "aifc", media.CodecAIFF, true}, // all four spellings, or these
+		{"pcm_s16le", "afc", media.CodecAIFF, true},  // two collect RIFF bytes
+		{"pcm_f32le", "aiff", media.CodecAIFF, true},
+		{"pcm_s16le", "wav", media.CodecWAV, true},
+		{"pcm_s16le", "", media.CodecWAV, true}, // no extension: the RIFF default
+		{"pcm_s16le", "mka", media.CodecWAV, true},
+		// Only PCM is extension-directed; other families ignore outExt.
+		{"flac", "aiff", media.CodecFLAC, true},
+		{"opus", "aiff", media.CodecOpus, true},
+		{"dts", "aiff", media.CodecCopy, false},
+	}
+	for _, c := range cases {
+		got, ok := sourceEncodeCodec(c.name, c.outExt)
+		if got != c.want || ok != c.ok {
+			t.Errorf("sourceEncodeCodec(%q,%q) = %v,%v; want %v,%v", c.name, c.outExt, got, ok, c.want, c.ok)
 		}
 	}
 }
@@ -532,8 +569,9 @@ func TestContainerTablesConsistent(t *testing.T) {
 		media.CodecVorbis: "vorbis",
 		media.CodecWAV:    "pcm_s16le",
 		media.CodecALAC:   "alac",
+		media.CodecAIFF:   "aiff",
 	}
-	for _, ext := range []string{"flac", "wav", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "mka", "mkv"} {
+	for _, ext := range []string{"flac", "wav", "aiff", "aif", "aifc", "afc", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "mka", "mkv"} {
 		c, ok := containerCodec(ext)
 		if !ok {
 			t.Errorf("containerCodec(%q) = not ok, want a default codec", ext)

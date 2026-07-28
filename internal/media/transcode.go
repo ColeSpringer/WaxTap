@@ -118,7 +118,7 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return fmt.Errorf("%w: cannot remux %s audio", waxerr.ErrIncompatibleSpec, codecName(track.Codec))
+		return remuxDeclined(track.Codec)
 	}
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: container}
 	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, staged, opts); err != nil {
@@ -144,20 +144,36 @@ func (r *Runner) remux(ctx context.Context, src container.Source, srcHint, outEx
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return fmt.Errorf("%w: cannot remux %s audio", waxerr.ErrIncompatibleSpec, codecName(track.Codec))
+		return remuxDeclined(track.Codec)
 	}
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
 	_, err = r.engine.RemuxDemuxer(ctx, demux, track, dst, opts)
 	return err
 }
 
+// remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own
+// wording because the obvious advice, re-encode instead, sounds lossy and is not.
+func remuxDeclined(id codec.ID) error {
+	if id == codec.PCM {
+		return fmt.Errorf("%w: cannot container-copy PCM audio: its sample layout belongs to the container (RIFF is little-endian, AIFF big-endian), so the packets cannot move unchanged; drop --format copy to re-encode, which is bit-exact for PCM",
+			waxerr.ErrIncompatibleSpec)
+	}
+	return fmt.Errorf("%w: cannot remux %s audio", waxerr.ErrIncompatibleSpec, codecName(id))
+}
+
 // containerFor returns the WaxFlow Container override for delivering format into
 // the container named by ext, or "" for the format's own default container.
 //
-// It is format-aware because the right override depends on both: AAC/ALAC into
-// .m4a need "progressive" (else WaxFlow ships fragmented CMAF, which Apple players
-// and tag editors reject), and FLAC into .ogg needs "ogg" (else WaxFlow writes a
-// bare FLAC stream in a .ogg file). Opus/Vorbis are Ogg natively, so "" suffices.
+// It is format-aware because the right override depends on both: AAC/ALAC need
+// "progressive" (else WaxFlow ships fragmented CMAF, which Apple players and tag
+// editors reject), and FLAC into .ogg needs "ogg" (else WaxFlow writes a bare
+// FLAC stream in a .ogg file). Opus/Vorbis are Ogg natively, so "" suffices.
+//
+// Callers must pair format with an ext that can hold it; this does not
+// re-validate, and WaxFlow errors on an override its row rejects rather than
+// falling back. The facade validates through CheckOutputContainer, the pipeline
+// through containerAccepts and containerCodec. AIFF accepts no override and falls
+// through to "".
 func containerFor(format, ext string) string {
 	switch ext {
 	case "mka", "mkv":
@@ -166,20 +182,29 @@ func containerFor(format, ext string) string {
 		return "webm"
 	case "aac":
 		return "adts"
-	case "m4a", "mp4", "m4b":
-		if format == "aac" || format == "alac" {
-			return "progressive"
-		}
 	case "ogg", "oga":
 		if format == "flac" {
 			return "ogg"
 		}
+	}
+	// AAC and ALAC mux into MP4 whatever the path is named, so the override is
+	// keyed on the format rather than an .m4a extension: -o out.alac and an
+	// extensionless -o out need it as much as -o out.m4a does.
+	if format == "aac" || format == "alac" {
+		return "progressive"
 	}
 	return ""
 }
 
 // codecToFormat maps a source codec ID to the WaxFlow output format that carries
 // it unchanged, for a remux. It reports false for a codec WaxTap cannot remux.
+//
+// PCM is absent on purpose. Its packets are raw samples whose layout belongs to
+// the container (RIFF little-endian, AIFF big-endian, Matroska signed 8-bit), so
+// WaxFlow's codecSurvives declines every PCM remux. Listing it here only deferred
+// that failure to the engine, which reported it as a bare error string at exit 1
+// instead of ErrIncompatibleSpec at exit 2. A PCM re-encode is bit-exact, so
+// nothing is lost by declining.
 func codecToFormat(id codec.ID) (string, bool) {
 	switch id {
 	case codec.Opus:
@@ -194,8 +219,6 @@ func codecToFormat(id codec.ID) (string, bool) {
 		return "mp3", true
 	case codec.Vorbis:
 		return "vorbis", true
-	case codec.PCM:
-		return "wav", true
 	}
 	return "", false
 }

@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/format"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
@@ -52,6 +54,7 @@ func TestCodecStringExtensionLossless(t *testing.T) {
 		{CodecAAC, "aac", "m4a", false},
 		{CodecOpus, "opus", "opus", false},
 		{CodecVorbis, "vorbis", "ogg", false},
+		{CodecAIFF, "aiff", "aiff", true},
 	}
 	for _, tc := range cases {
 		if got := tc.c.String(); got != tc.str {
@@ -98,11 +101,16 @@ func TestCodecNameBoundary(t *testing.T) {
 			t.Errorf("codecName(%v) = %q, want %q", id, got, want)
 		}
 	}
-	// codecToFormat is the write-direction inverse for the remuxable codecs.
-	for _, id := range []codec.ID{codec.Opus, codec.AACLC, codec.FLAC, codec.ALAC, codec.MP3, codec.Vorbis, codec.PCM} {
+	// codecToFormat is the write-direction inverse for the remuxable codecs. PCM is
+	// excluded because its wire layout belongs to the container, so no packet copy
+	// survives (see TestPCMRemuxDeclined).
+	for _, id := range []codec.ID{codec.Opus, codec.AACLC, codec.FLAC, codec.ALAC, codec.MP3, codec.Vorbis} {
 		if _, ok := codecToFormat(id); !ok {
 			t.Errorf("codecToFormat(%v) not ok", id)
 		}
+	}
+	if _, ok := codecToFormat(codec.PCM); ok {
+		t.Error("codecToFormat(pcm) ok = true; PCM must decline so the caller gets ErrIncompatibleSpec, not an engine error")
 	}
 }
 
@@ -307,6 +315,19 @@ func TestContainerAcceptsTable(t *testing.T) {
 		{"webm", "opus", true}, {"webm", "aac", false},
 		{"mka", "aac", true}, {"aac", "aac", true}, {"aac", "alac", false},
 		{"", "aac", true}, // unknown container: permissive
+		// PCM's two names must not cross: .aiff cannot hold RIFF and .wav cannot hold
+		// AIFF, though both hold a probed "pcm" source.
+		{"aiff", "aiff", true}, {"aif", "aiff", true}, {"aiff", "pcm_s16le", true},
+		{"aiff", "wav", false}, {"aiff", "flac", false}, {"aiff", "aac", false},
+		{"wav", "aiff", false},
+		// All four registered spellings answer identically; when .aifc was missing it
+		// collected RIFF bytes.
+		{"aifc", "aiff", true}, {"afc", "aiff", true},
+		{"aifc", "pcm_s16le", true}, {"afc", "pcm_s16le", true},
+		{"aifc", "wav", false}, {"afc", "flac", false},
+		// Matroska takes PCM through the wav row. The aiff row has no alternate
+		// container, so aiff into .mka has to be rejected before the encode.
+		{"mka", "aiff", false}, {"mka", "pcm_s16le", true},
 	}
 	for _, c := range cases {
 		if got := ContainerAccepts(c.ext, c.codec); got != c.want {
@@ -338,14 +359,22 @@ func TestContainerForFormatAware(t *testing.T) {
 	}{
 		{"aac", "m4a", "progressive"}, // else fragmented CMAF (Apple-hostile)
 		{"alac", "m4a", "progressive"},
-		{"flac", "ogg", "ogg"}, // else a bare FLAC stream in a .ogg file
-		{"opus", "ogg", ""},    // Opus is Ogg natively
+		// Keyed on the format, not the extension: AAC and ALAC are MP4 either way.
+		{"alac", "alac", "progressive"},
+		{"aac", "", "progressive"},    // extensionless output
+		{"aac", "xyz", "progressive"}, // unrelated extension
+		{"flac", "ogg", "ogg"},        // else a bare FLAC stream in a .ogg file
+		{"opus", "ogg", ""},           // Opus is Ogg natively
 		{"vorbis", "ogg", ""},
 		{"opus", "mka", "mka"},
 		{"opus", "webm", "webm"},
 		{"aac", "aac", "adts"},
 		{"flac", "flac", ""},
 		{"mp3", "mp3", ""},
+		// The aiff row has no alternate container, so any override would error.
+		{"aiff", "aiff", ""},
+		{"aiff", "aif", ""},
+		{"aiff", "", ""},
 	}
 	for _, c := range cases {
 		if got := containerFor(c.format, c.ext); got != c.want {
@@ -391,6 +420,149 @@ func TestRenderCutRemuxAACProgressive(t *testing.T) {
 	}
 	if bytes.Contains(b, []byte("moof")) {
 		t.Error("AAC cut produced a fragmented MP4 (moof); want progressive")
+	}
+}
+
+// TestEncodeMP4ProgressiveOffM4APath covers AAC and ALAC written to paths that do
+// not name MP4. They are MP4 regardless, so they need the progressive override;
+// a fragmented file cannot be tagged and Apple players reject it.
+func TestEncodeMP4ProgressiveOffM4APath(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	cases := []struct {
+		name string
+		c    Codec
+	}{
+		{"out.alac", CodecALAC}, // codec-named extension
+		{"out", CodecALAC},      // extensionless
+		{"aac_out", CodecAAC},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := encodeFixture(t, r, t.TempDir(), tc.name, tc.c)
+			b, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("moof")) {
+				t.Errorf("%s encode to %q produced a fragmented MP4 (moof); want progressive", tc.c, tc.name)
+			}
+		})
+	}
+}
+
+// magicOf returns a file's first four bytes, the container's magic.
+func magicOf(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 4 {
+		t.Fatalf("%s is %d bytes", path, len(b))
+	}
+	return string(b[:4])
+}
+
+// TestAIFFWritesFORMNotRIFF covers the encode side of the PCM split. An .aiff
+// output must carry AIFF's FORM magic, not the RIFF that PCM's default wav row
+// would write.
+func TestAIFFWritesFORMNotRIFF(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+
+	enc := encodeFixture(t, r, dir, "encoded.aiff", CodecAIFF)
+	if got := magicOf(t, enc); got != "FORM" {
+		t.Errorf("AIFF encode magic = %q, want %q", got, "FORM")
+	}
+	if c := mustProbe(t, r, enc).Format.Container; c != "aiff" {
+		t.Errorf("AIFF encode container = %q, want %q", c, "aiff")
+	}
+	// The mirror, confirming the choice follows the codec and is not blanket.
+	if got := magicOf(t, encodeFixture(t, r, dir, "encoded.wav", CodecWAV)); got != "RIFF" {
+		t.Errorf("WAV encode magic = %q, want %q", got, "RIFF")
+	}
+}
+
+// TestPCMRemuxDeclined covers why PCM is missing from codecToFormat and what
+// depends on that. PCM packets are raw samples whose layout belongs to the
+// container, so WaxFlow declines every PCM remux; declining in WaxTap instead
+// gives the caller ErrIncompatibleSpec at exit 2 rather than an engine string at
+// exit 1.
+//
+// A WaxFlow bump that lifts the decline fails the second half. PCM would then
+// need a row here plus extension-directed selection between wav and aiff, or a
+// copy into .aiff writes RIFF bytes.
+func TestPCMRemuxDeclined(t *testing.T) {
+	if f, ok := codecToFormat(codec.PCM); ok {
+		t.Errorf("codecToFormat(PCM) = %q,true; want a decline (no PCM remux survives)", f)
+	}
+
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	src := encodeFixture(t, r, dir, "src.aiff", CodecAIFF)
+
+	for _, out := range []string{"copy.aiff", "copy.wav"} {
+		dst := filepath.Join(dir, out)
+		_, err := r.Transcode(context.Background(), src, dst, Spec{Codec: CodecCopy})
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("copy PCM -> %s: err = %v, want ErrIncompatibleSpec (exit 2)", out, err)
+		}
+		if fileExists(dst) {
+			t.Errorf("copy PCM -> %s left a partial output behind", out)
+		}
+	}
+
+	// Confirm through WaxFlow that the engine still declines, so the check above is
+	// doing real work rather than duplicating one the engine would make.
+	if survives := codecSurvivesPCMProbe(t, r, src); survives {
+		t.Error("WaxFlow now remuxes PCM; codecToFormat needs a PCM row with extension-directed wav/aiff selection")
+	}
+}
+
+// codecSurvivesPCMProbe asks WaxFlow whether a PCM track can be packet-copied,
+// bypassing codecToFormat's decline.
+func codecSurvivesPCMProbe(t *testing.T, r *Runner, path string) bool {
+	t.Helper()
+	src, closeSrc, err := openSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSrc()
+	_, info, err := format.OpenDemuxer(src, hintFor(path), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := r.engine.PlanRemux(info.Default(), waxflow.TranscodeOptions{Format: "aiff"})
+	return err == nil && plan != nil
+}
+
+// TestIsAIFFExt covers the single list behind AIFF's four spellings. Every table
+// that chooses between PCM's two containers reads it, so a missing spelling means
+// that extension gets RIFF bytes.
+func TestIsAIFFExt(t *testing.T) {
+	for _, ext := range []string{"aiff", "aif", "aifc", "afc"} {
+		if !IsAIFFExt(ext) {
+			t.Errorf("IsAIFFExt(%q) = false, want true", ext)
+		}
+		// Each spelling is container-checked rather than force-muxed, so a mismatched
+		// format is rejected before the encode instead of writing the wrong bytes.
+		if !CanInferContainer("out." + ext) {
+			t.Errorf("CanInferContainer(out.%s) = false; an AIFF spelling must be container-checked", ext)
+		}
+		if err := CheckOutputContainer(CodecAIFF, "out."+ext); err != nil {
+			t.Errorf("CheckOutputContainer(aiff, out.%s) = %v, want nil", ext, err)
+		}
+		if err := CheckOutputContainer(CodecFLAC, "out."+ext); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("CheckOutputContainer(flac, out.%s) = %v, want ErrIncompatibleSpec", ext, err)
+		}
+		if err := CheckOutputContainer(CodecWAV, "out."+ext); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("CheckOutputContainer(wav, out.%s) = %v, want ErrIncompatibleSpec", ext, err)
+		}
+	}
+	for _, ext := range []string{"wav", "flac", "m4a", "aiffx", "af", ""} {
+		if IsAIFFExt(ext) {
+			t.Errorf("IsAIFFExt(%q) = true, want false", ext)
+		}
 	}
 }
 

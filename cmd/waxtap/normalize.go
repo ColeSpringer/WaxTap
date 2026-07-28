@@ -164,7 +164,7 @@ func newNormalizeCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.BoolVar(&measure, "measure-loudness", false, "measure loudness without writing output")
 	f.Float64Var(&target, "loudness-target", -14, "target integrated loudness (LUFS)")
-	f.StringVarP(&format, "format", "f", "", "output format: flac|alac|wav|mp3|aac|opus|vorbis")
+	f.StringVarP(&format, "format", "f", "", "output format: flac|alac|wav|aiff|mp3|aac|opus|vorbis")
 	bindBitrateFlag(f, &bitrate)
 	f.StringVarP(&out, "out", "o", "", "output file path for one input")
 	f.BoolVar(&album, "album", false, "treat all inputs as one album (group loudness)")

@@ -94,7 +94,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
 	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
 	bindCollisionFlag(f, &df.collisionStr)
-	f.StringVarP(&df.format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
+	f.StringVarP(&df.format, "format", "f", "", "output format: copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis")
 	bindBitrateFlag(f, &df.bitrate)
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
 	bindSponsorBlockFlag(f, &df.sbCats, "remove SponsorBlock categories (comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")

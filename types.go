@@ -284,8 +284,8 @@ type ProcessRequest struct {
 }
 
 // TranscodeFormat names an output preset. FormatCopy is the only no-re-encode
-// path. FLAC, ALAC, and WAV preserve the decoded samples, but they are still
-// decode-and-encode passes when the source is YouTube audio.
+// path. FLAC, ALAC, WAV, and AIFF preserve the decoded samples, but they are
+// still decode-and-encode passes when the source is YouTube audio.
 type TranscodeFormat uint8
 
 const (
@@ -297,6 +297,7 @@ const (
 	FormatAAC                           // delivered in an .m4a container
 	FormatOpus                          // Opus audio
 	FormatVorbis                        // Vorbis audio
+	FormatAIFF                          // uncompressed PCM in an AIFF container
 )
 
 // TranscodeSpec requests re-encoding. An explicit FormatCopy remuxes (container

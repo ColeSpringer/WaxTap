@@ -32,6 +32,8 @@ func transcodeCodec(f TranscodeFormat) media.Codec {
 		return media.CodecALAC
 	case FormatWAV:
 		return media.CodecWAV
+	case FormatAIFF:
+		return media.CodecAIFF
 	case FormatMP3:
 		return media.CodecMP3
 	case FormatAAC:

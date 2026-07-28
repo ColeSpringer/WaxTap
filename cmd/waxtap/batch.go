@@ -17,10 +17,14 @@ import (
 )
 
 // audioExts lists the case-insensitive file extensions accepted for directory
-// processing.
+// processing. These are the conventional spellings, not everything WaxFlow can
+// sniff: .wave, .rf64, .bw64, .m4r, .mov, .adts and .mpga also decode, but a
+// directory walk should not claim them unasked. Naming one directly still works.
 var audioExts = map[string]bool{
 	".flac": true, ".wav": true, ".mp3": true, ".m4a": true, ".aac": true,
 	".opus": true, ".ogg": true, ".alac": true, ".mka": true, ".webm": true,
+	".aiff": true, ".aif": true, ".aifc": true, ".afc": true,
+	".oga": true, ".mp4": true, ".m4b": true, ".mkv": true,
 }
 
 // collectAudioInputs returns recognized audio files under root in sorted order.
@@ -155,13 +159,13 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 	case waxtap.FormatVorbis:
 		return "vorbis"
 	default:
-		return "" // WAV, copy, and unknown formats cannot be confirmed as matches.
+		return "" // WAV, AIFF, copy, and unknown formats cannot be confirmed as matches.
 	}
 }
 
 // matchesTargetFamily reports whether a probed codec is one that tf produces.
-// Formats without a stable codec family, such as WAV and copy, return false so
-// single-file and batch planning use the same conservative rule.
+// Formats without a stable codec family, such as WAV, AIFF, and copy, return
+// false so single-file and batch planning use the same conservative rule.
 func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
 	fam := targetCodecFamily(tf)
 	return fam != "" && format.CodecFamily(codec) == fam
@@ -190,14 +194,22 @@ func extPossiblyCodec(ext, family string) bool {
 		return family == "alac"
 	case ".aac":
 		return family == "aac"
-	case ".m4a":
+	case ".m4a", ".m4b":
 		return family == "aac" || family == "alac"
 	case ".ogg", ".oga":
 		return family == "vorbis" || family == "opus" || family == "flac"
 	case ".webm":
 		return family == "opus" || family == "vorbis"
-	case ".wav":
+	case ".wav", ".aiff", ".aif", ".aifc", ".afc":
 		return false // PCM is not one of the comparable target families.
+	case ".mp4", ".mkv":
+		// The video spellings of MP4 and Matroska. A match makes a file a
+		// copy-through candidate, and a copy-through delivers the whole container.
+		// WaxFlow reports only audio tracks, so a probe cannot separate an audio-only
+		// .mp4 from a movie whose audio is AAC, and the movie would reach the output
+		// directory untouched. Declining sends them to the encoder, which extracts
+		// the audio. The audio-only spellings stay copy-eligible.
+		return false
 	default:
 		return true // Probe general-purpose and unknown containers.
 	}

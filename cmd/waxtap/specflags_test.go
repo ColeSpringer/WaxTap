@@ -136,6 +136,10 @@ func TestParseTranscodeFormat(t *testing.T) {
 		"wav": waxtap.FormatWAV, "mp3": waxtap.FormatMP3, "aac": waxtap.FormatAAC,
 		"m4a": waxtap.FormatAAC, "opus": waxtap.FormatOpus, "vorbis": waxtap.FormatVorbis,
 		"ogg": waxtap.FormatVorbis, "FLAC": waxtap.FormatFLAC,
+		// Four input spellings, one output extension (see transcodeExt).
+		"aiff": waxtap.FormatAIFF, "aif": waxtap.FormatAIFF,
+		"aifc": waxtap.FormatAIFF, "afc": waxtap.FormatAIFF,
+		"AIFF": waxtap.FormatAIFF,
 	}
 	for in, want := range cases {
 		got, err := parseTranscodeFormat(in)
@@ -152,6 +156,7 @@ func TestTranscodeExt(t *testing.T) {
 	cases := map[waxtap.TranscodeFormat]string{
 		waxtap.FormatFLAC: "flac", waxtap.FormatAAC: "m4a", waxtap.FormatALAC: "m4a",
 		waxtap.FormatVorbis: "ogg", waxtap.FormatOpus: "opus", waxtap.FormatCopy: "",
+		waxtap.FormatWAV: "wav", waxtap.FormatMP3: "mp3", waxtap.FormatAIFF: "aiff",
 	}
 	for f, want := range cases {
 		if got := transcodeExt(f); got != want {

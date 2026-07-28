@@ -19,7 +19,24 @@ var inferableContainers = map[string]bool{
 	"mp3": true, "flac": true, "wav": true, "m4a": true, "m4b": true,
 	"mp4": true, "aac": true, "ogg": true, "oga": true, "opus": true,
 	"webm": true, "mka": true, "mkv": true,
-	"aiff": true, "aif": true,
+	"aiff": true, "aif": true, "aifc": true, "afc": true,
+}
+
+// IsAIFFExt reports whether ext names an AIFF container. WaxFlow's aiff row
+// registers four spellings for one container; .aifc/.afc name the
+// compressed-capable variant, which the muxer selects from the sample format
+// rather than the filename.
+//
+// The list lives here rather than in each table because the output extension is
+// what picks between PCM's two containers, so a spelling missed by one table gets
+// RIFF bytes in an AIFF file. ext must be lowercased and undotted, which every
+// caller already guarantees.
+func IsAIFFExt(ext string) bool {
+	switch ext {
+	case "aiff", "aif", "aifc", "afc":
+		return true
+	}
+	return false
 }
 
 // needsForcedMuxer reports whether the output path does not name a container
@@ -40,11 +57,21 @@ func CanInferContainer(path string) bool {
 // codec unchanged (a copy/remux). Some extensions support several codecs, so this
 // consults a compatibility table rather than comparing names; unknown extensions
 // are permissive. codecName may be a codecName-mapped value ("opus", "aac",
-// "pcm", "wav"); every PCM branch accepts both "pcm" and "wav".
+// "pcm", "wav", "aiff").
+//
+// PCM has two container-defining names: "wav" and "aiff" are Codec.String()
+// values naming a container, while "pcm" is what a probe reports for a source.
+// isPCM covers RIFF and probed sources only; AIFF has its own branch, and
+// Matroska takes PCM through WaxFlow's wav row.
 func ContainerAccepts(ext, codecName string) bool {
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	c := strings.ToLower(codecName)
 	isPCM := c == "wav" || strings.HasPrefix(c, "pcm")
+	if IsAIFFExt(ext) {
+		// Ahead of the switch so all four spellings share one answer. Not isPCM:
+		// "wav" means CodecWAV, which is RIFF and cannot go in an AIFF file.
+		return c == "aiff" || strings.HasPrefix(c, "pcm")
+	}
 	switch ext {
 	case "flac":
 		return c == "flac"
@@ -84,8 +111,13 @@ func ContainersFor(codecName string) []string {
 	switch {
 	case c == "flac":
 		return []string{".flac", ".mka"}
-	case c == "wav" || strings.HasPrefix(c, "pcm"):
+	case c == "wav":
 		return []string{".wav", ".mka"}
+	case c == "aiff":
+		return []string{".aiff", ".aif"}
+	case strings.HasPrefix(c, "pcm"):
+		// A probed source stream, which any of the three can hold.
+		return []string{".wav", ".aiff", ".mka"}
 	case c == "mp3":
 		return []string{".mp3"}
 	case c == "aac":

@@ -152,7 +152,8 @@ func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 // same way.
 func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
 	return tf == waxtap.FormatCopy || tf == waxtap.FormatFLAC ||
-		tf == waxtap.FormatALAC || tf == waxtap.FormatWAV
+		tf == waxtap.FormatALAC || tf == waxtap.FormatWAV ||
+		tf == waxtap.FormatAIFF
 }
 
 // warnBitrateIgnoredIfLossless notes that --bitrate has no effect on a lossless or
@@ -335,7 +336,7 @@ func newCutCmd() *cobra.Command {
 	f.StringVarP(&out, "out", "o", "", "output file path")
 	bindCutFlags(f, &ranges, &cutMode, &crossfade, &sbOnError)
 	bindSponsorBlockFlag(f, &sbCats, "remove SponsorBlock categories (YouTube only; comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
-	f.StringVarP(&format, "format", "f", "", "also re-encode to: flac|alac|wav|mp3|aac|opus|vorbis")
+	f.StringVarP(&format, "format", "f", "", "also re-encode to: flac|alac|wav|aiff|mp3|aac|opus|vorbis")
 	bindBitrateFlag(f, &bitrate)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
@@ -487,7 +488,7 @@ func newTranscodeCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path (single file)")
-	f.StringVarP(&format, "format", "f", "", "output format: copy|flac|alac|wav|mp3|aac|opus|vorbis")
+	f.StringVarP(&format, "format", "f", "", "output format: copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis")
 	bindBitrateFlag(f, &bitrate)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")

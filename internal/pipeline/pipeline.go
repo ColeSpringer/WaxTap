@@ -226,7 +226,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// A downmix into a compatible container uses the source codec family when no
 	// transcode target was requested.
 	if fold > 0 && spec.Codec == media.CodecCopy {
-		c, ok := sourceEncodeCodec(res.SourceCodec)
+		c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output))
 		if !ok {
 			return Result{}, fmt.Errorf("%w: cannot downmix %s without a transcode target (pass --format)", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec))
 		}
@@ -280,7 +280,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		if copyCut {
 			// The re-encode fallback (when cut-remux declines the source codec)
 			// keeps the source family, staying lossless for a lossless source.
-			if c, ok := sourceEncodeCodec(res.SourceCodec); ok {
+			if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
 				fallback.Codec = c
 			}
 		}
@@ -338,7 +338,11 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 // sourceEncodeCodec maps a probed source codec name to the media.Codec that
 // re-encodes in the same family, so a downmix or a declined cut-remux keeps the
 // source codec. It reports false for codecs WaxTap cannot encode.
-func sourceEncodeCodec(name string) (media.Codec, bool) {
+//
+// PCM has two container-defining encoders, so outExt picks AIFF over the WAV
+// default. Without it these fallbacks write RIFF bytes into an AIFF file. outExt
+// comes from containerExt, already lowercased.
+func sourceEncodeCodec(name, outExt string) (media.Codec, bool) {
 	switch strings.ToLower(name) {
 	case "opus":
 		return media.CodecOpus, true
@@ -354,6 +358,9 @@ func sourceEncodeCodec(name string) (media.Codec, bool) {
 		return media.CodecALAC, true
 	}
 	if strings.HasPrefix(strings.ToLower(name), "pcm") {
+		if media.IsAIFFExt(outExt) {
+			return media.CodecAIFF, true
+		}
 		return media.CodecWAV, true
 	}
 	return media.CodecCopy, false
@@ -400,6 +407,9 @@ func containerSuggestion(codec string) string {
 // containerCodec returns the default encoder for a container extension. It
 // reports false for an unknown extension.
 func containerCodec(ext string) (media.Codec, bool) {
+	if media.IsAIFFExt(ext) {
+		return media.CodecAIFF, true
+	}
 	switch ext {
 	case "flac":
 		return media.CodecFLAC, true

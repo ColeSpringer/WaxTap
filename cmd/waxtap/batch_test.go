@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
 )
 
 func TestExtPossiblyCodec(t *testing.T) {
@@ -51,6 +52,58 @@ func TestPlanBatchOutputsSkipsImpossibleProbes(t *testing.T) {
 	}
 	if _, ok := probed.Load("b.mp3"); !ok {
 		t.Error("b.mp3 (MP3 extension, MP3 target) should be probed to confirm the no-op")
+	}
+}
+
+// TestExtPossiblyCodecVideoSpellings covers the video spellings of MP4 and
+// Matroska never becoming copy-through candidates. A copy-through delivers the
+// whole container, and a probe cannot separate an audio-only .mp4 from a movie,
+// so `transcode ./Videos -f aac` used to copy movie.mp4 into the output
+// directory untouched.
+func TestExtPossiblyCodecVideoSpellings(t *testing.T) {
+	for _, ext := range []string{".mp4", ".mkv"} {
+		for _, fam := range []string{"aac", "alac", "opus", "vorbis", "flac", "mp3"} {
+			if extPossiblyCodec(ext, fam) {
+				t.Errorf("extPossiblyCodec(%q,%q) = true; a video container must never be copied through", ext, fam)
+			}
+		}
+	}
+	// The audio-only spellings stay copy-eligible so a matching file is still
+	// spared a re-encode.
+	for _, c := range []struct {
+		ext, fam string
+		want     bool
+	}{
+		{".m4a", "aac", true}, {".m4b", "aac", true}, {".m4b", "alac", true},
+		{".m4b", "opus", false}, {".mka", "opus", true},
+	} {
+		if got := extPossiblyCodec(c.ext, c.fam); got != c.want {
+			t.Errorf("extPossiblyCodec(%q,%q) = %v, want %v", c.ext, c.fam, got, c.want)
+		}
+	}
+}
+
+// TestAIFFSpellingParity covers the four AIFF spellings across the CLI tables
+// that hand-maintain them. IsAIFFExt keeps the media package in step, but a map
+// literal cannot call it, so the agreement is asserted here.
+func TestAIFFSpellingParity(t *testing.T) {
+	for _, sp := range []string{"aiff", "aif", "aifc", "afc"} {
+		if !media.IsAIFFExt(sp) {
+			t.Fatalf("IsAIFFExt(%q) = false; this test is out of step with the helper", sp)
+		}
+		if f, err := parseTranscodeFormat(sp); err != nil || f != waxtap.FormatAIFF {
+			t.Errorf("parseTranscodeFormat(%q) = %v,%v; want FormatAIFF", sp, f, err)
+		}
+		if !audioExts["."+sp] {
+			t.Errorf("audioExts is missing .%s, so directory processing ignores it", sp)
+		}
+		if extPossiblyCodec("."+sp, "flac") {
+			t.Errorf("extPossiblyCodec(.%s) = true; PCM is not a comparable target family", sp)
+		}
+		// One output extension for all four input spellings.
+		if got := transcodeExt(waxtap.FormatAIFF); got != "aiff" {
+			t.Errorf("transcodeExt(FormatAIFF) = %q, want aiff", got)
+		}
 	}
 }
 
@@ -108,6 +161,30 @@ func TestCollectAudioInputs(t *testing.T) {
 		}
 		if !haveWav || !haveOpus {
 			t.Errorf("recursive inputs missing nested files: %v", inputs)
+		}
+	})
+
+	// Readable containers must be collected rather than counted as ignored. The
+	// AIFF spellings are new; .oga, .mp4, .m4b and .mkv were long-standing gaps,
+	// all inferable containers that directory processing skipped.
+	t.Run("collects every readable container", func(t *testing.T) {
+		dir := t.TempDir()
+		readable := []string{
+			"a.aiff", "b.aif", "c.aifc", "d.afc",
+			"e.oga", "f.mp4", "g.m4b", "h.mkv",
+			"i.flac", "j.wav", "k.mp3", "l.m4a", "m.aac",
+			"n.opus", "o.ogg", "p.alac", "q.mka", "r.webm",
+		}
+		writeFiles(t, dir, append(readable, "skip.txt")...)
+		inputs, ignored, err := collectAudioInputs(dir, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inputs) != len(readable) {
+			t.Errorf("collected %d inputs, want %d: %v", len(inputs), len(readable), inputs)
+		}
+		if ignored != 1 {
+			t.Errorf("ignored = %d, want 1 (skip.txt)", ignored)
 		}
 	})
 }

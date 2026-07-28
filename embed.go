@@ -90,7 +90,7 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 		return nil
 	}
 
-	if isMP4Path(path) {
+	if c.isMP4File(ctx, path) {
 		if err := remux("progressive"); err != nil {
 			return "", fmt.Errorf("flatten MP4 for tagging: %w", err)
 		}
@@ -235,25 +235,50 @@ func embedScratchPath(path string, seq int) string {
 	return filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.embed%d", filepath.Base(path), seq))
 }
 
-// isMP4Path reports whether path names an MP4-family container, which WaxLabel
-// can only tag in its progressive (non-fragmented) form.
-func isMP4Path(path string) bool {
+// isMP4File reports whether path holds an MP4-family container, which WaxLabel
+// can only tag in its progressive (non-fragmented) form. It sniffs instead of
+// reading the extension because every AAC/ALAC encode is MP4 whatever the output
+// is named, and a keep-source download is never container-checked, so even
+// -o out.flac can hold the source's AAC-in-MP4 bytes.
+//
+// A failed probe falls back to the extension, the rule this replaced. The embed
+// pass only warns on error, so reporting false here would cost the user their
+// tags without failing the download.
+//
+// pipeline.Result.OutputProbe carries the same Format.Container but is nil for a
+// keep-source download, so it cannot serve this. The comparison is exact because
+// WaxFlow reports one registry name per container, and "mp4" covers m4a through
+// mov.
+func (c *Client) isMP4File(ctx context.Context, path string) bool {
+	pr, err := c.engine().Probe(ctx, path)
+	if err != nil {
+		return isMP4Ext(path)
+	}
+	return pr.Format.Container == "mp4"
+}
+
+// isMP4Ext reports whether path is named like an MP4-family container. It serves
+// only as isMP4File's fallback for a file that will not probe.
+func isMP4Ext(path string) bool {
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
-	case "m4a", "mp4", "m4b":
+	case "m4a", "mp4", "m4b", "m4r", "mov":
 		return true
 	}
 	return false
 }
 
-// pictureCapableExt reports whether a file with this extension can hold cover art
-// (directly, or after a remux to the codec's native container). It is false for
-// the containers that cannot: WebM (the Matroska subset lacks Attachments), raw
-// ADTS, WAV, and AIFF. An empty extension (a stream sink) is treated as capable:
-// there is no filename to misname, so a remux to a picture-capable container is
-// safe.
+// pictureCapableExt reports the extensions that must not be remuxed into another
+// container to gain cover art. WebM is the case that matters: the Matroska subset
+// YouTube ships has no Attachments, and remuxing to Ogg would leave the bytes
+// misnamed. Raw ADTS is the same. WAV and AIFF are kept as a floor but never
+// reached, since WaxLabel writes pictures into both and the caller only consults
+// this function when Pictures.Write is AccessNone.
+//
+// An empty extension (a stream sink) counts as capable: there is no filename to
+// misname, so the remux is safe.
 func pictureCapableExt(ext string) bool {
 	switch strings.ToLower(ext) {
-	case "webm", "aac", "wav", "aiff", "aif":
+	case "webm", "aac", "wav", "aiff", "aif", "aifc", "afc":
 		return false
 	}
 	return true
