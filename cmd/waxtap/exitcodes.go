@@ -27,7 +27,7 @@ var exitCodeTable = []exitCodeEntry{
 	// unused rather than renumbered to keep the taxonomy stable.
 	{7, "incomplete stream or expired stream URL (another client may work)"},
 	{8, "PO token required (none configured, mint failed, or YouTube rejected it)"},
-	{9, "network failure (dead --proxy, unreachable sidecar, or connection error)"},
+	{9, "network failure (dead --proxy, unreachable sidecar, connection error, or an upstream HTTP error response)"},
 	{10, "local I/O failure (e.g. an unwritable output directory)"},
 	{130, "canceled (SIGINT)"},
 }

@@ -526,6 +526,9 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	if !req.NoFallback {
 		c.warnWebContextEndpointFailed(em, webCtxReason)
 	}
+	// A cancellation that ended the loop needs no check here: both callers run
+	// under Download or Stream, whose defers reclassify the aggregate and keep it
+	// as detail.
 	return nil, download.Result{}, "", causes.aggregate()
 }
 
@@ -678,6 +681,22 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 	return func(bw, total int64) { p(download.Progress{BytesWritten: bw, Total: total}) }
 }
 
+// cancelCause reclassifies a terminal error as the caller's cancellation, keeping
+// the original as message detail. Errors that already report the cancellation are
+// left alone. It covers the transfer paths (Download, Stream, and the readers
+// Stream hands back); Info and Enumerate report their own errors unchanged.
+//
+// It wraps ctx.Err() rather than joining, so a caller whose retry logic checks
+// ErrIncompleteStream first does not retry a download the user canceled. The
+// CLI's finalError deliberately joins instead; see its comment.
+func cancelCause(ctx context.Context, err error) error {
+	ce := ctx.Err()
+	if err == nil || ce == nil || errors.Is(err, ce) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ce, err)
+}
+
 // Download acquires and processes a single YouTube video to the configured sink.
 // It is strictly single-video: a playlist URL returns ErrIsPlaylist (use
 // Enumerate and loop).
@@ -698,7 +717,12 @@ func sabrProgress(p download.ProgressFunc) func(bytesWritten, total int64) {
 // pipeline, and finalizes to the sink.
 func (c *Client) Download(ctx context.Context, req Request) (res *Result, err error) {
 	em := newEmitter(req.Events, "")
-	defer func() { em.finish(res, err) }()
+	// Substitute before the terminal event so the event and the returned error
+	// agree on a canceled run.
+	defer func() {
+		err = cancelCause(ctx, err)
+		em.finish(res, err)
+	}()
 
 	id, err := youtube.ExtractVideoID(req.URL)
 	if err != nil {
@@ -975,8 +999,11 @@ func (c *Client) sponsorBlockTimeout(cs *CutSpec) (d time.Duration) {
 // counts are known only after the reader is drained and closed.
 func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, info StreamInfo, err error) {
 	em := newEmitter(req.Events, "")
+	// Substitute before the terminal event so the event and the returned error
+	// agree on a canceled run.
 	defer func() {
 		if err != nil {
+			err = cancelCause(ctx, err)
 			em.failed(err)
 		}
 	}()
@@ -1010,7 +1037,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 		return nil, StreamInfo{}, derr
 	}
 	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength, Client: a.client}
-	return &doneReader{ReadCloser: body, em: em}, info, nil
+	return &doneReader{ReadCloser: body, ctx: ctx, em: em}, info, nil
 }
 
 // streamProcessed stages and processes to a temp file, then returns a reader over
@@ -1039,7 +1066,7 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em
 	}
 	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver), Client: res.Client}
 	ok = true
-	return &dirCleanupReader{File: f, dir: jobDir, em: em}, info, nil
+	return &dirCleanupReader{File: f, dir: jobDir, ctx: ctx, em: em}, info, nil
 }
 
 // videoMetadataFor returns the requested result metadata, or nil when metadata
@@ -1074,11 +1101,11 @@ func (c *Client) watchPageMeta(ctx context.Context, id string) (youtube.WatchPag
 // publish date, and availability when Request.FullMetadata is set. It runs after
 // a successful acquisition so an ingest gets full metadata in one call. It is
 // best-effort: a failure leaves the base metadata (a completed download is never
-// failed for an enrichment error). It is skipped without IncludeMetadata (which
-// discards the result anyway), under NoFallback (which forbids the watch page),
-// and when extraction already scraped the watch page.
+// failed for an enrichment error). It is skipped without IncludeMetadata or
+// EmbedMetadata (nothing consumes the result), under NoFallback (which forbids
+// the watch page), and when extraction already scraped the watch page.
 func (c *Client) applyFullMetadata(ctx context.Context, req Request, a *acquired) {
-	if !req.FullMetadata || !req.IncludeMetadata || req.NoFallback || a == nil || a.video == nil {
+	if !req.FullMetadata || (!req.IncludeMetadata && !req.EmbedMetadata) || req.NoFallback || a == nil || a.video == nil {
 		return
 	}
 	if a.attempt == youtube.AttemptWatchPage {
@@ -1092,14 +1119,17 @@ func (c *Client) applyFullMetadata(ctx context.Context, req Request, a *acquired
 	mergeWatchPageMeta(a.video, meta)
 }
 
-// mergeWatchPageMeta merges a watch-page metadata pass into v: PublishDate only
-// when v left it zero (the primary client may already carry it), plus Chapters
-// and Availability. It is shared by the download and Info enrichment paths.
+// mergeWatchPageMeta merges a watch-page metadata pass into v. The pass backfills
+// what extraction left empty and never replaces it, so PublishDate and Chapters
+// are filled only when v carries none. Availability is unconditional because this
+// pass is its only source. It is shared by the download and Info enrichment paths.
 func mergeWatchPageMeta(v *youtube.Video, meta youtube.WatchPageMeta) {
 	if v.PublishDate.IsZero() {
 		v.PublishDate = meta.PublishDate
 	}
-	v.Chapters = meta.Chapters
+	if len(v.Chapters) == 0 {
+		v.Chapters = meta.Chapters
+	}
 	v.Availability = youtube.AvailabilityFromUnlisted(meta.Unlisted)
 }
 
@@ -1119,7 +1149,12 @@ type streamErr struct {
 	err error
 }
 
-func (s *streamErr) record(err error) {
+// record notes a read error. ctx is the request context the reader was built
+// with and is required: Stream has already returned by the time a read fails, so
+// the facade defer can never see this error and the terminal event would
+// otherwise be the one thing still reporting a transfer failure for a job the
+// user canceled.
+func (s *streamErr) record(ctx context.Context, err error) {
 	if err == nil || errors.Is(err, io.EOF) {
 		return
 	}
@@ -1128,6 +1163,9 @@ func (s *streamErr) record(err error) {
 	if isIncompleteDelivery(err) {
 		err = fmt.Errorf("%w: %v", ErrIncompleteStream, err)
 	}
+	// cancelCause wraps with %v, so a canceled run reports the cancellation and
+	// the sentinel just applied stops matching, exactly as at the facade.
+	err = cancelCause(ctx, err)
 	s.mu.Lock()
 	if s.err == nil {
 		s.err = err
@@ -1152,6 +1190,9 @@ func (s *streamErr) terminal(em *emitter) {
 // streaming path: Done on a clean read-to-EOF, Failed if a read error occurred.
 type doneReader struct {
 	io.ReadCloser
+	// ctx is the request context, held because Read carries none and a read that
+	// fails after cancellation must report the cancellation. Required.
+	ctx  context.Context
 	em   *emitter
 	errs streamErr
 	once sync.Once
@@ -1159,7 +1200,7 @@ type doneReader struct {
 
 func (r *doneReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
-	r.errs.record(err)
+	r.errs.record(r.ctx, err)
 	return n, err
 }
 
@@ -1173,7 +1214,9 @@ func (r *doneReader) Close() error {
 // fires the terminal event when closed (Failed if a read error occurred).
 type dirCleanupReader struct {
 	*os.File
-	dir  string
+	dir string
+	// ctx is the request context; see doneReader.ctx.
+	ctx  context.Context
 	em   *emitter
 	errs streamErr
 	once sync.Once
@@ -1181,7 +1224,7 @@ type dirCleanupReader struct {
 
 func (r *dirCleanupReader) Read(p []byte) (int, error) {
 	n, err := r.File.Read(p)
-	r.errs.record(err)
+	r.errs.record(r.ctx, err)
 	return n, err
 }
 

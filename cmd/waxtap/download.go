@@ -436,9 +436,11 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 			if err == nil {
 				return
 			}
-			if _, already := errors.AsType[*alreadyRenderedError](err); !already {
-				renderError(env.errOut, env.jsonMode(), err)
-			}
+			// Reclassify before rendering, or the document says incomplete stream
+			// while main exits 130 next to it. Nothing below returns an
+			// already-rendered error, so this is the only place it is written.
+			err = finalError(ctx, err)
+			renderError(env.errOut, env.jsonMode(), err)
 			err = alreadyRendered(err)
 		}()
 	}
@@ -679,7 +681,16 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 	} else {
 		spec.Output = waxtap.ToFile(outPath)
 	}
-	return waxtap.Request{URL: url, Audio: sel, SourcePolicy: policy, NoFallback: df.noFallback, ProcessSpec: spec}, nil
+	// Publish date and chapters come only from the watch-page pass, and both
+	// --embed-metadata and --write-info-json promise them.
+	return waxtap.Request{
+		URL:          url,
+		Audio:        sel,
+		SourcePolicy: policy,
+		NoFallback:   df.noFallback,
+		FullMetadata: df.embedMetadata || df.writeInfoJSON,
+		ProcessSpec:  spec,
+	}, nil
 }
 
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from

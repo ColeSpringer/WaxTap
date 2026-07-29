@@ -329,6 +329,45 @@ func TestClassifyError_SentinelBeatsStructural(t *testing.T) {
 	}
 }
 
+// An upstream service that answers with an error status is the same failure
+// class as one that cannot be reached; a script branching on 9 should not have to
+// care which happened.
+func TestClassifyError_HTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		hint   string
+	}{
+		{"server error", 500, "upstream service is failing"},
+		{"gateway timeout", 504, "upstream service is failing"},
+		{"request timeout", 408, "upstream service is failing"},
+		{"rejected request", 400, "may need an update"},
+		{"forbidden", 403, "may need an update"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &waxtap.HTTPStatusError{StatusCode: tc.status, URL: "https://sponsor.ajay.app/api/skipSegments?videoID=x"}
+			c := classifyError(err)
+			if c.exitCode != 9 || c.code != "network" {
+				t.Errorf("classify = %+v, want network/9", c)
+			}
+			if !strings.Contains(c.hint, tc.hint) {
+				t.Errorf("hint = %q, want it to contain %q", c.hint, tc.hint)
+			}
+			// The message attributes the service without leaking the URL.
+			if !strings.Contains(c.message, "SponsorBlock") || strings.Contains(c.message, "videoID") {
+				t.Errorf("message = %q, want the service named and the URL withheld", c.message)
+			}
+		})
+	}
+
+	// A domain sentinel still wins: an extraction failure carrying a bad status is
+	// a stale-parser signal, not a network one.
+	ext := &waxtap.ExtractionError{Stage: "player-response", Cause: &waxtap.HTTPStatusError{StatusCode: 500}}
+	if c := classifyError(ext); c.exitCode != 4 || c.code != "extraction-failed" {
+		t.Errorf("extraction-over-status = %+v, want extraction-failed/4", c)
+	}
+}
+
 // TestClassifyError_TimeoutConsistentAcrossPhases verifies that dial and read
 // deadlines share the timeout classification.
 func TestClassifyError_TimeoutConsistentAcrossPhases(t *testing.T) {
@@ -390,8 +429,60 @@ func TestFriendlyError_Sidecar429NamesSidecar(t *testing.T) {
 	if h := classifyError(sre).hint; !strings.Contains(h, "rate limit") {
 		t.Errorf("hint = %q, want a sidecar rate-limit advisory", h)
 	}
-	if yt := friendlyError(waxtap.ErrRateLimited); !strings.Contains(yt, "YouTube") {
-		t.Errorf("YouTube rate-limit msg = %q, want it to name YouTube", yt)
+}
+
+func TestFriendlyError_RateLimitNamesThrottlingHost(t *testing.T) {
+	rle := &waxtap.RateLimitError{Host: "127.0.0.1", RetryAfter: 30 * time.Second, StatusCode: 429}
+	msg := friendlyError(rle)
+	// The warning line from a throttled run names the host with its status code and
+	// the terminal message with its retry-after, so they match on the host alone.
+	if !strings.Contains(msg, "127.0.0.1") {
+		t.Errorf("msg = %q, want it to name the throttling host", msg)
+	}
+	if strings.Contains(msg, "YouTube") {
+		t.Errorf("msg = %q, want no hardcoded YouTube attribution", msg)
+	}
+	if c := classifyError(rle); c.exitCode != 5 || c.code != "rate-limited" {
+		t.Errorf("classify = %+v, want exit 5 and code rate-limited", c)
+	}
+}
+
+// A Ctrl-C mid-transfer must exit 130 whatever the in-flight failure reported.
+// The helper lives in output.go rather than main so this is reachable.
+func TestFinalError(t *testing.T) {
+	truncated := fmt.Errorf("%w: short chunk at offset 4096", waxtap.ErrIncompleteStream)
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got := finalError(canceled, truncated)
+	c := classifyError(got)
+	if c.exitCode != 130 || c.code != "canceled" {
+		t.Errorf("classify = %+v, want canceled/130", c)
+	}
+	if c.message != "canceled" || c.hint != "" {
+		t.Errorf("message = %q hint = %q, want a bare canceled message", c.message, c.hint)
+	}
+
+	// A live context leaves the failure and its exit code alone.
+	if c := classifyError(finalError(t.Context(), truncated)); c.exitCode != 7 {
+		t.Errorf("live-context classify = %+v, want incomplete-stream/7", c)
+	}
+	if finalError(canceled, nil) != nil {
+		t.Error("finalError(nil) must stay nil")
+	}
+	// An error that already reports the cancellation is left alone rather than
+	// joined onto a duplicate of itself.
+	plain := fmt.Errorf("download: %w", context.Canceled)
+	if got := finalError(canceled, plain); got != plain {
+		t.Errorf("err = %v, want the already-canceled error returned unwrapped", got)
+	}
+
+	// Joining, not wrapping: main still needs to see an already-rendered marker
+	// through the cancellation.
+	rendered := alreadyRendered(truncated)
+	if _, ok := errors.AsType[*alreadyRenderedError](finalError(canceled, rendered)); !ok {
+		t.Error("an alreadyRenderedError must survive the cancellation join")
 	}
 }
 

@@ -261,10 +261,13 @@ type Request struct {
 	// Read methods use WithNoFallback for the same behavior.
 	NoFallback bool
 
-	// FullMetadata runs a token-free watch-page pass during the download and fills
-	// Result.Metadata with the PublishDate and Chapters that the default /player
-	// client omits, so an ingest that needs them is one call instead of a separate
-	// Info(..., WithFullMetadata()) plus Download. It requires IncludeMetadata and is
+	// FullMetadata runs a token-free watch-page pass during the download, adding the
+	// PublishDate and Chapters that the default /player client omits, so an ingest
+	// that needs them is one call instead of a separate Info(..., WithFullMetadata())
+	// plus Download. It requires IncludeMetadata or EmbedMetadata, the two consumers
+	// of the enrichment, and feeds whichever is set: the fields reach Result.Metadata
+	// only with IncludeMetadata (which is what populates it at all) and the written
+	// tags only with EmbedMetadata. It is
 	// a no-op with NoFallback (which forbids the watch page). The extra fetch is
 	// skipped when extraction already scraped the watch page. Enrichment is
 	// best-effort: a failure leaves the base metadata and never fails the download.

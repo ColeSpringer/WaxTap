@@ -111,6 +111,7 @@ func (d *Downloader) streamToFile(ctx context.Context, shared *sharedSource, f *
 // first worker error cancels the rest; cancellation is returned even if workers
 // stop between spans without a fetch returning an error.
 func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f *tempfile.File, spans []chunkSpan, rep *progressReporter) error {
+	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -149,15 +150,24 @@ func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f
 	}
 	wg.Wait()
 
-	if firstErr != nil {
-		return firstErr
-	}
-	// Cancellation can stop workers between spans without any fetch returning an
-	// error, including when ctx was canceled before work started.
-	if err := ctx.Err(); err != nil {
+	// The caller's cancellation wins over a sibling's failure, which is usually
+	// that same cancellation surfacing as a truncated read. It is checked before
+	// firstErr because it can also stop workers between spans without any fetch
+	// returning an error, including when the caller canceled before work started.
+	// The derived ctx needs no separate check: it is only ever done because fail()
+	// ran, which sets firstErr.
+	//
+	// A pending failure that is not itself the cancellation is kept as message
+	// detail rather than dropped: a local write failure is not caused by a Ctrl-C,
+	// and while the cancellation still decides the class, discarding the cause
+	// would lose the only record of what went wrong.
+	if err := parent.Err(); err != nil {
+		if firstErr != nil && !errors.Is(firstErr, err) {
+			return fmt.Errorf("%w: %v", err, firstErr)
+		}
 		return err
 	}
-	return nil
+	return firstErr
 }
 
 // fetchChunkToFile fetches one span and writes it at its offset, retrying
@@ -213,10 +223,12 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 		// Remove partial bytes from progress before retrying this span.
 		rep.add(-n)
 		// Preserve cancellation and deadlines so callers do not retry the download
-		// with another client.
+		// with another client. copyErr is the truncated read the cancellation
+		// produced and its chain need not reach context.Canceled, so both are joined:
+		// the context error makes the class, copyErr keeps whatever it carries.
 		if ctx.Err() != nil {
 			if copyErr != nil {
-				return fmt.Errorf("download: chunk at offset %d: %w", span.start, copyErr)
+				return fmt.Errorf("download: chunk at offset %d: %w", span.start, errors.Join(ctx.Err(), copyErr))
 			}
 			return fmt.Errorf("download: chunk at offset %d: %w", span.start, ctx.Err())
 		}

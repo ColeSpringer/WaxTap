@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,6 +189,52 @@ func TestToFile_PersistentShortChunkIsIncomplete(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Error("no output file should remain after an incomplete download")
+	}
+	assertNoTempFiles(t, dir)
+}
+
+// cancelDuringShort truncates every range like shortAlways and cancels the
+// caller's context on the first request, so the transfer is mid-flight when the
+// signal lands and every chunk is both short and canceled.
+type cancelDuringShort struct {
+	shortAlways
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func (o *cancelDuringShort) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	o.once.Do(o.cancel)
+	o.shortAlways.ServeHTTP(w, r)
+}
+
+// A truncated transfer that the caller canceled is a cancellation, not an
+// incomplete stream: the CLI must exit 130, and a library caller must not retry
+// through another client.
+func TestToFile_CancelDuringTruncatedTransfer(t *testing.T) {
+	payload := makePayload(8000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(&cancelDuringShort{shortAlways: shortAlways{payload: payload}, cancel: cancel})
+	defer srv.Close()
+
+	d := newTestDownloader(1000, 4)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+
+	src := Source{URL: srv.URL, ContentLength: int64(len(payload))}
+	_, err := d.ToFile(ctx, src, path, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want no ErrIncompleteStream: the caller canceled", err)
+	}
+	// A pending failure that is the cancellation is not restated as its own detail.
+	if strings.Count(err.Error(), "context canceled") != 1 {
+		t.Errorf("err = %q, want the cancellation reported once", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("no output file should remain after a canceled download")
 	}
 	assertNoTempFiles(t, dir)
 }

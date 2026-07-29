@@ -5,7 +5,53 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/colespringer/waxtap/v3/youtube"
 )
+
+func TestMergeWatchPageMeta(t *testing.T) {
+	published := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	chapters := []youtube.Chapter{{Title: "Intro"}}
+
+	t.Run("fills what the client omitted", func(t *testing.T) {
+		v := &youtube.Video{}
+		mergeWatchPageMeta(v, youtube.WatchPageMeta{PublishDate: published, Chapters: chapters, Unlisted: true})
+		if !v.PublishDate.Equal(published) {
+			t.Errorf("PublishDate = %v, want %v", v.PublishDate, published)
+		}
+		if len(v.Chapters) != 1 {
+			t.Errorf("Chapters = %v, want the watch-page chapters", v.Chapters)
+		}
+		if v.Availability != youtube.AvailabilityUnlisted {
+			t.Errorf("Availability = %v, want unlisted", v.Availability)
+		}
+	})
+
+	// The pass backfills and never replaces, so what extraction supplied survives
+	// whether or not the watch page found its own.
+	t.Run("keeps existing values", func(t *testing.T) {
+		earlier := published.AddDate(-1, 0, 0)
+		for name, meta := range map[string]youtube.WatchPageMeta{
+			"watch page has none": {PublishDate: published},
+			"watch page has its own": {
+				PublishDate: published,
+				Chapters:    []youtube.Chapter{{Title: "Sponsor"}, {Title: "Outro"}},
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				v := &youtube.Video{PublishDate: earlier, Chapters: chapters}
+				mergeWatchPageMeta(v, meta)
+				if !v.PublishDate.Equal(earlier) {
+					t.Errorf("PublishDate = %v, want the client's %v preserved", v.PublishDate, earlier)
+				}
+				if len(v.Chapters) != 1 || v.Chapters[0].Title != "Intro" {
+					t.Errorf("Chapters = %v, want the client's chapters preserved", v.Chapters)
+				}
+			})
+		}
+	})
+}
 
 // TestEnrichEntriesCancellation covers the pre-canceled path: return
 // context.Canceled without making per-entry calls.

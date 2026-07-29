@@ -117,7 +117,7 @@ as `error.code`. Run `waxtap exit-codes` for the built-in table.
 | 6 | retired (formerly ffmpeg/ffprobe not found) |
 | 7 | incomplete stream or expired stream URL |
 | 8 | PO token required, missing, rejected, or not minted |
-| 9 | network failure, including an unreachable proxy or sidecar |
+| 9 | network failure, including an unreachable proxy or sidecar, or an upstream HTTP error response |
 | 10 | local I/O failure |
 | 130 | canceled with SIGINT |
 

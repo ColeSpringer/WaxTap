@@ -249,6 +249,79 @@ func TestSelectSourceIndex_PinsItagAcrossSwitch(t *testing.T) {
 	}
 }
 
+func TestCancelCause(t *testing.T) {
+	truncated := fmt.Errorf("%w: short chunk at offset 524288: got 12 bytes, want 4096", ErrIncompleteStream)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("canceled reclassifies", func(t *testing.T) {
+		err := cancelCause(canceled, truncated)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		// Wrapped, not joined: a caller whose retry logic checks the sentinel must
+		// not retry a download the user canceled.
+		if errors.Is(err, ErrIncompleteStream) {
+			t.Errorf("err = %v, want ErrIncompleteStream unmatchable after cancellation", err)
+		}
+		// The detail keeps naming the producing site in the message.
+		if !strings.Contains(err.Error(), "short chunk at offset 524288") {
+			t.Errorf("err = %q, want the masked detail retained", err)
+		}
+	})
+	t.Run("live context is untouched", func(t *testing.T) {
+		if err := cancelCause(context.Background(), truncated); !errors.Is(err, ErrIncompleteStream) {
+			t.Errorf("err = %v, want the incomplete stream preserved on a live context", err)
+		}
+	})
+	t.Run("already canceled is untouched", func(t *testing.T) {
+		in := fmt.Errorf("acquire: %w", context.Canceled)
+		if err := cancelCause(canceled, in); err != in {
+			t.Errorf("err = %v, want the input returned unwrapped", err)
+		}
+	})
+	t.Run("nil stays nil", func(t *testing.T) {
+		if err := cancelCause(canceled, nil); err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+	})
+}
+
+// The terminal event and the returned error must agree on a canceled run: the
+// substitution runs inside the same defer, before the emitter call.
+func TestDownload_CancellationReachesTerminalEvent(t *testing.T) {
+	c, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var failed error
+	// A missing Output fails at the facade with a plain error, no network, which is
+	// the shape the defer has to reclassify.
+	_, derr := c.Download(ctx, Request{
+		URL: "dummyVideo0",
+		ProcessSpec: ProcessSpec{
+			Events: func(e Event) {
+				if e.Stage == StageFailed {
+					failed = e.Err
+				}
+			},
+		},
+	})
+	if !errors.Is(derr, context.Canceled) {
+		t.Fatalf("returned err = %v, want context.Canceled", derr)
+	}
+	if failed == nil {
+		t.Fatal("no Failed event emitted")
+	}
+	if failed.Error() != derr.Error() {
+		t.Errorf("event err = %q, returned err = %q, want them to agree", failed, derr)
+	}
+}
+
 func TestStreamErr_RecordReclassifiesURLExpired(t *testing.T) {
 	var got error
 	em := newEmitter(func(e Event) {
@@ -258,10 +331,42 @@ func TestStreamErr_RecordReclassifiesURLExpired(t *testing.T) {
 	}, "vid")
 
 	var s streamErr
-	s.record(fmt.Errorf("mid-read: %w", ErrURLExpired))
+	s.record(t.Context(), fmt.Errorf("mid-read: %w", ErrURLExpired))
 	s.terminal(em)
 
 	if !errors.Is(got, ErrIncompleteStream) {
 		t.Fatalf("terminal err = %v, want ErrIncompleteStream", got)
+	}
+}
+
+// A late read failure under a canceled context is the cancellation, not a
+// truncated stream: Stream has already returned, so this event is the only place
+// that could claim otherwise.
+func TestStreamErr_RecordKeepsCancellation(t *testing.T) {
+	var got error
+	em := newEmitter(func(e Event) {
+		if e.Stage == StageFailed {
+			got = e.Err
+		}
+	}, "vid")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	var s streamErr
+	s.record(ctx, fmt.Errorf("mid-read: %w", ErrURLExpired))
+	s.terminal(em)
+
+	if errors.Is(got, ErrIncompleteStream) {
+		t.Fatalf("terminal err = %v, want no ErrIncompleteStream re-wrap", got)
+	}
+	// The event must say what happened, not just avoid saying the wrong thing: a
+	// listener branching on cancellation has only this event to go on, since
+	// Stream returned before the read failed.
+	if !errors.Is(got, context.Canceled) {
+		t.Fatalf("terminal err = %v, want context.Canceled", got)
+	}
+	if !strings.Contains(got.Error(), "mid-read") {
+		t.Errorf("terminal err = %q, want the read detail retained", got)
 	}
 }

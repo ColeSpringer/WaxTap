@@ -192,6 +192,26 @@ func alreadyRendered(cause error) error {
 	return &alreadyRenderedError{cause: cause}
 }
 
+// finalError makes a failure that followed a signal report as a cancellation.
+// Any error after the signal fired is treated as one, including an unrelated
+// failure from a moment earlier; the signal is the reason the process is exiting.
+// An error that already reports the cancellation is left alone.
+//
+// It joins rather than wrapping (unlike the library's cancelCause, which wraps to
+// mask ErrIncompleteStream from a caller's retry logic) so an
+// *alreadyRenderedError stays visible to errors.AsType; a single %w would hide it
+// and main would write a second error document next to the command's own. Nothing
+// here retries, and classifyError checks cancellation first, so the joined
+// sentinel cannot change the exit code. It joins ctx.Err() rather than a literal
+// context.Canceled: identical today, honest if a root deadline is ever wired in.
+func finalError(ctx context.Context, err error) error {
+	ce := ctx.Err()
+	if err == nil || ce == nil || errors.Is(err, ce) {
+		return err
+	}
+	return errors.Join(ce, err)
+}
+
 // jsonError is the --json error envelope.
 type jsonError struct {
 	SchemaVersion int `json:"schemaVersion"`
@@ -251,6 +271,7 @@ func classifyError(err error) classifiedError {
 	// Classify invalid sidecar responses by status, including responses wrapped in
 	// ErrNeedsPOToken.
 	sre, hasSidecarResp := errors.AsType[*waxtap.SidecarResponseError](err)
+	hse, hasHTTPStatus := errors.AsType[*waxtap.HTTPStatusError](err)
 	switch {
 	case errors.Is(err, context.Canceled):
 		c.exitCode, c.code = 130, "canceled"
@@ -339,6 +360,10 @@ func classifyError(err error) classifiedError {
 		c.hint = sidecarAuthHint(sre.StatusCode)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
+	// An upstream service that answers with an error status is the same failure
+	// class as one that cannot be reached; only the hint differs.
+	case hasHTTPStatus:
+		c.exitCode, c.code, c.hint = 9, "network", httpStatusHint(hse.StatusCode)
 	case isConnectionError(err):
 		c.exitCode, c.code, c.hint = 9, "network", "check network connectivity and any configured provider URLs"
 	// Only output failures receive output-directory guidance.
@@ -438,6 +463,13 @@ func friendlyError(err error) string {
 	if sre, ok := errors.AsType[*waxtap.SidecarResponseError](err); ok {
 		return sre.Error()
 	}
+	// A 429 can come from SponsorBlock or a sidecar as well as YouTube. The typed
+	// error names the throttling host and carries no URL, so it is safe to surface.
+	// Every rate-limit failure is this type (httpx builds it on every 429 exit
+	// path), so there is no bare-sentinel case in the switch below.
+	if rle, ok := errors.AsType[*waxtap.RateLimitError](err); ok {
+		return rle.Error() + "; back off and retry later"
+	}
 	// A typed playlist-unavailable error carries YouTube's own reason (no URL), so
 	// surface it. The bare wrapped sentinel from a browse 403/404 embeds the
 	// internal endpoint URL and is handled by the switch with a fixed message.
@@ -464,8 +496,6 @@ func friendlyError(err error) string {
 		return "Shorts shelf playlists aren't supported because YouTube doesn't expose them as a complete list; use the channel's uploads playlist instead (replace the leading UUSH with UU)"
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
-	case errors.Is(err, waxtap.ErrRateLimited):
-		return "rate limited by YouTube; back off and retry later"
 	case errors.Is(err, waxtap.ErrIncompleteStream):
 		return "the download ended before the full stream was received"
 	case errors.Is(err, waxtap.ErrURLExpired):
@@ -504,6 +534,17 @@ func httpStatusSource(rawURL string) string {
 	default:
 		return "the server"
 	}
+}
+
+// httpStatusHint gives class-appropriate guidance for an unexpected upstream
+// status. 5xx and 408 mean the endpoint is failing; anything else means it
+// answered and rejected the request, which is a staleness signal, not a
+// connectivity one.
+func httpStatusHint(status int) string {
+	if status >= 500 || status == http.StatusRequestTimeout {
+		return "the upstream service is failing; retry later"
+	}
+	return "the endpoint rejected the request; if it persists, WaxTap may need an update"
 }
 
 // configSymbolReplacer maps Go option field names in ErrInvalidConfig templates

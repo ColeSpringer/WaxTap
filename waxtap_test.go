@@ -321,7 +321,7 @@ func (e *errReadCloser) Close() error { return nil }
 func TestDoneReaderEmitsDoneOnCleanRead(t *testing.T) {
 	var got []Event
 	em := newEmitter(func(e Event) { got = append(got, e) }, "v")
-	r := &doneReader{ReadCloser: &errReadCloser{data: []byte("abc"), err: io.EOF}, em: em}
+	r := &doneReader{ReadCloser: &errReadCloser{data: []byte("abc"), err: io.EOF}, ctx: t.Context(), em: em}
 
 	if _, err := io.ReadAll(r); err != nil {
 		t.Fatalf("ReadAll: %v", err)
@@ -338,7 +338,7 @@ func TestDoneReaderEmitsFailedOnReadError(t *testing.T) {
 	var got []Event
 	em := newEmitter(func(e Event) { got = append(got, e) }, "v")
 	boom := errors.New("network stall")
-	r := &doneReader{ReadCloser: &errReadCloser{data: []byte("abc"), err: boom}, em: em}
+	r := &doneReader{ReadCloser: &errReadCloser{data: []byte("abc"), err: boom}, ctx: t.Context(), em: em}
 
 	// Drain; the reader surfaces the error instead of EOF.
 	_, _ = io.ReadAll(r)

@@ -187,6 +187,58 @@ func TestCollectAudioInputs(t *testing.T) {
 			t.Errorf("ignored = %d, want 1 (skip.txt)", ignored)
 		}
 	})
+
+	// macOS AppleDouble stubs carry an audio extension but no audio, and would
+	// otherwise fail a batch that processed every real file.
+	t.Run("skips hidden files", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, "Track.wav", "._Track.wav", ".hidden.flac", ".DS_Store")
+		inputs, ignored, err := collectAudioInputs(dir, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(dir, "Track.wav")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v", inputs, want)
+		}
+		if ignored != 3 { // ._Track.wav, .hidden.flac, .DS_Store
+			t.Errorf("ignored = %d, want 3 (hidden files counted, not dropped)", ignored)
+		}
+	})
+
+	t.Run("recursive does not descend hidden directories", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, "Track.wav", ".Trashes/x.mp3", ".Trashes/z.mp3", "sub/y.mp3", "sub/notes.txt")
+		inputs, ignored, err := collectAudioInputs(dir, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(dir, "Track.wav"), filepath.Join(dir, "sub", "y.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (.Trashes not descended)", inputs, want)
+		}
+		// A skipped directory's contents are not walked, so they are not counted;
+		// only notes.txt is.
+		if ignored != 1 {
+			t.Errorf("ignored = %d, want 1 (.Trashes contents are never visited)", ignored)
+		}
+	})
+
+	// Naming a hidden directory still processes it: only entries below the root
+	// are skipped.
+	t.Run("recursive hidden root still walks", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, ".music/a.mp3", ".music/nested/b.mp3")
+		root := filepath.Join(dir, ".music")
+		inputs, _, err := collectAudioInputs(root, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(root, "a.mp3"), filepath.Join(root, "nested", "b.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (a hidden root the user named still walks)", inputs, want)
+		}
+	})
 }
 
 // stubProbe returns codecs keyed by file basename.

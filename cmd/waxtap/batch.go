@@ -32,6 +32,15 @@ var audioExts = map[string]bool{
 // recursive walk so an output directory beneath root is not processed as input.
 // Unrecognized regular files contribute to ignored; directories and other file
 // types do not.
+//
+// A walk skips hidden entries: macOS writes AppleDouble stubs (._Track.wav) that
+// carry an audio extension but no audio, and metadata directories (.Trashes,
+// .Spotlight-V100) hold more of them. A hidden file the walk reaches counts as
+// ignored; a hidden directory is skipped whole and its contents are not counted,
+// since descending a metadata directory to tally it would be work spent to
+// inflate a number. Naming a hidden directory as root still walks it, the same
+// escape hatch audioExts documents; a hidden file named directly never reaches
+// here, since only a directory argument starts a batch.
 func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs []string, ignored int, err error) {
 	absRoot, _ := filepath.Abs(root)
 	absExclude := ""
@@ -43,6 +52,12 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 	consider := func(path string, d fs.DirEntry) {
 		if !d.Type().IsRegular() {
 			return // skip symlinks, devices, and directories
+		}
+		// A dotfile is counted, not silently dropped: it was present and not
+		// processed, the same as a file with an unrecognized extension.
+		if strings.HasPrefix(d.Name(), ".") {
+			ignored++
+			return
 		}
 		if audioExts[strings.ToLower(filepath.Ext(path))] {
 			inputs = append(inputs, path)
@@ -65,6 +80,14 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 				return walkErr
 			}
 			if d.IsDir() {
+				// A hidden directory is skipped whole, but only below the root: the
+				// user may have named a hidden directory (or "." itself, whose
+				// d.Name() is "."). The comparison is exact because WalkDir passes
+				// root verbatim for the root entry and filepath.Join, which cleans,
+				// for every child.
+				if path != root && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
 				if absExclude != "" {
 					if a, _ := filepath.Abs(path); a == absExclude {
 						return filepath.SkipDir

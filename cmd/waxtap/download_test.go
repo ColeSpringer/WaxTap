@@ -45,6 +45,34 @@ func TestResolveValidatesProcessSpec(t *testing.T) {
 	}
 }
 
+// Publish date and chapters come only from the watch-page pass, so the flags that
+// promise them have to turn it on.
+func TestBuildRequestFullMetadata(t *testing.T) {
+	cases := []struct {
+		name string
+		df   *downloadFlags
+		want bool
+	}{
+		{"embed-metadata", &downloadFlags{embedMetadata: true}, true},
+		{"write-info-json", &downloadFlags{writeInfoJSON: true}, true},
+		{"both", &downloadFlags{embedMetadata: true, writeInfoJSON: true}, true},
+		{"neither", &downloadFlags{}, false},
+		// A thumbnail carries no date or chapters, so it buys no extra fetch.
+		{"embed-thumbnail only", &downloadFlags{embedThumbnail: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := tc.df.buildRequest("dummyVideo0", "out.opus")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.FullMetadata != tc.want {
+				t.Errorf("FullMetadata = %v, want %v", req.FullMetadata, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildCutSpecValidatesCutModeWithoutRanges ensures invalid input fails
 // before extraction, even when no cut ranges are configured.
 func TestBuildCutSpecValidatesCutModeWithoutRanges(t *testing.T) {
