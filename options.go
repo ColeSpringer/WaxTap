@@ -74,6 +74,11 @@ type Options struct {
 	// context's visitorData); New rejects a configuration without one, because
 	// the token mint happens at SABR setup, past the fallback boundary. Nil
 	// leaves WaxTap on its default chain.
+	//
+	// A provider that also implements [potoken.SessionInvalidator] is told when
+	// its contexts keep delivering capped streams, so it can retire the session
+	// behind them and mint later contexts from a fresh one.
+	// [NewSidecarPlayerContextProvider] implements it.
 	PlayerContextProvider PlayerContextProvider
 
 	// Client, when non-empty, forces a single built-in client as the whole
@@ -97,12 +102,19 @@ type Options struct {
 	// synthetic visitorData. Adopted cookies need an HTTPClient with a cookie jar;
 	// login cookies are dropped (adoption assumes a guest session). The adopted
 	// session is resolved once per Client, so long-running services should recreate
-	// the Client per task. Mutually exclusive with SessionProvider.
+	// the Client per task. It also cannot be replaced when googlevideo caps
+	// delivery on it; use SessionProvider for that. Mutually exclusive with
+	// SessionProvider.
 	Session *POTokenSession
 
 	// SessionProvider resolves the adopted guest identity lazily, at most once per
 	// Client (cached on success). It is the pull-based form of Session and shares
 	// its uniform-chain requirement. Mutually exclusive with Session.
+	//
+	// A provider that also implements [potoken.SessionInvalidator] can replace its
+	// session mid-download when googlevideo caps delivery on it; without that, a
+	// capped session has no escape and the download fails.
+	// [NewSidecarSessionProvider] implements it.
 	SessionProvider POTokenSessionProvider
 }
 

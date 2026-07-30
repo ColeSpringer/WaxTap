@@ -1279,3 +1279,161 @@ func sabrPlayerJSONForFmts(client, formats string) string {
   "videoDetails": {"videoId": "dummyVideo0", "title": "Fallback", "lengthSeconds": "1", "author": "T"}
 }`, client, formats)
 }
+
+// reportingContextProvider supplies attested contexts stamped with a session
+// generation and records the session reports it receives, like a WaxSeal
+// sidecar's /player-context + /report pair. vpRound counts /videoplayback
+// requests within the current context so the fake transport can cap each one.
+type reportingContextProvider struct {
+	mu      sync.Mutex
+	gen     uint64
+	calls   int
+	vpRound int
+	reports []potoken.SessionInvalidation
+}
+
+func (p *reportingContextProvider) ProvidePlayerContext(context.Context, string) (potoken.PlayerContext, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	p.vpRound = 0
+	pc := iosPlayerContext()
+	pc.Generation = p.gen
+	return pc, nil
+}
+
+func (p *reportingContextProvider) InvalidateSession(_ context.Context, inv potoken.SessionInvalidation) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reports = append(p.reports, inv)
+	return nil
+}
+
+// nextRound advances and returns the /videoplayback round within the current
+// context.
+func (p *reportingContextProvider) nextRound() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.vpRound++
+	return p.vpRound
+}
+
+func (p *reportingContextProvider) snapshot() (calls int, reports []potoken.SessionInvalidation) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls, append([]potoken.SessionInvalidation(nil), p.reports...)
+}
+
+// cappedContextTransport serves capped web-context streams (no c= marker on the
+// context URL) and a complete ANDROID_VR chain fallback (c=android).
+func cappedContextTransport(p *reportingContextProvider, capped, happy []byte) roundTripFn {
+	return func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR delivers fully
+				return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.RawQuery, "c=android"):
+			return resp(http.StatusOK, happy), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			// The attested context's URL carries no c= marker. Every context caps:
+			// one partial round, then nothing.
+			if p.nextRound() == 1 {
+				return resp(http.StatusOK, capped), nil
+			}
+			return resp(http.StatusOK, nil), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	}
+}
+
+// TestFacade_WebContextSecondCapReportsSession is the SABR delivery-cap escape:
+// when the fresh-context retry caps too, the session behind the provider is
+// reported for replacement and the download completes through the fallback
+// chain.
+func TestFacade_WebContextSecondCapReportsSession(t *testing.T) {
+	init, media := []byte("INIT"), []byte("MEDIA")
+	p := &reportingContextProvider{gen: 7}
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: cappedContextTransport(p, fSabrBody(init, media, 2), fSabrHappyBody(init, media))},
+		PlayerContextProvider: p,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if derr != nil {
+		t.Fatalf("download should complete through the fallback chain: %v", derr)
+	}
+	if res.Client != "ANDROID_VR" {
+		t.Errorf("Result.Client = %q, want ANDROID_VR", res.Client)
+	}
+	want := append(append([]byte{}, init...), media...)
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+
+	calls, reports := p.snapshot()
+	if calls != 2 {
+		t.Errorf("player-context fetches = %d, want 2 (initial + one retry)", calls)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("session reports = %d, want 1 (only the second cap reports)", len(reports))
+	}
+	if got := reports[0]; got.Generation != 7 || got.VideoID != "dummyVideo0" || got.Reason != "stream-capped" {
+		t.Errorf("report = %+v, want generation 7 for dummyVideo0 with reason stream-capped", got)
+	}
+
+	var fallbackDetail string
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnWebContextFallback {
+			fallbackDetail = w.Detail
+		}
+	}
+	if !strings.Contains(fallbackDetail, "reported to the provider") {
+		t.Errorf("WarnWebContextFallback detail = %q, want it to mention the session report", fallbackDetail)
+	}
+}
+
+// TestFacade_WebContextSecondCapReportsUnderNoFallback pins that the report
+// fires before the --no-fallback stop: the download still fails, but the
+// session is retired for the next one.
+func TestFacade_WebContextSecondCapReportsUnderNoFallback(t *testing.T) {
+	init, media := []byte("INIT"), []byte("MEDIA")
+	p := &reportingContextProvider{gen: 7}
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: cappedContextTransport(p, fSabrBody(init, media, 2), fSabrHappyBody(init, media))},
+		PlayerContextProvider: p,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		NoFallback:  true,
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if !errors.Is(derr, waxtap.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream under --no-fallback", derr)
+	}
+	_, reports := p.snapshot()
+	if len(reports) != 1 {
+		t.Fatalf("session reports = %d, want 1 (the report must precede the no-fallback stop)", len(reports))
+	}
+	if reports[0].Generation != 7 {
+		t.Errorf("reported generation = %d, want 7", reports[0].Generation)
+	}
+}

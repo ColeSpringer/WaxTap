@@ -87,9 +87,17 @@ type rotationWorld struct {
 	mu           sync.Mutex
 	media        string
 	extraQuery   string
+	flaggedVD    string // visitorData googlevideo caps; defaults to the first guest identity
 	homepageHits int
 	vdServed     []string // visitorData observed on media requests, in order
 	mediaCodes   []int    // status answered for each media request
+}
+
+func (w *rotationWorld) flagged() string {
+	if w.flaggedVD != "" {
+		return w.flaggedVD
+	}
+	return "ROT_VD_1"
 }
 
 func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
@@ -115,7 +123,7 @@ func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
 		case strings.Contains(r.URL.Path, "/videoplayback"):
 			vd := r.URL.Query().Get("vd")
 			w.vdServed = append(w.vdServed, vd)
-			if vd == "ROT_VD_1" {
+			if vd == w.flagged() {
 				w.mediaCodes = append(w.mediaCodes, http.StatusForbidden)
 				return rotResp(http.StatusForbidden, ""), nil
 			}
@@ -227,5 +235,103 @@ func TestDownload_NoRotationOnExpiry403(t *testing.T) {
 		if vd != "ROT_VD_1" {
 			t.Errorf("media request carried %q; the identity must stay ROT_VD_1 without rotation", vd)
 		}
+	}
+}
+
+// rotationSessionProvider is a WaxSeal-style session sidecar: it hands out
+// numbered guest identities and retires the one a consumer reports.
+type rotationSessionProvider struct {
+	mu      sync.Mutex
+	served  int
+	reports []potoken.SessionInvalidation
+}
+
+func (p *rotationSessionProvider) ProvideSession(context.Context) (potoken.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.served++
+	return potoken.Session{
+		VisitorData: fmt.Sprintf("ADOPT_VD_%d", p.served),
+		Generation:  uint64(p.served),
+		Cookies:     []*http.Cookie{{Name: "VISITOR_INFO1_LIVE", Value: fmt.Sprintf("vi-%d", p.served), Domain: ".youtube.com", Path: "/"}},
+	}, nil
+}
+
+func (p *rotationSessionProvider) InvalidateSession(_ context.Context, inv potoken.SessionInvalidation) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reports = append(p.reports, inv)
+	return nil
+}
+
+// TestDownload_RotatesAdoptedSessionOnEarly403 is the delivery-cap escape for a
+// session-mediated download: the adopted identity's URL 403s while nowhere near
+// expiry, the refresh reports it to the provider instead of re-signing it, and
+// the download completes under the replacement the provider hands out.
+func TestDownload_RotatesAdoptedSessionOnEarly403(t *testing.T) {
+	w := &rotationWorld{media: strings.Repeat("M", 4096), flaggedVD: "ADOPT_VD_1"}
+	p := &rotationSessionProvider{}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{
+		HTTPClient:       &http.Client{Jar: jar, Transport: w.roundTrip(t)},
+		Client:           "android_vr",
+		DisableDiskCache: true,
+		SessionProvider:  p,
+		Retry:            RetryPolicy{MaxRetries: 1, BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "out.webm")
+	res, err := c.Download(context.Background(), Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: ProcessSpec{Output: ToFile(out)},
+	})
+	if err != nil {
+		t.Fatalf("download should recover by rotating the adopted session: %v", err)
+	}
+	if res.OutputBytes != 4096 {
+		t.Errorf("OutputBytes = %d, want 4096", res.OutputBytes)
+	}
+
+	if w.homepageHits != 0 {
+		t.Errorf("homepage hits = %d, want 0 (an adopted session must never bootstrap)", w.homepageHits)
+	}
+	if p.served != 2 {
+		t.Errorf("sessions served = %d, want 2 (one per identity)", p.served)
+	}
+	if len(p.reports) != 1 {
+		t.Fatalf("invalidations = %d, want 1", len(p.reports))
+	}
+	if got := p.reports[0]; got.Generation != 1 || got.VideoID != "dummyVideo0" {
+		t.Errorf("invalidation = %+v, want generation 1 for dummyVideo0", got)
+	}
+
+	var sawFlagged403, sawFreshOK bool
+	for i, vd := range w.vdServed {
+		if vd == "ADOPT_VD_1" && w.mediaCodes[i] == http.StatusForbidden {
+			sawFlagged403 = true
+		}
+		if vd == "ADOPT_VD_2" && w.mediaCodes[i] == http.StatusOK {
+			sawFreshOK = true
+		}
+	}
+	if !sawFlagged403 || !sawFreshOK {
+		t.Errorf("media sequence = %v %v; want a 403 for ADOPT_VD_1 then a 200 for ADOPT_VD_2", w.vdServed, w.mediaCodes)
+	}
+
+	var rotated bool
+	for _, warn := range res.Warnings {
+		if warn.Code == WarnSessionRotated {
+			rotated = true
+		}
+	}
+	if !rotated {
+		t.Errorf("Warnings = %v, want WarnSessionRotated", res.Warnings)
 	}
 }

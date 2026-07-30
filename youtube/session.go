@@ -38,6 +38,13 @@ type session struct {
 	// source records the provenance of visitorData; an adopted value is never
 	// overwritten or cleared (see learnVisitorData / resetPOBinding).
 	source visitorSource
+	// identityGen is the rotation generation the visitorData was resolved
+	// under, captured while the resolving lock was held. Stamping extractions
+	// from it (rather than re-reading the counter later) keeps a rotation that
+	// lands mid-extraction from tagging the extraction with the replacement's
+	// generation, which would let its 403s retire the innocent replacement
+	// (see Client.RotateIdentity).
+	identityGen uint64
 }
 
 // newSession starts a per-attempt session for the given content region. It

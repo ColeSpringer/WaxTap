@@ -127,16 +127,54 @@ func (f ProviderFunc) ProvidePOToken(ctx context.Context, req Request) (Response
 type Session struct {
 	VisitorData string         // exact X-Goog-Visitor-Id literal
 	Cookies     []*http.Cookie // guest-session cookies associated with VisitorData
+	// Generation names this session at the provider, so WaxTap can report it
+	// unusable through [SessionInvalidator]. It is opaque to WaxTap and echoed
+	// back verbatim. Zero means the provider does not version its sessions,
+	// which leaves the session unreportable.
+	Generation uint64
 }
 
 // SessionProvider supplies a guest Session on demand. WaxTap resolves it once per
-// Client and reuses the result for that Client's lifetime, so the adopted
-// visitorData never changes mid-extraction; long-running services should recreate
-// the Client per task to pick up a fresh session. Implementations must honor ctx
-// cancellation and should be safe for concurrent use.
+// Client and reuses the result, so the adopted visitorData never changes
+// mid-extraction. A provider that also implements [SessionInvalidator] can have
+// that cached result dropped and re-resolved when the adopted session stops
+// delivering; without it the session is fixed for the Client's lifetime and
+// long-running services should recreate the Client per task to pick up a fresh
+// one. Implementations must honor ctx cancellation and should be safe for
+// concurrent use.
 type SessionProvider interface {
 	// ProvideSession returns the guest identity WaxTap should adopt.
 	ProvideSession(ctx context.Context) (Session, error)
+}
+
+// SessionInvalidation names the session being reported unusable and why.
+type SessionInvalidation struct {
+	Generation uint64 // Session.Generation of the session to retire
+	VideoID    string // video whose download failed, for provider diagnostics; may be empty
+	Reason     string // short machine-readable cause, e.g. "delivery-cap"
+}
+
+// SessionInvalidator is an optional interface a [SessionProvider] or
+// [PlayerContextProvider] may implement so WaxTap can report a session whose
+// delivery degraded and have the provider replace it.
+//
+// googlevideo caps stream delivery for a small share of guest sessions: direct
+// URLs answer empty-body 403 past roughly the first 1 MB, and attested SABR
+// streams end at a preview cap; both survive re-resolves under the same
+// identity. Only a different identity escapes. WaxTap discards a guest identity
+// it bootstrapped itself, but a provider-owned session is load-bearing for
+// PO-token content binding, so it is reported here rather than dropped
+// unilaterally.
+//
+// Returning nil means the named session is retired and the provider's next
+// session or context comes from a different one; for an adopted session WaxTap
+// also drops its cached adoption. Return an error for a failure the provider
+// could not act on, such as a rate-limited or unreachable backend; WaxTap then
+// keeps the current session. Naming an already-replaced session is not an
+// error.
+type SessionInvalidator interface {
+	// InvalidateSession retires the session named by inv.
+	InvalidateSession(ctx context.Context, inv SessionInvalidation) error
 }
 
 // HTTPFailure is a compact snapshot of the HTTP failure that triggered a token

@@ -213,10 +213,21 @@ If present, `playability_status` must be `OK`.
 `player_url` is needed when the streaming URL's `n` parameter must be
 descrambled. Format entries require enough identity to select and request the
 audio, especially `itag`, `lmt`, `xtags`, and `mime_type`; richer quality,
-duration, DRC, and track fields are optional.
+duration, DRC, and track fields are optional. An optional `session_generation`
+names the daemon session behind the context.
 
 `--player-context-url` requires `--potoken-url`, and the context mint and
 download must share an egress IP because the signed URL is IP-bound.
+
+When an attested stream caps and the once-retried fresh context caps too, the
+session itself is suspect: WaxTap POSTs
+`{"session_generation","video_id","reason":"stream-capped"}` to the `/report`
+sibling of the player-context endpoint, then continues down the fallback chain.
+The report retires the daemon session so the next download's context comes from
+a fresh one. The `/report` response contract is the one in the session-adoption
+section: 200 with a JSON object, and `retry_after_seconds` refuses the report.
+A context without `session_generation` is never reported; an endpoint without
+`/report` fails each report (404) and the session stays.
 
 ### Session adoption
 
@@ -233,11 +244,21 @@ waxtap download <url> --client web \
   --potoken-url http://127.0.0.1:4417
 ```
 
-The `/session` response contains the exact `visitor_data` literal and optional
-cookies. The camelCase key `visitorData` is also accepted. Adoption requires a
-single-client chain and drops login cookies. The session is resolved once per
-`Client`, and adoption failures are fatal. The minter and download must share
-an egress IP.
+The `/session` response contains the exact `visitor_data` literal, optional
+cookies, and an optional `session_generation` naming the session. The camelCase
+keys `visitorData` and `sessionGeneration` are also accepted. Adoption requires
+a single-client chain and drops login cookies. Adoption failures are fatal. The
+minter and download must share an egress IP.
+
+When googlevideo caps delivery on the adopted session (empty-body 403 past
+roughly 1 MB, well before the URL expires), WaxTap POSTs
+`{"session_generation","video_id","reason"}` to the `/report` sibling of the
+session endpoint, then re-resolves `/session` for the replacement. `/report`
+must answer 200 with a JSON object; an empty body, a 204, or a response
+carrying `retry_after_seconds` counts as a refusal and the session is kept. A
+minter that omits `session_generation` is never reported; one without `/report`
+fails each report (404). Either way a capped session cannot be rotated and the
+download fails.
 
 ## SABR audio
 

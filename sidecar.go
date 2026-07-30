@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -70,12 +71,21 @@ func NewSidecarPOTokenProvider(baseURL string, opts ...SidecarOption) (POTokenPr
 //
 // The client imposes no timeout of its own; calls rely on [Timeouts.WebContext].
 // Like the token provider it ignores [Options.HTTPClient] and is never proxied.
+//
+// The provider also implements [potoken.SessionInvalidator] against the /report
+// sibling of that endpoint, so a session whose attested contexts deliver capped
+// streams can be retired.
 func NewSidecarPlayerContextProvider(baseURL string, opts ...SidecarOption) (PlayerContextProvider, error) {
 	endpoint, err := buildSidecarURL(baseURL, "/player-context")
 	if err != nil {
 		return nil, err
 	}
-	return newPlayerContextProvider(endpoint, applySidecarOptions(opts).apiKey), nil
+	cfg := applySidecarOptions(opts)
+	rep, err := newSidecarReporter(endpoint, "player-context report endpoint", cfg.apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return newPlayerContextProvider(endpoint, cfg.apiKey, rep), nil
 }
 
 // NewSidecarSessionProvider returns a POTokenSessionProvider that adopts a guest
@@ -87,12 +97,93 @@ func NewSidecarPlayerContextProvider(baseURL string, opts ...SidecarOption) (Pla
 // The provider uses a dedicated 30s-timeout, no-redirect client that ignores
 // [Options.HTTPClient]: full WEB validation requires the session host and the
 // downloads to share an egress IP.
+// The provider also implements [potoken.SessionInvalidator] against the /report
+// sibling of that endpoint, so a session googlevideo has capped can be retired
+// and replaced mid-download.
 func NewSidecarSessionProvider(baseURL string, opts ...SidecarOption) (POTokenSessionProvider, error) {
 	endpoint, err := buildSidecarURL(baseURL, "/session")
 	if err != nil {
 		return nil, err
 	}
-	return newHTTPSessionProvider(endpoint, applySidecarOptions(opts).apiKey), nil
+	cfg := applySidecarOptions(opts)
+	rep, err := newSidecarReporter(endpoint, "session report endpoint", cfg.apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return newHTTPSessionProvider(endpoint, cfg.apiKey, rep), nil
+}
+
+// siblingSidecarURL rewrites endpoint's last path segment to name, deriving one
+// sidecar endpoint from another the caller configured. Cleaning first keeps a
+// trailing slash on the configured endpoint from shifting the sibling down a
+// level ("/api/session/" must still yield "/api/report").
+func siblingSidecarURL(endpoint, name string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	u.Path = path.Join(path.Dir(path.Clean(u.Path)), name)
+	return u.String(), nil
+}
+
+// sidecarReporter posts session-degradation reports to the POST /report sibling
+// of a configured sidecar endpoint (WaxSeal's contract). The session and
+// player-context providers both delegate their InvalidateSession to one.
+type sidecarReporter struct {
+	endpoint string
+	label    string // identifies the owning provider in errors
+	apiKey   string
+	http     *http.Client
+}
+
+// newSidecarReporter derives the /report sibling of sourceEndpoint, which has
+// already been validated by buildSidecarURL.
+func newSidecarReporter(sourceEndpoint, label, apiKey string) (sidecarReporter, error) {
+	endpoint, err := siblingSidecarURL(sourceEndpoint, "report")
+	if err != nil {
+		return sidecarReporter{}, err
+	}
+	return sidecarReporter{
+		endpoint: endpoint,
+		label:    label,
+		apiKey:   apiKey,
+		http:     newSidecarClient(30 * time.Second),
+	}, nil
+}
+
+// invalidate reports the session named by inv so the sidecar retires it.
+//
+// A rate-limited report is an error: the sidecar is asking for backoff, and
+// acting as if the session were retired would re-adopt the same one. The
+// accepted field is not consulted, because a report the sidecar rejects as
+// stale means the session is already gone, which is the outcome asked for.
+func (r sidecarReporter) invalidate(ctx context.Context, inv potoken.SessionInvalidation) error {
+	// A missing generation is a local precondition failure, not an endpoint
+	// response, so it is not a SidecarResponseError.
+	if inv.Generation == 0 {
+		return fmt.Errorf("%s: no session_generation to report (the sidecar's session or context response omitted it)", r.label)
+	}
+	body := map[string]any{"session_generation": inv.Generation}
+	if inv.VideoID != "" {
+		body["video_id"] = inv.VideoID
+	}
+	if inv.Reason != "" {
+		body["reason"] = inv.Reason
+	}
+	var doc struct {
+		RetryAfterSeconds int `json:"retry_after_seconds"`
+	}
+	if err := sidecarJSON(ctx, r.http, http.MethodPost, r.endpoint, r.label, r.apiKey, body, &doc); err != nil {
+		return err
+	}
+	if doc.RetryAfterSeconds > 0 {
+		return &SidecarResponseError{
+			Label:    r.label,
+			Endpoint: r.endpoint,
+			Reason:   fmt.Sprintf("session recycling is rate-limited; retry in %ds", doc.RetryAfterSeconds),
+		}
+	}
+	return nil
 }
 
 // validateHTTPBaseURL parses base and requires an http or https scheme and a
@@ -394,17 +485,25 @@ type playerContextProvider struct {
 	endpoint string
 	apiKey   string
 	http     *http.Client
+	reporter sidecarReporter
 }
 
 // newPlayerContextProvider builds a provider for a player-context endpoint that
 // has already been validated by buildSidecarURL. Calls rely on the library's
 // Timeouts.WebContext deadline, so the HTTP client does not impose another one.
-func newPlayerContextProvider(endpoint, apiKey string) *playerContextProvider {
+func newPlayerContextProvider(endpoint, apiKey string, rep sidecarReporter) *playerContextProvider {
 	return &playerContextProvider{
 		endpoint: endpoint,
 		apiKey:   apiKey,
 		http:     newSidecarClient(0),
+		reporter: rep,
 	}
+}
+
+// InvalidateSession reports the session behind a capped context so the sidecar
+// retires it and mints later contexts from a fresh one.
+func (p *playerContextProvider) InvalidateSession(ctx context.Context, inv potoken.SessionInvalidation) error {
+	return p.reporter.invalidate(ctx, inv)
 }
 
 type playerContextRequest struct {
@@ -426,6 +525,9 @@ type playerContextResponse struct {
 	Author                       string                    `json:"author"`
 	LengthSeconds                int                       `json:"length_seconds"`
 	AudioFormats                 []playerContextFormatJSON `json:"audio_formats"`
+	// SessionGeneration names the daemon session for /report; absent leaves the
+	// session unreportable.
+	SessionGeneration uint64 `json:"session_generation"`
 }
 
 type playerContextFormatJSON struct {
@@ -490,6 +592,7 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 		Author:          out.Author,
 		LengthSeconds:   out.LengthSeconds,
 		AudioFormats:    formats,
+		Generation:      out.SessionGeneration,
 	}, nil
 }
 
@@ -505,15 +608,17 @@ type httpSessionProvider struct {
 	endpoint string
 	apiKey   string
 	http     *http.Client
+	reporter sidecarReporter
 }
 
 // newHTTPSessionProvider builds a provider for a session endpoint that has already
 // been validated by buildSidecarURL.
-func newHTTPSessionProvider(endpoint, apiKey string) *httpSessionProvider {
+func newHTTPSessionProvider(endpoint, apiKey string, rep sidecarReporter) *httpSessionProvider {
 	return &httpSessionProvider{
 		endpoint: endpoint,
 		apiKey:   apiKey,
 		http:     newSidecarClient(30 * time.Second),
+		reporter: rep,
 	}
 }
 
@@ -522,14 +627,18 @@ func newHTTPSessionProvider(endpoint, apiKey string) *httpSessionProvider {
 // accepted so the contract does not break on casing:
 //
 //	{"visitor_data":"<exact X-Goog-Visitor-Id literal>",
-//	 "cookies":[{"name","value","domain","path","secure","http_only","expires"}]}
+//	 "cookies":[{"name","value","domain","path","secure","http_only","expires"}],
+//	 "session_generation":<uint>}
 //
 // Extra keys (user_agent, client_version, cookie_header) are ignored. expires is
-// RFC3339 or unix seconds; 0/absent means a session cookie.
+// RFC3339 or unix seconds; 0/absent means a session cookie. session_generation
+// names the session for /report; absent leaves it unreportable.
 type sessionDoc struct {
 	VisitorData      string          `json:"visitor_data"`
 	VisitorDataCamel string          `json:"visitorData"`
 	Cookies          []sessionCookie `json:"cookies"`
+	Generation       uint64          `json:"session_generation"`
+	GenerationCamel  uint64          `json:"sessionGeneration"`
 }
 
 // visitorData returns the supplied literal, preferring the canonical snake_case.
@@ -538,6 +647,14 @@ func (d sessionDoc) visitorData() string {
 		return d.VisitorData
 	}
 	return d.VisitorDataCamel
+}
+
+// generation returns the supplied session generation, preferring snake_case.
+func (d sessionDoc) generation() uint64 {
+	if d.Generation != 0 {
+		return d.Generation
+	}
+	return d.GenerationCamel
 }
 
 type sessionCookie struct {
@@ -600,7 +717,13 @@ func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error
 			Expires:  parseSessionExpiry(c.Expires),
 		})
 	}
-	return potoken.Session{VisitorData: vd, Cookies: cookies}, nil
+	return potoken.Session{VisitorData: vd, Cookies: cookies, Generation: doc.generation()}, nil
+}
+
+// InvalidateSession reports the adopted session unusable so the sidecar retires
+// it and the next fetch adopts a replacement.
+func (p *httpSessionProvider) InvalidateSession(ctx context.Context, inv potoken.SessionInvalidation) error {
+	return p.reporter.invalidate(ctx, inv)
 }
 
 // parseSessionExpiry accepts a unix-seconds number or an RFC3339 string. An empty,

@@ -82,6 +82,8 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		ustreamerConfig: pc.UstreamerConfig,
 		playerURL:       pc.PlayerURL, // pin the n-descramble to the context's base.js
 		webContext:      true,
+		identityGen:     c.resetSeq.Load(),
+		contextGen:      pc.Generation,
 	}, nil
 }
 

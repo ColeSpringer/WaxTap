@@ -322,7 +322,8 @@ const validPlayerContextJSON = `{
   "length_seconds": 634,
   "audio_formats": [
     {"itag":251,"lmt":"1719185012384481","xtags":"","mime_type":"audio/webm; codecs=\"opus\"","bitrate":143452,"audio_channels":2,"audio_sample_rate":48000,"content_length":9700000,"approx_duration_ms":634624}
-  ]
+  ],
+  "session_generation": 7
 }`
 
 func newPlayerContextServer(t *testing.T, status int, body string) *httptest.Server {
@@ -363,6 +364,9 @@ func TestPlayerContextProviderDecode(t *testing.T) {
 	f := pc.AudioFormats[0]
 	if f.Itag != 251 || f.LMT != "1719185012384481" || f.ContentLength != 9700000 || f.AudioSampleRate != 48000 {
 		t.Errorf("format = %+v", f)
+	}
+	if pc.Generation != 7 {
+		t.Errorf("Generation = %d, want 7 (session_generation)", pc.Generation)
 	}
 }
 
@@ -563,5 +567,161 @@ func TestHTTPSessionProviderRetriesOnceThenFails(t *testing.T) {
 	}
 	if hits != 2 {
 		t.Errorf("server hits = %d, want 2 (one retry)", hits)
+	}
+}
+
+// TestHTTPSessionProviderInvalidateSession covers the delivery-cap escape for an
+// adopted session: the generation from /session is what gets reported, and the
+// report goes to the /report sibling of the configured session endpoint.
+func TestHTTPSessionProviderInvalidateSession(t *testing.T) {
+	var reportPath string
+	var reportBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/report" {
+			reportPath = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&reportBody)
+			_, _ = w.Write([]byte(`{"accepted":true,"retired":true,"generation":7}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"visitor_data":"CgtX%3D%3D","session_generation":7,"cookies":[]}`))
+	}))
+	defer srv.Close()
+
+	// Configure the full session endpoint, not the base, to pin the sibling
+	// derivation rather than a lucky default-path append.
+	p, err := NewSidecarSessionProvider(srv.URL + "/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := p.ProvideSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Generation != 7 {
+		t.Fatalf("Generation = %d, want 7", sess.Generation)
+	}
+
+	inv, ok := p.(potoken.SessionInvalidator)
+	if !ok {
+		t.Fatal("the sidecar session provider must implement potoken.SessionInvalidator")
+	}
+	if err := inv.InvalidateSession(context.Background(), potoken.SessionInvalidation{
+		Generation: sess.Generation,
+		VideoID:    "dummyVideo0",
+		Reason:     "delivery-cap",
+	}); err != nil {
+		t.Fatalf("InvalidateSession: %v", err)
+	}
+	if reportPath != "/report" {
+		t.Errorf("report path = %q, want /report", reportPath)
+	}
+	if got, _ := reportBody["session_generation"].(float64); got != 7 {
+		t.Errorf("session_generation = %v, want 7", reportBody["session_generation"])
+	}
+	if reportBody["video_id"] != "dummyVideo0" || reportBody["reason"] != "delivery-cap" {
+		t.Errorf("report body = %v, want the video and reason forwarded", reportBody)
+	}
+}
+
+// TestHTTPSessionProviderInvalidateSessionRateLimited pins that a sidecar asking
+// for backoff fails the invalidation: rotating anyway would re-adopt the same
+// capped session.
+func TestHTTPSessionProviderInvalidateSessionRateLimited(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"accepted":false,"generation":7,"retry_after_seconds":42}`))
+	}))
+	defer srv.Close()
+	p, err := NewSidecarSessionProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.(potoken.SessionInvalidator).InvalidateSession(context.Background(), potoken.SessionInvalidation{Generation: 7})
+	if err == nil {
+		t.Fatal("expected an error when the report is rate-limited")
+	}
+	if !strings.Contains(err.Error(), "42") {
+		t.Errorf("error should carry the retry delay: %v", err)
+	}
+}
+
+// TestHTTPSessionProviderInvalidateSessionUnversioned pins that a sidecar which
+// does not version its sessions cannot be reported to: /report requires a
+// generation, so the call fails locally instead of sending a rejected request.
+func TestHTTPSessionProviderInvalidateSessionUnversioned(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	p, err := NewSidecarSessionProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.(potoken.SessionInvalidator).InvalidateSession(context.Background(), potoken.SessionInvalidation{}); err == nil {
+		t.Fatal("expected an error when the session carries no generation")
+	}
+	if hits != 0 {
+		t.Errorf("report requests = %d, want 0", hits)
+	}
+}
+
+// TestPlayerContextProviderInvalidateSession pins that the player-context
+// provider reports capped sessions to the /report sibling of its endpoint,
+// sharing the session provider's report contract.
+func TestPlayerContextProviderInvalidateSession(t *testing.T) {
+	var reportBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/report" {
+			t.Errorf("path = %q, want /report", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reportBody)
+		_, _ = w.Write([]byte(`{"accepted":true,"retired":true,"generation":7}`))
+	}))
+	defer srv.Close()
+
+	// Configure the full endpoint, not the base, to pin the sibling derivation.
+	p, err := NewSidecarPlayerContextProvider(srv.URL + "/player-context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, ok := p.(potoken.SessionInvalidator)
+	if !ok {
+		t.Fatal("the sidecar player-context provider must implement potoken.SessionInvalidator")
+	}
+	if err := inv.InvalidateSession(context.Background(), potoken.SessionInvalidation{
+		Generation: 7,
+		VideoID:    "dummyVideo0",
+		Reason:     "stream-capped",
+	}); err != nil {
+		t.Fatalf("InvalidateSession: %v", err)
+	}
+	if got, _ := reportBody["session_generation"].(float64); got != 7 {
+		t.Errorf("session_generation = %v, want 7", reportBody["session_generation"])
+	}
+	if reportBody["video_id"] != "dummyVideo0" || reportBody["reason"] != "stream-capped" {
+		t.Errorf("report body = %v, want the video and reason forwarded", reportBody)
+	}
+}
+
+func TestSiblingSidecarURL(t *testing.T) {
+	cases := []struct {
+		endpoint, name, want string
+	}{
+		{"http://h:4417/session", "report", "http://h:4417/report"},
+		{"http://h/api/session", "report", "http://h/api/report"},
+		// A trailing slash must not shift the sibling down a level.
+		{"http://h/api/session/", "report", "http://h/api/report"},
+		{"http://h/session?key=K", "report", "http://h/report?key=K"},
+	}
+	for _, tc := range cases {
+		got, err := siblingSidecarURL(tc.endpoint, tc.name)
+		if err != nil {
+			t.Errorf("siblingSidecarURL(%q,%q) error: %v", tc.endpoint, tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("siblingSidecarURL(%q,%q) = %q, want %q", tc.endpoint, tc.name, got, tc.want)
+		}
 	}
 }

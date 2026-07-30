@@ -37,6 +37,11 @@ type PlayerContext struct {
 	LengthSeconds int
 	// AudioFormats are the audio renditions available for this context.
 	AudioFormats []PlayerContextFormat
+	// Generation names the provider session that minted this context, so WaxTap
+	// can report it unusable through [SessionInvalidator]. It is opaque to
+	// WaxTap and echoed back verbatim. Zero means the provider does not version
+	// its sessions, which leaves the session unreportable.
+	Generation uint64
 }
 
 // PlayerContextFormat is one audio rendition in a PlayerContext. Itag, LMT, and
@@ -65,8 +70,10 @@ type PlayerContextFormat struct {
 }
 
 // PlayerContextProvider supplies an attested player context for a video on
-// demand. Implementations must honor ctx cancellation and should be safe for
-// concurrent use.
+// demand. A provider that also implements [SessionInvalidator] can be told when
+// its contexts deliver capped streams, so it can retire the session behind them
+// and mint later contexts from a fresh one. Implementations must honor ctx
+// cancellation and should be safe for concurrent use.
 type PlayerContextProvider interface {
 	// ProvidePlayerContext returns an attested streaming context for videoID.
 	ProvidePlayerContext(ctx context.Context, videoID string) (PlayerContext, error)

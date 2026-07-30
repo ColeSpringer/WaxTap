@@ -282,10 +282,10 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 	return func(fctx context.Context, failure *potoken.HTTPFailure) (download.Source, error) {
 		// An empty-body 403 on a URL nowhere near expiry is the per-session
 		// delivery cap. Re-signing the same identity is measured futile there
-		// (every fresh URL inherits the cap), so discard the guest identity and
-		// re-extract fresh. Adopted and jarless sessions are never discarded;
-		// they take the plain re-resolve.
-		rotated := capSuspected(failure, lastExpiry) && c.yt.ResetGuestIdentity(identityGen)
+		// (every fresh URL inherits the cap), so discard the identity and
+		// re-extract fresh. An adopted session is retired through its provider;
+		// one that cannot be retired takes the plain re-resolve.
+		rotated := capSuspected(failure, lastExpiry) && c.yt.RotateIdentity(fctx, identityGen, id)
 		rext, rerr := func() (*youtube.Extraction, error) {
 			fectx, cancel := withTimeout(fctx, c.opts.Timeouts.Extraction)
 			defer cancel()
@@ -313,7 +313,7 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 		lastExpiry = nplan.Direct.ExpiresAt
 		identityGen = rext.IdentityGeneration()
 		if rotated {
-			em.warn(WarnSessionRotated, "the server rejected a stream URL well before its expiry; continuing with a new guest session")
+			em.warn(WarnSessionRotated, "the server rejected a stream URL well before its expiry; continuing with a new session")
 		} else {
 			em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
 		}
@@ -556,6 +556,15 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			webCtxReason = "stream capped before completion"
 			em.warn(WarnWebContextRetry, "attested WEB context was capped (attestation status 2, usually transient); retrying once with a fresh context")
 			continue
+		}
+		// The fresh context capped too, so the provider's session itself is
+		// suspect, not the individual context. Report it so the provider retires
+		// the session and later downloads mint contexts from a fresh one; this
+		// download proceeds to the fallback chain either way.
+		if a.attempt == youtube.AttemptWebContext && webContextRetried {
+			if st, ok := a.transfer.(sabrTransfer); ok && c.yt.ReportPlayerContext(ctx, st.handle.ContextGeneration(), id) {
+				webCtxReason = "stream capped twice; the session was reported to the provider"
+			}
 		}
 		if req.NoFallback {
 			break // do not switch clients after an incomplete delivery

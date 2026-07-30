@@ -37,24 +37,35 @@ type Client struct {
 	visitors    *cache.Store[string]          // bootstrapped guest visitorData, singleflighted
 	hl, gl      string                        // InnerTube host language / content region
 
-	// Guest-identity reset coordination: resetMu serializes resets and resetSeq
-	// counts completed ones, so concurrent ResetGuestIdentity calls collapse
-	// into a single wipe (see that method).
+	// Identity rotation: resetSeq counts completed rotations and stamps every
+	// Extraction, so concurrent RotateIdentity calls collapse into one (see that
+	// method). resetMu serializes guest wipes; the adopted arm uses adoptMu
+	// instead. Only one arm runs per Client, since adoption is fixed at
+	// construction.
 	resetMu  sync.Mutex
 	resetSeq atomic.Uint64
+
+	// Web-context session reporting: ctxReported is the last generation
+	// successfully reported through ReportPlayerContext, so concurrent
+	// downloads capped on one session collapse into one report.
+	ctxReportMu sync.Mutex
+	ctxReported uint64
 
 	// External session adoption. At most one of staticSession / sessionProvider
 	// is set (the facade rejects both). When either is set, Extract adopts that
 	// identity verbatim and skips the homepage bootstrap; a failed resolution is
-	// fatal. The provider is resolved at most once per Client under adoptMu,
-	// caching only on success so a transient failure retries on the next call.
+	// fatal. The provider is resolved under adoptMu, at most once per identity
+	// generation, caching only on success so a transient failure retries on the
+	// next call.
 	staticSession   *potoken.Session
 	sessionProvider potoken.SessionProvider
 	adoptMu         sync.Mutex
-	adoptVD         string // resolved adopted visitorData
-	adoptResolved   bool   // adoptVD is valid
-	adoptErr        error  // construction-time adoption error, surfaced at resolve
-	adoptSeeded     bool   // adopted cookies have been seeded into the jar
+	adoptVD         string   // resolved adopted visitorData
+	adoptGen        uint64   // provider-assigned generation of the adopted session, for invalidation
+	adoptHosts      []string // hosts the adopted cookies were seeded on, for rotation
+	adoptResolved   bool     // adoptVD is valid
+	adoptErr        error    // construction-time adoption error, surfaced at resolve
+	adoptSeeded     bool     // adopted cookies have been seeded into the jar
 }
 
 // Config configures a Client.
@@ -211,41 +222,140 @@ func (c *Client) adoptionConfigured() bool {
 	return c.staticSession != nil || c.sessionProvider != nil
 }
 
-// resolveAdoptedSession returns the adopted visitorData, resolving a
-// SessionProvider at most once. The provider runs under the first caller's
-// context while adoptMu is held, so concurrent extractions share one resolution;
-// the result is cached only on success, so a transient provider failure is
-// retried on the next call. A static session is already resolved at New.
-func (c *Client) resolveAdoptedSession(ctx context.Context) (string, error) {
+// resolveAdoptedSession returns the adopted visitorData and the rotation
+// generation it belongs to (read under adoptMu, which rotations also hold, so
+// the pair stays coherent), resolving a SessionProvider at most once per
+// generation. The provider runs under the first caller's context while adoptMu
+// is held, so concurrent extractions share one resolution; the result is cached
+// only on success, so a transient provider failure is retried on the next call.
+// A static session is already resolved at New.
+func (c *Client) resolveAdoptedSession(ctx context.Context) (string, uint64, error) {
 	c.adoptMu.Lock()
 	defer c.adoptMu.Unlock()
 	if c.adoptErr != nil {
-		return "", c.adoptErr
+		return "", 0, c.adoptErr
 	}
 	if c.adoptResolved {
-		return c.adoptVD, nil
+		return c.adoptVD, c.resetSeq.Load(), nil
 	}
 	sess, err := c.sessionProvider.ProvideSession(ctx)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
+			return "", 0, ctxErr
 		}
 		// Preserve provider failures so callers can classify their causes.
-		return "", &waxerr.ProviderError{Endpoint: "session", Cause: err}
+		return "", 0, &waxerr.ProviderError{Endpoint: "session", Cause: err}
 	}
 	if sess.VisitorData == "" {
-		return "", errors.New("adopted session provider returned an empty visitorData")
+		return "", 0, errors.New("adopted session provider returned an empty visitorData")
 	}
 	if err := c.seedAdoptedCookies(sess.Cookies); err != nil {
 		// Cookies + no jar is a permanent configuration error, not a transient
 		// provider failure: cache it so later Extracts short-circuit instead of
 		// re-running the remote provider on every call.
 		c.adoptErr = err
-		return "", err
+		return "", 0, err
 	}
 	c.adoptVD = sess.VisitorData
+	c.adoptGen = sess.Generation
 	c.adoptResolved = true
-	return c.adoptVD, nil
+	return c.adoptVD, c.resetSeq.Load(), nil
+}
+
+// invalidationReasonDeliveryCap is the cause reported to a session provider
+// when googlevideo caps delivery on the adopted session.
+const invalidationReasonDeliveryCap = "delivery-cap"
+
+// invalidationReasonStreamCapped is the cause reported to a player-context
+// provider when its attested contexts deliver capped streams.
+const invalidationReasonStreamCapped = "stream-capped"
+
+// ReportPlayerContext tells the player-context provider that the session behind
+// generation gen (a capped stream's [SABRStream.ContextGeneration]) delivers
+// capped streams, so it can retire that session and mint later contexts from a
+// fresh one. Unlike RotateIdentity there is no client-side state to drop:
+// contexts are fetched per extraction and never touch the cookie jar.
+//
+// It reports whether the session is reported (or already was, collapsing
+// concurrent downloads capped on one session). False means no report went out:
+// the provider does not implement [potoken.SessionInvalidator], the context
+// carried no generation, or the provider rejected the report; a rejection is
+// not cached, so a later cap on the same generation retries.
+func (c *Client) ReportPlayerContext(ctx context.Context, gen uint64, videoID string) bool {
+	inv, ok := c.webContext.(potoken.SessionInvalidator)
+	if !ok || gen == 0 {
+		return false
+	}
+	c.ctxReportMu.Lock()
+	defer c.ctxReportMu.Unlock()
+	if c.ctxReported == gen {
+		return true
+	}
+	if err := inv.InvalidateSession(ctx, potoken.SessionInvalidation{
+		Generation: gen,
+		VideoID:    videoID,
+		Reason:     invalidationReasonStreamCapped,
+	}); err != nil {
+		c.log.DebugContext(ctx, "player-context provider declined the capped-session report", "err", err)
+		return false
+	}
+	c.ctxReported = gen
+	return true
+}
+
+// rotateAdoptedSession is the adopted arm of RotateIdentity: report the session
+// unusable, then drop the cached adoption so the next extraction resolves a
+// replacement. It holds adoptMu, which resolveAdoptedSession also holds across
+// its provider call, so concurrent 403s collapse into one report and no
+// extraction observes a half-cleared adoption.
+func (c *Client) rotateAdoptedSession(ctx context.Context, gen uint64, videoID string) bool {
+	inv, ok := c.sessionProvider.(potoken.SessionInvalidator)
+	if !ok {
+		return false
+	}
+	c.adoptMu.Lock()
+	defer c.adoptMu.Unlock()
+	if c.resetSeq.Load() != gen {
+		return true // that session was already replaced
+	}
+	if c.adoptGen == 0 {
+		return false // the provider does not version its sessions; there is nothing to name in a report
+	}
+	if err := inv.InvalidateSession(ctx, potoken.SessionInvalidation{
+		Generation: c.adoptGen,
+		VideoID:    videoID,
+		Reason:     invalidationReasonDeliveryCap,
+	}); err != nil {
+		c.log.DebugContext(ctx, "session provider declined to retire the adopted session; keeping it", "err", err)
+		return false
+	}
+	c.clearAdoptedCookies()
+	c.adoptVD = ""
+	c.adoptGen = 0
+	c.adoptResolved = false
+	c.adoptSeeded = false
+	c.resetSeq.Add(1)
+	return true
+}
+
+// clearAdoptedCookies removes the retired session's cookies. Expiring only what
+// the adoption seeded is not enough: YouTube's own Set-Cookie on player and
+// watch-page responses re-stores identity anchors (VISITOR_INFO1_LIVE and
+// friends) under the youtube.com domain entry during use, and a visitorData-only
+// adoption seeds nothing at all. So the youtube.com wipe the guest arm uses runs
+// here too, then every other host the adoption seeded is expired, and CONSENT is
+// re-seeded last so the wipe cannot take it with it. Caller holds adoptMu.
+func (c *Client) clearAdoptedCookies() {
+	jar := c.http.Jar()
+	if jar == nil {
+		return
+	}
+	clearYouTubeCookies(jar)
+	for _, host := range c.adoptHosts {
+		expireHostCookies(jar, host)
+	}
+	c.adoptHosts = nil
+	seedConsentCookie(jar)
 }
 
 // seedAdoptedCookies installs an adopted session's cookies into the jar, once.
@@ -264,7 +374,7 @@ func (c *Client) seedAdoptedCookies(cookies []*http.Cookie) error {
 	if len(safe) > 0 && c.http.Jar() == nil {
 		return errors.New("adopted session supplies cookies but the HTTP client has no cookie jar: pass an *http.Client with a jar, or supply visitorData only")
 	}
-	seedExternalCookies(c.http.Jar(), safe)
+	c.adoptHosts = seedExternalCookies(c.http.Jar(), safe)
 	c.adoptSeeded = true
 	return nil
 }
@@ -432,7 +542,7 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 		return nil, err
 	}
 
-	return buildExtraction(video, profile, sess, raw, pr, profileAttempt(i), c.resetSeq.Load()), nil
+	return buildExtraction(video, profile, sess, raw, pr, profileAttempt(i)), nil
 }
 
 // signatureTimestamp returns the base.js signature timestamp required by
@@ -528,7 +638,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	// The watch page carries chapters (in ytInitialData) and the availability
 	// microformat, so fill them now rather than re-fetching for WithFullMetadata.
 	fillWatchPageEnrichment(video, body, pr)
-	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage, c.resetSeq.Load()), nil
+	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
 }
 
 // fillWatchPageEnrichment fills chapters and availability into v from

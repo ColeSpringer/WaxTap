@@ -2,6 +2,10 @@ module github.com/colespringer/waxtap/v3
 
 go 1.26
 
+// Shipped a session-rotation API (ResetGuestIdentity) that was replaced by
+// RotateIdentity the same day; use v3.0.1 or later.
+retract v3.0.0
+
 require (
 	github.com/colespringer/waxflow v0.0.0-20260730025520-35107bc1aae3
 	github.com/colespringer/waxlabel v1.2.0

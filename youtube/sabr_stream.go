@@ -91,6 +91,11 @@ func (s *SABRStream) Open(ctx context.Context, progress func(bytesWritten, total
 			if rerr != nil {
 				return nil, SABRStreamInfo{}, rerr
 			}
+			// Keep the handle's extraction current so ContextGeneration names
+			// the context that actually streamed. Open runs on one goroutine
+			// and readers exist only after it returns, so plain assignment is
+			// safe.
+			s.ext = next
 			ext, failure = next, nil
 		case errors.Is(err, waxerr.ErrNeedsPOToken) || isSABRAuthFailure(err):
 			// Both statuses indicate that the GVS token was rejected.
@@ -116,6 +121,14 @@ func (s *SABRStream) PrimeToken(ctx context.Context) error {
 	}
 	s.primedToken = token
 	return nil
+}
+
+// ContextGeneration reports the provider session generation of the attested
+// context the stream last used; mid-stream reloads keep it current. Pass it to
+// [Client.ReportPlayerContext] when the stream capped. Zero for streams off the
+// web-context path or from a provider that does not version its sessions.
+func (s *SABRStream) ContextGeneration() uint64 {
+	return s.ext.contextGen
 }
 
 // reextract refreshes the player response and finds the originally selected
