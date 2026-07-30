@@ -123,6 +123,17 @@ func (s *Store[V]) removeElement(el *list.Element) {
 	delete(s.items, el.Value.(*entry[V]).key)
 }
 
+// Delete removes key's cached value, if present. An in-flight load for the key
+// is unaffected and re-caches its result when it completes; callers that need
+// the next GetOrLoad to reload must call Delete after the flight settles.
+func (s *Store[V]) Delete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if el, ok := s.items[key]; ok {
+		s.removeElement(el)
+	}
+}
+
 // GetOrLoad returns the cached value for key, or loads it exactly once across
 // concurrent callers (singleflight) and caches the result. The loader's error is
 // returned to all waiters and is not cached.

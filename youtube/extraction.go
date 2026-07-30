@@ -69,10 +69,14 @@ type Extraction struct {
 	// mid-stream SABR reload must re-fetch the same kind of context to keep the
 	// URL, session, and GVS-token binding coherent.
 	webContext bool
+	// identityGen is the guest-identity generation this extraction was made
+	// under (see Client.ResetGuestIdentity). Zero for adopted and web-context
+	// extractions, whose identity is not the client's rotating guest identity.
+	identityGen uint64
 }
 
 // buildExtraction keeps the InnerTube and watch-page extraction paths in sync.
-func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []rawFormat, pr *playerResponse, attempt AttemptID) *Extraction {
+func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []rawFormat, pr *playerResponse, attempt AttemptID, identityGen uint64) *Extraction {
 	return &Extraction{
 		video:           video,
 		profile:         profile,
@@ -82,7 +86,15 @@ func buildExtraction(video *Video, profile ClientProfile, sess *session, raw []r
 		expiresAt:       pr.expiresAt(time.Now()),
 		serverAbrURL:    pr.serverAbrURL(),
 		ustreamerConfig: pr.ustreamerConfig(),
+		identityGen:     identityGen,
 	}
+}
+
+// IdentityGeneration reports the guest-identity generation this extraction was
+// made under. Pass it to [Client.ResetGuestIdentity] so a reset provoked by
+// this extraction's URLs discards only the identity that minted them.
+func (e *Extraction) IdentityGeneration() uint64 {
+	return e.identityGen
 }
 
 // Video returns the extracted metadata and candidate formats.

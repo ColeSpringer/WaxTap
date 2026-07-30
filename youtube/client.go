@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxtap/v3/internal/cache"
@@ -35,6 +36,12 @@ type Client struct {
 	webCtxTO    time.Duration                 // per-call bound on the player-context provider; 0 = none
 	visitors    *cache.Store[string]          // bootstrapped guest visitorData, singleflighted
 	hl, gl      string                        // InnerTube host language / content region
+
+	// Guest-identity reset coordination: resetMu serializes resets and resetSeq
+	// counts completed ones, so concurrent ResetGuestIdentity calls collapse
+	// into a single wipe (see that method).
+	resetMu  sync.Mutex
+	resetSeq atomic.Uint64
 
 	// External session adoption. At most one of staticSession / sessionProvider
 	// is set (the facade rejects both). When either is set, Extract adopts that
@@ -425,7 +432,7 @@ func (c *Client) extractProfile(ctx context.Context, sess *session, profile Clie
 		return nil, err
 	}
 
-	return buildExtraction(video, profile, sess, raw, pr, profileAttempt(i)), nil
+	return buildExtraction(video, profile, sess, raw, pr, profileAttempt(i), c.resetSeq.Load()), nil
 }
 
 // signatureTimestamp returns the base.js signature timestamp required by
@@ -521,7 +528,7 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	// The watch page carries chapters (in ytInitialData) and the availability
 	// microformat, so fill them now rather than re-fetching for WithFullMetadata.
 	fillWatchPageEnrichment(video, body, pr)
-	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
+	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage, c.resetSeq.Load()), nil
 }
 
 // fillWatchPageEnrichment fills chapters and availability into v from

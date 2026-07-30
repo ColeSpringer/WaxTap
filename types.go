@@ -672,6 +672,7 @@ const (
 	WarnWebContextRetry                         // WEB player-context was capped (status 2); retried once with a fresh context
 	WarnMetadataEmbed                           // an --embed-thumbnail/--embed-metadata post-pass failed; audio delivered untagged
 	WarnLoudnessTargetMissed                    // peak capping held the gain back, so the loudness target was not reached
+	WarnSessionRotated                          // a fresh guest session replaced one whose stream URLs the server kept rejecting
 )
 
 func (w WarningCode) String() string {
@@ -702,6 +703,8 @@ func (w WarningCode) String() string {
 		return "metadata-embed-failed"
 	case WarnLoudnessTargetMissed:
 		return "loudness-target-missed"
+	case WarnSessionRotated:
+		return "session-rotated"
 	default:
 		return "unknown"
 	}

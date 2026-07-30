@@ -73,7 +73,17 @@ func (c *Client) newBootstrappedSession(ctx context.Context) (*session, error) {
 
 // bootstrapVisitorData returns server-issued visitorData, loading and caching it
 // once across concurrent callers. The page response also seeds the client's jar.
+//
+// The load runs under resetMu so a ResetGuestIdentity cannot interleave with an
+// in-flight bootstrap: an unguarded wipe could strip the cookies the homepage
+// response just installed, or land before a flight (started with the old
+// cookies) re-caches the old identity, silently defeating the rotation. A reset
+// therefore waits for the bootstrap to finish and then discards its result,
+// which is correct: that bootstrap began under the identity the reset was asked
+// to remove.
 func (c *Client) bootstrapVisitorData(ctx context.Context) (string, error) {
+	c.resetMu.Lock()
+	defer c.resetMu.Unlock()
 	return c.visitors.GetOrLoad(ctx, visitorCacheKey, c.fetchVisitorData)
 }
 
@@ -99,6 +109,77 @@ func jsonUnescape(s string) string {
 		return out
 	}
 	return s
+}
+
+// ResetGuestIdentity discards the client's bootstrapped guest identity: the
+// cached visitorData and the youtube.com cookies that anchor it. The next
+// extraction bootstraps a fresh identity from the homepage.
+//
+// googlevideo caps stream delivery for a small share of guest sessions: every
+// URL such a session resolves answers empty-body 403 to any read past roughly
+// the first 1 MB, re-resolves inherit the cap because they reuse the same
+// identity, and a fresh identity resolves URLs that work immediately. This
+// method is that escape.
+//
+// gen names the identity to discard: the [Extraction.IdentityGeneration] of
+// the extraction whose URLs provoked the reset. The wipe runs only while that
+// identity is still current; if another reset already replaced it, the call
+// reports true without acting, because the identity it wanted gone is gone.
+// This keys the dedup to the failing identity rather than to call timing:
+// simultaneous downloads sharing this client (Concurrency.Downloads) all 403
+// together on a flagged identity and collapse into one wipe, while a fresh
+// identity that is itself capped (observed live) still rotates again, since
+// its extraction carries the new generation.
+//
+// It reports whether the failing identity is gone. False means no rotation is
+// possible: an adopted session is externally owned and required for PO-token
+// content-binding coherence, and a jarless client has no durable guest
+// identity at all (each extraction already mints a fresh synthetic
+// visitorData).
+func (c *Client) ResetGuestIdentity(gen uint64) bool {
+	if c.adoptionConfigured() || c.http.Jar() == nil {
+		return false
+	}
+	c.resetMu.Lock()
+	defer c.resetMu.Unlock()
+	if c.resetSeq.Load() != gen {
+		return true // that identity was already replaced
+	}
+	c.visitors.Delete(visitorCacheKey)
+	clearYouTubeCookies(c.http.Jar())
+	seedConsentCookie(c.http.Jar())
+	c.resetSeq.Add(1)
+	return true
+}
+
+// clearYouTubeCookies expires every cookie the jar holds for youtube.com so the
+// next homepage fetch mints a new guest identity instead of re-learning the old
+// one from VISITOR_INFO1_LIVE.
+//
+// jar.Cookies returns name/value only (net/http/cookiejar strips Domain and
+// Path), and the jar keys entries by (domain, path, name), so each name is
+// expired in both forms it can be stored under: the host-only www.youtube.com
+// entry and the youtube.com domain entry (the jar canonicalizes a .youtube.com
+// attribute to youtube.com; VISITOR_INFO1_LIVE is stored that way). The
+// enumeration sees only cookies that path-match "/", which is where YouTube
+// sets its identity cookies (live-verified); a narrower-path cookie cannot be
+// discovered through the CookieJar interface at all and would survive the
+// wipe. Accepted: the homepage bootstrap that mints the identity is a
+// path-"/" request, so a surviving narrow-path cookie cannot re-seed it.
+func clearYouTubeCookies(jar http.CookieJar) {
+	u := &url.URL{Scheme: "https", Host: "www.youtube.com"}
+	cookies := jar.Cookies(u)
+	if len(cookies) == 0 {
+		return
+	}
+	expired := make([]*http.Cookie, 0, 2*len(cookies))
+	for _, ck := range cookies {
+		expired = append(expired,
+			&http.Cookie{Name: ck.Name, Path: "/", MaxAge: -1},
+			&http.Cookie{Name: ck.Name, Path: "/", Domain: "youtube.com", MaxAge: -1},
+		)
+	}
+	jar.SetCookies(u, expired)
 }
 
 // seedConsentCookie keeps YouTube page fetches out of the consent interstitial.

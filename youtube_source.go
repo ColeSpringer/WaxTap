@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,7 +224,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 		a.transfer = sabrTransfer{dl: c.dl, handle: plan.SABR}
 		return a, nil
 	}
-	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext.Attempt(), selFmt.Itag, em)}
+	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext, selFmt.Itag, plan.Direct.ExpiresAt, em)}
 	return a, nil
 }
 
@@ -234,11 +235,57 @@ func (c *Client) warnClientSubstitution(em *emitter, a *acquired) {
 	}
 }
 
+// sessionRotateMargin separates a delivery-cap 403 from an expiry 403 in
+// directRefresh. googlevideo caps stream delivery per guest identity for a
+// small share of sessions (empty-body 403 on any read past roughly 1 MB); those
+// rejections arrive seconds after the URL is minted, while expiry rejections
+// arrive at or after the signed expire time (typically six hours out). A 403
+// with this much lifetime left is treated as the cap. Misreads are cheap in
+// both directions: rotation still re-resolves the URL, it just also pays one
+// homepage bootstrap.
+//
+// The comparison holds the local wall clock against the server-signed expire
+// time. A clock running behind classifies some true expiries as the cap and
+// pays that same bootstrap; only a clock running further ahead than the URL
+// lifetime (~6 h) would suppress rotation and give capped runs back their
+// pre-fix failure. That pathology is accepted rather than engineered around.
+const sessionRotateMargin = 5 * time.Minute
+
+// capSuspected reports whether a stream failure looks like the per-session
+// delivery cap rather than URL expiry: an empty-body 403 answered while the
+// current URL still had comfortable lifetime left. The empty body is the cap's
+// measured signature (every observed cap rejection carried zero bytes); a 403
+// with a body is something else explaining itself, typically a proxy or
+// middlebox block page, which no amount of identity rotation fixes. A 410 is a
+// dead URL, never the cap. An unknown expiry counts as suspected, since a
+// genuine expiry cannot be established either.
+func capSuspected(failure *potoken.HTTPFailure, expiresAt time.Time) bool {
+	if failure == nil || failure.StatusCode != http.StatusForbidden || failure.Body != "" {
+		return false
+	}
+	return expiresAt.IsZero() || time.Until(expiresAt) > sessionRotateMargin
+}
+
 // directRefresh builds a signed-URL refresh callback pinned to the original
-// extraction attempt and itag. Pinning prevents a resumed range from mixing bytes
-// from different encodings.
-func (c *Client) directRefresh(req Request, id string, target format.Target, attempt youtube.AttemptID, pinnedItag int, em *emitter) download.RefreshFunc {
+// extraction's attempt and itag. Pinning prevents a resumed range from mixing
+// bytes from different encodings.
+//
+// expiresAt is the expiry of the currently live URL; the closure keeps it and
+// the extraction's identity generation current across refreshes, so a 403 can
+// be classified as cap-vs-expiry and a rotation discards only the identity
+// that minted the failing URL. The download layer serializes refresh callbacks
+// (renew runs under the shared source lock), so plain assignment is safe.
+func (c *Client) directRefresh(req Request, id string, target format.Target, ext *youtube.Extraction, pinnedItag int, expiresAt time.Time, em *emitter) download.RefreshFunc {
+	attempt := ext.Attempt()
+	lastExpiry := expiresAt
+	identityGen := ext.IdentityGeneration()
 	return func(fctx context.Context, failure *potoken.HTTPFailure) (download.Source, error) {
+		// An empty-body 403 on a URL nowhere near expiry is the per-session
+		// delivery cap. Re-signing the same identity is measured futile there
+		// (every fresh URL inherits the cap), so discard the guest identity and
+		// re-extract fresh. Adopted and jarless sessions are never discarded;
+		// they take the plain re-resolve.
+		rotated := capSuspected(failure, lastExpiry) && c.yt.ResetGuestIdentity(identityGen)
 		rext, rerr := func() (*youtube.Extraction, error) {
 			fectx, cancel := withTimeout(fctx, c.opts.Timeouts.Extraction)
 			defer cancel()
@@ -263,7 +310,13 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, att
 		if nplan.Direct == nil {
 			return download.Source{}, fmt.Errorf("%w: stream refresh resolved itag %d to SABR", ErrURLExpired, pinnedItag)
 		}
-		em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
+		lastExpiry = nplan.Direct.ExpiresAt
+		identityGen = rext.IdentityGeneration()
+		if rotated {
+			em.warn(WarnSessionRotated, "the server rejected a stream URL well before its expiry; continuing with a new guest session")
+		} else {
+			em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
+		}
 		return toSource(*nplan.Direct), nil
 	}
 }
