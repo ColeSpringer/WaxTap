@@ -60,8 +60,13 @@ func TestLive_DownloadBestAudio(t *testing.T) {
 		skipIfTokenGated(t, err)
 		t.Fatalf("Download: %v", err)
 	}
+	// contentLength, OutputBytes, and the file on disk all describe the delivered
+	// file. See TestFacade_ContentLengthIsDeliveredSize for the offline form.
 	if res.OutputBytes <= 0 || fileSizeAt(t, res.OutputPath) != res.OutputBytes {
 		t.Errorf("OutputBytes=%d, file=%d", res.OutputBytes, fileSizeAt(t, res.OutputPath))
+	}
+	if res.OutputFormat.ContentLength != res.OutputBytes {
+		t.Errorf("OutputFormat.ContentLength=%d, OutputBytes=%d", res.OutputFormat.ContentLength, res.OutputBytes)
 	}
 	t.Logf("downloaded %q (%d bytes, %s)", res.Title, res.OutputBytes, res.SourceFormat)
 }

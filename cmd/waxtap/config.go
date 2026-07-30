@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
@@ -485,10 +487,35 @@ func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSes
 	}
 }
 
+// proxyEnvVars are the variables net/http's ProxyFromEnvironment consults for a
+// proxy URL. NO_PROXY is absent on purpose: it only removes hosts, and a
+// CONNECT-response hook that never fires costs nothing. ALL_PROXY is absent
+// because Go does not read it at all (golang.org/x/net/http/httpproxy takes only
+// the four below), so listing it would build a custom transport for traffic that
+// then goes direct.
+var proxyEnvVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
+
+// envProxySet reports whether the environment names a proxy, so the CLI builds its
+// own transport (and installs the CONNECT hook) even without --proxy.
+func envProxySet() bool {
+	for _, k := range proxyEnvVars {
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // httpClient builds a custom base client only when transport settings require
 // one. Returning nil lets the facade install its default jar-backed client.
+//
+// An environment proxy counts as requiring one: the facade's default client uses
+// http.DefaultTransport, which honors ProxyFromEnvironment but carries no
+// OnProxyConnectResponse hook, so an HTTPS_PROXY answering 407 would land in the
+// unclassified exit-1 bucket. tr.Proxy already defaults to ProxyFromEnvironment,
+// so nothing else about that path changes.
 func (a *appConfig) httpClient() (*http.Client, error) {
-	if a.proxy == "" && !a.insecure {
+	if a.proxy == "" && !a.insecure && !envProxySet() {
 		return nil, nil
 	}
 	tr := &http.Transport{
@@ -506,6 +533,17 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 			return nil, usagef("invalid --proxy %q: %v", a.proxy, err)
 		}
 		tr.Proxy = http.ProxyURL(u)
+	}
+	// Go turns a non-200 CONNECT response into a bare errors.New(reasonPhrase),
+	// which classification cannot read. The hook runs before that, so a typed error
+	// carrying the status reaches the exit-code table (9/network) instead of the
+	// unclassified default. Only https targets use CONNECT; a plain-http target
+	// through an http proxy gets an ordinary response and bypasses this.
+	tr.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			return &proxyStatusError{status: resp.StatusCode}
+		}
+		return nil
 	}
 	if a.insecure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit, diagnostics-only opt-in

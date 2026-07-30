@@ -102,7 +102,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
 	bindSponsorBlockFlag(f, &df.sbCats, "remove SponsorBlock categories (comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
 	bindCutFlags(f, &df.ranges, &df.cutMode, &df.crossfade, &df.sbOnError)
-	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode; the default --peak-mode cap is transparent but a loud source can land well short of the target)")
+	f.BoolVar(&df.normalize, "normalize", false, "normalize loudness to --loudness-target (fused into the encode; the default --peak-mode cap is transparent but a loud source can land well short of the target, while --peak-mode limit re-encodes until it reaches it)")
 	f.BoolVar(&df.measure, "measure-loudness", false, "measure loudness without altering the audio (still writes the downloaded file)")
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
 	bindPeakModeFlag(f, &df.peakMode)
@@ -358,6 +358,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 
 	out := &syncWriter{env: env}
 	reserver := newPathReserver()
+	stamps := newItemStamps()
 	// OnItem may run concurrently, so track the actionable-WEB signal atomically and
 	// emit the nudge once after the run instead of per item.
 	var actionableWeb atomic.Bool
@@ -368,7 +369,12 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		SleepInterval:    df.sleepInterval,
 		MaxSleepInterval: df.maxSleepInterval,
 		BuildRequest: func(rctx context.Context, e waxtap.PlaylistEntry) (waxtap.Request, string, error) {
-			return resolveItem(rctx, env, df, reserver, e.VideoID, e.Title, e.Author, e.Index+1)
+			req, skip, path, err := resolveItem(rctx, env, df, reserver, e.VideoID, e.Title, e.Author, e.Index+1)
+			// Stamp before the item downloads, for the same reason the single-download
+			// path does: a cancellation has to tell a file this run committed from one
+			// that was already sitting there.
+			stamps.record(e.VideoID, path)
+			return req, skip, err
 		},
 		OnItem: func(o waxtap.PlaylistItemOutcome) {
 			// Write sidecars and the archive before the result line.
@@ -382,6 +388,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 				actionableWeb.Store(true)
 			}
 			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
+			noteKeptItem(ctx, env, df, stamps, o)
 		},
 	})
 	if res == nil {
@@ -437,15 +444,17 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 				return
 			}
 			// Reclassify before rendering, or the document says incomplete stream
-			// while main exits 130 next to it. Nothing below returns an
-			// already-rendered error, so this is the only place it is written.
+			// while main exits 130 next to it. reportKeptOutput below can also render,
+			// but only for a file output, and this seam only exists for a stdout
+			// stream, so the two can never both fire; reportKeptOutput's own guard is
+			// what enforces that.
 			err = finalError(ctx, err)
 			renderError(env.errOut, env.jsonMode(), err)
 			err = alreadyRendered(err)
 		}()
 	}
 
-	req, skipped, err := resolveItem(ctx, env, df, nil, arg, "", "", 0)
+	req, skipped, outPath, err := resolveItem(ctx, env, df, nil, arg, "", "", 0)
 	if err != nil {
 		return err
 	}
@@ -460,6 +469,11 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 		return nil
 	}
 
+	// Stamp the output path before the download so a cancellation can tell a file
+	// this run committed from one that was already sitting there. Nothing there is
+	// fine, and is the common case.
+	before := stampOutputPath(outPath)
+
 	prog := env.newProgress()
 	req.Events = prog.handle
 	res, err := env.client.Download(ctx, req)
@@ -467,7 +481,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	if err != nil {
 		noteForcedIOSIncomplete(env, err)
 		noteUseBothWebSourcesIfActionable(env, res, err) // res is nil here; err-gated
-		return err
+		return env.reportKeptOutput(ctx, df, outPath, before, err)
 	}
 
 	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
@@ -485,13 +499,17 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 // resolveItem builds a request for one item, or returns a skip reason. Playlist
 // callers pass a reserver and fallback metadata; single-video callers pass nil
 // and empty fallbacks.
-func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *pathReserver, idOrURL, fallbackTitle, fallbackAuthor string, index int) (waxtap.Request, string, error) {
+//
+// The resolved output path is returned as well: waxtap.Output is opaque, so a
+// caller that needs the path (to notice a file a canceled run committed) cannot
+// read it back out of the request. It is "" for a stdout stream, which has no path.
+func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *pathReserver, idOrURL, fallbackTitle, fallbackAuthor string, index int) (waxtap.Request, string, string, error) {
 	id, err := youtube.ExtractVideoID(idOrURL)
 	if err != nil {
-		return waxtap.Request{}, "", err
+		return waxtap.Request{}, "", "", err
 	}
 	if df.archive != nil && df.archive.Has(id) {
-		return waxtap.Request{}, "archive", nil
+		return waxtap.Request{}, "archive", "", nil
 	}
 
 	// Streaming to stdout has no file path: skip naming and collision handling and
@@ -499,28 +517,28 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 	if df.streamW != nil {
 		req, err := df.buildRequest(idOrURL, "-")
 		if err != nil {
-			return waxtap.Request{}, "", err
+			return waxtap.Request{}, "", "", err
 		}
-		return req, "", nil
+		return req, "", "", nil
 	}
 
 	target := df.out
 	if target == "" {
 		td, nerr := env.namingData(ctx, idOrURL, df, fallbackTitle, fallbackAuthor, index)
 		if nerr != nil {
-			return waxtap.Request{}, "", nerr
+			return waxtap.Request{}, "", "", nerr
 		}
 		target = filepath.Join(df.dir, resolveOutputName(df.template, td))
 		if err := ensureUnderDir(df.dir, target); err != nil {
-			return waxtap.Request{}, "", err
+			return waxtap.Request{}, "", "", err
 		}
 	}
 	resolved, skip, err := reserve.reserveOr(target, df.collision)
 	if err != nil {
-		return waxtap.Request{}, "", err
+		return waxtap.Request{}, "", "", err
 	}
 	if skip {
-		return waxtap.Request{}, "exists", nil
+		return waxtap.Request{}, "exists", "", nil
 	}
 	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
 		warnALACToAlacExt(env, resolved, tf)
@@ -528,9 +546,114 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 
 	req, err := df.buildRequest(idOrURL, resolved)
 	if err != nil {
-		return waxtap.Request{}, "", err
+		return waxtap.Request{}, "", "", err
 	}
-	return req, "", nil
+	return req, "", resolved, nil
+}
+
+// reportKeptOutput names a complete output file a canceled run left behind, and
+// returns an already-rendered error so main exits 130 without writing a second
+// document.
+//
+// Detection is by comparing the output path against a stamp taken before the
+// download, not by latching a stage event. StageFinalizing means "entering
+// finalization", not "committed": it fires before the measure-only move runs, so a
+// latch on it plus an os.Stat would report a stale file under --collision overwrite
+// as the kept output. Keying on a canceled context plus a file that actually
+// changed is site-agnostic and cannot make that mistake.
+//
+// Only a finished root context qualifies, which today means a signal. Any other
+// failure either wrote nothing or already carries its own cause, and a partial file
+// cannot reach the output path: every writer stages and commits atomically. It keys
+// on ctx.Err() rather than context.Canceled for the same reason finalError does: a
+// root deadline, if one is ever wired in, leaves a complete file behind exactly the
+// same way and deserves the same note.
+func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outPath string, before outputStamp, err error) error {
+	// A stdout stream has no output path, so this and the audio-sink render seam in
+	// runSingleDownload can never both fire; no guard is needed for that.
+	if outPath == "" || ctx.Err() == nil {
+		return err
+	}
+	kept := changedOutput(outPath, before)
+	if kept == nil {
+		return err
+	}
+	// Reclassify first, or the document names the download failure while main exits
+	// 130 next to it.
+	err = finalError(ctx, err)
+	// Match main's routing exactly, so taking over the rendering does not move the
+	// error between streams: JSON to stdout, human-readable to stderr.
+	w := env.errOut
+	if env.jsonMode() {
+		w = env.out
+	}
+	renderErrorKept(w, env.jsonMode(), err, kept)
+	if df.archive != nil {
+		// finishItem never ran, so the file is not recorded and a re-run refetches it.
+		// Say so rather than letting the archive look authoritative.
+		env.info("note: the run was canceled before post-processing, so %s was not added to the download archive; a re-run will fetch it again\n", kept.path)
+	}
+	return alreadyRendered(err)
+}
+
+// itemStamps records each playlist item's resolved output path and what was at it
+// before the item ran. BuildRequest and OnItem both execute on the playlist's
+// workers, so it is guarded.
+type itemStamps struct {
+	mu sync.Mutex
+	m  map[string]itemStamp
+}
+
+type itemStamp struct {
+	path   string
+	before outputStamp
+}
+
+func newItemStamps() *itemStamps { return &itemStamps{m: make(map[string]itemStamp)} }
+
+// record stamps path for id. An empty path (a skip, or a stdout stream) records
+// nothing, so kept reports nothing for it either.
+func (s *itemStamps) record(id, path string) {
+	if path == "" {
+		return
+	}
+	st := itemStamp{path: path, before: stampOutputPath(path)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[id] = st
+}
+
+// kept reports the file now at id's output path when this run put it there.
+func (s *itemStamps) kept(id string) *keptOutput {
+	s.mu.Lock()
+	st, ok := s.m[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return changedOutput(st.path, st.before)
+}
+
+// noteKeptItem names a file a canceled playlist item nevertheless finished. This
+// is the playlist half of reportKeptOutput: the item's own result line reports the
+// failure but carries no path, so without this the file is invisible. It is also
+// not in the archive, and under the default --collision fail a re-run stops on it
+// with nothing to explain why.
+//
+// It only adds a note. Unlike the single-download path there is no rendering to
+// take over: the playlist already printed the item, and main renders the run error.
+func noteKeptItem(ctx context.Context, env *appEnv, df *downloadFlags, stamps *itemStamps, o waxtap.PlaylistItemOutcome) {
+	if !o.Attempted || o.Err == nil || ctx.Err() == nil {
+		return
+	}
+	kept := stamps.kept(o.Entry.VideoID)
+	if kept == nil {
+		return
+	}
+	env.info("note: the finished file was kept: %s (%d bytes)\n", kept.path, kept.bytes)
+	if df.archive != nil {
+		env.info("note: %s was not added to the download archive; a re-run will fetch it again\n", kept.path)
+	}
 }
 
 // finishItem writes the optional sidecar and archive entry after a successful

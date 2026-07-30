@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3/internal/media/loudness"
@@ -52,9 +53,9 @@ func hasWarning(res *Result, code WarningCode) bool {
 	return false
 }
 
-// TestPeakModeCapMissesAndWarns pins the defect F5 reported: on a source whose
-// peak and loudness are far apart, the default cap policy lands well short of the
-// target and says so, while limit hits it.
+// TestPeakModeCapMissesAndWarns pins both peak policies on a source whose peak and
+// loudness are far apart: the default cap policy lands well short of the target and
+// says so, and limit either reaches the target or reports that it could not.
 func TestPeakModeCapMissesAndWarns(t *testing.T) {
 	dir := t.TempDir()
 	in := peakFixture(t, dir)
@@ -68,14 +69,31 @@ func TestPeakModeCapMissesAndWarns(t *testing.T) {
 		t.Errorf("cap mode missed the target without WarnLoudnessTargetMissed: %+v", capped.Warnings)
 	}
 
-	// A few LU of residual gap is expected, not a miss: the transient contributed
-	// to the measured input loudness, and the limiter takes it back on the way out.
+	// The invariant, on the fixture most likely to defeat the gain search: limit mode
+	// never misses by more than the reporting threshold in silence, in either
+	// direction, and never warns about a run that reached the target.
+	//
+	// Between the two thresholds nothing is asserted, because mapping.go documents
+	// that band as deliberately silent: a miss under loudnessMissWarnDB is inside the
+	// noise of a lossy encode and not worth telling the user about. Requiring
+	// "converged or warned" would fail this test for a limiter improvement that lands
+	// 0.6 LU short, which is behaving exactly as designed.
+	//
+	// This deliberately does not assert a fixed LU figure. QuietWithTransientWAV is
+	// about -41 LUFS peaking near 0 dBTP, roughly 41 dB of crest, so it is the
+	// saturation case: how close the limiter can be driven to a normal target is a
+	// property of the limiter, not of WaxTap, and pinning a number here would turn an
+	// upstream improvement into a test failure.
 	limited := normalizeTo(t, in, filepath.Join(dir, "limit.flac"), target, PeakLimit)
-	if got := limited.Loudness.Output.IntegratedLUFS; math.Abs(got-target) > 4 {
-		t.Errorf("limit output = %.1f LUFS, want within 4 LU of %g", got, target)
+	got := limited.Loudness.Output.IntegratedLUFS
+	miss := math.Abs(got - target)
+	warned := hasWarning(limited, WarnLoudnessTargetMissed)
+	if miss > loudnessMissWarnDB && !warned {
+		t.Errorf("limit output = %.3f LUFS misses %g by %.3f LU, past the %g LU reporting threshold, and said nothing: %+v",
+			got, target, miss, loudnessMissWarnDB, limited.Warnings)
 	}
-	if hasWarning(limited, WarnLoudnessTargetMissed) {
-		t.Errorf("limit mode hit the target but still warned: %+v", limited.Warnings)
+	if miss <= loudness.ConvergeToleranceDB && warned {
+		t.Errorf("limit output = %.3f LUFS converged but still warned: %+v", got, limited.Warnings)
 	}
 }
 
@@ -126,11 +144,13 @@ func TestWarnLoudnessTargetMissed(t *testing.T) {
 	if !warned(apply(PeakCap), pres(clamped)) {
 		t.Error("a 30 dB clamp should warn")
 	}
+	// PeakLimit has no clamp to read, so the cap-shaped input alone (with no output
+	// measurement) tells it nothing and it stays silent.
 	if warned(apply(PeakLimit), pres(clamped)) {
-		t.Error("PeakLimit does not clamp, so it must not warn")
+		t.Error("PeakLimit with no output measurement must not warn")
 	}
 	if warned(apply(PeakCap), pres(marginal)) {
-		t.Errorf("a %g dB shortfall is below the %g dB threshold", 0.5, loudnessClampWarnDB)
+		t.Errorf("a %g dB shortfall is below the %g dB threshold", 0.5, loudnessMissWarnDB)
 	}
 	// Silence measures -Inf, which would make the shortfall +Inf.
 	if warned(apply(PeakCap), pres(&loudness.Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)})) {
@@ -144,5 +164,56 @@ func TestWarnLoudnessTargetMissed(t *testing.T) {
 	}
 	if warned(nil, pres(clamped)) {
 		t.Error("nil loudness spec must not warn")
+	}
+}
+
+// TestWarnLimiterTargetMissed covers the limit-mode branch, which is derived from
+// the measured output because there is no clamp to attribute a miss to.
+func TestWarnLimiterTargetMissed(t *testing.T) {
+	limit := &LoudnessSpec{Mode: LoudnessApply, Target: -14, PeakMode: PeakLimit}
+	out := func(lufs float64) pipeline.Result {
+		return pipeline.Result{
+			OutputLoudness: &loudness.Loudness{IntegratedLUFS: lufs, TruePeakDBTP: -1, LRA: 3},
+			LoudnessPasses: 3,
+		}
+	}
+	detail := func(p pipeline.Result) string {
+		var got string
+		em := newEmitter(func(e Event) {
+			if e.Stage == StageWarning && e.Warning != nil && e.Warning.Code == WarnLoudnessTargetMissed {
+				got = e.Warning.Detail
+			}
+		}, "")
+		warnLoudnessTargetMissed(em, limit, p)
+		return got
+	}
+
+	// A 1.4 LU shortfall: reported, with the achieved loudness and the pass count.
+	d := detail(out(-15.4))
+	for _, want := range []string{"1.4 LU short", "-14 LUFS target", "3 encode passes", "-15.4 LUFS"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("shortfall detail = %q, want it to contain %q", d, want)
+		}
+	}
+	// An overshoot is as much a silently wrong delivery as a shortfall.
+	if d := detail(out(-12.0)); !strings.Contains(d, "2.0 LU above") {
+		t.Errorf("overshoot detail = %q, want it to report an overshoot", d)
+	}
+	// Inside the reporting threshold: silent on both sides.
+	for _, lufs := range []float64{-14.5, -13.5, -14} {
+		if d := detail(out(lufs)); d != "" {
+			t.Errorf("%.1f LUFS is within %g LU of the target but warned: %q", lufs, loudnessMissWarnDB, d)
+		}
+	}
+	// No usable measurement: nothing honest to report.
+	if d := detail(pipeline.Result{}); d != "" {
+		t.Errorf("nil OutputLoudness warned: %q", d)
+	}
+	nonFinite := pipeline.Result{
+		OutputLoudness: &loudness.Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)},
+		LoudnessPasses: 1,
+	}
+	if d := detail(nonFinite); d != "" {
+		t.Errorf("silent output warned: %q", d)
 	}
 }

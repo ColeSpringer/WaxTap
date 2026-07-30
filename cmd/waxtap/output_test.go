@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -196,6 +198,9 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrRequestedFormatUnavailable, 2}, // correctable request error
 		{&waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("down")}, 9},
 		{&url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Err: errFake("refused")}}, 9},
+		// A proxy that answers CONNECT with 407 arrives untyped from net/http; the
+		// transport hook makes it classifiable instead of exit 1 (F7).
+		{&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusProxyAuthRequired}}, 9},
 		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},
 		{&fs.PathError{Op: "mkdir", Path: "/root/x", Err: errFake("permission denied")}, 10},
 		{errFake("other"), 1},
@@ -738,6 +743,31 @@ func TestIsProxyError(t *testing.T) {
 	if isProxyError(errors.New("some unrelated network error")) {
 		t.Error("a non-proxy error must not be classified as a proxy failure")
 	}
+	// A proxy that answered CONNECT with an error status carries no proxyconnect
+	// marker, so only the typed branch finds it.
+	if !isProxyError(&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusProxyAuthRequired}}) {
+		t.Error("a non-200 CONNECT response should be detected as a proxy failure")
+	}
+}
+
+func TestFriendlyError_ProxyConnectStatus(t *testing.T) {
+	// 407 names the status and points at credentials, rather than being flattened
+	// to the generic "proxy connection failed".
+	msg := friendlyError(&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusProxyAuthRequired}})
+	if !strings.Contains(msg, "407") {
+		t.Errorf("407 friendlyError = %q, want the status named", msg)
+	}
+	if !strings.Contains(msg, "--proxy") {
+		t.Errorf("407 friendlyError = %q, want the credentials remedy", msg)
+	}
+	if strings.Contains(msg, "proxy connection failed") {
+		t.Errorf("407 friendlyError = %q, want the status-specific message, not the generic one", msg)
+	}
+	// A non-407 status still reports the status without the credentials advice.
+	other := friendlyError(&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusBadGateway}})
+	if !strings.Contains(other, "502") || strings.Contains(other, "credentials") {
+		t.Errorf("502 friendlyError = %q, want the status without credentials advice", other)
+	}
 }
 
 func TestFriendlyError_ProxyAndInvalidPlaylist(t *testing.T) {
@@ -787,3 +817,63 @@ func TestAlreadyRenderedMarker(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// TestRenderErrorKept covers the additive kept-output reporting. The nil case must
+// be byte-identical to renderError: every existing failure path goes through it,
+// and a stray extra line would break scripted stderr parsing and the JSON contract.
+func TestRenderErrorKept(t *testing.T) {
+	err := errors.New("something failed")
+	for _, jsonMode := range []bool{false, true} {
+		var plain, kept bytes.Buffer
+		renderError(&plain, jsonMode, err)
+		renderErrorKept(&kept, jsonMode, err, nil)
+		if plain.String() != kept.String() {
+			t.Errorf("jsonMode=%v: nil kept diverged from renderError:\n%q\n%q", jsonMode, plain.String(), kept.String())
+		}
+	}
+
+	// Human form: the existing error line, then a note naming the file.
+	var human bytes.Buffer
+	renderErrorKept(&human, false, context.Canceled, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	got := human.String()
+	if !strings.HasPrefix(got, "waxtap: canceled\n") {
+		t.Errorf("human output does not start with the usual error line:\n%q", got)
+	}
+	for _, want := range []string{"note:", "/out/track.flac", "4096 bytes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("human output missing %q:\n%s", want, got)
+		}
+	}
+
+	// JSON form: additive fields on the existing envelope.
+	var doc bytes.Buffer
+	renderErrorKept(&doc, true, context.Canceled, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	var envelope struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		OutputPath    string `json:"outputPath"`
+		OutputBytes   int64  `json:"outputBytes"`
+		Error         struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if uerr := json.Unmarshal(doc.Bytes(), &envelope); uerr != nil {
+		t.Fatalf("unmarshal %q: %v", doc.String(), uerr)
+	}
+	if envelope.SchemaVersion != schemaVersion {
+		t.Errorf("schemaVersion = %d, want %d", envelope.SchemaVersion, schemaVersion)
+	}
+	if envelope.OutputPath != "/out/track.flac" || envelope.OutputBytes != 4096 {
+		t.Errorf("envelope = %+v, want the kept path and byte count", envelope)
+	}
+	if envelope.Error.Code != "canceled" {
+		t.Errorf("error.code = %q, want canceled", envelope.Error.Code)
+	}
+
+	// The fields are omitempty, so an ordinary failure document does not gain keys.
+	var bare bytes.Buffer
+	renderError(&bare, true, err)
+	if strings.Contains(bare.String(), "outputPath") {
+		t.Errorf("ordinary error document gained an outputPath key:\n%s", bare.String())
+	}
+}

@@ -2,9 +2,12 @@ package httpx
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 func TestHostLimiterSpacesRequests(t *testing.T) {
@@ -191,6 +194,101 @@ func TestHostLimiterSpacingResumesAfterCooldown(t *testing.T) {
 	// The cooldown and two spacing intervals should take about 200ms.
 	if elapsed < 170*time.Millisecond {
 		t.Errorf("3 requests after cooldown took %v; QPS spacing did not resume (want ~200ms)", elapsed)
+	}
+}
+
+func TestHostLimiterCooldownPastDeadlineReportsRateLimit(t *testing.T) {
+	// A penalty from an earlier 429 outlasts the next request's deadline. Blocking
+	// and returning DeadlineExceeded would re-mask the throttling as a timeout, so
+	// the cooldown reports itself instead (F3, layer 2).
+	l := NewHostLimiter(0) // cooldown-only
+	l.Penalize("a.example", 60*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := l.Wait(ctx, "a.example")
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Wait blocked for %v, want a fast return", elapsed)
+	}
+	if !errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestHostLimiterQPSPastDeadlineStaysContextError(t *testing.T) {
+	// Pacing our own requests is not the server throttling us, so a pure QPS delay
+	// the deadline cannot hold keeps reporting the context error.
+	l := NewHostLimiter(0.1) // 10s spacing, no cooldown
+	if err := l.Wait(context.Background(), "a.example"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := l.Wait(ctx, "a.example")
+	if errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want a context error for a pure QPS delay", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestHostLimiterSpacingBehindExpiringCooldownStaysContextError(t *testing.T) {
+	// A cooldown with milliseconds left, behind a 10s spacing interval: the wait the
+	// deadline cannot hold is almost entirely self-imposed pacing, so reporting it as
+	// the host throttling us would be wrong. The cooldown's own remaining time is
+	// what the deadline is measured against.
+	l := NewHostLimiter(0.1) // 10s spacing
+	if err := l.Wait(context.Background(), "a.example"); err != nil {
+		t.Fatalf("first Wait: %v", err)
+	}
+	// Penalized after the schedule already ran ahead, so the next request waits on
+	// spacing and the cooldown is long gone by the time its slot arrives.
+	l.Penalize("a.example", 20*time.Millisecond)
+
+	// Comfortably past the cooldown plus retryHeadroom, far short of the 10s slot.
+	ctx, cancel := context.WithTimeout(context.Background(), 1300*time.Millisecond)
+	defer cancel()
+	err := l.Wait(ctx, "a.example")
+	if errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want a context error: the wait is QPS spacing, not the cooldown", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestHostLimiterCooldownErrorCarriesRemainingTime(t *testing.T) {
+	// The cooldown is the one thing that can say how long the host is paused, and
+	// the CLI prints it. Reporting a rate limit with no retry-after would leave the
+	// user with nothing to act on.
+	l := NewHostLimiter(0)
+	l.Penalize("a.example", 60*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rle, ok := errors.AsType[*waxerr.RateLimitError](l.Wait(ctx, "a.example"))
+	if !ok {
+		t.Fatalf("Wait did not return *waxerr.RateLimitError")
+	}
+	if rle.RetryAfter <= 0 || rle.RetryAfter > 60*time.Second {
+		t.Errorf("RetryAfter = %v, want the cooldown's remaining time", rle.RetryAfter)
+	}
+}
+
+func TestHostLimiterCanceledDuringCooldownStaysCanceled(t *testing.T) {
+	// Ctrl-C during a cooldown must stay exit 130, not be reported as a rate limit.
+	l := NewHostLimiter(0)
+	l.Penalize("a.example", 60*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	if err := l.Wait(ctx, "a.example"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
 

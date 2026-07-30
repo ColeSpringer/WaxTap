@@ -187,10 +187,17 @@ func (r *resumableReader) openNext() error {
 		}
 
 		if nr, ok := errors.AsType[*needRefreshError](err); ok {
-			if _, _, rerr := r.shared.renew(r.ctx, gen, nr.failure); rerr != nil {
+			rerr := handleRefresh(r.ctx, r.shared, gen, nr.failure)
+			if rerr == nil {
+				continue // refreshed: retry without spending an attempt
+			}
+			// A spent budget drops this 403 into the ordinary ladder below, which it
+			// never used to reach. Every other refresh outcome is terminal, and so is a
+			// 410 whatever the budget says.
+			if !errors.Is(rerr, errRefreshBudgetSpent) || gone(nr.failure) {
 				return rerr
 			}
-			continue // refreshed: retry without spending a transient attempt
+			err = rerr
 		}
 		if attempt >= r.d.maxChunkRetries || !retryable(r.ctx, err) {
 			return err

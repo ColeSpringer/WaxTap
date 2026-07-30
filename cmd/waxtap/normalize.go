@@ -47,9 +47,14 @@ func newNormalizeCmd() *cobra.Command {
 			"the target: a source already peaking at 0 dBTP takes at most -1.0 dB of gain\n" +
 			"whatever the target, so the miss can be 10 LU or more. --peak-mode limit\n" +
 			"applies the full gain and lets the true-peak limiter catch the overshoot,\n" +
-			"hitting the target at the cost of transparency. --album always limits and\n" +
-			"rejects --peak-mode cap: one uniform gain cannot be clamped per track\n" +
-			"without destroying the relative track loudness album mode preserves.",
+			"at the cost of transparency. Because the limiter gives back part of the\n" +
+			"gain it is handed, limit measures its own output and corrects, re-encoding\n" +
+			"up to 4 times to land within 0.3 LU of the target; it reports\n" +
+			"loudness-target-missed if the limiter saturates before getting there.\n" +
+			"--album always limits and rejects --peak-mode cap: one uniform gain cannot\n" +
+			"be clamped per track without destroying the relative track loudness album\n" +
+			"mode preserves. Album mode is also the one path that stays a single pass,\n" +
+			"for the same reason: correcting per track would undo that spacing.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)

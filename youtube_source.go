@@ -758,6 +758,11 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 
 // deliverSource downloads without processing. File outputs can retry incomplete
 // attempts because staging is atomic; Writer outputs cannot retract written bytes.
+//
+// Both branches set OutputFormat.ContentLength from the bytes delivered rather
+// than leaving the player's declaration, matching the processing path: a format
+// whose player response omits contentLength delivers fine but would otherwise
+// report zero. SourceFormat keeps the declared value, which is what it describes.
 func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *emitter) (*Result, error) {
 	switch req.Output.kind {
 	case outputFile:
@@ -766,13 +771,15 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, err
 		}
 		em.stage(StageFinalizing)
+		out := a.fmtSel
+		out.ContentLength = r.BytesWritten
 		return &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      id,
 			Title:        a.video.Title,
 			Client:       a.client,
 			SourceFormat: a.fmtSel,
-			OutputFormat: a.fmtSel,
+			OutputFormat: out,
 			OutputPath:   req.Output.path,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
@@ -793,13 +800,15 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, derr
 		}
 		em.stage(StageFinalizing)
+		out := a.fmtSel
+		out.ContentLength = r.BytesWritten
 		return &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      id,
 			Title:        a.video.Title,
 			Client:       a.client,
 			SourceFormat: a.fmtSel,
-			OutputFormat: a.fmtSel,
+			OutputFormat: out,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
 			Metadata:     videoMetadataFor(req, a.video),
@@ -846,6 +855,20 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 			return nil, err
 		}
 		res.OutputBytes = n
+	}
+	// contentLength describes the file actually delivered. The pipeline's output
+	// probe runs before embedMetadata rewrites the file, and the embed-only branch
+	// in produce has no probe at all, so the probe size can undercount cover art.
+	// OutputBytes is stat'd above, after every write, so it is the authority.
+	//
+	// Client.Process (local files) needs no equivalent: embedMetadata is called only
+	// from this path, so a local run's probe size already equals the file size.
+	// Bitrate is deliberately left alone; applyProbe takes the audio stream's own
+	// rate, so it keeps describing the audio rather than growing with the artwork.
+	// The consequence is intentional: after an embed pass contentLength and bitrate
+	// no longer satisfy size * 8 / duration.
+	if res.OutputBytes > 0 {
+		res.OutputFormat.ContentLength = res.OutputBytes
 	}
 	return res, nil
 }

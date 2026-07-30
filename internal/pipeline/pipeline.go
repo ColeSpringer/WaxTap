@@ -9,11 +9,17 @@
 // The stages are probe, optional loudness analysis, one fused processing pass,
 // and an optional output loudness measurement. Analysis includes any requested
 // cut so the gain matches the audio that will be encoded.
+//
+// Normalizing with a true-peak limiter is the one case that writes more than
+// once: the limiter gives back part of whatever gain it is handed, so the pass is
+// measured and the gain corrected until the output lands on the target. Each pass
+// rewrites the output atomically, so the destination always holds a complete file.
 package pipeline
 
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -120,8 +126,16 @@ type Result struct {
 	LoudnessMeasured bool          // input loudness was measured
 	LoudnessApplied  bool          // normalization was applied
 
-	InputLoudness  *loudness.Loudness // measured post-cut input loudness
-	OutputLoudness *loudness.Loudness // measured output loudness, set only on Apply
+	InputLoudness *loudness.Loudness // measured post-cut input loudness
+	// OutputLoudness is the measured loudness of the file left at OutputPath, set
+	// only on Apply. It is nil when the measurement failed, so a caller reporting it
+	// never has to wonder whether it matches the delivered file.
+	OutputLoudness *loudness.Loudness
+	// LoudnessPasses counts the output writes normalization took: 1 for PeakCap and
+	// for a PeakLimit pass that landed inside tolerance, more when the limiter-backed
+	// gain needed correcting. It is 0 when no normalization ran. Only completed
+	// writes count, so it always matches the encodes behind the delivered file.
+	LoudnessPasses int
 
 	// OutputProbe is a probe of the written OutputPath, populated whenever an
 	// output file was produced. It is nil for a measure-only or no-op spec and
@@ -240,6 +254,18 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		remux = false
 	}
 
+	// An explicit copy cut cannot ride along with an encode. The facade rejects the
+	// --format form before any download, but this also catches the route it cannot
+	// see: the downmix branch above sets spec.Codec without consulting CutMode, so
+	// --cut-mode copy --downmix --channels mono with no --format would otherwise
+	// reach the same silent downgrade. Placed after container resolution so the
+	// container-mismatch path (which already honors ModeCopy) reports its own
+	// clearer error first.
+	if effectiveCut && spec.CutMode == media.ModeCopy && spec.Codec != media.CodecCopy {
+		return Result{}, fmt.Errorf("%w: a copy cut cannot re-encode, but this spec encodes to %s; drop the copy mode or the encode",
+			waxerr.ErrIncompatibleSpec, spec.Codec)
+	}
+
 	// A copy cut that survived container resolution stays lossless: WaxTap
 	// cut-remuxes it (kept codec, byte-identical packets) and re-encodes only if
 	// WaxFlow declines the source codec.
@@ -273,9 +299,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 
 	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth, Channels: fold}
 	if apply {
-		// The two peak policies differ only here: RawGain hits the target and hands
-		// the peaks to WaxFlow's limiter, GainFor holds the peak under the ceiling
-		// and may fall short.
+		// The two peak policies differ only here: RawGain aims straight at the target
+		// and hands the peaks to WaxFlow's limiter, GainFor holds the peak under the
+		// ceiling and may fall short.
 		if spec.Loudness.PeakLimit {
 			enc.GainDB = loudness.RawGain(spec.Loudness.Target, measured.IntegratedLUFS)
 		} else {
@@ -283,43 +309,53 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		}
 	}
 
+	// write runs one complete output pass: the fused cut+encode, or a plain
+	// transcode. It is a closure so the loudness search below can run it more than
+	// once. Every path stages through internal/tempfile and commits, so re-running
+	// it atomically replaces the output rather than appending to it, and enc.GainDB
+	// is absolute and always applied to input, so repeated passes never compound.
+	write := func(enc media.Spec) error {
+		if effectiveCut {
+			send(StageCutting)
+			fallback := enc
+			if copyCut {
+				// The re-encode fallback (when cut-remux declines the source codec)
+				// keeps the source family, staying lossless for a lossless source.
+				if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
+					fallback.Codec = c
+				}
+			}
+			cres, err := r.Render(ctx, input, output, media.CutSpec{
+				Keeps:       keeps,
+				Total:       total,
+				Crossfade:   spec.Crossfade,
+				CopyCut:     copyCut,
+				RequireCopy: spec.CutMode == media.ModeCopy || remux,
+				Encode:      fallback,
+			})
+			if err != nil {
+				return err
+			}
+			res.Cut = cres.Applied
+			res.Removed = cres.Removed
+			// A copy cut that fell back to a re-encode (cut-remux declined the source
+			// codec) reports the encode it actually produced.
+			if copyCut && cres.Mode == media.ModeAccurate {
+				transcoding = true
+				spec.Codec = fallback.Codec
+			}
+			return nil
+		}
+		send(StageTranscoding)
+		_, err := r.Transcode(ctx, input, output, enc)
+		return err
+	}
+
 	if apply {
 		send(StageNormalizing)
 	}
-	if effectiveCut {
-		send(StageCutting)
-		fallback := enc
-		if copyCut {
-			// The re-encode fallback (when cut-remux declines the source codec)
-			// keeps the source family, staying lossless for a lossless source.
-			if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
-				fallback.Codec = c
-			}
-		}
-		cres, err := r.Render(ctx, input, output, media.CutSpec{
-			Keeps:       keeps,
-			Total:       total,
-			Crossfade:   spec.Crossfade,
-			CopyCut:     copyCut,
-			RequireCopy: spec.CutMode == media.ModeCopy || remux,
-			Encode:      fallback,
-		})
-		if err != nil {
-			return Result{}, err
-		}
-		res.Cut = cres.Applied
-		res.Removed = cres.Removed
-		// A copy cut that fell back to a re-encode (cut-remux declined the source
-		// codec) reports the encode it actually produced.
-		if copyCut && cres.Mode == media.ModeAccurate {
-			transcoding = true
-			spec.Codec = fallback.Codec
-		}
-	} else {
-		send(StageTranscoding)
-		if _, err := r.Transcode(ctx, input, output, enc); err != nil {
-			return Result{}, err
-		}
+	if err := write(enc); err != nil {
+		return Result{}, err
 	}
 
 	res.OutputPath = output
@@ -327,15 +363,35 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	res.LoudnessApplied = apply
 	res.OutputCodec = spec.Codec
 
-	// Post-measure the written output so callers can report the achieved loudness.
-	// Best-effort: the apply already succeeded, so a measurement failure must not
-	// fail the job.
-	if apply {
+	// The output is already at the target layout, so it is measured as-is (0).
+	measureOutput := func() (loudness.Loudness, error) { return loudness.Measure(ctx, r, output, 0) }
+
+	switch {
+	case apply && spec.Loudness.PeakLimit:
+		// The limiter gives back part of whatever gain it is handed, by an amount
+		// that depends on the material, so one pass cannot hit the target. Measure
+		// the encode and correct.
+		var cerr error
+		res.OutputLoudness, res.LoudnessPasses, cerr = converge(ctx, spec.Loudness.Target, enc, measureOutput, write, send)
+		if cerr != nil {
+			// Only cancellation reaches here; everything else the search can hit is
+			// non-fatal by design. It must not be swallowed: the file at output is a
+			// complete earlier pass, but it carries the wrong gain, and returning
+			// success would report that as the requested loudness. The caller keeps
+			// exit 130 and can name the file it found.
+			return Result{}, cerr
+		}
+	case apply:
+		// PeakCap keeps exactly one pass. Its head clamp is the whole policy, and
+		// iterating would defeat it; the caller reports the resulting miss instead.
+		//
+		// Post-measure so callers can report the achieved loudness. Best-effort: the
+		// apply already succeeded, so a measurement failure must not fail the job.
 		send(StageAnalyzing)
-		// The output is already at the target layout, so measure it as-is (0).
-		if out, merr := loudness.Measure(ctx, r, output, 0); merr == nil {
+		if out, merr := measureOutput(); merr == nil {
 			res.OutputLoudness = &out
 		}
+		res.LoudnessPasses = 1
 	}
 
 	// Probe the written output so callers can report authoritative output numbers.
@@ -345,6 +401,159 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		res.OutputProbe = &op
 	}
 	return res, nil
+}
+
+// Tuning for the PeakLimit gain search.
+const (
+	// maxLoudnessWrites caps how many times the search writes output while
+	// converging on a PeakLimit target.
+	//
+	// One further write is allowed past it, and only to put back the best pass the
+	// search already measured. That write cannot come out of the budget: the search
+	// spends its last write speculatively, without knowing whether the result will
+	// improve, so reserving a slot for the restore would cost a search pass on every
+	// run to serve the one where the last pass got worse. The worst case is therefore
+	// maxLoudnessWrites+1 encodes, and only on a run that would otherwise have
+	// delivered a file the search itself had already rejected.
+	maxLoudnessWrites = 4
+
+	// loudnessGainSlope is the LUFS gained per dB of applied gain, seeding the first
+	// correction before there are two points to take a secant from. It is under 1.0
+	// because the limiter gives back part of every dB; assuming unit slope
+	// under-corrects and costs an extra pass every time.
+	loudnessGainSlope = 0.93
+
+	// minLoudnessSlope and maxLoudnessSlope bound a secant estimate. A slope above
+	// 1.0 is not physical for a limiter that only ever gives gain back, and a very
+	// small one (two passes that barely moved) would blow the next step up.
+	minLoudnessSlope = 0.5
+	maxLoudnessSlope = 1.0
+)
+
+// converge re-encodes until the measured output loudness is within
+// [loudness.ConvergeToleranceDB] of target, and reports the delivered
+// measurement together with the number of output writes that produced it.
+//
+// write performs one output pass with the gain in the spec it is handed; measure
+// reads back the file write left behind. They are injected so the search can be
+// exercised without an encoder: it is the one place in WaxTap whose failure mode
+// is silently delivering audio at a loudness nobody asked for.
+//
+// The returned measurement always describes the file left at output, or is nil
+// when that could not be measured; a caller reporting it must not have to wonder
+// whether the file matches. enc arrives holding the first pass's gain, which has
+// already been written.
+//
+// Failures are non-fatal, matching the best-effort contract the single-pass
+// post-measure has always carried: the apply already succeeded, and every write is
+// atomic, so a failed correction leaves a complete earlier pass at output and
+// simply stops the search.
+//
+// Cancellation is the one exception and is returned as an error. The file at
+// output is complete either way, but it holds an uncorrected gain, so reporting
+// success would present a loudness the caller never asked for as the delivered
+// result. Returning it also keeps a Ctrl-C at exit 130.
+func converge(
+	ctx context.Context,
+	target float64,
+	enc media.Spec,
+	measure func() (loudness.Loudness, error),
+	write func(media.Spec) error,
+	send func(Stage),
+) (*loudness.Loudness, int, error) {
+	gain := enc.GainDB // gain that produced the file currently at output
+	var cur *loudness.Loudness
+	bestGain, bestMiss := gain, math.Inf(1)
+	var best *loudness.Loudness
+	// Previous (gain, LUFS) point, for the secant slope. NaN until a second pass.
+	prevGain, prevLUFS := math.NaN(), math.NaN()
+	writes := 1
+
+	for {
+		send(StageAnalyzing)
+		out, merr := measure()
+		if merr != nil {
+			if ctx.Err() != nil {
+				return nil, writes, ctx.Err()
+			}
+			break
+		}
+		if !out.Finite() {
+			break // silence: no miss to correct, and no gain would change it
+		}
+		m := out
+		cur = &m
+
+		// Symmetric on the absolute miss. The step can overshoot (a 0.93 slope
+		// assumed against a true 1.0 gives miss*0.075 of overshoot), and the -70 LUFS
+		// absolute gate can let a pass over-deliver on dynamic material. A loop that
+		// only tested miss > tol would accept an unbounded overshoot and ship a
+		// silent "delivered -12.0 for a -14 target", the same defect being fixed.
+		miss := target - out.IntegratedLUFS
+		improved := math.Abs(miss) < bestMiss
+		if improved {
+			b := out
+			bestGain, bestMiss, best = gain, math.Abs(miss), &b
+		}
+		if bestMiss <= loudness.ConvergeToleranceDB {
+			return cur, writes, nil
+		}
+		// A pass that did not improve on an earlier one ends the search; so does a
+		// spent write budget.
+		if !improved || writes >= maxLoudnessWrites {
+			break
+		}
+
+		// Do not assume unit slope. Seed from loudnessGainSlope, then use the secant
+		// of the last two (gain, LUFS) points once they exist.
+		slope := loudnessGainSlope
+		if !math.IsNaN(prevGain) && gain != prevGain {
+			slope = clampFloat((out.IntegratedLUFS-prevLUFS)/(gain-prevGain), minLoudnessSlope, maxLoudnessSlope)
+		}
+		// Clamped like the gains loudness computes: the search walks away from the
+		// value RawGain returned, and a step off the end of WaxFlow's accepted range
+		// would end the search on a write error instead of on the miss.
+		next := loudness.ClampGain(gain + miss/slope)
+		if next == gain {
+			break // pinned at the limit: another pass would encode the same file
+		}
+
+		prevGain, prevLUFS = gain, out.IntegratedLUFS
+		enc.GainDB = next
+		if err := write(enc); err != nil {
+			if ctx.Err() != nil {
+				return nil, writes, err
+			}
+			// The failed pass left the previous file at output, so gain and cur still
+			// describe what is there.
+			break
+		}
+		writes++
+		gain, cur = next, nil // cur is stale: the file changed
+	}
+
+	// Restore the best pass when the search left something worse at output, or left
+	// a file it could not measure. This runs at most once and is not bound by
+	// maxLoudnessWrites; see the constant for why.
+	if best != nil && gain != bestGain {
+		enc.GainDB = bestGain
+		if err := write(enc); err != nil {
+			if ctx.Err() != nil {
+				return nil, writes, err
+			}
+			// The rewrite failed, so the previous pass is still at output and cur still
+			// describes it. Nothing to correct.
+		} else {
+			writes++
+			cur = best
+		}
+	}
+	return cur, writes, nil
+}
+
+// clampFloat bounds v to [lo, hi].
+func clampFloat(v, lo, hi float64) float64 {
+	return min(max(v, lo), hi)
 }
 
 // sourceEncodeCodec maps a probed source codec name to the media.Codec that

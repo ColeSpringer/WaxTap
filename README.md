@@ -87,15 +87,24 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   peaking at 0 dBTP takes at most -1.0 dB whatever the target, so the miss can be
   10 LU or more (reported as the `loudness-target-missed` warning).
   `--peak-mode limit` applies the full gain and lets the true-peak limiter catch
-  the overshoot, hitting the target at the cost of transparency. `--album`
-  always limits and rejects `--peak-mode cap`, because one uniform gain cannot be
-  clamped per track without destroying the relative track loudness it preserves.
+  the overshoot, at the cost of transparency. The limiter gives back part of the
+  gain it is handed, so `limit` measures its own output and corrects, re-encoding
+  up to 4 times to land within 0.3 LU of the target, and reports
+  `loudness-target-missed` when the limiter saturates before reaching it. Ordinary
+  material costs one extra encode pass. `--album` always limits and rejects
+  `--peak-mode cap`, because one uniform gain cannot be clamped per track without
+  destroying the relative track loudness it preserves; it is also the one path
+  that stays single-pass, since correcting per track would undo that spacing.
 - Decoding runs in float, so output depth follows the decoded stream: a lossy
   source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
   AIFF. That is lossless but larger, and some older DAWs and hardware players
   reject float WAV. `--bit-depth 16|24` forces integer output for
   wav/aiff/flac/alac; narrowing is dithered (TPDF), not truncated. The lossy
   formats encode in float and ignore it.
+- SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
+  exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
+  outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal
+  or delivers the audio uncut with a warning.
 - Playlist downloads support `--concurrency`, pacing, attempt limits, collision
   policies, and yt-dlp-compatible `--download-archive` files.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
@@ -117,7 +126,7 @@ as `error.code`. Run `waxtap exit-codes` for the built-in table.
 | 6 | retired (formerly ffmpeg/ffprobe not found) |
 | 7 | incomplete stream or expired stream URL |
 | 8 | PO token required, missing, rejected, or not minted |
-| 9 | network failure, including an unreachable proxy or sidecar, or an upstream HTTP error response |
+| 9 | network failure, including a proxy that is unreachable or rejects CONNECT, an unreachable sidecar, or an upstream HTTP error response |
 | 10 | local I/O failure |
 | 130 | canceled with SIGINT |
 

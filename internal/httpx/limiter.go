@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // HostLimiter spaces requests and applies cooldowns independently per host.
@@ -32,6 +34,14 @@ func NewHostLimiter(qps float64) *HostLimiter {
 // Wait rechecks the host cooldown after each timer wakeup. On cancellation, it
 // rolls back the request's spacing reservation when no later request depends on
 // it.
+//
+// A cooldown the caller's deadline cannot outlast returns *waxerr.RateLimitError
+// rather than a context error, so the throttling that caused the cooldown is what
+// the caller sees. Without it a penalty from one 429 re-masks itself on the next
+// request to that host: the cooldown eats the deadline and the classifier reports
+// a timeout. The comparison is against the cooldown's own remaining time, not the
+// whole wait, so a delay that is mostly our own QPS spacing keeps returning
+// ctx.Err(): pacing our own requests is not the server throttling us.
 func (l *HostLimiter) Wait(ctx context.Context, host string) error {
 	if err := ctx.Err(); err != nil {
 		return err // do not reserve a slot for an already-canceled request
@@ -39,9 +49,20 @@ func (l *HostLimiter) Wait(ctx context.Context, host string) error {
 	b := l.bucket(host)
 	slot, reserved := b.reserve(l.interval)
 	for {
-		wait := b.admitDelay(slot)
+		wait, cooldown := b.admitDelay(slot)
 		if wait <= 0 {
 			return nil
+		}
+		// pauseBlocked applies the same precedence Client.Do uses: cancellation
+		// outranks the cooldown report so Ctrl-C stays exit 130, while an expired
+		// deadline still gets the typed rate limit rather than a bare timeout. With no
+		// cooldown in force there is nothing to report, so the wait falls through to
+		// the timer and cancellation comes back from its Done branch.
+		if cooldown > 0 {
+			if berr := pauseBlocked(ctx, cooldown, &waxerr.RateLimitError{Host: host, RetryAfter: cooldown}); berr != nil {
+				b.rollback(reserved, l.interval)
+				return berr
+			}
 		}
 		t := time.NewTimer(wait)
 		select {
@@ -107,15 +128,20 @@ func (b *hostBucket) reserve(interval time.Duration) (slot, reserved time.Time) 
 	return base, b.next
 }
 
-// admitDelay returns the remaining wait for a slot and the current cooldown.
-func (b *hostBucket) admitDelay(slot time.Time) time.Duration {
+// admitDelay returns the remaining wait for a slot and how much of it a Penalize
+// cooldown accounts for, so a caller can tell server-imposed throttling from its
+// own QPS spacing. cooldown is zero when no cooldown is in force, and is not
+// capped by delay: a nearly-expired cooldown behind a long spacing interval leaves
+// a wait that is almost entirely self-imposed, which is not something to report as
+// the host throttling us.
+func (b *hostBucket) admitDelay(slot time.Time) (delay, cooldown time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	admit := slot
 	if b.cooldownUntil.After(admit) {
 		admit = b.cooldownUntil
 	}
-	return time.Until(admit)
+	return time.Until(admit), max(time.Until(b.cooldownUntil), 0)
 }
 
 // rollback gives back a reservation whose wait was canceled, but only when it is

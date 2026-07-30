@@ -147,7 +147,7 @@ func isCategoryList(s string) bool {
 // bindCutFlags registers the time-range cut flags shared by download and cut.
 func bindCutFlags(f *pflag.FlagSet, ranges *[]string, cutMode *string, crossfade *time.Duration, sbOnError *string) {
 	f.StringArrayVar(ranges, "cut-range", nil, "remove a time range start-end (repeatable)")
-	f.StringVar(cutMode, "cut-mode", "smart", "cut rendering: smart|copy|accurate")
+	f.StringVar(cutMode, "cut-mode", "smart", "cut rendering: smart|copy (rejects --format/--downmix, which re-encode)|accurate")
 	f.DurationVar(crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
 	f.StringVar(sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
 }
@@ -171,7 +171,7 @@ func bindBitDepthFlag(f *pflag.FlagSet, bitDepth *int) {
 
 // bindPeakModeFlag registers --peak-mode with the shared help text.
 func bindPeakModeFlag(f *pflag.FlagSet, peakMode *string) {
-	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target)|limit (hits the target)")
+	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target)|limit (re-encodes until it reaches the target)")
 }
 
 // rejectEmptyFlags errors when any named string flag is explicitly set to an

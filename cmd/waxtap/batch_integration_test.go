@@ -168,7 +168,16 @@ func TestBatchNormalizeReportsAggregatedWarnings(t *testing.T) {
 		t.Errorf("aggregated warning does not name the file its numbers came from:\n%s", got)
 	}
 
-	// --peak-mode limit takes the full gain, so the same library reports nothing.
+	// The same library under --peak-mode limit reports nothing, because the gain
+	// search reaches the target even on this 41 dB-crest fixture.
+	//
+	// Silence here is an outcome, not the contract. The contract is "converges or
+	// warns", and it is asserted where the loudness numbers exist: the batch NDJSON
+	// item records carry only input/output/status, so this layer can only observe
+	// that the library found nothing to report. If an upstream limiter change ever
+	// makes this fixture fall short again, the right response is a warning appearing
+	// here, not a loosened threshold. See TestPeakModeCapMissesAndWarns for the
+	// invariant itself and TestRunPeakLimitConverges for the convergence assertion.
 	cmd = newNormalizeCmd()
 	cmd.SetArgs([]string{root, "--format", "flac", "--dir", filepath.Join(root, "lim"), "--peak-mode", "limit"})
 	buf.Reset()
@@ -177,8 +186,8 @@ func TestBatchNormalizeReportsAggregatedWarnings(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("normalize dir --peak-mode limit: %v\n%s", err, buf.String())
 	}
-	if got := buf.String(); strings.Contains(got, "warnings:") {
-		t.Errorf("--peak-mode limit hit the target but still reported warnings:\n%s", got)
+	if got := buf.String(); strings.Contains(got, "warnings:") && !strings.Contains(got, "loudness-target-missed") {
+		t.Errorf("--peak-mode limit reported a warning other than the loudness miss:\n%s", got)
 	}
 }
 

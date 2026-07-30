@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/media/loudness"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
@@ -327,6 +329,194 @@ func TestRunCutLoudnessApply(t *testing.T) {
 	}
 	if d := probeDuration(t, r, out); d < 2500*time.Millisecond || d > 3500*time.Millisecond {
 		t.Errorf("output duration = %v, want ~3s", d)
+	}
+}
+
+// crestFixture writes the moderate-crest source the convergence tests need: one
+// PeakLimit pass misses the target by more than the reporting tolerance, and
+// correcting reaches it.
+func crestFixture(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, mediatest.CrestWAV(8, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRunPeakLimitConverges covers F1 Part A: with the peaks handed to the
+// limiter, the pipeline measures its own output and corrects the gain until the
+// delivered loudness reaches the target.
+func TestRunPeakLimitConverges(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := crestFixture(t, dir, "crest.wav")
+
+	for _, target := range []float64{-24, -20, -16, -14, -10} {
+		out := filepath.Join(dir, "out.flac")
+		res, err := Run(context.Background(), r, in, out, Spec{
+			Codec:    media.CodecFLAC,
+			Loudness: &Loudness{Apply: true, Target: target, PeakLimit: true},
+		}, nil)
+		if err != nil {
+			t.Fatalf("Run(target %g): %v", target, err)
+		}
+		if res.OutputLoudness == nil {
+			t.Fatalf("target %g: no output loudness measured", target)
+		}
+		if miss := math.Abs(target - res.OutputLoudness.IntegratedLUFS); miss > loudness.ConvergeToleranceDB {
+			t.Errorf("target %g: delivered %.3f LUFS, miss %.3f > tolerance %g",
+				target, res.OutputLoudness.IntegratedLUFS, miss, loudness.ConvergeToleranceDB)
+		}
+		// The limiter must still hold the ceiling under the extra gain iteration
+		// pushes through it, which is the regression the search could have caused.
+		if tp := res.OutputLoudness.TruePeakDBTP; tp > loudness.TruePeakCeilingDB+0.1 {
+			t.Errorf("target %g: true peak %.3f dBTP is over the %g ceiling",
+				target, tp, loudness.TruePeakCeilingDB)
+		}
+		// maxLoudnessWrites+1: the search budget, plus the one restoring write that
+		// is allowed past it.
+		if res.LoudnessPasses < 1 || res.LoudnessPasses > maxLoudnessWrites+1 {
+			t.Errorf("target %g: LoudnessPasses = %d, want 1..%d", target, res.LoudnessPasses, maxLoudnessWrites+1)
+		}
+	}
+}
+
+// TestRunPeakLimitOutputLoudnessMatchesDisk: the reported measurement must
+// describe the file actually delivered. Getting this wrong makes --json describe a
+// file that is not there, which is the same class of defect as the silent miss.
+func TestRunPeakLimitOutputLoudnessMatchesDisk(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := crestFixture(t, dir, "crest.wav")
+	out := filepath.Join(dir, "out.flac")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		Codec:    media.CodecFLAC,
+		Loudness: &Loudness{Apply: true, Target: -14, PeakLimit: true},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.OutputLoudness == nil {
+		t.Fatal("no output loudness measured")
+	}
+	disk, err := loudness.Measure(context.Background(), r, out, 0)
+	if err != nil {
+		t.Fatalf("re-measure output: %v", err)
+	}
+	if math.Abs(disk.IntegratedLUFS-res.OutputLoudness.IntegratedLUFS) > 0.01 {
+		t.Errorf("reported %.3f LUFS but the file on disk measures %.3f",
+			res.OutputLoudness.IntegratedLUFS, disk.IntegratedLUFS)
+	}
+}
+
+// TestRunPeakLimitNoCorrectionWhenOnTarget: a source whose peak and loudness track
+// each other lands on the target in one pass, so the search costs nothing.
+func TestRunPeakLimitNoCorrectionWhenOnTarget(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 3, "flac") // ~-6.7 LUFS, peak ~-6 dBTP
+	out := filepath.Join(dir, "out.flac")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		Codec:    media.CodecFLAC,
+		Loudness: &Loudness{Apply: true, Target: -24, PeakLimit: true}, // attenuating: the limiter never engages
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.LoudnessPasses != 1 {
+		t.Errorf("LoudnessPasses = %d, want 1 (pass 1 landed inside tolerance)", res.LoudnessPasses)
+	}
+}
+
+// TestRunPeakCapStaysSinglePass: cap's head clamp is the whole policy, so it must
+// not iterate. Its output is unchanged from before the search existed.
+func TestRunPeakCapStaysSinglePass(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := crestFixture(t, dir, "crest.wav")
+	out := filepath.Join(dir, "out.flac")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		Codec:    media.CodecFLAC,
+		Loudness: &Loudness{Apply: true, Target: -14}, // PeakLimit false
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.LoudnessPasses != 1 {
+		t.Errorf("LoudnessPasses = %d, want 1 (cap never iterates)", res.LoudnessPasses)
+	}
+	if res.OutputLoudness == nil {
+		t.Fatal("cap mode should still post-measure")
+	}
+	// The crest source peaks at ~0 dBTP, so the clamp allows about -1 dB of gain and
+	// the output lands nowhere near -14. Iterating would have "fixed" that, which is
+	// exactly what cap must not do.
+	if got := res.OutputLoudness.IntegratedLUFS; got > -20 {
+		t.Errorf("cap output = %.3f LUFS, want well short of -14 (the clamp should bind)", got)
+	}
+}
+
+// TestRunPeakLimitFailedWriteLeavesNoOutput: iteration is the one change that
+// could leave a committed earlier pass behind when the job fails, so a rejected
+// output path must still produce no file at all.
+func TestRunPeakLimitFailedWriteLeavesNoOutput(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := crestFixture(t, dir, "crest.wav")
+	// A directory that does not exist: staging cannot open a temp file there.
+	out := filepath.Join(dir, "missing", "out.flac")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		Codec:    media.CodecFLAC,
+		Loudness: &Loudness{Apply: true, Target: -14, PeakLimit: true},
+	}, nil)
+	if err == nil {
+		t.Fatalf("Run into an unwritable path succeeded: %+v", res)
+	}
+	if fileExists(out) {
+		t.Error("a failed run left a file at the output path")
+	}
+}
+
+// TestRunPeakLimitCancelDuringSearchFails: a cancellation partway through the gain
+// search must surface, not be swallowed as success. The file at the output path is
+// complete (every write commits atomically) but carries an uncorrected gain, so
+// reporting success would present a loudness nobody asked for as the delivered
+// result, and would drop the Ctrl-C exit code on the floor.
+func TestRunPeakLimitCancelDuringSearchFails(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := crestFixture(t, dir, "crest.wav")
+	out := filepath.Join(dir, "out.flac")
+
+	// Cancel as soon as the first write finishes, so the search is interrupted
+	// between passes rather than before any output exists.
+	ctx, cancel := context.WithCancel(context.Background())
+	var wrote bool
+	emit := func(s Stage) {
+		if s == StageAnalyzing && wrote {
+			cancel()
+		}
+		if s == StageTranscoding {
+			wrote = true
+		}
+	}
+
+	_, err := Run(ctx, r, in, out, Spec{
+		Codec:    media.CodecFLAC,
+		Loudness: &Loudness{Apply: true, Target: -14, PeakLimit: true},
+	}, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	// The committed pass stays on disk: a caller can name it, and nothing partial
+	// can be there because every write is atomic.
+	if !fileExists(out) {
+		t.Error("the committed pass was removed; a canceled search should leave it in place")
 	}
 }
 
@@ -691,6 +881,51 @@ func TestRunCopyCutFlacRejected(t *testing.T) {
 			t.Errorf("%s wrote output despite rejection", name)
 		}
 	}
+}
+
+// TestRunCopyCutWithEncodeRejected covers the F4 invariant: an explicit copy cut
+// combined with an encode is rejected rather than silently downgraded to a
+// re-encode. Both rows use a container that accepts the source codec, so the
+// container-mismatch guard above them does not fire first and the new check is
+// what rejects them.
+func TestRunCopyCutWithEncodeRejected(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	remove := []cutrange.Range{{Start: time.Second, End: 2 * time.Second}}
+
+	t.Run("transcode-target", func(t *testing.T) {
+		in := synthSine(t, dir, "stereo.flac", 4, "flac")
+		out := filepath.Join(dir, "target.flac")
+		_, err := Run(context.Background(), r, in, out, Spec{
+			Remove: remove, Codec: media.CodecFLAC, CutMode: media.ModeCopy,
+		}, nil)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("err = %v, want ErrIncompatibleSpec", err)
+		}
+		if fileExists(out) {
+			t.Error("wrote output despite rejection")
+		}
+	})
+
+	// The downmix branch sets Codec and transcoding without consulting CutMode, so
+	// this reaches the same downgrade by a route the facade check cannot see (it
+	// skips downmix on purpose, since the fold decision needs the probe).
+	t.Run("downmix-no-format", func(t *testing.T) {
+		in := synthSurround(t, dir, "surround.mka", 2, "flac")
+		if got := probeChannels(t, r, in); got != 6 {
+			t.Skipf("synth produced %d channels, want 6", got)
+		}
+		out := filepath.Join(dir, "folded.mka")
+		_, err := Run(context.Background(), r, in, out, Spec{
+			Remove: remove, Codec: media.CodecCopy, CutMode: media.ModeCopy, Downmix: 2,
+		}, nil)
+		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("err = %v, want ErrIncompatibleSpec", err)
+		}
+		if fileExists(out) {
+			t.Error("wrote output despite rejection")
+		}
+	})
 }
 
 func TestRunForcedCopyIncompatibleContainerRejected(t *testing.T) {

@@ -1184,16 +1184,24 @@ type bodyReader struct{ *bytes.Reader }
 
 func (bodyReader) Close() error { return nil }
 
+// fUmpVarint encodes a UMP variable-length integer, the inverse of the reader's
+// readVarint: the prefix's leading 1 bits give the total length, its trailing
+// (8-size) bits hold the value's low bits, and each following byte stacks above
+// them. The 5-byte form ignores the prefix's low bits and carries a little-endian
+// uint32.
+//
+// Every branch past the first is exercised only by payloads of 128 bytes or more,
+// which the placeholder fixtures never reach; a test serving real audio does.
 func fUmpVarint(v uint64) []byte {
 	switch {
 	case v < 1<<7:
 		return []byte{byte(v)}
-	case v < 1<<14:
-		return []byte{0x80 | byte(v>>8), byte(v)}
-	case v < 1<<21:
-		return []byte{0xC0 | byte(v>>16), byte(v), byte(v >> 8)}
-	case v < 1<<28:
-		return []byte{0xE0 | byte(v>>24), byte(v), byte(v >> 8), byte(v >> 16)}
+	case v < 1<<14: // 6 prefix bits + 8
+		return []byte{0x80 | byte(v&0x3F), byte(v >> 6)}
+	case v < 1<<21: // 5 prefix bits + 16
+		return []byte{0xC0 | byte(v&0x1F), byte(v >> 5), byte(v >> 13)}
+	case v < 1<<28: // 4 prefix bits + 24
+		return []byte{0xE0 | byte(v&0x0F), byte(v >> 4), byte(v >> 12), byte(v >> 20)}
 	default:
 		b := []byte{0xF0, 0, 0, 0, 0}
 		binary.LittleEndian.PutUint32(b[1:], uint32(v))

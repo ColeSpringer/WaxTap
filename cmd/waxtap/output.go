@@ -212,18 +212,41 @@ func finalError(ctx context.Context, err error) error {
 	return errors.Join(ce, err)
 }
 
-// jsonError is the --json error envelope.
+// jsonError is the --json error envelope. outputPath and outputBytes are set only
+// when a failed run nevertheless left a complete file behind, so their absence is
+// the norm and schemaVersion stays 2.
 type jsonError struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Error         struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+	OutputPath  string `json:"outputPath,omitempty"`
+	OutputBytes int64  `json:"outputBytes,omitempty"`
+}
+
+// keptOutput names a complete file a failed run left at its output path.
+type keptOutput struct {
+	path  string
+	bytes int64
 }
 
 // renderError writes the final command error as JSON or as a human-readable line.
 // Both forms use the same classification.
 func renderError(w io.Writer, jsonMode bool, err error) {
+	renderErrorKept(w, jsonMode, err, nil)
+}
+
+// renderErrorKept is renderError plus the file a failed run left behind. Every
+// writer to an output path in WaxTap stages and commits atomically, so a file
+// sitting there after a cancellation is complete; the gap this closes is that
+// nothing used to say so. A nil kept produces byte-identical output to
+// renderError.
+//
+// A cancellation reported this way is still exit 130 and still a failure. Naming
+// the file does not promote it to a success, and the caller says so in the note
+// when post-processing (the info sidecar, the archive entry) did not run.
+func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
 	if err == nil {
 		return
 	}
@@ -233,6 +256,9 @@ func renderError(w io.Writer, jsonMode bool, err error) {
 		je.SchemaVersion = schemaVersion
 		je.Error.Code = c.code
 		je.Error.Message = c.message
+		if kept != nil {
+			je.OutputPath, je.OutputBytes = kept.path, kept.bytes
+		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(je)
@@ -241,6 +267,9 @@ func renderError(w io.Writer, jsonMode bool, err error) {
 	fmt.Fprintf(w, "waxtap: %s\n", c.message)
 	if c.hint != "" {
 		fmt.Fprintf(w, "  hint: %s\n", c.hint)
+	}
+	if kept != nil {
+		fmt.Fprintf(w, "  note: the finished file was kept: %s (%d bytes)\n", kept.path, kept.bytes)
 	}
 }
 
@@ -353,7 +382,9 @@ func classifyError(err error) classifiedError {
 
 	// Structural fallbacks apply only when no domain sentinel or timeout matched.
 	case isProxyError(err):
-		c.exitCode, c.code, c.hint = 9, "network", "check the proxy is reachable and that --proxy is a correct URL"
+		// A proxy that answered CONNECT is demonstrably reachable, so the generic
+		// reachability hint would contradict its own message.
+		c.exitCode, c.code, c.hint = 9, "network", proxyHint(err)
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
 		c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
@@ -451,6 +482,11 @@ func friendlyError(err error) string {
 	// first so the endpoint failure remains visible.
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
+	}
+	// A proxy that answered names its status and remedy, so check it before the
+	// generic proxy branch flattens it to "connection failed".
+	if pse, ok := errors.AsType[*proxyStatusError](err); ok {
+		return pse.Error()
 	}
 	if isProxyError(err) {
 		return "proxy connection failed (check --proxy)"
@@ -571,10 +607,56 @@ func translateConfigSymbols(msg string) string {
 	return configSymbolReplacer.Replace(msg)
 }
 
-// isProxyError reports whether err is a failure to connect to the configured
-// proxy. It prefers typed unwrapping and falls back to a string match for
-// transports that do not expose a typed proxyconnect error.
+// proxyStatusError reports a proxy that answered CONNECT with a non-200 status.
+//
+// It exists because Go returns a bare errors.New(reasonPhrase) for a failed
+// CONNECT, with no status, no type, and no "proxyconnect" marker, so a 407 would
+// otherwise keep the unclassified exit-1 default. config.go's
+// OnProxyConnectResponse hook sees the real response and builds this instead.
+// String-matching the reason phrase is not an option: it varies by status and is
+// indistinguishable from any other error text.
+//
+// It stays in package main deliberately. httpx never builds a transport (it wraps
+// an injected *http.Client), and config.go holds the only http.Transport in
+// non-test code, so there is no second caller to serve and no public type to
+// freeze.
+type proxyStatusError struct {
+	status int
+}
+
+func (e *proxyStatusError) Error() string {
+	msg := fmt.Sprintf("the proxy rejected CONNECT with HTTP %d %s",
+		e.status, http.StatusText(e.status))
+	if e.status == http.StatusProxyAuthRequired {
+		msg += "; put the credentials in the --proxy URL (http://user:pass@host:port)"
+	}
+	return msg
+}
+
+// proxyHint gives guidance matching how the proxy failed. A proxy that answered
+// CONNECT with an error status is reachable and its own message already carries the
+// remedy, so it gets guidance about the status instead of about connectivity.
+func proxyHint(err error) string {
+	pse, ok := errors.AsType[*proxyStatusError](err)
+	if !ok {
+		return "check the proxy is reachable and that --proxy is a correct URL"
+	}
+	if pse.status == http.StatusProxyAuthRequired {
+		// The message already gives the URL form (it has to: --json has no hint
+		// field), so repeating it here would print the same remedy twice in human
+		// mode. Add only what the message cannot say.
+		return "the same form works when the proxy comes from HTTPS_PROXY"
+	}
+	return "the proxy is reachable but refused the tunnel; check its configuration and access rules"
+}
+
+// isProxyError reports whether err is a failure to reach or negotiate with the
+// configured proxy. It prefers typed unwrapping and falls back to a string match
+// for transports that do not expose a typed proxyconnect error.
 func isProxyError(err error) bool {
+	if _, ok := errors.AsType[*proxyStatusError](err); ok {
+		return true
+	}
 	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "proxyconnect" {
 		return true
 	}

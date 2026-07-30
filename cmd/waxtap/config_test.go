@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,6 +334,50 @@ func TestFlagIntPtrOnlyWhenChanged(t *testing.T) {
 	}
 	if p := flagIntPtr(fs, "chrome-major"); p == nil || *p != 151 {
 		t.Errorf("set flag pointer = %v", p)
+	}
+}
+
+// TestHTTPClientBuiltForEnvProxy covers the F7 env-proxy gap: without --proxy the
+// CLI used to hand the facade its default transport, which has no CONNECT hook, so
+// an HTTPS_PROXY answering 407 stayed unclassified at exit 1.
+func TestHTTPClientBuiltForEnvProxy(t *testing.T) {
+	for _, k := range proxyEnvVars {
+		t.Setenv(k, "")
+	}
+	a := &appConfig{}
+	c, err := a.httpClient()
+	if err != nil {
+		t.Fatalf("httpClient: %v", err)
+	}
+	if c != nil {
+		t.Fatal("no proxy settings should yield a nil client (the facade installs its own)")
+	}
+
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+	c, err = a.httpClient()
+	if err != nil {
+		t.Fatalf("httpClient with HTTPS_PROXY: %v", err)
+	}
+	if c == nil {
+		t.Fatal("an env proxy should build a transport so the CONNECT hook is installed")
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+	}
+	if tr.OnProxyConnectResponse == nil {
+		t.Error("OnProxyConnectResponse not installed")
+	}
+	// The hook must classify a non-200 and pass a 200 through untouched.
+	if err := tr.OnProxyConnectResponse(context.Background(), nil, nil,
+		&http.Response{StatusCode: http.StatusProxyAuthRequired}); err == nil {
+		t.Error("407 CONNECT response should produce an error")
+	} else if pse, ok := errors.AsType[*proxyStatusError](err); !ok || pse.status != http.StatusProxyAuthRequired {
+		t.Errorf("hook err = %v (%T), want *proxyStatusError{407}", err, err)
+	}
+	if err := tr.OnProxyConnectResponse(context.Background(), nil, nil,
+		&http.Response{StatusCode: http.StatusOK}); err != nil {
+		t.Errorf("200 CONNECT response err = %v, want nil", err)
 	}
 }
 

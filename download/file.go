@@ -194,10 +194,17 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 				cancel()
 			}
 			if nr, ok := errors.AsType[*needRefreshError](err); ok {
-				if _, _, rerr := shared.renew(ctx, gen, nr.failure); rerr != nil {
+				rerr := handleRefresh(ctx, shared, gen, nr.failure)
+				if rerr == nil {
+					continue // retry with the refreshed URL; no attempt spent
+				}
+				// A spent budget drops this 403 into the ordinary ladder below, which it
+				// never used to reach. Every other refresh outcome is terminal, and so is
+				// a 410 whatever the budget says.
+				if !errors.Is(rerr, errRefreshBudgetSpent) || gone(nr.failure) {
 					return rerr
 				}
-				continue // retry with the refreshed URL; not a transient attempt
+				err = rerr
 			}
 			if attempt >= d.maxChunkRetries || !retryable(ctx, err) {
 				return err

@@ -302,6 +302,184 @@ func TestDo_ThrottleHookRetryStartedFires(t *testing.T) {
 	}
 }
 
+// The three tests below cover the shape the 2026-07-29 E2E report found (F3): a
+// pause that fits under MaxRetryWait but not under the caller's deadline. Each
+// one exercises a different sleep site in Do.
+
+func TestDo_RetryAfterPastDeadlineReportsRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", strconv.Itoa(30))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	// 30s is under MaxRetryWait, so the over-cap fail-fast does not fire; the 10s
+	// deadline (SponsorBlock's) is what the sleep would consume.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := New(Config{MaxRetries: 5, MaxRetryWait: 60 * time.Second})
+
+	start := time.Now()
+	_, err := c.Do(newReq(t, ctx, srv.URL))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected fail-fast, slept %s", elapsed)
+	}
+	if !errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited (not a context timeout)", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls = %d, want 1 (no retry the deadline cannot hold)", got)
+	}
+}
+
+func TestDo_RetryableStatusPastDeadlineReportsStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	// A backoff longer than the deadline: the typed status error must survive
+	// rather than being replaced by DeadlineExceeded.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c := New(Config{MaxRetries: 5, BaseBackoff: 30 * time.Second, MaxBackoff: 30 * time.Second})
+
+	start := time.Now()
+	_, err := c.Do(newReq(t, ctx, srv.URL))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected fail-fast, slept %s", elapsed)
+	}
+	st, ok := errors.AsType[*waxerr.HTTPStatusError](err)
+	if !ok {
+		t.Fatalf("err = %v, want *waxerr.HTTPStatusError", err)
+	}
+	if st.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode = %d, want 502", st.StatusCode)
+	}
+}
+
+func TestDo_TransportErrorPastDeadlineReportsTransportError(t *testing.T) {
+	// A closed listener address: the transport fails without reaching a server.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c := New(Config{MaxRetries: 5, BaseBackoff: 30 * time.Second, MaxBackoff: 30 * time.Second})
+
+	start := time.Now()
+	_, err := c.Do(newReq(t, ctx, url))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected fail-fast, slept %s", elapsed)
+	}
+	if err == nil {
+		t.Fatal("Do returned nil, want the transport error")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the transport error, not a deadline", err)
+	}
+}
+
+// retryHeadroom is the part of the rule that has teeth: a sleep that fits the
+// deadline exactly buys a retry that cannot finish, and the deadline then masks
+// the real cause all over again. This pins the window where only the headroom
+// forbids the pause.
+func TestDo_SleepFitsButHeadroomDoesNotStillFailsFast(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	// Full-jitter backoff lands in (0, 500ms], so the pause always fits inside the
+	// 700ms deadline and never fits with the 1s headroom, whatever it draws.
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	c := New(Config{MaxRetries: 5, BaseBackoff: 500 * time.Millisecond, MaxBackoff: 500 * time.Millisecond})
+
+	start := time.Now()
+	_, err := c.Do(newReq(t, ctx, srv.URL))
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("Do took %s: it slept rather than failing fast", elapsed)
+	}
+	if _, ok := errors.AsType[*waxerr.HTTPStatusError](err); !ok {
+		t.Fatalf("err = %v, want *waxerr.HTTPStatusError", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls = %d, want 1: the retry the headroom forbids must not run", got)
+	}
+}
+
+// roundTripFunc is a transport stub, so a test can decide exactly what happens
+// between a response arriving and Do acting on it.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A caller that gives up while a request is failing must be reported as a
+// cancellation, not as whatever the server happened to say. The deadline is what
+// skips the pause, but it is not what ended the request, and a *RateLimitError
+// here would have a retry loop back off against a host that never throttled it.
+func TestDo_CanceledPastDeadlineStaysCanceled(t *testing.T) {
+	// A deadline far enough out to still be live, but too near to hold a 30s pause.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tr := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		cancel() // the caller gives up while the response is in flight
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}, nil
+	})
+	c := New(Config{
+		HTTPClient:  &http.Client{Transport: tr},
+		MaxRetries:  5,
+		BaseBackoff: 30 * time.Second,
+		MaxBackoff:  30 * time.Second,
+	})
+
+	start := time.Now()
+	_, err := c.Do(newReq(t, ctx, "http://example.invalid/audio"))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected fail-fast, slept %s", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want the cancellation to outrank the rate limit", err)
+	}
+}
+
+// The counterpart: an expired deadline is the case the typed error exists to
+// explain, so it must not be rewritten into a bare timeout.
+func TestDo_ExpiredDeadlineStillReportsRateLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+
+	tr := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}, nil
+	})
+	c := New(Config{HTTPClient: &http.Client{Transport: tr}, MaxRetries: 5})
+
+	_, err := c.Do(newReq(t, ctx, "http://example.invalid/audio"))
+	if !errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited (not a bare deadline)", err)
+	}
+}
+
 func TestDo_ThrottleHookNoRetryStartedOnCancelDuringSleep(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", strconv.Itoa(2))

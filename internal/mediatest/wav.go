@@ -61,6 +61,43 @@ func QuietWithTransientWAV(seconds, channels int) []byte {
 	})
 }
 
+// CrestWAV returns a 16-bit PCM WAV with a moderate crest factor: a ~-24 dBFS
+// 440 Hz body carrying four half-millisecond full-scale transients per second,
+// 44100 Hz. It measures near -23 LUFS at ~0 dBTP, about 23 dB of crest.
+//
+// It exists for the loudness-convergence tests, between the two fixtures that
+// cannot serve there. A plain sine's peak and loudness track each other, so one
+// normalization pass lands on the target and nothing iterates.
+// [QuietWithTransientWAV] is the opposite extreme, roughly 41 dB of crest, where
+// the limiter saturates before reaching a normal target; it is the saturation
+// fixture, not the convergence one. This sits in the middle: one pass misses the
+// target by more than the reporting tolerance, and correcting reaches it.
+//
+// The transients repeat rather than appearing once so that they contribute to the
+// gated integrated loudness rather than reading as a single outlier, which is what
+// makes the miss reproducible instead of incidental.
+func CrestWAV(seconds, channels int) []byte {
+	const (
+		rate       = 44100
+		bodyHz     = 440.0
+		bodyAmp    = 0.06   // ~-24 dBFS
+		burstSecs  = 0.0005 // long enough for the 4x-oversampled true-peak meter
+		burstsPerS = 4
+	)
+	frames := seconds * rate
+	burstFrames := int(math.Round(burstSecs * rate))
+	period := rate / burstsPerS
+
+	return pcmWAV(frames, channels, rate, func(i int) float64 {
+		if p := i % period; p < burstFrames {
+			// A half cycle across the burst, touching 1.0 midway, for the same reason
+			// QuietWithTransientWAV uses one: the peak does not depend on body phase.
+			return math.Sin(math.Pi * float64(p) / float64(burstFrames))
+		}
+		return bodyAmp * math.Sin(2*math.Pi*bodyHz*float64(i)/float64(rate))
+	})
+}
+
 // pcmWAV builds a 16-bit WAV from a per-frame sample function in [-1, 1]. Every
 // channel carries the same signal.
 func pcmWAV(frames, channels, rate int, sampleAt func(i int) float64) []byte {

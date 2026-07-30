@@ -252,10 +252,29 @@ func (s *sharedSource) current() (Source, int) {
 	return s.src, s.gen
 }
 
+// errRefreshBudgetSpent marks a refresh declined because the per-download budget
+// is used up, as opposed to one that was attempted and failed. Callers treat it as
+// a transient condition worth an ordinary retry: see renew's doc for why.
+//
+// It is a sentinel so callers can test for it, and renew wraps it with the count
+// for the user-facing text. The wording avoids claiming the URL expired: reaching
+// this point means the server rejected every freshly re-resolved URL, which is a
+// server-side refusal rather than a stale signature. It still wraps ErrURLExpired,
+// because the exit class and the caller's client-fallback behavior are the same.
+var errRefreshBudgetSpent = fmt.Errorf("%w: refresh budget spent", waxerr.ErrURLExpired)
+
 // renew refreshes the Source for generation gen. If another worker has already
 // advanced the generation, renew returns the current Source without calling
 // refresh again. The refresh callback runs under the lock so only one refresh is
 // active for a download at a time.
+//
+// A spent budget returns [errRefreshBudgetSpent] rather than a plain error,
+// because the two cases need different handling. googlevideo answers 403 for
+// transient reasons as well as for genuine expiry, and the two are
+// indistinguishable from the response: a 403 arriving seconds after a fresh
+// resolve is far more likely a stray edge-node rejection than a URL that has
+// already expired. Since the budget is shared by every chunk of the download, a
+// couple of those exhaust it, and the caller must then retry rather than fail.
 func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTPFailure) (Source, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -266,7 +285,7 @@ func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTP
 		return s.src, s.gen, fmt.Errorf("%w: no refresh callback configured", waxerr.ErrURLExpired)
 	}
 	if s.refCount >= s.maxRef {
-		return s.src, s.gen, fmt.Errorf("%w: exhausted %d refresh attempts", waxerr.ErrURLExpired, s.maxRef)
+		return s.src, s.gen, fmt.Errorf("%w: the server kept rejecting the stream after %d re-resolves", errRefreshBudgetSpent, s.maxRef)
 	}
 	newSrc, err := s.refresh(ctx, failure)
 	if err != nil {
@@ -276,6 +295,27 @@ func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTP
 	s.gen++
 	s.refCount++
 	return s.src, s.gen, nil
+}
+
+// handleRefresh renews the Source after a 403/410. A nil error means the Source
+// was refreshed (or another worker refreshed it) and the caller should retry
+// immediately against the new URL, without spending a retry attempt.
+//
+// A non-nil error is for the caller's ordinary ladder to judge: [retryable]
+// accepts a spent budget, so that 403 gets the backoff-and-retry it never used to
+// get, and rejects everything else the refresh can report. Both download paths
+// share this to keep the decision in one place.
+func handleRefresh(ctx context.Context, shared *sharedSource, gen int, failure *potoken.HTTPFailure) error {
+	_, _, err := shared.renew(ctx, gen, failure)
+	return err
+}
+
+// gone reports a 410: the server saying this URL is not coming back. googlevideo
+// answers 403 for transient reasons as well as for expiry, which is why a spent
+// refresh budget falls through to the retry ladder, but a 410 is definitive and
+// must not spend it.
+func gone(f *potoken.HTTPFailure) bool {
+	return f != nil && f.StatusCode == http.StatusGone
 }
 
 // retryable reports whether the download layer should retry err. It checks the

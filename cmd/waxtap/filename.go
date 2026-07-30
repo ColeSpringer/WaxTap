@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -334,6 +335,56 @@ func statOutputPath(path string) (exists, isDir bool) {
 		return false, false
 	}
 	return true, fi.IsDir()
+}
+
+// outputStamp identifies a file at an output path closely enough to tell whether a
+// later run replaced it. present is false when nothing is there, which is the
+// common case.
+type outputStamp struct {
+	present bool
+	size    int64
+	modTime time.Time
+}
+
+// deliverableFile stats path and reports it only when it is something a run could
+// have delivered: a regular, non-empty file. Both halves of the kept-output
+// comparison go through it, so "what counts as a file here" cannot drift between
+// the before and after readings. Like statOutputPath it treats any stat error as
+// absence: the point is only to notice a change, and a path that cannot be stat'd
+// has nothing to compare.
+func deliverableFile(path string) (os.FileInfo, bool) {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
+		return nil, false
+	}
+	return fi, true
+}
+
+// stampOutputPath records the file at path, for comparison after a run.
+//
+// Size and mtime together are enough because every commit in WaxTap is a rename of
+// a freshly staged file, which carries the staging file's own mtime. A file this run
+// wrote therefore cannot match a stale one it replaced.
+func stampOutputPath(path string) outputStamp {
+	fi, ok := deliverableFile(path)
+	if !ok {
+		return outputStamp{}
+	}
+	return outputStamp{present: true, size: fi.Size(), modTime: fi.ModTime()}
+}
+
+// changedOutput reports the file now at path when it is a non-empty regular file
+// that either was not there before or differs from before. It returns nil when
+// nothing is there, when it is unchanged, or when it is empty.
+func changedOutput(path string, before outputStamp) *keptOutput {
+	fi, ok := deliverableFile(path)
+	if !ok {
+		return nil
+	}
+	if before.present && fi.Size() == before.size && fi.ModTime().Equal(before.modTime) {
+		return nil // the run never touched it
+	}
+	return &keptOutput{path: path, bytes: fi.Size()}
 }
 
 // rejectDirOutput rejects an existing directory before collision handling can

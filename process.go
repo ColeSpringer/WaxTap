@@ -285,6 +285,14 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album normalization always limits: one uniform gain, peaks left to
 		// WaxFlow's limiter. A per-track clamp would flatten the inter-track
 		// spacing album mode exists to preserve.
+		//
+		// This deliberately stays a single pass, unlike the per-track PeakLimit path
+		// in internal/pipeline, which measures its output and corrects the gain onto
+		// the target. Correcting per track here would reintroduce exactly the
+		// per-track variation album mode removes; correcting the album gain as a
+		// whole would mean re-encoding every track on each iteration. The album
+		// result therefore lands wherever the limiter leaves it, and the reported
+		// GainDB is the offset asked for rather than the loudness achieved.
 		GainDB: loudness.RawGain(target, album.IntegratedLUFS),
 	}
 

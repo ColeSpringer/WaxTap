@@ -150,12 +150,26 @@ func validateOutputContainer(s ProcessSpec) error {
 // needs an explicit target format. A plain copy cut can keep the source samples,
 // but a file output still needs a container extension.
 //
-// Downmix is skipped here because the pipeline needs the probed channel count.
-// When the source has more channels than the target, the pipeline chooses an
-// encode after probing and the cut is valid without --format. When no fold is
-// needed, the pipeline still applies its copy-mode checks before writing.
+// The copy-plus-transcode contradiction is checked first, because the rest of the
+// function only looks at specs with no transcode target.
+//
+// Beyond that, downmix is skipped here because the pipeline needs the probed
+// channel count. When the source has more channels than the target, the pipeline
+// chooses an encode after probing and the cut is valid without --format. When no
+// fold is needed, the pipeline still applies its copy-mode checks before writing.
 func validateCutEncodeNeed(s ProcessSpec) error {
-	if !cutRequested(s.Cut) || s.Downmix || transcodeCodec(specFormat(s.Transcode)) != media.CodecCopy {
+	cut := cutRequested(s.Cut)
+	target := transcodeCodec(specFormat(s.Transcode))
+	// An explicit copy cut and a transcode target contradict each other: --format
+	// re-encodes, which is what copy mode forbids. Reject rather than silently
+	// dropping the copy request. FormatCopy is media.CodecCopy, so the coherent
+	// cut-plus-remux case is not caught. This sits ahead of the s.Downmix term, so
+	// --cut-mode copy --downmix --format flac fails here too, which is correct.
+	if cut && s.Cut.Mode == CutCopy && target != media.CodecCopy {
+		return fmt.Errorf("%w: --cut-mode copy cannot be combined with --format %s, which re-encodes; drop one",
+			waxerr.ErrIncompatibleSpec, target)
+	}
+	if !cut || s.Downmix || target != media.CodecCopy {
 		return nil
 	}
 	switch {
@@ -312,30 +326,50 @@ func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments 
 	}
 }
 
-// loudnessClampWarnDB is the gain shortfall, in dB, that turns peak protection
-// from a detail into something the user needs told. Below it the miss is within
-// the noise of a lossy encode.
-const loudnessClampWarnDB = 1.0
-
-// warnLoudnessTargetMissed reports that PeakCap's true-peak clamp held the gain
-// back, so the delivered loudness is short of the target.
+// loudnessMissWarnDB is the miss, in LU, that turns a loudness shortfall from a
+// detail into something the user needs told. Below it the miss is within the noise
+// of a lossy encode.
 //
-// It is derived from the clamp rather than from the achieved loudness on purpose.
-// pipeline.Result.OutputLoudness is best-effort, so comparing against it would
-// silently drop the warning whenever the post-measure fails, and a lossy encode
-// can miss the target by more than a LU for reasons that have nothing to do with
-// the ceiling, which would make the detail text a lie. Asking the loudness
-// package what its peak clamp held back, on the InputLoudness that fed it
-// (downmix fold included), is deterministic and correctly attributed.
+// It is deliberately well above [loudness.ConvergeToleranceDB] (0.3 LU), which
+// leaves a band where a limit-mode miss neither converges further nor warns: a
+// 0.8 LU miss is silent. That is intended, for the reason above, but it is the
+// same shape as the finding this warning exists to close, so it is written down
+// here rather than left for the next end-to-end pass to rediscover.
+const loudnessMissWarnDB = 1.0
+
+// warnLoudnessTargetMissed reports that normalization did not reach the requested
+// loudness. The two peak policies miss for different reasons, so each is detected
+// where its cause actually lives.
+//
+// For PeakCap the cause is the true-peak clamp, and it is read from the clamp
+// rather than from the achieved loudness on purpose: pipeline.Result.OutputLoudness
+// is best-effort, so comparing against it would silently drop the warning whenever
+// the post-measure fails, and a lossy encode can miss by more than a LU for
+// reasons that have nothing to do with the ceiling, which would make the detail
+// text a lie. Asking the loudness package what its clamp held back, on the
+// InputLoudness that fed it (downmix fold included), is deterministic and correctly
+// attributed.
+//
+// For PeakLimit there is no clamp to attribute anything to: the gain aims at the
+// target and the limiter gives back an amount only a measurement can reveal. So
+// that branch is derived from the measured output, and stays silent when there is
+// no usable measurement.
 func warnLoudnessTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
-	if ls == nil || ls.Mode != LoudnessApply || ls.PeakMode == PeakLimit || pres.InputLoudness == nil {
+	if ls == nil || ls.Mode != LoudnessApply {
+		return
+	}
+	if ls.PeakMode == PeakLimit {
+		warnLimiterTargetMissed(em, ls, pres)
+		return
+	}
+	if pres.InputLoudness == nil {
 		return
 	}
 	// PeakShortfall reports only what the true-peak clamp cost, so the detail below
 	// can name that cause. It returns 0 for a non-finite measurement, so silence
 	// (-Inf, which would otherwise be an infinite shortfall) stays quiet.
 	short := loudness.PeakShortfall(ls.Target, *pres.InputLoudness)
-	if short <= loudnessClampWarnDB {
+	if short <= loudnessMissWarnDB {
 		return
 	}
 	detail := fmt.Sprintf("true-peak capping at %g dBTP held the gain %.1f dB short of the %g LUFS target",
@@ -343,7 +377,41 @@ func warnLoudnessTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Resul
 	if out := pres.OutputLoudness; out != nil && out.Finite() {
 		detail += fmt.Sprintf("; delivered %.1f LUFS", out.IntegratedLUFS)
 	}
-	em.warn(WarnLoudnessTargetMissed, detail+"; use --peak-mode limit to hit the target")
+	// The remedy stays worded as "closer" rather than "hits the target": limit
+	// iterates onto the target but is still bounded by the limiter's saturation, so
+	// promising the target is what produced this finding in the first place.
+	// cmd/waxtap/batch_render.go aggregates on the code and surfaces this detail,
+	// which is why the "--peak-mode limit" substring belongs in it.
+	em.warn(WarnLoudnessTargetMissed, detail+"; use --peak-mode limit to get closer to the target")
+}
+
+// warnLimiterTargetMissed reports a limit-mode normalization the true-peak limiter
+// held away from the target, in either direction: an overshoot is as much a
+// silently wrong delivery as a shortfall, and the gain search can produce one.
+func warnLimiterTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
+	out := pres.OutputLoudness
+	if out == nil || !out.Finite() {
+		return // no measurement, nothing honest to report
+	}
+	miss := ls.Target - out.IntegratedLUFS
+	if math.Abs(miss) <= loudnessMissWarnDB {
+		return
+	}
+	// Two wordings, because an overshoot is not something the limiter "held": a
+	// shortfall is the limiter giving gain back, an overshoot is the gain search
+	// stepping past the target.
+	//
+	// Plural is safe: reaching this line needs a miss above loudnessMissWarnDB,
+	// which is far above the correction floor, so the search always ran at least one
+	// correction and the count is at least 2. Do not add singular handling for a
+	// case that cannot occur. The count comes from the result rather than from
+	// maxLoudnessWrites, since tolerance or saturation can end the search early.
+	tmpl := "the true-peak limiter held the output %.1f LU short of the %g LUFS target after %d encode passes; delivered %.1f LUFS"
+	if miss < 0 {
+		tmpl = "normalization landed %.1f LU above the %g LUFS target after %d encode passes; delivered %.1f LUFS"
+	}
+	em.warn(WarnLoudnessTargetMissed, fmt.Sprintf(tmpl,
+		math.Abs(miss), ls.Target, pres.LoudnessPasses, out.IntegratedLUFS))
 }
 
 // needsProcessing reports whether the spec needs audio processing and a staged input. When

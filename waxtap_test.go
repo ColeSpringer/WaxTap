@@ -695,6 +695,46 @@ func TestValidateProcessSpec_Downmix(t *testing.T) {
 	}
 }
 
+// TestValidateProcessSpec_CopyCutWithTranscode covers F4 at the facade, where it
+// fails before any media transfer. The coherent combinations must keep working:
+// FormatCopy is a container remux, not an encode, and a copy cut with no
+// TranscodeSpec is the plain lossless case the mode exists for.
+func TestValidateProcessSpec_CopyCutWithTranscode(t *testing.T) {
+	copyCut := func(t *TranscodeSpec) ProcessSpec {
+		return ProcessSpec{
+			Cut:       &CutSpec{Ranges: []TimeRange{{Start: 0, End: time.Second}}, Mode: CutCopy},
+			Transcode: t,
+			Output:    ToFile("out.flac"),
+		}
+	}
+	for _, f := range []TranscodeFormat{FormatFLAC, FormatMP3, FormatOpus, FormatWAV} {
+		if err := validateProcessSpec(copyCut(&TranscodeSpec{Format: f})); !errors.Is(err, ErrIncompatibleSpec) {
+			t.Errorf("CutCopy + format %d = %v, want ErrIncompatibleSpec", f, err)
+		}
+	}
+	// A copy cut with --downmix and a format is rejected too: the check sits ahead
+	// of the Downmix skip, and both halves re-encode.
+	withDownmix := copyCut(&TranscodeSpec{Format: FormatFLAC})
+	withDownmix.Downmix, withDownmix.Channels = true, LayoutStereo
+	if err := validateProcessSpec(withDownmix); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("CutCopy + downmix + format = %v, want ErrIncompatibleSpec", err)
+	}
+	// FormatCopy is a remux, so the pairing is coherent.
+	if err := validateProcessSpec(copyCut(&TranscodeSpec{Format: FormatCopy})); err != nil {
+		t.Errorf("CutCopy + FormatCopy = %v, want nil (container remux)", err)
+	}
+	// No transcode target at all: the output extension carries the container.
+	if err := validateProcessSpec(copyCut(nil)); err != nil {
+		t.Errorf("CutCopy + no transcode = %v, want nil", err)
+	}
+	// Other cut modes are unaffected.
+	smart := copyCut(&TranscodeSpec{Format: FormatFLAC})
+	smart.Cut.Mode = CutSmart
+	if err := validateProcessSpec(smart); err != nil {
+		t.Errorf("CutSmart + format flac = %v, want nil", err)
+	}
+}
+
 func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 	apply := func(target float64) ProcessSpec {
 		return ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: target}}

@@ -203,6 +203,9 @@ func TestDownloadRejectsIgnoredFlagCombinations(t *testing.T) {
 		{"sponsorblock-on-error": "fail"},
 		{"crossfade": "1s"},
 		{"list": "true", "format": "flac"},
+		// A copy cut and --format contradict each other; the copy request used to be
+		// dropped silently (F4).
+		{"cut-range": "0-2", "cut-mode": "copy", "format": "flac"},
 	}
 	for _, values := range cases {
 		df := &downloadFlags{}

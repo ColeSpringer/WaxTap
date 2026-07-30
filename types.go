@@ -333,7 +333,10 @@ const (
 	// workflows that would encode twice.
 	CutSmart CutMode = iota
 	// CutCopy forces stream-copy; it errors with ErrIncompatibleSpec when copy is
-	// unsafe for the codec/container.
+	// unsafe for the codec/container, and also when the spec asks for an encode the
+	// copy would have to give up: any TranscodeSpec.Format other than FormatCopy, or
+	// a Downmix the source needs. Combining them is a contradiction, not a
+	// preference to be silently resolved.
 	CutCopy
 	// CutAccurate decodes, cuts sample-exactly, and re-encodes.
 	CutAccurate
@@ -392,9 +395,19 @@ const (
 	// whatever the target, so the achieved loudness can land well short of it.
 	PeakCap PeakMode = iota
 	// PeakLimit applies the full gain and lets the true-peak limiter catch the
-	// overshoot. It hits the target at the cost of transparency, and is what album
-	// normalization does (a per-track clamp would destroy the relative spacing
-	// album mode exists to preserve).
+	// overshoot, reaching the target at the cost of transparency.
+	//
+	// One pass cannot get there: the limiter gives back part of whatever gain it is
+	// handed, by an amount that depends on the material. So a PeakLimit run measures
+	// its own output and corrects, re-encoding a small bounded number of times until
+	// the delivered loudness lands within a fraction of a LU of the target, and
+	// emitting [WarnLoudnessTargetMissed] when the limiter saturates before it can.
+	// Ordinary material costs one extra encode; a source already crushed against the
+	// ceiling costs a few and may still fall short, which is what the warning is for.
+	//
+	// Album normalization also limits, because a per-track clamp would destroy the
+	// relative spacing album mode exists to preserve, but it stays a single pass for
+	// that same reason: correcting each track individually would undo the spacing.
 	PeakLimit
 )
 

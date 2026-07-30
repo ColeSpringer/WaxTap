@@ -91,6 +91,37 @@ func TestFetchSegments_ServerError(t *testing.T) {
 	}
 }
 
+// TestFetchSegments_RateLimitedWithRetryAfter covers the F3 shape end to end from
+// this package: a 429 whose Retry-After fits MaxRetryWait but not the caller's
+// 10-second budget must surface as a rate limit, fast, rather than as the deadline
+// the sleep would have consumed.
+func TestFetchSegments_RateLimitedWithRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	c := New(Config{
+		HTTP: httpx.New(httpx.Config{
+			HTTPClient:   srv.Client(),
+			MaxRetries:   3,
+			MaxRetryWait: 60 * time.Second,
+		}),
+		BaseURL: srv.URL,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := c.FetchSegments(ctx, testVideoID, nil)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("FetchSegments took %v, want a fast rate-limit report", elapsed)
+	}
+	if !errors.Is(err, waxerr.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
 func TestFetchSegments_FiltersAndParses(t *testing.T) {
 	// The array carries the target video plus another sharing the prefix, a mute
 	// action, and an off-category segment. Only matching skip segments in the

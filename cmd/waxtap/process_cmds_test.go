@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -285,6 +286,57 @@ func TestBitDepthSurfaceAndGuards(t *testing.T) {
 		if err := runProcessCmd(t, "transcode", in, "--format", "flac", "--bit-depth", depth, "-o", out); err != nil {
 			t.Errorf("--bit-depth %s = %v, want success", depth, err)
 		}
+	}
+}
+
+// TestCutModeCopyRejectsEncode covers F4 from the CLI: --cut-mode copy plus a
+// re-encoding flag exits 2 instead of silently dropping the copy request. The
+// coherent combinations must keep working.
+func TestCutModeCopyRejectsEncode(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	synthAudio(t, in, "flac")
+
+	rejected := [][]string{
+		{"--cut-range", "0.1-0.3", "--cut-mode", "copy", "--format", "flac"},
+		{"--cut-range", "0.1-0.3", "--cut-mode", "copy", "--format", "mp3"},
+		{"--cut-range", "0.1-0.3", "--cut-mode", "copy", "--downmix", "--format", "flac"},
+	}
+	for i, args := range rejected {
+		out := filepath.Join(dir, "rej"+strconv.Itoa(i)+".flac")
+		full := append([]string{"cut", in}, args...)
+		err := runProcessCmd(t, append(full, "-o", out)...)
+		if !errors.Is(err, waxtap.ErrIncompatibleSpec) {
+			t.Errorf("cut %v = %v, want ErrIncompatibleSpec", args, err)
+		}
+		if _, serr := os.Stat(out); serr == nil {
+			t.Errorf("cut %v wrote %s despite rejection", args, out)
+		}
+	}
+
+	// A copy cut with no transcode target keeps the source codec: the .flac
+	// container cannot hold cut-remuxed FLAC, so this still exits 2, but with the
+	// pre-existing container message rather than the new one.
+	err := runProcessCmd(t, "cut", in, "--cut-range", "0.1-0.3", "--cut-mode", "copy", "-o", filepath.Join(dir, "bare.flac"))
+	if !errors.Is(err, waxtap.ErrIncompatibleSpec) {
+		t.Errorf("cut --cut-mode copy (no format) = %v, want ErrIncompatibleSpec", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "cannot be combined with --format") {
+		t.Errorf("bare copy cut got the transcode-target message: %v", err)
+	}
+
+	// --cut-mode smart with a format is the ordinary fused cut+encode.
+	if err := runProcessCmd(t, "cut", in, "--cut-range", "0.1-0.3", "--cut-mode", "smart",
+		"--format", "flac", "-o", filepath.Join(dir, "smart.flac")); err != nil {
+		t.Errorf("cut --cut-mode smart --format flac = %v, want success", err)
+	}
+	// --format copy is a container remux, not an encode, so it stays legal. Opus is
+	// the source codec because a packet-level cut needs one WaxFlow can copy-cut.
+	opus := filepath.Join(dir, "in.opus")
+	synthAudio(t, opus, "libopus")
+	if err := runProcessCmd(t, "cut", opus, "--cut-range", "0.1-0.3", "--cut-mode", "copy",
+		"--format", "copy", "-o", filepath.Join(dir, "remux.opus")); err != nil {
+		t.Errorf("cut --cut-mode copy --format copy = %v, want success", err)
 	}
 }
 

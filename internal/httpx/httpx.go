@@ -9,12 +9,17 @@
 //   - Retry-After is honored but capped by MaxRetryWait: YouTube can demand
 //     hours on an IP ban, so beyond the cap we fail fast with
 //     *waxerr.RateLimitError instead of sleeping a worker.
+//   - No pause outlasts the caller's deadline. A wait that would consume the
+//     deadline is skipped and the pending error is returned instead, so the cause
+//     reaches the caller typed rather than as a context timeout. MaxRetryWait is
+//     the absolute cap; this is the per-operation one.
 //   - Retried requests must be replayable: a request with a body but no
 //     GetBody is attempted exactly once.
 package httpx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	rand "math/rand/v2"
@@ -33,6 +38,45 @@ const (
 	defaultMaxBackoff   = 10 * time.Second
 	defaultMaxRetryWait = 30 * time.Second
 )
+
+// retryHeadroom is the slack a pause must leave for the retry it exists to
+// enable. A sleep that consumes the deadline down to the wire buys a request that
+// cannot finish, and the deadline then masks the real cause all over again.
+const retryHeadroom = time.Second
+
+// fitsBeforeDeadline reports whether d, plus room for the retry after it, elapses
+// before ctx's deadline. A ctx with no deadline always fits.
+//
+// It answers only the deadline question. Cancellation is separate and outranks it;
+// see pauseBlocked.
+func fitsBeforeDeadline(ctx context.Context, d time.Duration) bool {
+	dl, has := ctx.Deadline()
+	return !has || time.Until(dl) > d+retryHeadroom
+}
+
+// pauseBlocked returns the error to report instead of pausing for d, or nil when
+// the pause may proceed. pending is the typed error the caller is already holding
+// for the failure that provoked the pause.
+//
+// Cancellation outranks pending. A context canceled while a request was failing is
+// a caller giving up (a Ctrl-C at the CLI), and reporting that as a rate limit or a
+// 502 both misclassifies it and can send a retry loop somewhere it should not go.
+// A ctx carrying a deadline *and* a cancellation is the case this exists for: the
+// deadline alone decides whether the pause fits, so checking it inside
+// fitsBeforeDeadline would not catch this.
+//
+// An expired deadline is deliberately not treated the same way. That is the exact
+// case pending exists to explain, and replacing it with a bare timeout is the
+// finding this whole fail-fast path closed.
+func pauseBlocked(ctx context.Context, d time.Duration, pending error) error {
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if !fitsBeforeDeadline(ctx, d) {
+		return pending
+	}
+	return nil
+}
 
 // Limiter gates outbound requests. Wait blocks until a request may proceed or
 // ctx is done. Penalize pauses requests to one host for at least d.
@@ -208,8 +252,13 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			}
 			lastErr = err
 			if attempt < attempts-1 {
+				wait := c.backoffDuration(attempt)
+				// The deadline would swallow the retry: report the transport error.
+				if berr := pauseBlocked(ctx, wait, err); berr != nil {
+					return nil, berr
+				}
 				c.log.DebugContext(ctx, "httpx: transport error, retrying", "host", host, "attempt", attempt, "err", err)
-				if werr := c.backoff(ctx, attempt); werr != nil {
+				if werr := Sleep(ctx, wait); werr != nil {
 					return nil, werr
 				}
 				continue
@@ -250,6 +299,12 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				if !ok {
 					sleepFor = c.backoffDuration(attempt)
 				}
+				// A pause the deadline cannot accommodate folds into the over-cap
+				// fail-fast above: report the rate limit rather than sleeping into a
+				// context timeout that names no cause.
+				if berr := pauseBlocked(ctx, sleepFor, rlErr); berr != nil {
+					return nil, berr
+				}
 				rlRetryStatus = status
 				c.log.DebugContext(ctx, "httpx: rate limited, backing off", "host", host, "wait", sleepFor)
 				if werr := Sleep(ctx, sleepFor); werr != nil {
@@ -264,8 +319,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		if attempt < attempts-1 && retryableStatus(resp.StatusCode) {
 			drain(resp)
 			lastErr = &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.String()}
+			wait := c.backoffDuration(attempt)
+			// The typed status error carries the server's code into --json; a deadline
+			// reached mid-backoff would replace it with a bare timeout.
+			if berr := pauseBlocked(ctx, wait, lastErr); berr != nil {
+				return nil, berr
+			}
 			c.log.DebugContext(ctx, "httpx: server error, retrying", "host", host, "status", resp.StatusCode, "attempt", attempt)
-			if werr := c.backoff(ctx, attempt); werr != nil {
+			if werr := Sleep(ctx, wait); werr != nil {
 				return nil, werr
 			}
 			continue
@@ -300,10 +361,6 @@ func (c *Client) backoffDuration(attempt int) time.Duration {
 	}
 	// Full jitter in (0, d].
 	return time.Duration(rand.Int64N(int64(d)) + 1)
-}
-
-func (c *Client) backoff(ctx context.Context, attempt int) error {
-	return Sleep(ctx, c.backoffDuration(attempt))
 }
 
 // Sleep waits for d or until ctx is done, whichever comes first, returning the

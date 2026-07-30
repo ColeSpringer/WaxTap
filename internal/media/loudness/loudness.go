@@ -24,9 +24,24 @@ import (
 // leaves headroom for inter-sample peaks and matches WaxFlow's limiter default.
 const TruePeakCeilingDB = -1.0
 
+// ConvergeToleranceDB is how close to the target the limiter-backed gain search
+// must land before it stops re-encoding. EBU R128 tooling reports integrated
+// loudness to 0.1 dB, so a miss below this is barely expressible, let alone worth
+// another encode pass.
+//
+// It is exported because the callers that assert on it live outside this package:
+// the pipeline runs the search and the facade's peak-mode tests check that a run
+// either converges inside it or warns.
+const ConvergeToleranceDB = 0.3
+
 // maxGainDB bounds the applied gain to a finite value WaxFlow accepts (its own
 // limit is +-120 dB).
 const maxGainDB = 120.0
+
+// ClampGain bounds a gain to the range WaxFlow accepts. [GainFor] and [RawGain]
+// apply it to their own results; the pipeline's iterative correction needs it
+// too, since it walks the gain away from the value they returned.
+func ClampGain(gainDB float64) float64 { return clamp(gainDB, -maxGainDB, maxGainDB) }
 
 // Loudness is an EBU R128 measurement.
 type Loudness struct {
@@ -164,10 +179,15 @@ func PeakShortfall(target float64, m Loudness) float64 {
 }
 
 // RawGain is the plain target - integrated offset, with no peak clamp: WaxFlow's
-// limiter guards the peaks at encode time. It hits the target where GainFor may
-// fall short, at the cost of transparency, and is the gain both PeakLimit
-// normalization and album normalization apply. Album mode has no other option; a
-// per-track clamp would destroy the inter-track spacing it exists to preserve.
+// limiter guards the peaks at encode time. It gets far closer to the target than
+// GainFor can, at the cost of transparency.
+//
+// It is the *starting* gain for the PeakLimit path and the *final* gain for album
+// mode. The difference is that the limiter gives back part of whatever gain it is
+// handed, by an amount that depends on the material, so a single RawGain pass
+// lands short. The pipeline measures the encode and corrects; album mode cannot,
+// because one uniform gain is the point and a per-track correction would destroy
+// the inter-track spacing it exists to preserve.
 //
 // A non-finite integrated loudness (silence) yields zero gain, for the same
 // reason GainFor guards it: WaxFlow rejects a non-finite GainDB.
