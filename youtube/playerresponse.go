@@ -268,10 +268,15 @@ func (pr *playerResponse) liveStatus() LiveStatus {
 	}
 }
 
-// sortThumbnailsLargestFirst orders thumbnails by descending pixel area, then a
-// stable URL tie-break so equal-size candidates keep a deterministic order.
+// sortThumbnailsLargestFirst orders thumbnails by descending pixel area, then
+// width, height, and a stable URL tie-break so equal-size candidates keep a
+// deterministic order. Area rather than width alone: a square candidate can hold
+// more pixels than a wider 16:9 one, and area is what a cover-art consumer wants.
 func sortThumbnailsLargestFirst(ts []Thumbnail) {
 	sort.Slice(ts, func(i, j int) bool {
+		if ai, aj := ts[i].Width*ts[i].Height, ts[j].Width*ts[j].Height; ai != aj {
+			return ai > aj
+		}
 		if ts[i].Width != ts[j].Width {
 			return ts[i].Width > ts[j].Width
 		}

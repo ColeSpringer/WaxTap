@@ -174,6 +174,11 @@ func bindPeakModeFlag(f *pflag.FlagSet, peakMode *string) {
 	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target)|limit (re-encodes until it reaches the target)")
 }
 
+// bindCoverArtFlag registers --cover-art with the shared help text.
+func bindCoverArtFlag(f *pflag.FlagSet, coverArt *string) {
+	f.StringVar(coverArt, "cover-art", "frame", "shape of the embedded cover art: frame (the image as delivered)|square (crop the bars off an Art Track's release art)")
+}
+
 // rejectEmptyFlags errors when any named string flag is explicitly set to an
 // empty or whitespace-only value (usually an unset shell/env $VAR); omitting the
 // flag uses the default. Unknown names are skipped, so it is safe to pass a flag

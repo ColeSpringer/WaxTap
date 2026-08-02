@@ -2,9 +2,7 @@ package waxtap
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,18 +10,14 @@ import (
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
 
-	"github.com/colespringer/waxtap/v3/internal/iox"
 	"github.com/colespringer/waxtap/v3/youtube"
 )
-
-// maxThumbnailBytes caps a fetched thumbnail. YouTube cover-art JPEGs are well
-// under this; the cap guards against a hostile or mistaken response.
-const maxThumbnailBytes = 16 << 20
 
 // embedOptions selects which parts of the metadata post-pass run.
 type embedOptions struct {
 	thumbnail bool
 	metadata  bool
+	coverArt  CoverArtMode
 }
 
 // embedRequested reports whether the spec asks for any embed post-pass.
@@ -52,9 +46,10 @@ func (c *Client) embedMetadata(ctx context.Context, path, targetExt string, v *y
 
 // doEmbed performs the WaxLabel edit. It returns a non-empty skipReason when a
 // requested cover picture could not be embedded (an unusable container, or an
-// unobtainable image) but the audio and tags were still written; a returned error
-// means the file could not be edited at all. The contract is that any dropped
-// picture is reported, never silent.
+// unobtainable image), or could not be shaped as asked, but the audio and tags
+// were still written; a returned error means the file could not be edited at
+// all. The contract is that any dropped or degraded picture is reported, never
+// silent.
 //
 // Two container fix-ups may run first, both a zero-re-encode packet copy and both
 // staged so the original file is replaced only after every step succeeds:
@@ -126,14 +121,23 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 	changed := false
 
 	if o.thumbnail && caps.Pictures.Write != waxlabel.AccessNone {
-		img, ferr := c.thumbnailImage(ctx, v)
-		if ferr == nil {
+		img, note, ferr := c.coverPicture(ctx, v, o.coverArt)
+		switch {
+		case ferr != nil:
+			if skipReason == "" {
+				skipReason = "could not embed cover art: " + ferr.Error()
+			}
+		default:
 			// MIME is left empty: AddPicture sniffs the bytes authoritatively, so a
 			// JPEG/PNG/WebP thumbnail is stored under the MIME its bytes actually are.
 			ed.AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: img})
 			changed = true
-		} else if skipReason == "" {
-			skipReason = "could not embed cover art: " + ferr.Error()
+			// The picture landed but not in the shape asked for. No collision risk
+			// with the block above: that one only runs when Pictures.Write is
+			// AccessNone, which this branch requires not to be.
+			if note != "" {
+				skipReason = note
+			}
 		}
 	}
 
@@ -181,40 +185,6 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 		committed = true
 	}
 	return skipReason, nil
-}
-
-// thumbnailImage fetches and validates the video's largest thumbnail. It returns
-// a descriptive error when there is no thumbnail, the fetch fails, or the bytes
-// are not a recognized image, so the caller can warn rather than drop silently.
-func (c *Client) thumbnailImage(ctx context.Context, v *youtube.Video) ([]byte, error) {
-	if len(v.Thumbnails) == 0 {
-		return nil, errors.New("the video carries no thumbnail")
-	}
-	img, err := c.fetchThumbnail(ctx, v.Thumbnails[0].URL)
-	if err != nil {
-		return nil, err
-	}
-	if !waxlabel.IsRecognizedImage(img) {
-		return nil, errors.New("the thumbnail is not a recognized image format")
-	}
-	return img, nil
-}
-
-// fetchThumbnail downloads a thumbnail image over the shared HTTP client, capped.
-func (c *Client) fetchThumbnail(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("thumbnail fetch: HTTP %d", resp.StatusCode)
-	}
-	return iox.ReadAllCapped(resp.Body, maxThumbnailBytes, "thumbnail")
 }
 
 // toWaxlabelChapters maps youtube chapters to waxlabel chapters. Both use

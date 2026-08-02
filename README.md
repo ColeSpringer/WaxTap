@@ -101,6 +101,20 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   reject float WAV. `--bit-depth 16|24` forces integer output for
   wav/aiff/flac/alac; narrowing is dithered (TPDF), not truncated. The lossy
   formats encode in float and ignore it.
+- `--embed-thumbnail` writes the video's thumbnail as front cover art, and
+  `--embed-metadata` writes title, artist, date, and chapters. Both are
+  best-effort: a failure warns and still delivers valid audio. WebM cannot hold a
+  picture, so a cover-art request remuxes Opus-in-WebM to Ogg-Opus (lossless) when
+  the output extension allows it. The image comes from the largest rung YouTube
+  lists, and WaxTap also probes the deterministic 1280x720 endpoints when that
+  ladder falls short of them.
+- `--cover-art square` crops the embedded picture to the release art. A music
+  "Art Track" composites square cover art onto a 16:9 canvas and letterboxes that
+  into a 4:3 variant, and both sets of bars are pixels rather than metadata, so
+  every player that resizes without cropping ships them. `square` peels the
+  uniform borders and center-crops what remains; it never scales, so the art keeps
+  its proportions and an image already square within 1% is left untouched. The
+  default, `--cover-art frame`, embeds the delivered bytes verbatim.
 - SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
   exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
   outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal

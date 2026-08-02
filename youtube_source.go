@@ -968,7 +968,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return "", nil, err
 	}
 
-	eo := embedOptions{thumbnail: req.EmbedThumbnail, metadata: req.EmbedMetadata}
+	eo := embedOptions{thumbnail: req.EmbedThumbnail, metadata: req.EmbedMetadata, coverArt: req.CoverArt}
 	// The delivered file's extension: the post-pass must not remux into a container
 	// the extension would then misname. A Writer sink has no path, hence no
 	// extension constraint.

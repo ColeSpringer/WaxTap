@@ -695,6 +695,24 @@ func TestValidateProcessSpec_Downmix(t *testing.T) {
 	}
 }
 
+func TestValidateProcessSpec_CoverArt(t *testing.T) {
+	// A shape with nothing to shape: the picture is never fetched, so report it
+	// rather than ignoring the field.
+	if err := validateProcessSpec(ProcessSpec{CoverArt: CoverArtSquare}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("square without EmbedThumbnail = %v, want ErrIncompatibleSpec", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{CoverArt: CoverArtSquare, EmbedThumbnail: true}); err != nil {
+		t.Errorf("square with EmbedThumbnail = %v, want nil", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{CoverArt: 7, EmbedThumbnail: true}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("unknown cover art mode = %v, want ErrIncompatibleSpec", err)
+	}
+	// The zero value is today's behavior and never needs EmbedThumbnail.
+	if err := validateProcessSpec(ProcessSpec{}); err != nil {
+		t.Errorf("zero CoverArt = %v, want nil", err)
+	}
+}
+
 // TestValidateProcessSpec_CopyCutWithTranscode covers F4 at the facade, where it
 // fails before any media transfer. The coherent combinations must keep working:
 // FormatCopy is a container remux, not an encode, and a copy cut with no

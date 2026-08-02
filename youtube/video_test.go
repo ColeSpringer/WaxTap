@@ -64,6 +64,21 @@ func TestToVideoSetsURLAndSortsThumbnails(t *testing.T) {
 	}
 }
 
+// TestThumbnailSortPrefersArea pins the documented contract against the obvious
+// simplification back to width-first. Only a square candidate can tell them
+// apart: 1000x1000 beats 1280x720 on area and loses on width.
+func TestThumbnailSortPrefersArea(t *testing.T) {
+	ts := []Thumbnail{
+		{URL: "wide", Width: 1280, Height: 720},
+		{URL: "square", Width: 1000, Height: 1000},
+		{URL: "small", Width: 640, Height: 480},
+	}
+	sortThumbnailsLargestFirst(ts)
+	if ts[0].URL != "square" || ts[1].URL != "wide" || ts[2].URL != "small" {
+		t.Errorf("area order = %q,%q,%q; want square,wide,small", ts[0].URL, ts[1].URL, ts[2].URL)
+	}
+}
+
 // TestThumbnailTieBreakDeterministic checks equal-size thumbnails order by URL so
 // tests do not flake.
 func TestThumbnailTieBreakDeterministic(t *testing.T) {

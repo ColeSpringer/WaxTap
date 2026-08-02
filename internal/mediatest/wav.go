@@ -1,7 +1,7 @@
-// Package mediatest provides pure-Go audio fixtures for tests, replacing the
+// Package mediatest provides pure-Go media fixtures for tests, replacing the
 // ffmpeg lavfi generators the pre-WaxFlow suite relied on. It writes standard
-// 16-bit PCM WAV bytes that the WaxFlow engine decodes, so the test suite needs
-// no external tools.
+// 16-bit PCM WAV bytes that the WaxFlow engine decodes, plus synthetic
+// cover-art images, so the test suite needs no external tools.
 package mediatest
 
 import (

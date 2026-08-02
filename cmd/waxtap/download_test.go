@@ -146,6 +146,36 @@ func TestBuildProcessSpecNormalizeRequiresEncode(t *testing.T) {
 	}
 }
 
+func TestBuildProcessSpecCoverArt(t *testing.T) {
+	cases := []struct {
+		name string
+		df   *downloadFlags
+		want waxtap.CoverArtMode
+	}{
+		// An unset flag, as a zero downloadFlags carries it.
+		{"unset", &downloadFlags{}, waxtap.CoverArtFrame},
+		{"frame is the flag default", &downloadFlags{embedThumbnail: true, coverArt: "frame"}, waxtap.CoverArtFrame},
+		{"square", &downloadFlags{embedThumbnail: true, coverArt: "square"}, waxtap.CoverArtSquare},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := tt.df.buildProcessSpec()
+			if err != nil {
+				t.Fatalf("buildProcessSpec: %v", err)
+			}
+			if spec.CoverArt != tt.want {
+				t.Errorf("CoverArt = %v, want %v", spec.CoverArt, tt.want)
+			}
+			if err := waxtap.ValidateProcessSpec(spec); err != nil {
+				t.Errorf("the built spec should validate: %v", err)
+			}
+		})
+	}
+	if _, err := (&downloadFlags{embedThumbnail: true, coverArt: "round"}).buildProcessSpec(); err == nil {
+		t.Error("an unknown --cover-art value should be rejected")
+	}
+}
+
 // TestReportKeptOutput covers F6: a SIGINT that lands after finalization used to
 // exit 130 with a complete file on disk and say nothing about it. Every writer
 // commits atomically, so a file at the output path is whole; the gap was reporting.

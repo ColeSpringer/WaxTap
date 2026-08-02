@@ -131,7 +131,27 @@ func validateProcessSpec(s ProcessSpec) error {
 	if err := validateBitrate(s.Transcode); err != nil {
 		return err
 	}
-	return validateBitDepth(s.Transcode)
+	if err := validateBitDepth(s.Transcode); err != nil {
+		return err
+	}
+	return validateCoverArt(s)
+}
+
+// validateCoverArt rejects an unknown CoverArt value, and a cover-art mode set
+// without EmbedThumbnail. The second is a spec that asks to shape a picture that
+// will never be fetched, so it is reported rather than silently ignored.
+func validateCoverArt(s ProcessSpec) error {
+	switch s.CoverArt {
+	case CoverArtFrame, CoverArtSquare:
+	default:
+		return fmt.Errorf("%w: cover art mode %d is not supported (want CoverArtFrame or CoverArtSquare)",
+			waxerr.ErrIncompatibleSpec, s.CoverArt)
+	}
+	if s.CoverArt != CoverArtFrame && !s.EmbedThumbnail {
+		return fmt.Errorf("%w: CoverArt needs EmbedThumbnail; there is no cover picture to shape without it",
+			waxerr.ErrIncompatibleSpec)
+	}
+	return nil
 }
 
 // validateOutputContainer rejects a file transcode when the output extension

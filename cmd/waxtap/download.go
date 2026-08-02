@@ -48,6 +48,7 @@ type downloadFlags struct {
 
 	embedThumbnail bool
 	embedMetadata  bool
+	coverArt       string
 
 	sourcePolicy  string
 	archivePath   string
@@ -108,6 +109,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	bindPeakModeFlag(f, &df.peakMode)
 	f.BoolVar(&df.embedThumbnail, "embed-thumbnail", false, "embed the YouTube thumbnail as cover art (when the format supports it)")
 	f.BoolVar(&df.embedMetadata, "embed-metadata", false, "write basic tags (title, artist, date, chapters) into the output")
+	bindCoverArtFlag(f, &df.coverArt)
 	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
 	f.BoolVar(&df.writeInfoJSON, "write-info-json", false, "write a <output>.info.json sidecar")
@@ -197,7 +199,8 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 			"format", "bitrate", "bit-depth", "channels", "downmix", "cut-range", "sponsorblock",
 			"cut-mode", "crossfade", "sponsorblock-on-error", "normalize", "measure-loudness",
 			"loudness-target", "peak-mode", "source-policy", "no-fallback", "download-archive",
-			"write-info-json", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
+			"write-info-json", "embed-thumbnail", "embed-metadata", "cover-art",
+			"concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
 			return err
 		}
 	}
@@ -255,6 +258,12 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	}
 	if cmd.Flags().Changed("peak-mode") && !df.normalize {
 		return usagef("--peak-mode requires --normalize")
+	}
+	// The value itself is parsed by buildProcessSpec at the tail of resolve, the
+	// same as --peak-mode and --cut-mode. Only the dependency is checked here,
+	// since nothing else reports it.
+	if cmd.Flags().Changed("cover-art") && !df.embedThumbnail {
+		return usagef("--cover-art requires --embed-thumbnail")
 	}
 	if err := rejectEmptySponsorBlock(cmd, df.sbCats); err != nil {
 		return err
@@ -826,6 +835,11 @@ func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
 		EmbedThumbnail:  df.embedThumbnail,
 		EmbedMetadata:   df.embedMetadata,
 	}
+	cover, err := parseCoverArt(df.coverArt)
+	if err != nil {
+		return spec, err
+	}
+	spec.CoverArt = cover
 	tf, hasTranscode, err := df.transcodeFormat()
 	if err != nil {
 		return spec, err

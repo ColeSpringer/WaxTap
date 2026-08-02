@@ -127,6 +127,18 @@ func parsePeakMode(s string) (waxtap.PeakMode, error) {
 	}
 }
 
+// parseCoverArt maps a mode name to a CoverArtMode.
+func parseCoverArt(s string) (waxtap.CoverArtMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "frame":
+		return waxtap.CoverArtFrame, nil
+	case "square":
+		return waxtap.CoverArtSquare, nil
+	default:
+		return 0, usagef("invalid --cover-art %q (want frame|square)", s)
+	}
+}
+
 // parseSourcePolicy maps a policy name to a SourcePolicy. "prefer:<codec>"
 // selects PreferCodec, a soft bias that ranks the named codec first but still
 // falls back to other sources, unlike the hard --codec filter.

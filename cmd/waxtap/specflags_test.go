@@ -282,6 +282,29 @@ func TestParsePeakMode(t *testing.T) {
 	}
 }
 
+func TestParseCoverArt(t *testing.T) {
+	cases := map[string]waxtap.CoverArtMode{
+		"":         waxtap.CoverArtFrame, // an unset flag, and the zero value
+		"frame":    waxtap.CoverArtFrame,
+		"FRAME":    waxtap.CoverArtFrame,
+		"square":   waxtap.CoverArtSquare,
+		" Square ": waxtap.CoverArtSquare,
+	}
+	for in, want := range cases {
+		got, err := parseCoverArt(in)
+		if err != nil || got != want {
+			t.Errorf("parseCoverArt(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	// "none" reads as "embed no cover art", which is what --embed-thumbnail
+	// controls, so it is deliberately not a value.
+	for _, bad := range []string{"round", "none"} {
+		if _, err := parseCoverArt(bad); err == nil {
+			t.Errorf("parseCoverArt(%q) should be rejected", bad)
+		}
+	}
+}
+
 func TestAudioSelectorMutualExclusion(t *testing.T) {
 	if _, err := audioSelector(140, "opus", waxtap.LayoutStereo); err == nil {
 		t.Error("--itag and --codec together should error")

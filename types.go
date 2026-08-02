@@ -228,9 +228,17 @@ type ProcessSpec struct {
 
 	// EmbedThumbnail embeds the YouTube thumbnail as front-cover art in the
 	// written audio file, when the output format can carry a picture. It is
-	// off by default and applies to YouTube downloads only (a local file has no
-	// thumbnail). A fetch or embed failure never fails the download.
+	// off by default and applies to YouTube downloads only, so it is a no-op on a
+	// local-file [Client.Process] (which has no thumbnail to fetch). A fetch or
+	// embed failure never fails the download.
 	EmbedThumbnail bool
+
+	// CoverArt selects the shape of the embedded cover picture. The zero value,
+	// CoverArtFrame, stores the fetched bytes verbatim. It requires
+	// EmbedThumbnail; setting it alone is ErrIncompatibleSpec rather than a
+	// silently ignored field, and like EmbedThumbnail it is a no-op on a
+	// local-file Process.
+	CoverArt CoverArtMode
 
 	// EmbedMetadata writes basic tags (title, artist, date, chapters) into the
 	// written audio file, when the output format can carry them. It is off by
@@ -409,6 +417,22 @@ const (
 	// relative spacing album mode exists to preserve, but it stays a single pass for
 	// that same reason: correcting each track individually would undo the spacing.
 	PeakLimit
+)
+
+// CoverArtMode selects the shape of the embedded cover picture.
+type CoverArtMode uint8
+
+const (
+	// CoverArtFrame embeds the fetched image verbatim, bars and all. It is the
+	// zero value, so the delivered bytes stay byte-identical to what the CDN sent
+	// and no re-encode generation is spent.
+	CoverArtFrame CoverArtMode = iota
+	// CoverArtSquare peels uniform-color borders and center-crops what remains to
+	// a square, recovering the release art from the 16:9 canvas (and 4:3
+	// letterbox) YouTube composites an Art Track onto. It crops and never scales,
+	// so the art keeps its proportions, and an image that is already square within
+	// 1% is left untouched: the result is square within 1%, not exactly square.
+	CoverArtSquare
 )
 
 // LoudnessSpec requests loudness measurement or normalization (EBU R128).
@@ -659,20 +683,25 @@ func (s Stage) String() string {
 type WarningCode uint8
 
 const (
-	WarnProceedUncut         WarningCode = iota // SponsorBlock fetch failed; delivered uncut
-	WarnFallbackProfile                         // a fallback client profile was used
-	WarnURLReResolved                           // an expired stream URL was re-resolved
-	WarnPlaylistEntryFailed                     // one playlist entry failed (others returned)
-	WarnRateLimitedRetried                      // a request was retried after a 429
-	WarnSponsorBlockEmpty                       // SponsorBlock matched no segments
-	WarnRangesEmpty                             // SponsorBlock segments all fell outside the media
-	WarnThrottled                               // a limiter/cooldown is active
-	WarnWebContextFallback                      // WEB player-context failed; fell back to the configured chain
-	WarnIncompleteFallback                      // a client returned an incomplete stream; switched clients
-	WarnWebContextRetry                         // WEB player-context was capped (status 2); retried once with a fresh context
-	WarnMetadataEmbed                           // an --embed-thumbnail/--embed-metadata post-pass failed; audio delivered untagged
-	WarnLoudnessTargetMissed                    // peak capping held the gain back, so the loudness target was not reached
-	WarnSessionRotated                          // a fresh session replaced one whose stream URLs the server kept rejecting
+	WarnProceedUncut        WarningCode = iota // SponsorBlock fetch failed; delivered uncut
+	WarnFallbackProfile                        // a fallback client profile was used
+	WarnURLReResolved                          // an expired stream URL was re-resolved
+	WarnPlaylistEntryFailed                    // one playlist entry failed (others returned)
+	WarnRateLimitedRetried                     // a request was retried after a 429
+	WarnSponsorBlockEmpty                      // SponsorBlock matched no segments
+	WarnRangesEmpty                            // SponsorBlock segments all fell outside the media
+	WarnThrottled                              // a limiter/cooldown is active
+	WarnWebContextFallback                     // WEB player-context failed; fell back to the configured chain
+	WarnIncompleteFallback                     // a client returned an incomplete stream; switched clients
+	WarnWebContextRetry                        // WEB player-context was capped (status 2); retried once with a fresh context
+	// WarnMetadataEmbed reports that an --embed-thumbnail/--embed-metadata
+	// post-pass could not write everything asked for. That includes partial
+	// success: tags written but the picture dropped, or the picture embedded but
+	// not shaped as --cover-art asked. Its String stays "metadata-embed-failed",
+	// the identifier callers already match on; Detail says what was missed.
+	WarnMetadataEmbed
+	WarnLoudnessTargetMissed // peak capping held the gain back, so the loudness target was not reached
+	WarnSessionRotated       // a fresh session replaced one whose stream URLs the server kept rejecting
 )
 
 func (w WarningCode) String() string {

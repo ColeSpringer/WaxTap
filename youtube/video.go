@@ -19,7 +19,7 @@ type Video struct {
 	PublishDate time.Time     // publication date, or zero when unknown
 	Description string        // video description
 
-	Thumbnails []Thumbnail // cover-art candidates, largest first
+	Thumbnails []Thumbnail // cover-art candidates, largest pixel area first
 	Chapters   []Chapter   // chapter markers in playback order
 
 	Formats []format.Format // candidate audio (and incidental video) formats

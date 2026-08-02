@@ -54,6 +54,25 @@ func TestFlagSurfaceConsistency(t *testing.T) {
 		}
 	}
 
+	// --cover-art shapes the picture --embed-thumbnail fetches, so it belongs to
+	// the same command and only that one: the local-file process commands have no
+	// thumbnail to fetch.
+	if download.Lookup("cover-art") == nil {
+		t.Error("download should expose --cover-art")
+	}
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"cut", newCutCmd()},
+		{"transcode", newTranscodeCmd()},
+		{"normalize", newNormalizeCmd()},
+	} {
+		if c.cmd.Flags().Lookup("cover-art") != nil {
+			t.Errorf("%s should not expose --cover-art; it has no thumbnail to embed", c.name)
+		}
+	}
+
 	// --skip-existing was removed in favor of --collision skip.
 	if newDownloadCmd().Flags().Lookup("skip-existing") != nil {
 		t.Error("download --skip-existing should be removed; use --collision skip")
@@ -203,6 +222,13 @@ func TestDownloadRejectsIgnoredFlagCombinations(t *testing.T) {
 		{"sponsorblock-on-error": "fail"},
 		{"crossfade": "1s"},
 		{"list": "true", "format": "flac"},
+		// The embed flags were ignored under --list rather than rejected.
+		{"list": "true", "embed-thumbnail": "true"},
+		{"list": "true", "embed-metadata": "true"},
+		{"list": "true", "cover-art": "square"},
+		// Shaping a picture that is never fetched.
+		{"cover-art": "square"},
+		{"embed-thumbnail": "true", "cover-art": "round"},
 		// A copy cut and --format contradict each other; the copy request used to be
 		// dropped silently (F4).
 		{"cut-range": "0-2", "cut-mode": "copy", "format": "flac"},
