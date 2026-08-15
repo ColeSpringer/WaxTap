@@ -171,7 +171,7 @@ func bindBitDepthFlag(f *pflag.FlagSet, bitDepth *int) {
 
 // bindPeakModeFlag registers --peak-mode with the shared help text.
 func bindPeakModeFlag(f *pflag.FlagSet, peakMode *string) {
-	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target)|limit (re-encodes until it reaches the target)")
+	f.StringVar(peakMode, "peak-mode", "cap", "true-peak policy when normalizing: cap (transparent, may miss the target; with --album one clamp holds the whole album, so a lossless output keeps the track-to-track spacing exactly)|limit (single file: re-encodes until it reaches the target; --album: one pass, and its default)")
 }
 
 // bindCoverArtFlag registers --cover-art with the shared help text.

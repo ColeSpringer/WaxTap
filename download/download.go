@@ -34,7 +34,7 @@ const (
 	defaultChunkSize       = 10 << 20 // 10 MiB per ranged chunk
 	defaultParallelism     = 4        // parallel chunks within one ToFile download
 	defaultMaxChunkRetries = 3        // per-chunk retry attempts after the first
-	defaultMaxRefreshes    = 2        // URL re-resolves allowed per download
+	defaultMaxRefreshes    = 3        // URL re-resolves (delivery sessions) allowed per download
 	defaultBaseBackoff     = 250 * time.Millisecond
 	defaultMaxBackoff      = 5 * time.Second
 )
@@ -109,7 +109,8 @@ type Config struct {
 	// MaxChunkRetries is the per-chunk retry budget for transient failures after
 	// the first request (default 3). Expiry refreshes are counted separately.
 	MaxChunkRetries int
-	// MaxRefreshes caps URL refreshes per download (default 2).
+	// MaxRefreshes caps the URL refreshes per download (default 3). See
+	// sharedSource.renew for why the bound is a flat count.
 	MaxRefreshes int
 
 	// BaseBackoff and MaxBackoff tune the download-layer retry sleep (distinct
@@ -275,6 +276,15 @@ var errRefreshBudgetSpent = fmt.Errorf("%w: refresh budget spent", waxerr.ErrURL
 // resolve is far more likely a stray edge-node rejection than a URL that has
 // already expired. Since the budget is shared by every chunk of the download, a
 // couple of those exhaust it, and the caller must then retry rather than fail.
+//
+// The bound is a flat count on purpose. An earlier design refunded a refresh
+// that had been followed by forward progress, on the theory that the delivery
+// cap is positional so legitimate refreshes scale with file size. Measurement
+// says otherwise: a session is either capped, in which case it delivers
+// essentially nothing however many times its URL is re-signed, or it is fine, in
+// which case it delivers the whole file. Refreshes therefore count how many
+// sessions were tried, which does not scale with size, and the refund never
+// fired on the failure it was written for.
 func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTPFailure) (Source, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

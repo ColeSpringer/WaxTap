@@ -48,10 +48,47 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		sem = make(chan struct{}, cfg.MaxProcs)
 	}
 	return &Runner{
-		engine: waxflow.New(waxflow.WithLogger(log)),
+		engine: waxflow.New(waxflow.WithLogger(slog.New(demoteImplicitDownmix{log.Handler()}))),
 		sem:    sem,
 		log:    log,
 	}
+}
+
+// implicitDownmixMsg is WaxFlow's log record for a channel fold the caller did
+// not ask for.
+//
+// keep in sync with waxflow.go logImplicitDownmix
+const implicitDownmixMsg = "downmixed to fit the output format"
+
+// demoteImplicitDownmix lowers that one WaxFlow record from WARN to DEBUG, so it
+// does not duplicate the implicit-downmix warning WaxTap raises from its own
+// probes, and still shows up under --verbose.
+//
+// Narrow on purpose: demoting every WaxFlow WARN would silence the upstream
+// warnings WaxTap has *not* learned to detect, which is the same defect one
+// release later. The coupling to the message string fails benignly too: if
+// upstream rewords the record, the raw line comes back as a cosmetic duplicate
+// rather than a lost signal, because the typed warning does not depend on it.
+type demoteImplicitDownmix struct{ slog.Handler }
+
+func (h demoteImplicitDownmix) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn && r.Message == implicitDownmixMsg {
+		// Handle is called without re-checking Enabled, so the level test that the
+		// demotion implies has to happen here or the record prints anyway.
+		if !h.Handler.Enabled(ctx, slog.LevelDebug) {
+			return nil
+		}
+		r.Level = slog.LevelDebug
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h demoteImplicitDownmix) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return demoteImplicitDownmix{h.Handler.WithAttrs(attrs)}
+}
+
+func (h demoteImplicitDownmix) WithGroup(name string) slog.Handler {
+	return demoteImplicitDownmix{h.Handler.WithGroup(name)}
 }
 
 // Engine returns the underlying WaxFlow engine, for callers (loudness) that

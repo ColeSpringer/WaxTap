@@ -2,15 +2,12 @@ package media
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
-
-	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // ProbeResult is a probe of a local audio file: container metadata plus the
@@ -66,10 +63,10 @@ func (r *Runner) Probe(ctx context.Context, input string) (ProbeResult, error) {
 		return ProbeResult{}, err
 	}
 	defer closeSrc()
-	return r.probeSource(ctx, src, hintFor(input))
+	return r.probeSource(ctx, src, input, hintFor(input))
 }
 
-func (r *Runner) probeSource(ctx context.Context, src container.Source, hint string) (ProbeResult, error) {
+func (r *Runner) probeSource(ctx context.Context, src container.Source, input, hint string) (ProbeResult, error) {
 	if err := r.acquire(ctx); err != nil {
 		return ProbeResult{}, err
 	}
@@ -80,7 +77,7 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, hint str
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ProbeResult{}, ctxErr
 		}
-		return ProbeResult{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return ProbeResult{}, classifyInputError(err, input)
 	}
 	return mapProbe(info, src.Size()), nil
 }

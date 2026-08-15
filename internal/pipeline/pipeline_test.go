@@ -964,3 +964,27 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+// SourceChannels is the only thing a caller can compare the output layout
+// against: nothing in a request says "6 channels", so without it an encoder that
+// folds a surround master to stereo leaves no signal at all.
+func TestRunReportsSourceChannels(t *testing.T) {
+	dir := t.TempDir()
+	in := synthSurround(t, dir, "in.wav", 1, "wav")
+	res, err := Run(t.Context(), newTestRunner(t), in, filepath.Join(dir, "out.mp3"),
+		Spec{Codec: media.CodecMP3}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SourceChannels != 6 {
+		t.Errorf("SourceChannels = %d, want 6", res.SourceChannels)
+	}
+	// The fold itself is WaxFlow policy and correct; what matters here is that both
+	// halves of the comparison are on the Result.
+	if res.OutputProbe == nil {
+		t.Fatal("OutputProbe is nil; the fold cannot be detected without it")
+	}
+	if a, ok := res.OutputProbe.AudioStream(); !ok || a.Channels >= res.SourceChannels {
+		t.Errorf("output channels = %+v, want fewer than the source's %d", a, res.SourceChannels)
+	}
+}

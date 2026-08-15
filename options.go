@@ -168,6 +168,13 @@ type RetryPolicy struct {
 	// a *RateLimitError instead of sleeping a goroutine. Some Retry-After values
 	// can be hours long.
 	MaxRetryWait time.Duration
+
+	// MaxStreamRefreshes bounds how many times one download may re-resolve its
+	// signed stream URL. Each re-resolve is effectively a fresh delivery session,
+	// so this is how many sessions a download tries before giving up and letting
+	// the caller fall back to another client. Zero selects the default (3); a
+	// negative value disables stream refresh entirely.
+	MaxStreamRefreshes int
 }
 
 // Politeness governs request volume and backoff. The posture is to be a

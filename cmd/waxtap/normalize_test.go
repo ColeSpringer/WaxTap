@@ -240,9 +240,10 @@ func TestValidateNormalizeInputFlags(t *testing.T) {
 	}
 }
 
-// TestNormalizeAlbumPeakMode: album applies one uniform gain, so it can only
-// limit. An explicit --peak-mode cap is refused rather than silently ignored;
-// --peak-mode limit is redundant but honest, and passes.
+// TestNormalizeAlbumPeakMode: album takes both peak modes. cap used to be
+// refused, on the reasoning that a per-track clamp destroys the spacing album
+// mode preserves; the clamp is album-wide, so it does the opposite, and refusing
+// it left the mandatory limiter compressing that spacing with no way out.
 func TestNormalizeAlbumPeakMode(t *testing.T) {
 	dir := t.TempDir()
 	var inputs []string
@@ -251,29 +252,26 @@ func TestNormalizeAlbumPeakMode(t *testing.T) {
 		synthAudio(t, p, "flac")
 		inputs = append(inputs, p)
 	}
-	out := filepath.Join(dir, "out")
 
-	capArgs := append([]string{"--album", "--format", "flac", "--dir", out, "--peak-mode", "cap"}, inputs...)
-	cmd := newNormalizeCmd()
-	cmd.SetArgs(capArgs)
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	err := cmd.Execute()
-	if _, ok := errors.AsType[*usageError](err); !ok {
-		t.Fatalf("--album --peak-mode cap = %v (%T), want *usageError", err, err)
-	}
-	if !strings.Contains(err.Error(), "relative track loudness") {
-		t.Errorf("message = %q, want the album-spacing reason", err)
-	}
-
-	limitArgs := append([]string{"--album", "--format", "flac", "--dir", out, "--peak-mode", "limit"}, inputs...)
-	cmd = newNormalizeCmd()
-	cmd.SetArgs(limitArgs)
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	if err := cmd.Execute(); err != nil {
-		t.Errorf("--album --peak-mode limit = %v (it is what album already does)\n%s", err, buf.String())
+	// The empty mode is the case the gate exists for: --album defaults to limit
+	// whatever --peak-mode's own default is, and only an explicit flag changes it.
+	for _, mode := range []string{"", "cap", "limit"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			out := filepath.Join(dir, "out-"+mode)
+			args := []string{"--album", "--format", "flac", "--dir", out}
+			if mode != "" {
+				args = append(args, "--peak-mode", mode)
+			}
+			args = append(args, inputs...)
+			cmd := newNormalizeCmd()
+			cmd.SetArgs(args)
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			if err := cmd.Execute(); err != nil {
+				t.Errorf("--album --peak-mode %s = %v\n%s", mode, err, buf.String())
+			}
+		})
 	}
 }
 

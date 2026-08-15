@@ -434,6 +434,92 @@ func warnLimiterTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result
 		math.Abs(miss), ls.Target, pres.LoudnessPasses, out.IntegratedLUFS))
 }
 
+// warnImplicitDownmix reports a channel fold the request never asked for: a
+// lossy encoder that cannot hold the source layout folds it to stereo, correctly,
+// and a run that halves a 5.1 master used to exit 0 with an empty warnings array
+// and nothing but a raw WaxFlow log line on stderr to say so.
+//
+// It reads WaxTap's own probes rather than parsing that log line: SourceChannels
+// is what the pipeline measured on the input and OutputProbe is what it measured
+// on the written file, both already authoritative for everything else the result
+// reports. A Downmix request means the caller chose the fold and does not need
+// telling.
+func warnImplicitDownmix(em *emitter, spec ProcessSpec, pres pipeline.Result) {
+	if spec.Downmix || pres.SourceChannels <= 0 || pres.OutputProbe == nil {
+		return
+	}
+	out, ok := pres.OutputProbe.AudioStream()
+	if !ok || out.Channels <= 0 || out.Channels >= pres.SourceChannels {
+		return
+	}
+	em.warn(WarnImplicitDownmix, fmt.Sprintf(
+		"%s cannot hold %d channels, so the encode folded them to %d; pass --downmix to choose the fold, or a format that keeps the layout",
+		outputCodecLabel(pres.OutputCodec), pres.SourceChannels, out.Channels))
+}
+
+// outputCodecLabel names the encoder a fold is attributable to, falling back to
+// neutral wording for a container copy that carries no codec of its own.
+func outputCodecLabel(c media.Codec) string {
+	if c == media.CodecCopy {
+		return "the output format"
+	}
+	return c.String()
+}
+
+// warnAlbumTargetMissed reports an album normalization that did not reach the
+// requested loudness. Album mode used to emit no warning at all: it never calls
+// em.warn, and warnLimiterTargetMissed returns early without a measured output,
+// which album mode did not produce. A 1.16 LU miss on a -14 target was therefore
+// silent, past the same threshold that warns loudly on a single file.
+//
+// The split mirrors warnLoudnessTargetMissed, and for the same reasons: the cap
+// branch attributes the miss to the clamp it can compute deterministically, the
+// limit branch reads it off the delivered album because there is no clamp to
+// attribute anything to. What differs is the remedy, since album mode is a single
+// pass by design and has no gain search to have given up.
+func warnAlbumTargetMissed(em *emitter, target float64, mode PeakMode, album loudness.Loudness, perTrack []loudness.Loudness, delivered *LoudnessInfo) {
+	deliveredLUFS := func() (float64, bool) {
+		if delivered == nil || math.IsInf(delivered.IntegratedLUFS, 0) || math.IsNaN(delivered.IntegratedLUFS) {
+			return 0, false
+		}
+		return delivered.IntegratedLUFS, true
+	}
+
+	if mode == PeakCap {
+		short := loudness.AlbumPeakShortfall(target, album, perTrack)
+		if short <= loudnessMissWarnDB {
+			return
+		}
+		detail := fmt.Sprintf("true-peak capping at %g dBTP held the album gain %.1f dB short of the %g LUFS target",
+			loudness.TruePeakCeilingDB, short, target)
+		if lufs, ok := deliveredLUFS(); ok {
+			detail += fmt.Sprintf("; delivered %.1f LUFS", lufs)
+		}
+		// The trade is stated because it is the whole reason both modes exist: limit
+		// gets closer, and gives up the exact spacing that cap was chosen for.
+		em.warn(WarnLoudnessTargetMissed, detail+"; the loudest track sets the album's headroom, so drop --peak-mode cap to get closer to the target at the cost of the exact track-to-track spacing")
+		return
+	}
+
+	lufs, ok := deliveredLUFS()
+	if !ok {
+		return // no measurement, nothing honest to report
+	}
+	miss := target - lufs
+	if math.Abs(miss) <= loudnessMissWarnDB {
+		return
+	}
+	tmpl := "the true-peak limiter held the album %.1f LU short of the %g LUFS target; delivered %.1f LUFS"
+	if miss < 0 {
+		tmpl = "the normalized album landed %.1f LU above the %g LUFS target; delivered %.1f LUFS"
+	}
+	// No "encode passes" count and no offer to iterate: album mode applies one
+	// uniform gain in one pass on purpose, because correcting per track is exactly
+	// the per-track variation it exists to remove.
+	em.warn(WarnLoudnessTargetMissed, fmt.Sprintf(tmpl, math.Abs(miss), target, lufs)+
+		"; album mode is a single uniform-gain pass and cannot iterate onto the target the way a single file does")
+}
+
 // needsProcessing reports whether the spec needs audio processing and a staged input. When
 // false, a download can stream straight to the sink with no temp file. Any
 // non-nil Transcode counts, including an explicit FormatCopy remux (distinct from

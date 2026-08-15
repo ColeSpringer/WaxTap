@@ -2,14 +2,11 @@ package media
 
 import (
 	"context"
-	"fmt"
 	"os"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
-
-	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // AnalyzeFile measures the loudness of a whole local file. channels, when 1 or 2,
@@ -34,7 +31,7 @@ func (r *Runner) AnalyzeFile(ctx context.Context, input string, channels int) (*
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return nil, classifyInputError(err, input)
 	}
 	return res, nil
 }
@@ -51,7 +48,10 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, channels in
 	if err != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	return res, err
+	// Analysis only ever fails on the media it is reading, so it takes the
+	// input-side classification; the Media is already open, so there is no path to
+	// name an I/O failure with.
+	return res, classifyInputError(err, "")
 }
 
 // OpenAlbumConcat opens the gapless concatenation of inputs as one Media, for a
@@ -89,7 +89,7 @@ func (r *Runner) albumTrack(input string) (container.Track, error) {
 	defer closeSrc()
 	_, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return container.Track{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return container.Track{}, classifyInputError(err, input)
 	}
 	return info.Default(), nil
 }

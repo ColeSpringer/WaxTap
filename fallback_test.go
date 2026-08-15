@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -368,5 +370,76 @@ func TestStreamErr_RecordKeepsCancellation(t *testing.T) {
 	}
 	if !strings.Contains(got.Error(), "mid-read") {
 		t.Errorf("terminal err = %q, want the read detail retained", got)
+	}
+}
+
+// TestAttemptErrorsAllDeliveriesIncomplete pins the gate on the whole-chain
+// retry. The default chain records causes from attempts that never reached the
+// transfer (WEB stops at "requires a player PO token"), so a literal "every
+// recorded cause is incomplete" would never fire on the chain that needs it.
+func TestAttemptErrorsAllDeliveriesIncomplete(t *testing.T) {
+	incomplete := fmt.Errorf("chunk: %w", ErrIncompleteStream)
+
+	var empty attemptErrors
+	if empty.allDeliveriesIncomplete() {
+		t.Error("no causes at all is not evidence of an incomplete delivery")
+	}
+
+	var noDelivery attemptErrors
+	noDelivery.add(youtube.AttemptID("profile:2"), ErrNeedsPOToken)
+	if noDelivery.allDeliveriesIncomplete() {
+		t.Error("an attempt that never reached the transfer must not qualify on its own")
+	}
+
+	// The measured real-chain shape: two clients capped, the rest unable to start.
+	var realChain attemptErrors
+	realChain.addDelivered(&acquired{attempt: "profile:0", stats: &refreshStats{}}, fmt.Errorf("%w: refresh budget spent", ErrURLExpired))
+	realChain.addDelivered(&acquired{attempt: "profile:2", stats: &refreshStats{}}, incomplete)
+	realChain.add(youtube.AttemptID("watch-page"), ErrNeedsPOToken)
+	if !realChain.allDeliveriesIncomplete() {
+		t.Error("every attempt that delivered was incomplete; the retry must be allowed")
+	}
+
+	// One delivery that failed for another reason is enough to decline: a second
+	// pass would only repeat it.
+	var mixed attemptErrors
+	mixed.addDelivered(&acquired{attempt: "profile:0", stats: &refreshStats{}}, incomplete)
+	mixed.addDelivered(&acquired{attempt: "profile:2", stats: &refreshStats{}}, ErrVideoUnavailable)
+	if mixed.allDeliveriesIncomplete() {
+		t.Error("an availability failure at delivery must stop the retry")
+	}
+}
+
+// The rendered attempt lines end up in a playlist run's NDJSON error field as
+// well as in the terminal message, and a cause can carry a signed stream URL, so
+// redaction happens where the strings are built rather than at one display site.
+func TestAttemptErrorsRenderedRedactsURLs(t *testing.T) {
+	signed := "https://rr3---sn-x.googlevideo.com/videoplayback?expire=1&sig=SECRET&pot=TOKEN"
+	var causes attemptErrors
+	causes.pass = 1
+	causes.addDelivered(
+		&acquired{attempt: youtube.AttemptID("profile:0"), stats: &refreshStats{}},
+		fmt.Errorf("%w: %v", ErrIncompleteStream, &url.Error{Op: "Get", URL: signed, Err: io.EOF}),
+	)
+	causes.pass = 2
+	causes.add(youtube.AttemptID("watch-page"), fmt.Errorf("re-resolve: %s failed", signed))
+
+	lines := causes.rendered()
+	joined := strings.Join(lines, "; ")
+	for _, leak := range []string{"sig=SECRET", "pot=TOKEN", "videoplayback"} {
+		if strings.Contains(joined, leak) {
+			t.Errorf("rendered leaked %q: %s", leak, joined)
+		}
+	}
+	if !strings.Contains(joined, "googlevideo.com") {
+		t.Errorf("rendered dropped the host, which is the useful half: %s", joined)
+	}
+	// A second pass over the same clients is distinguishable from one longer pass.
+	if !strings.Contains(joined, "(pass 2)") || strings.Contains(lines[0], "(pass") {
+		t.Errorf("rendered = %s, want only later passes marked", joined)
+	}
+	// The aggregate carries the same redacted text.
+	if e := causes.aggregate(); strings.Contains(e.Error(), "sig=SECRET") {
+		t.Errorf("aggregate leaked the signature: %v", e)
 	}
 }

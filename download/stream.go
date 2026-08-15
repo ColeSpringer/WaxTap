@@ -17,8 +17,8 @@ import (
 // Unlike ToFile, ToWriter gives no atomicity guarantee: bytes already handed to
 // w are not retractable if a later error occurs. refresh and progress may be nil.
 func (d *Downloader) ToWriter(ctx context.Context, src Source, w io.Writer, refresh RefreshFunc, progress ProgressFunc) (Result, error) {
-	shared := newSharedSource(src, refresh, d.maxRefreshes)
 	rep := newProgress(progress, src.ContentLength)
+	shared := newSharedSource(src, refresh, d.maxRefreshes)
 
 	r := d.newResumableReader(ctx, shared, rep)
 	defer r.Close()
@@ -40,8 +40,8 @@ func (d *Downloader) ToWriter(ctx context.Context, src Source, w io.Writer, refr
 // byte counts are known only after the reader is drained. refresh and progress
 // may be nil.
 func (d *Downloader) Stream(ctx context.Context, src Source, refresh RefreshFunc, progress ProgressFunc) (io.ReadCloser, StreamInfo, error) {
-	shared := newSharedSource(src, refresh, d.maxRefreshes)
 	rep := newProgress(progress, src.ContentLength)
+	shared := newSharedSource(src, refresh, d.maxRefreshes)
 
 	r := d.newResumableReader(ctx, shared, rep)
 	if err := r.prime(); err != nil {

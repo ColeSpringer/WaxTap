@@ -73,8 +73,11 @@ and chapters via a token-free watch-page fetch.
 
 `transcode` and `normalize` also take directories: `-r` recurses, `--dir` sets
 an output directory, and `--force` re-encodes files already in the target
-codec. Album normalization preserves relative track loudness. Loudness uses EBU
-R128 (integrated LUFS, true peak dBTP, range LU).
+codec. Album normalization applies one gain to every track: `--peak-mode cap`
+leaves the true-peak limiter idle and reproduces the input's track-to-track
+spacing exactly on a lossless target, at the cost of landing short; the default
+`limit` reaches for the target and lets the per-track limiter compress that
+spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
 
@@ -91,10 +94,12 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   gain it is handed, so `limit` measures its own output and corrects, re-encoding
   up to 4 times to land within 0.3 LU of the target, and reports
   `loudness-target-missed` when the limiter saturates before reaching it. Ordinary
-  material costs one extra encode pass. `--album` always limits and rejects
-  `--peak-mode cap`, because one uniform gain cannot be clamped per track without
-  destroying the relative track loudness it preserves; it is also the one path
-  that stays single-pass, since correcting per track would undo that spacing.
+  material costs one extra encode pass. `--album` applies one gain in a single
+  pass and defaults to `limit`; correcting per track would undo the spacing album
+  mode exists to keep. Its `cap` clamps the one gain by the album's least
+  true-peak headroom rather than per track, so the loudest track sets the
+  headroom for all of them and the miss can be large. Both modes report a miss
+  over 1 LU.
 - Decoding runs in float, so output depth follows the decoded stream: a lossy
   source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
   AIFF. That is lossless but larger, and some older DAWs and hardware players

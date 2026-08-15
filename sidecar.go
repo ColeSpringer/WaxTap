@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -326,6 +327,29 @@ func redactURL(raw string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+// urlRun matches an http(s) URL up to the next space. Message text quotes and
+// punctuates URLs (net/http renders `Get "https://host/path": ...`), so the match
+// runs past the URL itself and redactURLsIn trims the tail back.
+var urlRun = regexp.MustCompile(`https?://\S+`)
+
+// redactURLsIn is [redactURL] for free text: it rewrites every URL it finds down
+// to scheme and host. It exists for messages assembled from wrapped causes, where
+// there is no single endpoint field to redact and a signed stream URL can arrive
+// inside anything (a refresh failure, net/http's own *url.Error). Redacting where
+// the text is built keeps it safe wherever it is later printed, which a redactor
+// living in the CLI cannot do.
+func redactURLsIn(s string) string {
+	return urlRun.ReplaceAllStringFunc(s, func(m string) string {
+		trimmed := strings.TrimRight(m, `"'.,;:!?)]}`)
+		suffix := m[len(trimmed):]
+		u, err := url.Parse(trimmed)
+		if err != nil || u.Host == "" {
+			return "<url>" + suffix
+		}
+		return u.Scheme + "://" + u.Host + suffix
+	})
 }
 
 // SidecarError reports a connection failure to a configured sidecar endpoint. Its

@@ -50,6 +50,103 @@ type acquired struct {
 	// substitutedFrom names the forced client replaced by the WEB watch-page
 	// fallback. It is reported only after delivery succeeds.
 	substitutedFrom string
+	// stats counts what this attempt's refresh callback did. It is nil for a SABR
+	// transfer, which has no signed URL to refresh.
+	stats *refreshStats
+}
+
+// refreshStats counts what one attempt's signed-URL refresh callback did, so a
+// failed download can say how close it came and a successful one can say how much
+// it needed. The two counts separate the failure shapes a single terminal error
+// cannot: a session that ran out of rotations reports several, and a body that
+// ended short without ever asking for a new URL reports none.
+//
+// The download layer serializes refresh callbacks (renew holds the shared-source
+// lock) and the facade reads the counts after the transfer returns, so the mutex
+// guards an ordering that happens to hold today rather than one the code relies
+// on.
+type refreshStats struct {
+	mu        sync.Mutex
+	attempts  int // refresh callbacks entered
+	refreshes int // callbacks that returned a replacement Source
+	rotations int // guest identities discarded
+	// identityGen is the guest-identity generation currently behind this attempt's
+	// URLs: the extraction's own to begin with, and the re-extraction's after each
+	// refresh. A whole-chain retry has to rotate that one, not the generation the
+	// attempt started on, which the attempt's own rotations already discarded.
+	identityGen uint64
+}
+
+// begin notes that a refresh was asked for. The outcome is counted separately
+// because a refresh that rotated the identity and then failed to re-extract is
+// exactly the state these counters exist to expose, and counting only successes
+// renders it identically to no refresh at all.
+func (s *refreshStats) begin() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.attempts++
+	s.mu.Unlock()
+}
+
+// recordRotation notes a discarded guest identity, when it happens rather than
+// once the refresh around it succeeds.
+func (s *refreshStats) recordRotation() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rotations++
+	s.mu.Unlock()
+}
+
+// recordRefresh notes a completed refresh and the generation its replacement URLs
+// were minted under.
+func (s *refreshStats) recordRefresh(gen uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.refreshes++
+	s.identityGen = gen
+	s.mu.Unlock()
+}
+
+// generation reports the guest-identity generation currently behind the attempt's
+// URLs, and whether one is known (a SABR transfer refreshes no signed URL).
+func (s *refreshStats) generation() (uint64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.identityGen, true
+}
+
+// counts reports the refreshes and identity rotations recorded so far.
+func (s *refreshStats) counts() (refreshes, rotations int) {
+	if s == nil {
+		return 0, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refreshes, s.rotations
+}
+
+// String renders the counts for a diagnostic line, or "" when no refresh was ever
+// asked for, which is itself the distinguishing signal. A refresh that was asked
+// for and failed shows as a shortfall against the attempt count.
+func (s *refreshStats) String() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attempts == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d refreshes, %d session rotations", s.refreshes, s.attempts, s.rotations)
 }
 
 // webContextCooldown limits a failing WEB player-context provider to one attempt
@@ -211,6 +308,10 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 		return nil, err
 	}
 	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom()}
+	// Both branches record the identity the attempt runs under, SABR included: it
+	// refreshes no signed URL, but a whole-chain retry still has to know which
+	// identity to discard, and a zero there rotates nothing while reporting success.
+	a.stats = &refreshStats{identityGen: ext.IdentityGeneration()}
 
 	// SABR reloads are pinned to the original attempt by SABRStream.reextract.
 	if plan.SABR != nil {
@@ -224,7 +325,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 		a.transfer = sabrTransfer{dl: c.dl, handle: plan.SABR}
 		return a, nil
 	}
-	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext, selFmt.Itag, plan.Direct.ExpiresAt, em)}
+	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext, selFmt.Itag, plan.Direct.ExpiresAt, em, a.stats)}
 	return a, nil
 }
 
@@ -275,7 +376,7 @@ func capSuspected(failure *potoken.HTTPFailure, expiresAt time.Time) bool {
 // be classified as cap-vs-expiry and a rotation discards only the identity
 // that minted the failing URL. The download layer serializes refresh callbacks
 // (renew runs under the shared source lock), so plain assignment is safe.
-func (c *Client) directRefresh(req Request, id string, target format.Target, ext *youtube.Extraction, pinnedItag int, expiresAt time.Time, em *emitter) download.RefreshFunc {
+func (c *Client) directRefresh(req Request, id string, target format.Target, ext *youtube.Extraction, pinnedItag int, expiresAt time.Time, em *emitter, stats *refreshStats) download.RefreshFunc {
 	attempt := ext.Attempt()
 	lastExpiry := expiresAt
 	identityGen := ext.IdentityGeneration()
@@ -285,7 +386,11 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 		// (every fresh URL inherits the cap), so discard the identity and
 		// re-extract fresh. An adopted session is retired through its provider;
 		// one that cannot be retired takes the plain re-resolve.
+		stats.begin()
 		rotated := capSuspected(failure, lastExpiry) && c.yt.RotateIdentity(fctx, identityGen, id)
+		if rotated {
+			stats.recordRotation()
+		}
 		rext, rerr := func() (*youtube.Extraction, error) {
 			fectx, cancel := withTimeout(fctx, c.opts.Timeouts.Extraction)
 			defer cancel()
@@ -312,6 +417,7 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 		}
 		lastExpiry = nplan.Direct.ExpiresAt
 		identityGen = rext.IdentityGeneration()
+		stats.recordRefresh(identityGen)
 		if rotated {
 			em.warn(WarnSessionRotated, "the server rejected a stream URL well before its expiry; continuing with a new session")
 		} else {
@@ -454,6 +560,20 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 	return a, ext.Attempt(), nil
 }
 
+// maxChainPasses bounds how many times acquireAndDownload runs the whole client
+// chain. The second pass exists because the per-download refresh budget is not
+// the only thing standing between a capped session and a complete file: measured
+// live, successful runs spend up to the full budget of identity rotations, and
+// the failures sit exactly at it on every client. Rotation demonstrably recovers
+// runs, so the chain is given one more set of them on a fresh session rather than
+// the budget being raised, which would spend the extra re-resolves on a URL that
+// is genuinely dead as readily as on one that is capped.
+//
+// One extra pass, not a loop: a pass that delivers nothing still costs a full
+// re-extract and re-resolve per client, and the passes are not independent, since
+// a capped window can outlast them both.
+const maxChainPasses = 2
+
 // acquireAndDownload downloads to a file, retrying incomplete deliveries with
 // other extraction attempts. dest returns the path for each selected format.
 //
@@ -468,6 +588,36 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	webContextRetried := false
 	webCtxReason := c.initialWebContextReason()
 	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
+	// lastIdentityGen is the guest identity behind the most recent delivery
+	// attempt, which is the one a whole-chain retry has to discard.
+	var lastIdentityGen uint64
+	pass := 1
+	causes.pass = pass
+
+	// nextPass decides whether the exhausted chain gets one more run on a fresh
+	// session, and prepares for it. Rotation is the precondition, not a nicety: if
+	// the identity behind the failing URLs cannot be discarded (a jarless client,
+	// a fixed Session, a provider that cannot retire what it handed out), a second
+	// pass re-resolves under the same capped identity and repeats the first
+	// exactly. See maxChainPasses.
+	nextPass := func() bool {
+		if pass >= maxChainPasses || req.NoFallback || !causes.allDeliveriesIncomplete() {
+			return false
+		}
+		if !c.yt.RotateIdentity(ctx, lastIdentityGen, id) {
+			return false
+		}
+		pass++
+		causes.pass = pass
+		skip = baseSkip(req)
+		// The attested WEB context does not get a second pass. It had its one
+		// fresh-context retry and, if that capped too, its session was already
+		// reported to the provider; running it again would re-report and re-retry
+		// past the "second cap, then stop" the provider path is built on.
+		skip[youtube.AttemptWebContext] = true
+		em.warn(WarnIncompleteFallback, "every client that reached the stream returned an incomplete delivery; retrying the chain once on a fresh session")
+		return true
+	}
 
 	for {
 		a, attempt, err := c.acquireNext(ctx, req, id, target, em, skip, pinnedItag)
@@ -486,6 +636,9 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 				// per-attempt errors contain the useful causes.
 				if !errors.Is(err, waxerr.ErrChainExhausted) {
 					causes.add(attempt, err)
+				}
+				if nextPass() {
+					continue
 				}
 				break
 			}
@@ -508,6 +661,11 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 		path := dest(a)
 		em.stage(StageDownloading)
 		res, derr := a.transfer.toFile(ctx, path, progress)
+		// Whatever happened, this attempt's URLs were minted under an identity a
+		// whole-chain retry would have to discard.
+		if gen, ok := a.stats.generation(); ok {
+			lastIdentityGen = gen
+		}
 		if derr == nil {
 			// Use the more specific web-context fallback warning below.
 			if a.client != firstClient && !firstFromWebContext {
@@ -518,8 +676,13 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// Report substitution only after the bytes arrive.
 			c.warnClientSubstitution(em, a)
 			c.applyFullMetadata(ctx, req, a)
+			// The refresh counts ride the happy path too: a run that needed two
+			// rotations to finish is one rotation from the failures this breadcrumb
+			// exists to explain.
+			refreshes, rotations := a.stats.counts()
 			c.log.DebugContext(ctx, "download complete",
-				"client", a.client, "itag", a.fmtSel.Itag, "bytes", res.BytesWritten)
+				"client", a.client, "itag", a.fmtSel.Itag, "bytes", res.BytesWritten,
+				"refreshes", refreshes, "rotations", rotations, "chainPasses", pass)
 			return a, res, path, nil
 		}
 		if ctx.Err() != nil {
@@ -533,7 +696,11 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// fails during extraction or availability checks. Local I/O errors
 			// remain terminal.
 			if isUpstreamDiagnostic(derr) && causes.hasIncomplete() {
-				causes.add(a.attempt, derr)
+				// No whole-chain retry here: this attempt reached the transfer and
+				// failed on availability or a missing token, which a fresh session does
+				// not change. Asking would be dead code anyway, since the cause just
+				// recorded is a delivery that was not incomplete.
+				causes.addDelivered(a, derr)
 				break
 			}
 			return nil, download.Result{}, "", derr
@@ -543,7 +710,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 		// in the aggregate. The retry's own second cap re-enters here with
 		// webContextRetried set and is skipped to avoid a duplicate "tried" entry.
 		if a.attempt != youtube.AttemptWebContext || !webContextRetried {
-			causes.add(a.attempt, derr)
+			causes.addDelivered(a, derr)
 		}
 		// Retry the same web-context attempt once with a fresh context before falling
 		// back. ExtractWebContext re-fetches /player-context each call, so re-entering
@@ -597,15 +764,34 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 // attemptErrors collects failures from a cross-client download.
 type attemptErrors struct {
 	causes []attemptCause
+	// pass is the chain pass causes are being recorded for, so a second pass over
+	// the same clients is distinguishable from one longer pass.
+	pass int
 }
 
 type attemptCause struct {
-	id  youtube.AttemptID
-	err error
+	id   youtube.AttemptID
+	err  error
+	pass int
+	// delivered marks a cause from an attempt that reached the transfer, as
+	// opposed to one that failed to start.
+	delivered bool
+	// stats is the attempt's refresh accounting, rendered, or "" when the failure
+	// happened before delivery or the transfer had no signed URL to refresh.
+	stats string
 }
 
 func (a *attemptErrors) add(id youtube.AttemptID, err error) {
-	a.causes = append(a.causes, attemptCause{id: id, err: err})
+	a.causes = append(a.causes, attemptCause{id: id, err: err, pass: a.pass})
+}
+
+// addDelivered records a failure that reached the transfer, so the cause carries
+// how many stream-URL refreshes and session rotations the attempt spent getting
+// there.
+func (a *attemptErrors) addDelivered(acq *acquired, err error) {
+	a.causes = append(a.causes, attemptCause{
+		id: acq.attempt, err: err, pass: a.pass, delivered: true, stats: acq.stats.String(),
+	})
 }
 
 // hasIncomplete reports whether any recorded cause is an incomplete delivery.
@@ -616,6 +802,32 @@ func (a *attemptErrors) hasIncomplete() bool {
 		}
 	}
 	return false
+}
+
+// allDeliveriesIncomplete reports whether every attempt that reached the transfer
+// ended in an incomplete delivery, and that at least one did. It is the gate on
+// retrying the whole chain: the failure it describes is transport-shaped, so a
+// fresh session can plausibly fix it, while any other delivery failure means a
+// second pass would only repeat itself.
+//
+// Attempts that never reached the transfer are skipped rather than counted
+// against it. On the default chain they are the norm, not the exception: WEB and
+// WEB_EMBEDDED_PLAYER stop at "requires a player PO token" with no provider
+// configured, so requiring every recorded cause to be incomplete would mean this
+// never fires on the one chain that needs it. Those attempts did not fail to
+// deliver, they failed to start, and another pass changes nothing about that.
+func (a *attemptErrors) allDeliveriesIncomplete() bool {
+	seen := false
+	for _, c := range a.causes {
+		if !c.delivered {
+			continue
+		}
+		if !isIncompleteDelivery(c.err) {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 func (a *attemptErrors) aggregate() error {
@@ -632,22 +844,78 @@ func (a *attemptErrors) aggregate() error {
 			tried = append(tried, string(cause.id))
 		}
 	}
-	summary := "no attempted client delivered a complete stream"
-	if len(tried) > 0 {
-		summary += " (tried " + strings.Join(tried, ", ") + ")"
-	}
 	switch {
-	case errors.Is(best, ErrIncompleteStream):
-		// Preserve the most useful truncation detail.
-		return fmt.Errorf("%s: %w", summary, best)
 	case isIncompleteDelivery(best):
 		// A refresh failure is an incomplete file delivery once all attempts fail.
-		return fmt.Errorf("%w: %s: %w", ErrIncompleteStream, summary, best)
+		return &IncompleteDeliveryError{Attempts: a.rendered(), Err: best}
 	case len(tried) == 0:
 		return best
 	default:
 		return fmt.Errorf("%w (tried %s)", best, strings.Join(tried, ", "))
 	}
+}
+
+// rendered describes every recorded cause, one line per attempt, for
+// [IncompleteDeliveryError.Attempts].
+func (a *attemptErrors) rendered() []string {
+	out := make([]string, 0, len(a.causes))
+	for _, c := range a.causes {
+		label := string(c.id)
+		if label == "" {
+			label = "chain" // no single attempt could be blamed
+		}
+		if c.pass > 1 {
+			label += fmt.Sprintf(" (pass %d)", c.pass)
+		}
+		// Redacted here rather than at the CLI: the text ends up in a playlist run's
+		// NDJSON error field as well as in the terminal message, and a cause can carry
+		// a signed stream URL.
+		line := label + ": " + redactURLsIn(c.err.Error())
+		if c.stats != "" {
+			line += " [" + c.stats + "]"
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// IncompleteDeliveryError reports that no extraction attempt delivered a complete
+// stream, and carries what every attempt tried and how it ended.
+//
+// The chain's single preferred cause is what classification needs, but it is not
+// what diagnosis needs. [waxerr.PreferErr] ranks ErrIncompleteStream and
+// ErrURLExpired equally and keeps the first, so an ANDROID_VR chunk that ended
+// short followed by an IOS attempt that spent its refresh budget keeps only the
+// short chunk, dropping the one fact that separates a truncated body from an
+// exhausted budget. Attempts keeps all of them.
+type IncompleteDeliveryError struct {
+	// Attempts is one rendered line per extraction attempt, in the order they were
+	// tried, as "<attempt>: <cause>", with the attempt's stream-URL refresh and
+	// session-rotation counts in brackets when it reached delivery. An attempt no
+	// single extraction can be blamed for is labeled "chain".
+	//
+	// The text can contain a signed stream URL: the chain wraps arbitrary causes,
+	// including net/http's own *url.Error. Redact before display.
+	Attempts []string
+	// Err is the preferred cause, the one chosen for classification. Unwrap
+	// reports it alongside ErrIncompleteStream, so errors.Is classification, and
+	// with it the CLI exit code, is what the plainly wrapped error always gave.
+	Err error
+}
+
+func (e *IncompleteDeliveryError) Error() string {
+	const summary = "no attempted client delivered a complete stream"
+	if len(e.Attempts) == 0 {
+		return summary
+	}
+	return summary + " (" + strings.Join(e.Attempts, "; ") + ")"
+}
+
+func (e *IncompleteDeliveryError) Unwrap() []error {
+	if e.Err == nil {
+		return []error{ErrIncompleteStream}
+	}
+	return []error{ErrIncompleteStream, e.Err}
 }
 
 // webContextCoolingDown reports whether the WEB player-context attempt is
@@ -1007,6 +1275,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	}
 	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
+	warnImplicitDownmix(em, req.ProcessSpec, pres)
 
 	deliver := pres.OutputPath
 	if deliver == "" {

@@ -50,11 +50,20 @@ func newNormalizeCmd() *cobra.Command {
 			"at the cost of transparency. Because the limiter gives back part of the\n" +
 			"gain it is handed, limit measures its own output and corrects, re-encoding\n" +
 			"up to 4 times to land within 0.3 LU of the target; it reports\n" +
-			"loudness-target-missed if the limiter saturates before getting there.\n" +
-			"--album always limits and rejects --peak-mode cap: one uniform gain cannot\n" +
-			"be clamped per track without destroying the relative track loudness album\n" +
-			"mode preserves. Album mode is also the one path that stays a single pass,\n" +
-			"for the same reason: correcting per track would undo that spacing.",
+			"loudness-target-missed if the limiter saturates before getting there.\n\n" +
+			"--album applies one uniform gain in a single pass and defaults to limit,\n" +
+			"whichever way --peak-mode is set for single files. Under limit the gain\n" +
+			"aims at the target and the per-track limiter gives part of it back on the\n" +
+			"loudest tracks, which compresses the track-to-track spacing; --peak-mode\n" +
+			"cap instead clamps the one gain by the album's least true-peak headroom,\n" +
+			"which leaves the limiter idle and reproduces that spacing exactly on a\n" +
+			"lossless output, at the cost of landing short of the target; a lossy\n" +
+			"encoder can overshoot the source peak and re-engage the limiter. One hot\n" +
+			"master sets the headroom for every track, so the miss can be large.\n" +
+			"Neither mode has anything to give back when the gain attenuates, so a loud\n" +
+			"album lands on target either way. cap reports loudness-target-missed when\n" +
+			"the clamp holds it more than 1 LU short; limit reports it when the measured\n" +
+			"album misses by more than 1 LU, which only a boosting gain can do.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
@@ -270,11 +279,12 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 	if err := validateNormalizeInputFlags(cmd, p.measure, false, true); err != nil {
 		return err
 	}
-	// Album normalization applies one uniform gain, so it can only limit. Clamping
-	// per track would flatten the inter-track spacing album mode exists to
-	// preserve, so --peak-mode cap is refused rather than silently ignored.
-	if cmd.Flags().Changed("peak-mode") && p.peakMode == waxtap.PeakCap {
-		return usagef("--peak-mode cap is not supported with --album; a per-track peak clamp would destroy the relative track loudness album mode preserves")
+	// The album default stays limit whether or not --peak-mode was given: cap is
+	// the default for a single file, but for an album it is the mode that gives up
+	// hitting the target, so it is opted into rather than inherited.
+	peakMode := waxtap.PeakLimit
+	if cmd.Flags().Changed("peak-mode") {
+		peakMode = p.peakMode
 	}
 	for _, in := range inputs {
 		if !isLocalFile(in) {
@@ -321,7 +331,9 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 	}
 	warnBitrateIgnored(env, tf, p.bitrate)
 	warnBitDepthIgnored(env, tf, p.bitDepth)
-	res, err := env.client.ProcessAlbum(cmd.Context(), tracks, p.target, waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth})
+	res, err := env.client.ProcessAlbum(cmd.Context(), tracks, p.target,
+		waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth},
+		waxtap.WithAlbumPeakMode(peakMode))
 	if err != nil {
 		return err
 	}
@@ -352,20 +364,30 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 		for i, w := range res.Warnings {
 			warns[i] = warningJSON{Code: w.Code.String(), Detail: w.Detail}
 		}
+		var delivered *loudnessInfoJSON
+		if res.Delivered != nil {
+			d := albumInfoJSON(*res.Delivered)
+			delivered = &d
+		}
 		return env.emitJSON(struct {
-			SchemaVersion int              `json:"schemaVersion"`
-			Album         loudnessInfoJSON `json:"album"`
-			GainDB        jsonFloat        `json:"gainDb"`
-			Tracks        []albumTrackJSON `json:"tracks"`
-			Warnings      []warningJSON    `json:"warnings,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns})
+			SchemaVersion int               `json:"schemaVersion"`
+			Album         loudnessInfoJSON  `json:"album"`
+			GainDB        jsonFloat         `json:"gainDb"`
+			Delivered     *loudnessInfoJSON `json:"delivered,omitempty"`
+			Tracks        []albumTrackJSON  `json:"tracks"`
+			Warnings      []warningJSON     `json:"warnings,omitempty"`
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns})
 	}
 	// Album processing runs without an event stream, so carry warnings surface
 	// here rather than through the progress renderer.
 	for _, w := range res.Warnings {
 		env.info("warning: [%s] %s\n", w.Code, w.Detail)
 	}
-	env.printf("Album:  %s LUFS; applied %+.1f dB to each track\n\n", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
+	env.printf("Album:  %s LUFS; applied %+.1f dB to each track", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
+	if res.Delivered != nil {
+		env.printf("; delivered %s LUFS", humanLUFS(res.Delivered.IntegratedLUFS))
+	}
+	env.printf("\n\n")
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	// Per-track values are input measurements; processed output is not measured here.
 	fmt.Fprintln(tw, "#\tIN-LUFS\tOUTPUT")

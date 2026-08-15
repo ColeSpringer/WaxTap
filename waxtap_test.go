@@ -1525,3 +1525,63 @@ func TestMeasureAlbum(t *testing.T) {
 		}
 	}
 }
+
+// TestProcessWarnsImplicitDownmix is F4: a lossy encode of a surround master
+// folds to stereo, correctly, and the run used to exit 0 with an empty warnings
+// array. The only trace was WaxFlow's own log line on stderr, which --json never
+// sees.
+func TestProcessWarnsImplicitDownmix(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "surround.wav")
+	if err := os.WriteFile(src, mediatest.SineWAV(1, 6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newOfflineClient(t)
+
+	res, err := c.Process(t.Context(), ProcessRequest{
+		Input: src,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "out.mp3")),
+			Transcode: &TranscodeSpec{Format: FormatMP3},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	w, ok := findWarning(res.Warnings, WarnImplicitDownmix)
+	if !ok {
+		t.Fatalf("no implicit-downmix warning: %+v", res.Warnings)
+	}
+	if !strings.Contains(w.Detail, "6 channels") || !strings.Contains(w.Detail, "2") {
+		t.Errorf("detail = %q, want the source and output channel counts", w.Detail)
+	}
+	if got := WarnImplicitDownmix.String(); got != "implicit-downmix" {
+		t.Errorf("String() = %q, want implicit-downmix", got)
+	}
+
+	// A requested downmix is the caller's own choice, so it stays quiet.
+	asked, err := c.Process(t.Context(), ProcessRequest{
+		Input: src,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "asked.mp3")),
+			Transcode: &TranscodeSpec{Format: FormatMP3},
+			Channels:  LayoutStereo,
+			Downmix:   true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process (downmix): %v", err)
+	}
+	if _, ok := findWarning(asked.Warnings, WarnImplicitDownmix); ok {
+		t.Errorf("a requested downmix must not warn: %+v", asked.Warnings)
+	}
+}
+
+func findWarning(ws []Warning, code WarningCode) (Warning, bool) {
+	for _, w := range ws {
+		if w.Code == code {
+			return w, true
+		}
+	}
+	return Warning{}, false
+}

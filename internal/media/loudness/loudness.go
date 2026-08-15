@@ -178,16 +178,94 @@ func PeakShortfall(target float64, m Loudness) float64 {
 	return want - head
 }
 
+// AlbumGain is the gain album normalization applies to every track. It is the
+// [GainFor] / [RawGain] pair lifted to a whole album: clampPeaks holds the
+// loudest track's true peak under the ceiling, which leaves the limiter nothing
+// to do and so reproduces the input spacing exactly; without it the gain aims
+// straight at the target and the limiter guards the peaks per track, which is
+// what pulls louder tracks down harder and compresses that spacing.
+//
+// The clamp is album-wide, taken from the least headroom across the tracks,
+// because a per-track clamp is the one thing album mode cannot do: different
+// gains per track are exactly the inter-track differences it exists to preserve.
+//
+// One consequence is worth stating where users will read it, not only here: a
+// single hot master sets the headroom for the whole album, so twelve tracks can
+// land 6 dB below target because one of them peaks at 0 dBTP. That is [GainFor]'s
+// policy applied album-wide, and it is why the mode is opt-in.
+//
+// The clamp is only as good as the peaks it is given. [MeasureAlbum] measures
+// each track at its source layout, so an album that the encoder then folds to
+// stereo can peak higher than was clamped for and re-engage the limiter, which is
+// the spacing drift the clamp exists to avoid. The fold is reported separately
+// (waxtap's implicit-downmix warning), and the exactness claim is scoped to
+// lossless outputs, which is where no fold happens.
+func AlbumGain(target float64, album Loudness, perTrack []Loudness, clampPeaks bool) float64 {
+	// Silence is a no-op in both modes, and the guard has to come before the clamp,
+	// not after RawGain alone: a gated-silent album whose tracks still carry a peak
+	// over the ceiling would otherwise be attenuated by a clamp with no loudness to
+	// protect, and the two modes would disagree on an album neither can move.
+	if math.IsInf(album.IntegratedLUFS, 0) || math.IsNaN(album.IntegratedLUFS) {
+		return 0
+	}
+	g := RawGain(target, album.IntegratedLUFS)
+	if !clampPeaks {
+		return g
+	}
+	if head, ok := albumHeadroom(perTrack); ok && g > head {
+		g = head
+	}
+	return ClampGain(g)
+}
+
+// AlbumPeakShortfall reports how many dB of gain the album-wide true-peak clamp
+// held back, or 0 when the clamp did not bind. It is [PeakShortfall] for an
+// album, and it is deliberately derived from the clamp rather than from the
+// achieved loudness, for the reason that function documents.
+func AlbumPeakShortfall(target float64, album Loudness, perTrack []Loudness) float64 {
+	if !album.Finite() || math.IsInf(target, 0) || math.IsNaN(target) {
+		return 0
+	}
+	want := target - album.IntegratedLUFS
+	head, ok := albumHeadroom(perTrack)
+	if !ok || want <= head {
+		return 0
+	}
+	return want - head
+}
+
+// albumHeadroom returns the least true-peak headroom across the tracks, and
+// whether any track had a peak to measure.
+//
+// A silent track reports a -Inf true peak, which would make its headroom +Inf and
+// silently drop out of a min; it is skipped explicitly instead, the same guard
+// [GainFor] applies to its own measurement. An album of nothing but silent tracks
+// reports false, so the caller applies no clamp rather than an infinite one.
+func albumHeadroom(perTrack []Loudness) (float64, bool) {
+	head, ok := math.Inf(1), false
+	for _, t := range perTrack {
+		if math.IsInf(t.TruePeakDBTP, 0) || math.IsNaN(t.TruePeakDBTP) {
+			continue
+		}
+		if h := TruePeakCeilingDB - t.TruePeakDBTP; h < head {
+			head, ok = h, true
+		}
+	}
+	return head, ok
+}
+
 // RawGain is the plain target - integrated offset, with no peak clamp: WaxFlow's
 // limiter guards the peaks at encode time. It gets far closer to the target than
 // GainFor can, at the cost of transparency.
 //
-// It is the *starting* gain for the PeakLimit path and the *final* gain for album
-// mode. The difference is that the limiter gives back part of whatever gain it is
-// handed, by an amount that depends on the material, so a single RawGain pass
-// lands short. The pipeline measures the encode and corrects; album mode cannot,
-// because one uniform gain is the point and a per-track correction would destroy
-// the inter-track spacing it exists to preserve.
+// It is the *starting* gain for the PeakLimit path and, through [AlbumGain], the
+// *final* gain for a limiting album. The difference is that the limiter gives
+// back part of whatever gain it is handed, by an amount that depends on the
+// material, so a single RawGain pass lands short. The pipeline measures the
+// encode and corrects; album mode cannot, because one uniform gain is the point
+// and a per-track correction would destroy the inter-track spacing it exists to
+// preserve. A capping album takes [AlbumGain]'s clamp instead, which leaves the
+// limiter idle and the spacing intact.
 //
 // A non-finite integrated loudness (silence) yields zero gain, for the same
 // reason GainFor guards it: WaxFlow rejects a non-finite GainDB.

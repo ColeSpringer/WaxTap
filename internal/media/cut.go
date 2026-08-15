@@ -101,7 +101,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	if tryRemux {
 		done, rerr := r.cutRemux(ctx, src, hint, outExt, spec.Keeps, spec.Total, staged)
 		if rerr != nil {
-			return CutResult{}, rerr
+			return CutResult{}, classifyEngineError(rerr, input, output)
 		}
 		if done {
 			mode = ModeCopy
@@ -112,12 +112,12 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless source.
 			if err := r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
-				return CutResult{}, err
+				return CutResult{}, classifyEngineError(err, input, output)
 			}
 		}
 	} else {
 		if err := r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
-			return CutResult{}, err
+			return CutResult{}, classifyEngineError(err, input, output)
 		}
 	}
 

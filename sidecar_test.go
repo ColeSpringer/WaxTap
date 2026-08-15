@@ -725,3 +725,25 @@ func TestSiblingSidecarURL(t *testing.T) {
 		}
 	}
 }
+
+// redactURLsIn guards the messages assembled from wrapped causes, where a signed
+// stream URL can arrive inside anything. It runs where those strings are built,
+// so the result is safe in a playlist run's NDJSON as well as on the terminal.
+func TestRedactURLsIn(t *testing.T) {
+	cases := map[string]string{
+		"":                       "",
+		"no urls here":           "no urls here",
+		"hostless: https://?x=1": "hostless: <url>",
+		`Get "https://rr3---sn-x.googlevideo.com/videoplayback?expire=1&sig=SECRET": EOF`: `Get "https://rr3---sn-x.googlevideo.com": EOF`,
+		"re-resolve after refresh: http://127.0.0.1:4417/get_pot?key=hunter2":             "re-resolve after refresh: http://127.0.0.1:4417",
+		"two: https://a.example/x and https://b.example/y.":                               "two: https://a.example and https://b.example.",
+	}
+	for in, want := range cases {
+		if got := redactURLsIn(in); got != want {
+			t.Errorf("redactURLsIn(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := redactURLsIn("pot=X only in https://host/p?pot=X"); strings.Contains(got, "?pot=X") {
+		t.Errorf("query string survived: %q", got)
+	}
+}

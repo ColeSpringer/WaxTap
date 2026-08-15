@@ -188,6 +188,7 @@ func New(opts Options) (*Client, error) {
 			Parallelism:     opts.Concurrency.Chunks,
 			ChunkTimeout:    opts.Timeouts.ChunkRetry,
 			MaxChunkRetries: opts.Retry.MaxRetries,
+			MaxRefreshes:    opts.Retry.MaxStreamRefreshes,
 			BaseBackoff:     opts.Retry.BaseBackoff,
 			MaxBackoff:      opts.Retry.MaxBackoff,
 		}),

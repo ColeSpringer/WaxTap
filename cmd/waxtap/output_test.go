@@ -877,3 +877,38 @@ func TestRenderErrorKept(t *testing.T) {
 		t.Errorf("ordinary error document gained an outputPath key:\n%s", bare.String())
 	}
 }
+
+// The fixed sentence alone is what the 2026-08-15 pass had to diagnose an
+// intermittent exit 7 with. Every attempt's own cause and refresh accounting now
+// rides with it, in both the human line and the --json message.
+func TestFriendlyError_IncompleteStreamNamesEveryAttempt(t *testing.T) {
+	ide := &waxtap.IncompleteDeliveryError{
+		Attempts: []string{
+			"android_vr: incomplete stream: short chunk at offset 33554432: got 1048576 bytes, want 10485760 [2 refreshes, 2 session rotations]",
+			"web: url expired: refresh budget spent [3 refreshes, 0 session rotations]",
+		},
+		Err: waxtap.ErrIncompleteStream,
+	}
+	c := classifyError(ide)
+	if c.exitCode != 7 || c.code != "incomplete-stream" {
+		t.Fatalf("classify = %+v, want exit 7 and code incomplete-stream", c)
+	}
+	if !strings.Contains(c.message, "the download ended before the full stream was received") {
+		t.Errorf("message = %q, want the fixed sentence kept", c.message)
+	}
+	for _, want := range []string{"android_vr", "web", "offset 33554432", "2 session rotations", "refresh budget spent"} {
+		if !strings.Contains(c.message, want) {
+			t.Errorf("message = %q, want it to carry %q", c.message, want)
+		}
+	}
+}
+
+// A bare sentinel with no recorded attempts keeps the message it always had.
+func TestFriendlyError_IncompleteStreamWithoutAttempts(t *testing.T) {
+	if got := friendlyError(waxtap.ErrIncompleteStream); got != "the download ended before the full stream was received" {
+		t.Errorf("msg = %q, want the fixed sentence alone", got)
+	}
+	if got := friendlyError(&waxtap.IncompleteDeliveryError{Err: waxtap.ErrIncompleteStream}); got != "the download ended before the full stream was received" {
+		t.Errorf("msg = %q, want the fixed sentence alone", got)
+	}
+}

@@ -63,17 +63,19 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 	}
 	defer r.release()
 
-	hint := hintFor(input)
 	if spec.Codec == CodecCopy {
-		err = r.remux(ctx, src, hint, hintFor(output), staged)
+		// remux classifies its own failures; classifying again here would wrap an
+		// already-mapped error a second time.
+		if err := r.remux(ctx, src, input, output, staged); err != nil {
+			return Result{}, err
+		}
 	} else {
 		opts := encodeOptions(spec)
 		format, _ := codecFormat(spec.Codec)
 		opts.Container = containerFor(format, hintFor(output))
-		_, err = r.engine.Transcode(ctx, src, hint, staged, opts)
-	}
-	if err != nil {
-		return Result{}, err
+		if _, err := r.engine.Transcode(ctx, src, hintFor(input), staged, opts); err != nil {
+			return Result{}, classifyEngineError(err, input, output)
+		}
 	}
 
 	if err := staged.Commit(); err != nil {
@@ -115,7 +117,7 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 
 	demux, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return classifyInputError(err, input)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
@@ -124,7 +126,7 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 	}
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: container}
 	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, staged, opts); err != nil {
-		return err
+		return classifyEngineError(err, input, output)
 	}
 	// Close the source before the rename: on Windows a rename over an open file
 	// fails, and input may equal output.
@@ -137,20 +139,23 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 
 // remux rewrites the source packets into the container the output extension
 // names, choosing WaxFlow's output format from the source codec (the codec must
-// survive the trip) so no re-encode happens.
-func (r *Runner) remux(ctx context.Context, src container.Source, srcHint, outExt string, dst *tempfile.File) error {
-	demux, info, err := format.OpenDemuxer(src, srcHint, nil)
+// survive the trip) so no re-encode happens. It takes the paths rather than their
+// container hints so its failures can name the file they are about.
+func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) error {
+	demux, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return classifyInputError(err, input)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
 		return remuxDeclined(track.Codec)
 	}
-	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
-	_, err = r.engine.RemuxDemuxer(ctx, demux, track, dst, opts)
-	return err
+	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, hintFor(output))}
+	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts); err != nil {
+		return classifyEngineError(err, input, output)
+	}
+	return nil
 }
 
 // remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own
@@ -207,10 +212,11 @@ const ContainerProgressive = waxflow.ContainerProgressive
 //
 // PCM is absent on purpose. Its packets are raw samples whose layout belongs to
 // the container (RIFF little-endian, AIFF big-endian, Matroska signed 8-bit), so
-// WaxFlow's codecSurvives declines every PCM remux. Listing it here only deferred
-// that failure to the engine, which reported it as a bare error string at exit 1
-// instead of ErrIncompatibleSpec at exit 2. A PCM re-encode is bit-exact, so
-// nothing is lost by declining.
+// WaxFlow's codecSurvives declines every PCM remux. Listing it here would only
+// defer that failure to the engine. classifyEngineError now gives an engine-side
+// refusal the same exit code this table's does, so the reason to keep PCM out is
+// no longer the exit code but the message: remuxDeclined can say that a PCM
+// re-encode is bit-exact, which the engine's own wording cannot.
 func codecToFormat(id codec.ID) (string, bool) {
 	switch id {
 	case codec.Opus:

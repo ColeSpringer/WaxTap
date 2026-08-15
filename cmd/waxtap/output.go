@@ -533,7 +533,7 @@ func friendlyError(err error) string {
 	case errors.Is(err, waxtap.ErrNeedsPOToken):
 		return "YouTube requires a verified PO token for this stream (none configured, or the provided token was not accepted)"
 	case errors.Is(err, waxtap.ErrIncompleteStream):
-		return "the download ended before the full stream was received"
+		return incompleteStreamMessage(err)
 	case errors.Is(err, waxtap.ErrURLExpired):
 		return "the stream URL expired and could not be refreshed"
 	case errors.Is(err, waxtap.ErrPlaylistParse):
@@ -546,6 +546,24 @@ func friendlyError(err error) string {
 		return fmt.Sprintf("%s returned HTTP %d", httpStatusSource(hse.URL), hse.StatusCode)
 	}
 	return err.Error()
+}
+
+// incompleteStreamMessage renders an incomplete delivery: the fixed sentence,
+// plus every attempt's own terminal cause when the chain recorded them.
+//
+// The sentence alone is what the 2026-08-15 pass had to work with, and it is not
+// enough to act on: it names no client, no offset, and no refresh count, so a
+// truncated body and an exhausted refresh budget read identically. The chain
+// carries signed URLs, so the appended detail is redacted rather than surfaced.
+func incompleteStreamMessage(err error) string {
+	const lead = "the download ended before the full stream was received"
+	ide, ok := errors.AsType[*waxtap.IncompleteDeliveryError](err)
+	if !ok || len(ide.Attempts) == 0 {
+		return lead
+	}
+	// Already redacted: the library builds Attempts through its own redactor so the
+	// text is safe in a playlist run's NDJSON too, not only here.
+	return lead + "; " + strings.Join(ide.Attempts, "; ")
 }
 
 // httpStatusSource names the service behind an HTTPStatusError from its URL host,

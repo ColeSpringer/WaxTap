@@ -708,6 +708,11 @@ const (
 	// changed the timeline, or the carry write failed. Detail names what was
 	// lost.
 	WarnTagCarry
+	// WarnImplicitDownmix reports that the encoder folded channels the request
+	// never asked to lose, because the output format cannot hold the source
+	// layout. It is the only signal such a run has: nothing in the request says
+	// "6 channels", so a consumer has nothing to compare the output against.
+	WarnImplicitDownmix
 )
 
 func (w WarningCode) String() string {
@@ -742,6 +747,8 @@ func (w WarningCode) String() string {
 		return "session-rotated"
 	case WarnTagCarry:
 		return "tag-carry-incomplete"
+	case WarnImplicitDownmix:
+		return "implicit-downmix"
 	default:
 		return "unknown"
 	}

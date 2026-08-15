@@ -42,8 +42,8 @@ func planChunks(total, chunkSize int64) []chunkSpan {
 // refresh re-resolves the URL if it expires mid-download; progress receives
 // best-effort byte updates. Both may be nil.
 func (d *Downloader) ToFile(ctx context.Context, src Source, path string, refresh RefreshFunc, progress ProgressFunc) (Result, error) {
-	shared := newSharedSource(src, refresh, d.maxRefreshes)
 	rep := newProgress(progress, src.ContentLength)
+	shared := newSharedSource(src, refresh, d.maxRefreshes)
 
 	f, err := tempfile.New(path)
 	if err != nil {

@@ -199,3 +199,88 @@ func TestMeasureAlbum(t *testing.T) {
 		t.Errorf("album/track measurements not finite: album=%+v track0=%+v", album, perTrack[0])
 	}
 }
+
+// TestAlbumGain covers the album-wide peak clamp and the guards that keep it from
+// producing a gain WaxFlow would reject.
+func TestAlbumGain(t *testing.T) {
+	quiet := Loudness{IntegratedLUFS: -30, TruePeakDBTP: -20, LRA: 5}
+	loud := Loudness{IntegratedLUFS: -12, TruePeakDBTP: -2, LRA: 5}
+	silent := Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)}
+	hot := Loudness{IntegratedLUFS: -8, TruePeakDBTP: 0.5} // already over the ceiling
+	album := Loudness{IntegratedLUFS: -20, TruePeakDBTP: -2, LRA: 6}
+
+	// Without the clamp the gain is the plain offset, whatever the peaks are.
+	if got := AlbumGain(-14, album, []Loudness{quiet, loud}, false); math.Abs(got-6) > 1e-9 {
+		t.Errorf("limit gain = %v, want 6", got)
+	}
+	// With it, the least headroom wins: loud has -1 - -2 = 1 dB to give.
+	if got := AlbumGain(-14, album, []Loudness{quiet, loud}, true); math.Abs(got-1) > 1e-9 {
+		t.Errorf("cap gain = %v, want the 1 dB the loudest track allows", got)
+	}
+	// A track already over the ceiling attenuates the album, matching GainFor's
+	// policy on a single file.
+	if got := AlbumGain(-14, album, []Loudness{quiet, hot}, true); math.Abs(got-(-1.5)) > 1e-9 {
+		t.Errorf("cap gain over a hot master = %v, want -1.5", got)
+	}
+	// A silent track reports a -Inf peak, which would make its headroom +Inf and
+	// vanish from the minimum; skipping it keeps the finite tracks in charge.
+	if got := AlbumGain(-14, album, []Loudness{silent, loud}, true); math.Abs(got-1) > 1e-9 {
+		t.Errorf("cap gain beside a silent track = %v, want 1", got)
+	}
+	// An album of nothing but silence has no peak to clamp against and no loudness
+	// to move: the gain must stay finite either way, because WaxFlow rejects a
+	// non-finite GainDB and a working no-op would turn into an error.
+	for _, clamp := range []bool{false, true} {
+		if got := AlbumGain(-14, silent, []Loudness{silent, silent}, clamp); got != 0 {
+			t.Errorf("silent album gain (clamp=%v) = %v, want 0", clamp, got)
+		}
+	}
+}
+
+func TestAlbumPeakShortfall(t *testing.T) {
+	album := Loudness{IntegratedLUFS: -20, TruePeakDBTP: -2, LRA: 6}
+	loud := Loudness{IntegratedLUFS: -12, TruePeakDBTP: -2}
+	roomy := Loudness{IntegratedLUFS: -30, TruePeakDBTP: -20}
+	silent := Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)}
+
+	// Wants +6, the clamp allows +1: 5 dB held back.
+	if got := AlbumPeakShortfall(-14, album, []Loudness{roomy, loud}); math.Abs(got-5) > 1e-9 {
+		t.Errorf("shortfall = %v, want 5", got)
+	}
+	// Plenty of headroom: nothing held back.
+	if got := AlbumPeakShortfall(-14, album, []Loudness{roomy}); got != 0 {
+		t.Errorf("shortfall with headroom = %v, want 0", got)
+	}
+	// Attenuating: the clamp cannot bind.
+	if got := AlbumPeakShortfall(-26, album, []Loudness{roomy, loud}); got != 0 {
+		t.Errorf("attenuating shortfall = %v, want 0", got)
+	}
+	// Nothing measurable reports no shortfall rather than an infinite one.
+	if got := AlbumPeakShortfall(-14, Loudness{IntegratedLUFS: math.Inf(-1)}, []Loudness{silent}); got != 0 {
+		t.Errorf("silent album shortfall = %v, want 0", got)
+	}
+	// The gain and the shortfall must agree: applied + held back == asked for.
+	gain := AlbumGain(-14, album, []Loudness{roomy, loud}, true)
+	short := AlbumPeakShortfall(-14, album, []Loudness{roomy, loud})
+	if want := RawGain(-14, album.IntegratedLUFS); math.Abs(gain+short-want) > 1e-9 {
+		t.Errorf("gain %v + shortfall %v != requested %v", gain, short, want)
+	}
+}
+
+// A gated-silent album has no loudness to move, so neither mode moves it. The
+// clamp has to sit behind that guard rather than in front of it: a silent album
+// whose tracks still carry a peak over the ceiling would otherwise be attenuated
+// by a clamp protecting nothing, and cap and limit would disagree on an album
+// neither can change.
+func TestAlbumGainSilentAlbumWithHotTrack(t *testing.T) {
+	silentAlbum := Loudness{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: -0.5, LRA: 0}
+	perTrack := []Loudness{
+		{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: -0.5}, // silent body, hot transient
+		{IntegratedLUFS: math.Inf(-1), TruePeakDBTP: math.Inf(-1)},
+	}
+	for _, clamp := range []bool{false, true} {
+		if got := AlbumGain(-14, silentAlbum, perTrack, clamp); got != 0 {
+			t.Errorf("clamp=%v: gain = %v, want 0", clamp, got)
+		}
+	}
+}

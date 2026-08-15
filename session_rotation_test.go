@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,7 +88,7 @@ type rotationWorld struct {
 	mu           sync.Mutex
 	media        string
 	extraQuery   string
-	flaggedVD    string // visitorData googlevideo caps; defaults to the first guest identity
+	flaggedVD    string // visitorData googlevideo caps; "*" caps every identity; defaults to the first
 	homepageHits int
 	vdServed     []string // visitorData observed on media requests, in order
 	mediaCodes   []int    // status answered for each media request
@@ -98,6 +99,12 @@ func (w *rotationWorld) flagged() string {
 		return w.flaggedVD
 	}
 	return "ROT_VD_1"
+}
+
+// capped reports whether googlevideo rejects this identity. "*" caps all of them,
+// for the case where no amount of rotating helps.
+func (w *rotationWorld) capped(vd string) bool {
+	return w.flaggedVD == "*" || vd == w.flagged()
 }
 
 func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
@@ -123,7 +130,7 @@ func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
 		case strings.Contains(r.URL.Path, "/videoplayback"):
 			vd := r.URL.Query().Get("vd")
 			w.vdServed = append(w.vdServed, vd)
-			if vd == w.flagged() {
+			if w.capped(vd) {
 				w.mediaCodes = append(w.mediaCodes, http.StatusForbidden)
 				return rotResp(http.StatusForbidden, ""), nil
 			}
@@ -211,8 +218,14 @@ func TestDownload_RotatesGuestSessionOnEarly403(t *testing.T) {
 }
 
 // TestDownload_NoRotationOnExpiry403 pins the guard: a 403 on a URL that is
-// already past its expire time is treated as ordinary expiry, so the identity
-// is kept (no extra bootstrap) even though the download ultimately fails here.
+// already past its expire time is treated as ordinary expiry, so every
+// mid-download refresh stays on the same identity and re-resolves under it.
+//
+// The whole-chain retry is a separate mechanism, gated on the chain being
+// exhausted rather than on one 403's classification, and it is what eventually
+// delivers here. That the two do not collapse into one is the point: rotating on
+// the first expiry 403 would pay a homepage bootstrap on every genuinely expired
+// URL.
 func TestDownload_NoRotationOnExpiry403(t *testing.T) {
 	w := &rotationWorld{
 		media:      strings.Repeat("M", 4096),
@@ -221,20 +234,31 @@ func TestDownload_NoRotationOnExpiry403(t *testing.T) {
 	c := rotationClient(t, w)
 
 	out := filepath.Join(t.TempDir(), "out.webm")
-	_, err := c.Download(context.Background(), Request{
+	res, err := c.Download(context.Background(), Request{
 		URL:         "dummyVideo0",
 		ProcessSpec: ProcessSpec{Output: ToFile(out)},
 	})
-	if err == nil {
-		t.Fatal("download should fail when every URL 403s at expiry")
+	if err != nil {
+		t.Fatalf("Download: %v", err)
 	}
-	if w.homepageHits != 1 {
-		t.Errorf("homepage hits = %d, want 1 (an expiry 403 must not rotate the identity)", w.homepageHits)
-	}
-	for _, vd := range w.vdServed {
-		if vd != "ROT_VD_1" {
-			t.Errorf("media request carried %q; the identity must stay ROT_VD_1 without rotation", vd)
+	for _, warn := range res.Warnings {
+		if warn.Code == WarnSessionRotated {
+			t.Errorf("Warnings = %v; an expiry 403 must not rotate the identity mid-download", res.Warnings)
 		}
+	}
+	// The refreshes stayed on the flagged identity and kept 403ing; the retry then
+	// bootstrapped a second one, which delivered.
+	onFlagged := 0
+	for _, vd := range w.vdServed {
+		if vd == w.flagged() {
+			onFlagged++
+		}
+	}
+	if onFlagged < 2 {
+		t.Errorf("media requests on %s = %d, want the mid-download refreshes to have stayed on it (%v)", w.flagged(), onFlagged, w.vdServed)
+	}
+	if w.homepageHits != 2 {
+		t.Errorf("homepage hits = %d, want 2: one bootstrap per chain pass, none from an expiry 403", w.homepageHits)
 	}
 }
 
@@ -333,5 +357,74 @@ func TestDownload_RotatesAdoptedSessionOnEarly403(t *testing.T) {
 	}
 	if !rotated {
 		t.Errorf("Warnings = %v, want WarnSessionRotated", res.Warnings)
+	}
+}
+
+// TestDownload_ChainRetryIsBounded: when every identity is capped, the chain
+// retries once on a fresh session and then stops. Unbounded retrying would turn a
+// video that is simply not deliverable into a loop, and each pass costs a
+// bootstrap, a re-extract, and a re-resolve per client.
+func TestDownload_ChainRetryIsBounded(t *testing.T) {
+	w := &rotationWorld{media: strings.Repeat("M", 4096), flaggedVD: "*"}
+	c := rotationClient(t, w)
+
+	retries := 0
+	out := filepath.Join(t.TempDir(), "out.webm")
+	_, err := c.Download(context.Background(), Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: ProcessSpec{Output: ToFile(out), Events: countChainRetries(&retries)},
+	})
+	if !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("Download = %v, want ErrIncompleteStream when no identity can deliver", err)
+	}
+	if retries != maxChainPasses-1 {
+		t.Errorf("chain retries = %d, want %d and no more", retries, maxChainPasses-1)
+	}
+	// The terminal message names each attempt and how it ended, which is what the
+	// bare sentence could not.
+	ide, ok := errors.AsType[*IncompleteDeliveryError](err)
+	if !ok {
+		t.Fatalf("err = %T, want *IncompleteDeliveryError", err)
+	}
+	if len(ide.Attempts) < 2 {
+		t.Errorf("Attempts = %v, want one entry per attempt across both passes", ide.Attempts)
+	}
+	for _, a := range ide.Attempts {
+		if strings.Contains(a, "googlevideo.com/videoplayback?") {
+			t.Errorf("attempt line carries a signed URL: %q", a)
+		}
+	}
+}
+
+// TestDownload_NoChainRetryUnderNoFallback: --no-fallback means one client, one
+// try. The retry is a second pass over the chain, so it is fallback by any
+// reading.
+func TestDownload_NoChainRetryUnderNoFallback(t *testing.T) {
+	w := &rotationWorld{media: strings.Repeat("M", 4096), flaggedVD: "*"}
+	c := rotationClient(t, w)
+
+	retries := 0
+	out := filepath.Join(t.TempDir(), "out.webm")
+	_, err := c.Download(context.Background(), Request{
+		URL:         "dummyVideo0",
+		NoFallback:  true,
+		ProcessSpec: ProcessSpec{Output: ToFile(out), Events: countChainRetries(&retries)},
+	})
+	if err == nil {
+		t.Fatal("download should fail when no identity can deliver")
+	}
+	if retries != 0 {
+		t.Errorf("chain retries = %d, want 0: --no-fallback takes no second pass", retries)
+	}
+}
+
+// countChainRetries counts the whole-chain retry warnings a run emits. The retry
+// fires on a failed download, which returns no Result to read Warnings off.
+func countChainRetries(n *int) func(Event) {
+	return func(ev Event) {
+		if ev.Stage == StageWarning && ev.Warning != nil &&
+			strings.Contains(ev.Warning.Detail, "retrying the chain once on a fresh session") {
+			*n++
+		}
 	}
 }

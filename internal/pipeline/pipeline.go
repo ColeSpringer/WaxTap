@@ -118,6 +118,10 @@ type Result struct {
 	// about the cut (for example whether SponsorBlock contributed) without
 	// re-probing. It is 0 when the input duration is unknown.
 	SourceDuration time.Duration
+	// SourceChannels is the probed input channel count, 0 when unknown. Callers
+	// compare it against OutputProbe to detect a fold the encoder applied on its
+	// own, which no field of the request would otherwise reveal.
+	SourceChannels int
 
 	Cut     bool          // an effective cut was rendered
 	Removed time.Duration // audio removed by the cut
@@ -220,6 +224,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		res.SourceCodec = audio.CodecName
 		srcChannels = audio.Channels
 	}
+	res.SourceChannels = srcChannels
 
 	// Reduce the channel count only when the source exceeds the requested target.
 	fold := 0
