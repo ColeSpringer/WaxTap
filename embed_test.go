@@ -10,8 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/colespringer/waxlabel"
 
 	"github.com/colespringer/waxtap/v3/internal/coverart"
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/youtube"
 )
@@ -145,4 +149,59 @@ func embeddedJPEG(data []byte) []byte {
 		return nil
 	}
 	return data[start : start+end+2]
+}
+
+// TestDoEmbedRemapsChaptersThroughCut pins the download-side chapter fix: with
+// a rendered cut attached, --embed-metadata writes chapter marks on the
+// delivered timeline, not the source's. Removing [1s,2s) from a 3s track
+// erases chapter Two's content and shifts Three from 2s to 1s.
+func TestDoEmbedRemapsChaptersThroughCut(t *testing.T) {
+	ctx := context.Background()
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "in.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(3, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flac := filepath.Join(dir, "in.flac")
+	if _, err := c.Process(ctx, ProcessRequest{
+		Input: wav,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(flac),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	}); err != nil {
+		t.Fatalf("fixture transcode: %v", err)
+	}
+
+	v := &youtube.Video{
+		Title: "Fixture Track",
+		Chapters: []youtube.Chapter{
+			{Start: 0, Title: "One"},
+			{Start: 1 * time.Second, Title: "Two"},
+			{Start: 2 * time.Second, Title: "Three"},
+		},
+	}
+	cut := &appliedCut{
+		keeps: []cutrange.Range{{Start: 0, End: 1 * time.Second}, {Start: 2 * time.Second, End: 3 * time.Second}},
+		total: 3 * time.Second,
+	}
+	if _, err := c.doEmbed(ctx, flac, "flac", v, embedOptions{metadata: true, cut: cut}); err != nil {
+		t.Fatalf("doEmbed: %v", err)
+	}
+
+	doc, err := waxlabel.ParseFile(ctx, flac)
+	if err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	chs := doc.Chapters()
+	if len(chs) != 2 {
+		t.Fatalf("chapters = %+v, want One and Three", chs)
+	}
+	if chs[0].Title != "One" || chs[0].Start != 0 {
+		t.Errorf("chapter 0 = %q@%v, want One@0", chs[0].Title, chs[0].Start)
+	}
+	if chs[1].Title != "Three" || chs[1].Start != 1*time.Second {
+		t.Errorf("chapter 1 = %q@%v, want Three@1s", chs[1].Title, chs[1].Start)
+	}
 }

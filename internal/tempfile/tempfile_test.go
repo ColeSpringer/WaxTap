@@ -67,14 +67,15 @@ func TestCommitRenameFailureNamesFinalPath(t *testing.T) {
 	if _, err := f.Write([]byte("data")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	// Remove the staged temp so Commit fails on rename but still reports the
-	// destination.
-	if err := os.Remove(f.tmpPath); err != nil {
-		t.Fatalf("remove temp: %v", err)
+	// Put a directory in the way of the final path so Commit fails on rename but
+	// still reports the destination. (Removing the staged temp instead would need
+	// its open handle gone first on Windows, and closing it fails Commit at sync.)
+	if err := os.Mkdir(final, 0o755); err != nil {
+		t.Fatalf("mkdir obstacle: %v", err)
 	}
 	err = f.Commit()
 	if err == nil {
-		t.Fatal("Commit should fail after the staged temp is removed")
+		t.Fatal("Commit should fail when a directory blocks the final path")
 	}
 	if _, ok := errors.AsType[*OutputError](err); !ok {
 		t.Fatalf("err = %v (%T), want *OutputError", err, err)

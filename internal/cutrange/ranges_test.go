@@ -143,3 +143,37 @@ func TestRangesFromSegments(t *testing.T) {
 		t.Error("RangesFromSegments(nil) should be nil")
 	}
 }
+
+func TestMapTime(t *testing.T) {
+	keeps := []Range{{0, s(10)}, {s(20), s(40)}}
+	cases := []struct {
+		name      string
+		crossfade time.Duration
+		t, want   time.Duration
+	}{
+		{"inside-first", 0, s(5), s(5)},
+		{"start-of-gap", 0, s(10), s(10)},
+		{"inside-gap-snaps-to-join", 0, s(15), s(10)},
+		{"start-of-second", 0, s(20), s(10)},
+		{"inside-second", 0, s(30), s(20)},
+		{"past-end-is-output-duration", 0, s(50), s(30)},
+		{"crossfade-shifts-second", s(2), s(30), s(18)},
+		{"crossfade-join", s(2), s(15), s(8)},
+		{"crossfade-past-end", s(2), s(50), s(28)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := MapTime(keeps, c.crossfade, c.t); got != c.want {
+				t.Errorf("MapTime(%v, %v, %v) = %v, want %v", keeps, c.crossfade, c.t, got, c.want)
+			}
+		})
+	}
+	// A leading removal: offsets before the first keep map to 0.
+	lead := []Range{{s(5), s(10)}}
+	if got := MapTime(lead, 0, s(2)); got != 0 {
+		t.Errorf("MapTime(before first keep) = %v, want 0", got)
+	}
+	if got := MapTime(lead, 0, s(7)); got != s(2) {
+		t.Errorf("MapTime(inside shifted keep) = %v, want 2s", got)
+	}
+}

@@ -102,8 +102,10 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   wav/aiff/flac/alac; narrowing is dithered (TPDF), not truncated. The lossy
   formats encode in float and ignore it.
 - `--embed-thumbnail` writes the video's thumbnail as front cover art, and
-  `--embed-metadata` writes title, artist, date, and chapters. Both are
-  best-effort: a failure warns and still delivers valid audio. WebM cannot hold a
+  `--embed-metadata` writes title, artist, date, and chapters. Chapter marks
+  follow any cut: shifted by the audio removed before them, dropped when their
+  content was removed. Both flags are best-effort: a failure warns and still
+  delivers valid audio. WebM cannot hold a
   picture, so a cover-art request remuxes Opus-in-WebM to Ogg-Opus (lossless) when
   the output extension allows it. The image comes from the largest rung YouTube
   lists, and WaxTap also probes the deterministic 1280x720 endpoints when that
@@ -115,6 +117,14 @@ R128 (integrated LUFS, true peak dBTP, range LU).
   uniform borders and center-crops what remains; it never scales, so the art keeps
   its proportions and an image already square within 1% is left untouched. The
   default, `--cover-art frame`, embeds the delivered bytes verbatim.
+- Processing a local file (`transcode`, `normalize`, `cut`, `--album` included)
+  carries the input's embedded metadata - tags, cover art, chapters, synced
+  lyrics - onto the rewritten output. Anything the output format cannot hold is
+  reported as the `tag-carry-incomplete` warning, never dropped silently.
+  Chapter marks follow a cut the same way the embed flags do. Tags describing
+  the source audio itself (ReplayGain, encoder stamps) carry only on a pure
+  `--format copy` remux; a re-encode or cut invalidates them, so they are left
+  off.
 - SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
   exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
   outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal

@@ -193,10 +193,14 @@ func containerFor(format, ext string) string {
 	// keyed on the format rather than an .m4a extension: -o out.alac and an
 	// extensionless -o out need it as much as -o out.m4a does.
 	if format == "aac" || format == "alac" {
-		return "progressive"
+		return ContainerProgressive
 	}
 	return ""
 }
+
+// ContainerProgressive is WaxFlow's flat (moov+mdat) MP4 container override,
+// re-exported for callers that remux through RemuxContainer.
+const ContainerProgressive = waxflow.ContainerProgressive
 
 // codecToFormat maps a source codec ID to the WaxFlow output format that carries
 // it unchanged, for a remux. It reports false for a codec WaxTap cannot remux.

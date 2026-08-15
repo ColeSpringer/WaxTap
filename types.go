@@ -702,6 +702,12 @@ const (
 	WarnMetadataEmbed
 	WarnLoudnessTargetMissed // peak capping held the gain back, so the loudness target was not reached
 	WarnSessionRotated       // a fresh session replaced one whose stream URLs the server kept rejecting
+	// WarnTagCarry reports that a local process could not carry all of the
+	// input's embedded metadata onto the output: an item was dropped or
+	// downgraded by the output format, chapters were dropped because a cut
+	// changed the timeline, or the carry write failed. Detail names what was
+	// lost.
+	WarnTagCarry
 )
 
 func (w WarningCode) String() string {
@@ -734,6 +740,8 @@ func (w WarningCode) String() string {
 		return "loudness-target-missed"
 	case WarnSessionRotated:
 		return "session-rotated"
+	case WarnTagCarry:
+		return "tag-carry-incomplete"
 	default:
 		return "unknown"
 	}

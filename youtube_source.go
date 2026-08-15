@@ -922,9 +922,7 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 	// probe runs before embedMetadata rewrites the file, and the embed-only branch
 	// in produce has no probe at all, so the probe size can undercount cover art.
 	// OutputBytes is stat'd above, after every write, so it is the authority.
-	//
-	// Client.Process (local files) needs no equivalent: embedMetadata is called only
-	// from this path, so a local run's probe size already equals the file size.
+	// Client.Process overlays the same way after its tag-carry pass.
 	// Bitrate is deliberately left alone; applyProbe takes the audio stream's own
 	// rate, so it keeps describing the audio rather than growing with the artwork.
 	// The consequence is intentional: after an embed pass contentLength and bitrate
@@ -1014,6 +1012,9 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	if deliver == "" {
 		deliver = srcPath // measure-only/no-op: deliver the original source
 	}
+	// A rendered cut moved every later chapter mark; the embed pass remaps them
+	// onto the delivered timeline.
+	eo.cut = appliedCutFrom(pres)
 	c.embedMetadata(ctx, deliver, embedExt, a.video, eo, em)
 
 	var explicit []cutrange.Range

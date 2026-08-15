@@ -97,6 +97,28 @@ func Keeps(removals []Range, total time.Duration) []Range {
 	return keeps
 }
 
+// MapTime maps a source-timeline offset onto the output timeline of a cut:
+// the keep spans concatenated in order, each join overlapped by crossfade. An
+// offset inside a removed span maps to the join where its surrounding audio
+// meets; offsets before the first keep map to 0 and offsets past the last to
+// the output duration. keeps must be sorted and disjoint, as Keeps returns.
+func MapTime(keeps []Range, crossfade time.Duration, t time.Duration) time.Duration {
+	var out time.Duration
+	for i, k := range keeps {
+		if i > 0 && crossfade > 0 {
+			out = max(out-crossfade, 0)
+		}
+		if t < k.Start {
+			return out
+		}
+		if t < k.End {
+			return out + (t - k.Start)
+		}
+		out += k.Duration()
+	}
+	return out
+}
+
 // OutputDuration is the length of the rendered keep ranges. A crossfade overlaps
 // adjacent spans, so it shortens the output by one crossfade per join.
 func OutputDuration(keeps []Range, crossfade time.Duration) time.Duration {

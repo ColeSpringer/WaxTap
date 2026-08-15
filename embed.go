@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
 
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/youtube"
 )
 
@@ -18,6 +19,9 @@ type embedOptions struct {
 	thumbnail bool
 	metadata  bool
 	coverArt  CoverArtMode
+	// cut is the timeline cut the pipeline applied, nil when none ran. Chapters
+	// are remapped through it so their offsets match the delivered audio.
+	cut *appliedCut
 }
 
 // embedRequested reports whether the spec asks for any embed post-pass.
@@ -46,10 +50,10 @@ func (c *Client) embedMetadata(ctx context.Context, path, targetExt string, v *y
 
 // doEmbed performs the WaxLabel edit. It returns a non-empty skipReason when a
 // requested cover picture could not be embedded (an unusable container, or an
-// unobtainable image), or could not be shaped as asked, but the audio and tags
-// were still written; a returned error means the file could not be edited at
-// all. The contract is that any dropped or degraded picture is reported, never
-// silent.
+// unobtainable image), or could not be shaped as asked, or when a step after a
+// committed write failed, but the audio and tags were still written; a returned
+// error means the file could not be edited at all. The contract is that any
+// dropped or degraded outcome is reported, never silent.
 //
 // Two container fix-ups may run first, both a zero-re-encode packet copy and both
 // staged so the original file is replaced only after every step succeeds:
@@ -86,7 +90,7 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 	}
 
 	if c.isMP4File(ctx, path) {
-		if err := remux("progressive"); err != nil {
+		if err := remux(media.ContainerProgressive); err != nil {
 			return "", fmt.Errorf("flatten MP4 for tagging: %w", err)
 		}
 	}
@@ -160,8 +164,14 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 			changed = true
 		}
 		if len(v.Chapters) > 0 && caps.Chapters.Write != waxlabel.AccessNone {
-			ed.SetChapters(toWaxlabelChapters(v.Chapters)...)
-			changed = true
+			chs := toWaxlabelChapters(v.Chapters)
+			if o.cut != nil {
+				chs = remapChapters(chs, o.cut)
+			}
+			if len(chs) > 0 {
+				ed.SetChapters(chs...)
+				changed = true
+			}
 		}
 	}
 
@@ -170,8 +180,17 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 		if perr != nil {
 			return "", perr
 		}
-		if _, _, perr := plan.Execute(ctx, waxlabel.SaveBack()); perr != nil {
+		_, note, perr := executeSaveBack(ctx, plan)
+		if perr != nil {
 			return "", perr
+		}
+		if note != "" {
+			note = "metadata written, but " + note
+			if skipReason != "" {
+				skipReason += "; " + note
+			} else {
+				skipReason = note
+			}
 		}
 	}
 
@@ -185,6 +204,23 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 		committed = true
 	}
 	return skipReason, nil
+}
+
+// executeSaveBack runs plan against its parsed file in place, applying
+// WaxLabel's committed-write contract: an error with SaveResult.Committed true
+// means the bytes landed and only a step after the commit failed (e.g. the
+// directory fsync); the plan is spent and retrying is refused, so that is a
+// success carrying a warning note, not a failure. The returned document is the
+// post-write one, nil only when nothing was written (err non-nil).
+func executeSaveBack(ctx context.Context, plan *waxlabel.Plan) (doc *waxlabel.Document, note string, err error) {
+	doc, sr, err := plan.Execute(ctx, waxlabel.SaveBack())
+	if err == nil {
+		return doc, "", nil
+	}
+	if !sr.Committed {
+		return nil, "", err
+	}
+	return doc, "a post-write step failed: " + err.Error(), nil
 }
 
 // toWaxlabelChapters maps youtube chapters to waxlabel chapters. Both use

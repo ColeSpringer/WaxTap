@@ -88,6 +88,14 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	measureOnly := deliver == ""
 	if measureOnly {
 		deliver = req.Input
+	} else {
+		// A WaxFlow rewrite carries no tags, so restore the input's own embedded
+		// metadata onto the output before delivery (both sinks read deliver).
+		// Measure-only runs deliver the input itself and must not edit it. No
+		// re-encode and no cut means the output is a whole-file packet copy, the
+		// one case where own-audio tags still hold.
+		remuxed := !pres.Transcoded && !pres.Cut
+		c.carryTags(ctx, req.Input, deliver, appliedCutFrom(pres), remuxed, em)
 	}
 
 	em.stage(StageFinalizing)
@@ -114,6 +122,13 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 			return nil, err
 		}
 		res.OutputBytes = n
+	}
+	// contentLength describes the delivered file. The pipeline's output probe
+	// runs before carryTags rewrites the file, so the probe size can undercount
+	// carried metadata. OutputBytes is stat'd after every write, so it is the
+	// authority, same as the download path after its embed pass.
+	if res.OutputBytes > 0 {
+		res.OutputFormat.ContentLength = res.OutputBytes
 	}
 	res.SourceBytes = fileSize(req.Input)
 	return res, nil
@@ -217,6 +232,7 @@ type AlbumProcessResult struct {
 	GainDB   float64        // Target - album integrated LUFS, applied to every track (0 for a silent album)
 	PerTrack []LoudnessInfo // input measurements in track order
 	Outputs  []string       // completed output paths in track order
+	Warnings []Warning      // non-fatal signals (metadata carry), across all tracks
 }
 
 // ProcessAlbum measures local files as one album, then applies the same gain to
@@ -225,6 +241,8 @@ type AlbumProcessResult struct {
 //
 // Album processing requires a non-copy transcode format. A silent
 // album applies a no-op gain, leaving each track unchanged apart from re-encoding.
+// Each track's embedded metadata is carried onto its output, the same pass
+// Process runs; carry losses accumulate in the result's Warnings.
 func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target float64, spec TranscodeSpec) (*AlbumProcessResult, error) {
 	if len(tracks) == 0 {
 		return nil, fmt.Errorf("waxtap.ProcessAlbum: no inputs")
@@ -307,6 +325,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
 	}
+	em := newEmitter(nil, "")
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -314,7 +333,12 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		if _, err := runner.Transcode(ctx, t.Input, t.Output, tspec); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
+		// Album tracks are always re-encoded, so no cut remap and no own-audio
+		// restore apply. Carried ReplayGain would be wrong twice over here: the
+		// gain just changed the loudness it describes.
+		c.carryTags(ctx, t.Input, t.Output, nil, false, em)
 		res.Outputs[i] = t.Output
 	}
+	res.Warnings = em.collected()
 	return res, nil
 }

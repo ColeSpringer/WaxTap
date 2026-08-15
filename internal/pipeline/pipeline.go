@@ -119,12 +119,17 @@ type Result struct {
 	// re-probing. It is 0 when the input duration is unknown.
 	SourceDuration time.Duration
 
-	Cut              bool          // an effective cut was rendered
-	Removed          time.Duration // audio removed by the cut
-	Transcoded       bool          // a re-encode ran (not a container copy)
-	OutputCodec      media.Codec   // codec written to OutputPath
-	LoudnessMeasured bool          // input loudness was measured
-	LoudnessApplied  bool          // normalization was applied
+	Cut     bool          // an effective cut was rendered
+	Removed time.Duration // audio removed by the cut
+	// Keeps are the kept source spans the effective cut composed, in order, and
+	// Crossfade the join overlap used; nil and 0 when no effective cut ran.
+	// Callers remap source-timeline metadata (chapter marks) through them.
+	Keeps            []cutrange.Range
+	Crossfade        time.Duration
+	Transcoded       bool        // a re-encode ran (not a container copy)
+	OutputCodec      media.Codec // codec written to OutputPath
+	LoudnessMeasured bool        // input loudness was measured
+	LoudnessApplied  bool        // normalization was applied
 
 	InputLoudness *loudness.Loudness // measured post-cut input loudness
 	// OutputLoudness is the measured loudness of the file left at OutputPath, set
@@ -206,6 +211,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	var res Result
 	res.OutputCodec = media.CodecCopy
 	res.SourceDuration = total
+	if effectiveCut {
+		res.Keeps = keeps
+		res.Crossfade = spec.Crossfade
+	}
 	srcChannels := 0
 	if audio, ok := probe.AudioStream(); ok {
 		res.SourceCodec = audio.CodecName

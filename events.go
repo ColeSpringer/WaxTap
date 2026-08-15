@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/colespringer/waxtap/v3/internal/httpx"
@@ -103,6 +104,14 @@ func throttleDetail(code WarningCode, ev httpx.ThrottleEvent) string {
 
 // pipelineStage forwards a pipeline stage as the matching public Stage.
 func (e *emitter) pipelineStage(s pipeline.Stage) { e.stage(mapPipelineStage(s)) }
+
+// collected returns a snapshot of the warnings accumulated so far, for callers
+// whose result type is not a *Result (album processing).
+func (e *emitter) collected() []Warning {
+	e.warnMu.Lock()
+	defer e.warnMu.Unlock()
+	return slices.Clone(e.warnings)
+}
 
 // finish copies accumulated warnings into res (when non-nil) and fires the
 // terminal event: StageDone on success or StageFailed carrying err. It is meant

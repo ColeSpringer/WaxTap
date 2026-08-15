@@ -348,12 +348,22 @@ func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessRes
 
 func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResult) error {
 	if env.jsonMode() {
+		warns := make([]warningJSON, len(res.Warnings))
+		for i, w := range res.Warnings {
+			warns[i] = warningJSON{Code: w.Code.String(), Detail: w.Detail}
+		}
 		return env.emitJSON(struct {
 			SchemaVersion int              `json:"schemaVersion"`
 			Album         loudnessInfoJSON `json:"album"`
 			GainDB        jsonFloat        `json:"gainDb"`
 			Tracks        []albumTrackJSON `json:"tracks"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), albumTracksJSON(inputs, res.PerTrack, res.Outputs)})
+			Warnings      []warningJSON    `json:"warnings,omitempty"`
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns})
+	}
+	// Album processing runs without an event stream, so carry warnings surface
+	// here rather than through the progress renderer.
+	for _, w := range res.Warnings {
+		env.info("warning: [%s] %s\n", w.Code, w.Detail)
 	}
 	env.printf("Album:  %s LUFS; applied %+.1f dB to each track\n\n", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)

@@ -126,20 +126,3 @@ func trackDuration(samples int64, rate int) time.Duration {
 	}
 	return time.Duration(float64(samples) / float64(rate) * float64(time.Second))
 }
-
-// probeAudio probes and requires a decodable audio track, applying the same
-// classification the old ffprobe boundary used.
-func (r *Runner) probeAudio(ctx context.Context, input string) (ProbeResult, ProbeStream, error) {
-	pr, err := r.Probe(ctx, input)
-	if err != nil {
-		return ProbeResult{}, ProbeStream{}, err
-	}
-	a, ok := pr.AudioStream()
-	if !ok {
-		return ProbeResult{}, ProbeStream{}, fmt.Errorf("%w: no audio stream", waxerr.ErrUnsupportedInput)
-	}
-	if a.Channels == 0 && a.SampleRate == 0 {
-		return ProbeResult{}, ProbeStream{}, fmt.Errorf("%w: no decodable audio", waxerr.ErrUnsupportedInput)
-	}
-	return pr, a, nil
-}
