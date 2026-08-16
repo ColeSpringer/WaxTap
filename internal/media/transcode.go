@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
@@ -32,6 +33,47 @@ type Result struct {
 	Output string // final output path
 	Size   int64  // output size in bytes (0 if it could not be stat'd)
 	Codec  Codec  // codec the output was encoded with
+	// Levels is WaxFlow's level measurement of the encode. It is zero for a
+	// container copy, which never re-derives samples.
+	Levels Levels
+}
+
+// Levels carries WaxFlow's level measurement of one encode as numbers, so the
+// caller sets the warning policy (thresholds, per-cause remedies, aggregation)
+// instead of receiving a pre-rendered sentence. See waxflow.TranscodeResult for
+// the field semantics. The zero value reports nothing.
+type Levels struct {
+	ClippedSamples int64   // channel samples the integer output clamped
+	Samples        int64   // output frames (per channel)
+	Channels       int     // output channel count
+	TruePeak       float64 // output true peak, linear, 1.0 = full scale
+	Quantized      bool    // a quantizer ran (float cut to integer)
+}
+
+// Note renders WaxFlow's one-line level warning for these levels, or "" when
+// they warrant none: the clipped-sample count, else a true peak past full
+// scale on a quantized output. The wording is WaxFlow's own, reconstructed
+// through its LevelNote so the two never drift; callers may append remedies.
+func (l Levels) Note() string {
+	r := waxflow.TranscodeResult{
+		Samples:        l.Samples,
+		Format:         audio.Format{Channels: l.Channels},
+		ClippedSamples: l.ClippedSamples,
+		TruePeak:       l.TruePeak,
+		Quantized:      l.Quantized,
+	}
+	return r.LevelNote()
+}
+
+// levelsOf extracts the level fields from an engine transcode result.
+func levelsOf(r *waxflow.TranscodeResult) Levels {
+	return Levels{
+		ClippedSamples: r.ClippedSamples,
+		Samples:        r.Samples,
+		Channels:       r.Format.Channels,
+		TruePeak:       r.TruePeak,
+		Quantized:      r.Quantized,
+	}
 }
 
 // Transcode reads input, applies spec, and writes the result to output. The
@@ -63,6 +105,7 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 	}
 	defer r.release()
 
+	var levels Levels
 	if spec.Codec == CodecCopy {
 		// remux classifies its own failures; classifying again here would wrap an
 		// already-mapped error a second time.
@@ -73,15 +116,17 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		opts := encodeOptions(spec)
 		format, _ := codecFormat(spec.Codec)
 		opts.Container = containerFor(format, hintFor(output))
-		if _, err := r.engine.Transcode(ctx, src, hintFor(input), staged, opts); err != nil {
+		tres, err := r.engine.Transcode(ctx, src, hintFor(input), staged, opts)
+		if err != nil {
 			return Result{}, classifyEngineError(err, input, output)
 		}
+		levels = levelsOf(tres)
 	}
 
 	if err := staged.Commit(); err != nil {
 		return Result{}, err
 	}
-	res := Result{Output: output, Codec: spec.Codec}
+	res := Result{Output: output, Codec: spec.Codec, Levels: levels}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}

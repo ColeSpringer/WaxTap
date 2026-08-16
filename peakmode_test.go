@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/media/loudness"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/internal/pipeline"
@@ -215,5 +216,143 @@ func TestWarnLimiterTargetMissed(t *testing.T) {
 	}
 	if d := detail(nonFinite); d != "" {
 		t.Errorf("silent output warned: %q", d)
+	}
+}
+
+// TestProcessWarnsOutputClipping runs the whole chain: a float source with
+// planted overs, transcoded to an integer output through the facade, must come
+// back with the output-clipping warning and the clamp count.
+func TestProcessWarnsOutputClipping(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "hot.wav")
+	if err := os.WriteFile(in, mediatest.HotFloatWAV(1, 2, 13), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := newOfflineClient(t).Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "out.flac")),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, ok := findWarning(res.Warnings, WarnOutputClipping)
+	if !ok {
+		t.Fatalf("no output-clipping warning: %+v", res.Warnings)
+	}
+	for _, want := range []string{"clipping: 26 of ", "normalize"} {
+		if !strings.Contains(w.Detail, want) {
+			t.Errorf("detail = %q, want it to carry %q", w.Detail, want)
+		}
+	}
+}
+
+// TestProcessWarnsTruePeakOnly runs the between-samples branch end to end: a
+// source whose stored samples are in range but whose waveform crosses full
+// scale must come back with the true-peak wording and a remedy that names the
+// true peak, not the level.
+func TestProcessWarnsTruePeakOnly(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "isp.wav")
+	if err := os.WriteFile(in, mediatest.IntersampleHotWAV(1, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := newOfflineClient(t).Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "isp.flac")),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, ok := findWarning(res.Warnings, WarnOutputClipping)
+	if !ok {
+		t.Fatalf("no output-clipping warning: %+v", res.Warnings)
+	}
+	for _, want := range []string{"true peak:", "normalize to bring the true peak under full scale"} {
+		if !strings.Contains(w.Detail, want) {
+			t.Errorf("detail = %q, want it to carry %q", w.Detail, want)
+		}
+	}
+}
+
+// TestWarnOutputClipping covers the level-warning policy: silent without a
+// note, silent for a lossy source (the decoder manufactures the overshoot
+// there), and a remedy chosen by what the run already tried.
+func TestWarnOutputClipping(t *testing.T) {
+	clipped := pipeline.Result{SourceCodec: "pcm", Levels: media.Levels{
+		ClippedSamples: 26, Samples: 44100, Channels: 2, TruePeak: 1.0, Quantized: true,
+	}}
+	isp := pipeline.Result{SourceCodec: "pcm", Levels: media.Levels{
+		Samples: 44100, Channels: 2, TruePeak: 1.2, Quantized: true,
+	}}
+
+	detail := func(ls *LoudnessSpec, p pipeline.Result) string {
+		var got string
+		em := newEmitter(func(e Event) {
+			if e.Stage == StageWarning && e.Warning != nil && e.Warning.Code == WarnOutputClipping {
+				got = e.Warning.Detail
+			}
+		}, "")
+		warnOutputClipping(em, ls, p)
+		return got
+	}
+
+	if d := detail(nil, pipeline.Result{SourceCodec: "pcm"}); d != "" {
+		t.Errorf("no levels but warned: %q", d)
+	}
+
+	// A lossy decode legitimately overshoots full scale on loud masters, and the
+	// clamp is inherent to any faithful integer conversion, so a lossy source
+	// must not warn however many samples clipped.
+	for _, codec := range []string{"opus", "aac", "mp3", "vorbis"} {
+		lossy := clipped
+		lossy.SourceCodec = codec
+		if d := detail(nil, lossy); d != "" {
+			t.Errorf("%s source warned: %q", codec, d)
+		}
+	}
+
+	d := detail(nil, clipped)
+	for _, want := range []string{"clipping: 26 of 88200", "normalize to bring the level under full scale"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("unnormalized clip detail = %q, want it to carry %q", d, want)
+		}
+	}
+
+	// The true-peak-only branch names what is actually over: the stored samples
+	// are all in range, so the remedy speaks of the true peak, not the level.
+	d = detail(nil, isp)
+	for _, want := range []string{"true peak:", "normalize to bring the true peak under full scale"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("unnormalized true-peak detail = %q, want it to carry %q", d, want)
+		}
+	}
+
+	// Measure-only is not normalization: the remedy still applies.
+	if d := detail(&LoudnessSpec{Mode: LoudnessMeasureOnly}, clipped); !strings.Contains(d, "normalize") {
+		t.Errorf("measure-only detail = %q, want the normalize remedy", d)
+	}
+
+	// A limit-mode normalization can attenuate, which runs no limiter, so a hot
+	// source can still clip; cap derives its clamp from the measured peak and is
+	// the next knob to point at.
+	limit := &LoudnessSpec{Mode: LoudnessApply, Target: -14, PeakMode: PeakLimit}
+	if d := detail(limit, clipped); !strings.Contains(d, "--peak-mode cap") {
+		t.Errorf("limit-mode detail = %q, want the --peak-mode cap remedy", d)
+	}
+
+	// Cap mode already held what it could see; there is nothing left to suggest.
+	capped := &LoudnessSpec{Mode: LoudnessApply, Target: -14, PeakMode: PeakCap}
+	if d := detail(capped, clipped); d != clipped.Levels.Note() {
+		t.Errorf("cap-mode detail = %q, want the bare note %q", d, clipped.Levels.Note())
+	}
+
+	if got := WarnOutputClipping.String(); got != "output-clipping" {
+		t.Errorf("WarnOutputClipping.String() = %q, want %q", got, "output-clipping")
 	}
 }

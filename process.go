@@ -87,6 +87,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	warnEmptyCut(em, req.Cut, pres, false)
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
+	warnOutputClipping(em, req.Loudness, pres)
 
 	srcFmt := Format{
 		Codec:     pres.SourceCodec,
@@ -388,6 +389,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 	em := newEmitter(nil, "")
 	var fold albumFold
+	var levels albumLevels
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -395,11 +397,14 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album mode writes through runner.Transcode rather than the pipeline, so
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
-		srcCh := probeChannels(ctx, runner, t.Input)
-		if _, err := runner.Transcode(ctx, t.Input, t.Output, tspec); err != nil {
+		srcCh, srcCodec := probeAudio(ctx, runner, t.Input)
+		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
+		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
-		fold.observe(srcCh, probeChannels(ctx, runner, t.Output))
+		levels.observe(t.Output, srcCodec, tres.Levels)
+		outCh, _ := probeAudio(ctx, runner, t.Output)
+		fold.observe(srcCh, outCh)
 		// Album tracks are always re-encoded, so no cut remap and no own-audio
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
 		// gain just changed the loudness it describes.
@@ -409,6 +414,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		res.Outputs[i] = t.Output
 	}
 	fold.warn(em, codec)
+	levels.warn(em, ao.peakMode)
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
 	res.Warnings = em.collected()
@@ -437,18 +443,65 @@ func (f *albumFold) warn(em *emitter, c media.Codec) {
 		c, f.src, f.out))
 }
 
+// albumLevels aggregates per-track level measurements into one album warning,
+// the way albumFold folds the downmix observation: the worst track speaks for
+// the album, with a count of the others that clipped. Lossy tracks never
+// count, for the reason warnOutputClipping gives.
+type albumLevels struct {
+	worst     media.Levels
+	worstPath string
+	n         int
+}
+
+func (a *albumLevels) observe(path, srcCodec string, l media.Levels) {
+	if l.Note() == "" || lossySource(srcCodec) {
+		return
+	}
+	a.n++
+	if a.n == 1 || worseLevels(l, a.worst) {
+		a.worst, a.worstPath = l, path
+	}
+}
+
+// worseLevels orders two level measurements by damage: more clamped samples,
+// then a higher true peak when neither clamped.
+func worseLevels(l, r media.Levels) bool {
+	if l.ClippedSamples != r.ClippedSamples {
+		return l.ClippedSamples > r.ClippedSamples
+	}
+	return l.TruePeak > r.TruePeak
+}
+
+func (a *albumLevels) warn(em *emitter, mode PeakMode) {
+	if a.n == 0 {
+		return
+	}
+	detail := a.worstPath + ": " + a.worst.Note()
+	if a.n == 2 {
+		detail += " (and 1 more track)"
+	} else if a.n > 2 {
+		detail += fmt.Sprintf(" (and %d more tracks)", a.n-1)
+	}
+	// The album always normalizes, so the single-file remedy split reduces to
+	// its applied half: point at the peak mode, or at nothing.
+	if mode == PeakLimit {
+		detail += clipRemedyCap
+	}
+	em.warn(WarnOutputClipping, detail)
+}
+
 // probeChannels reports a file's channel count, or 0 when it cannot be probed.
 // It is best-effort on purpose: it exists to describe a fold, and failing to
 // describe one must not fail the album.
-func probeChannels(ctx context.Context, r *media.Runner, path string) int {
+func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string) {
 	pr, err := r.Probe(ctx, path)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
 	if a, ok := pr.AudioStream(); ok {
-		return a.Channels
+		return a.Channels, a.CodecName
 	}
-	return 0
+	return 0, ""
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only

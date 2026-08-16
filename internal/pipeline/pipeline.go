@@ -154,6 +154,13 @@ type Result struct {
 	// nil when the probe failed. Callers read it for authoritative output
 	// rate/channels/duration/size.
 	OutputProbe *media.ProbeResult
+
+	// Levels is WaxFlow's level measurement of the delivered file: clipped
+	// samples, output true peak, and whether a quantizer ran. It comes from the
+	// last completed write, so when the PeakLimit gain search re-encodes it
+	// always describes the file left at OutputPath. Zero for every copy path
+	// and when no output pass ran; warning policy belongs to the caller.
+	Levels media.Levels
 }
 
 // Run processes input per spec, writing any output to output. It returns a
@@ -355,6 +362,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			}
 			res.Cut = cres.Applied
 			res.Removed = cres.Removed
+			res.Levels = cres.Levels
 			// A copy cut that fell back to a re-encode (cut-remux declined the source
 			// codec) reports the encode it actually produced.
 			if copyCut && cres.Mode == media.ModeAccurate {
@@ -372,7 +380,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		} else {
 			send(StageTranscoding)
 		}
-		_, err := r.Transcode(ctx, input, output, enc)
+		tres, err := r.Transcode(ctx, input, output, enc)
+		if err == nil {
+			res.Levels = tres.Levels
+		}
 		return err
 	}
 

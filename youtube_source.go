@@ -1308,6 +1308,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
+	warnOutputClipping(em, req.Loudness, pres)
 
 	deliver := pres.OutputPath
 	if deliver == "" {

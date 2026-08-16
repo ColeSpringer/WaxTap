@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,81 @@ func encodeFixture(t *testing.T, r *Runner, dir, name string, c Codec) string {
 		t.Fatalf("encode %s: %v", name, err)
 	}
 	return out
+}
+
+// hotFixture writes a float WAV carrying overs samples per channel planted
+// past full scale and returns its path; encoding it to an integer output must
+// clip exactly 2*overs samples (stereo).
+func hotFixture(t *testing.T, overs int) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "hot.wav")
+	if err := os.WriteFile(p, mediatest.HotFloatWAV(1, 2, overs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestTranscodeReportsLevels(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+
+	out := filepath.Join(dir, "hot.flac")
+	res, err := r.Transcode(context.Background(), hotFixture(t, 13), out, Spec{Codec: CodecFLAC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 13 overs per channel, stereo: the quantizer clamps all 26.
+	l := res.Levels
+	if l.ClippedSamples != 26 || l.Samples != 44100 || l.Channels != 2 || !l.Quantized {
+		t.Errorf("Levels = %+v, want 26 clipped of 44100x2 quantized", l)
+	}
+	if want := "clipping: 26 of 88200"; !strings.Contains(l.Note(), want) {
+		t.Errorf("Note() = %q, want it to carry %q", l.Note(), want)
+	}
+
+	// A clean encode warrants no note...
+	clean := filepath.Join(dir, "clean.flac")
+	cres, err := r.Transcode(context.Background(), wavFixture(t, 1, 2), clean, Spec{Codec: CodecFLAC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cres.Levels.ClippedSamples != 0 || cres.Levels.Note() != "" {
+		t.Errorf("clean encode Levels = %+v (note %q), want no clipping and no note", cres.Levels, cres.Levels.Note())
+	}
+
+	// ...and a container copy never earns one, whatever the source held.
+	copied := filepath.Join(dir, "hot.mka")
+	rres, err := r.Transcode(context.Background(), out, copied, Spec{Codec: CodecCopy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rres.Levels != (Levels{}) {
+		t.Errorf("remux Levels = %+v, want zero (a packet copy re-derives no samples)", rres.Levels)
+	}
+}
+
+// TestTranscodeReportsTruePeakOnly covers the other half of the level report: a
+// source whose stored samples stay under full scale while the waveform between
+// them crosses it. The quantizer clamps nothing, so only the output true-peak
+// meter can say playback will clip.
+func TestTranscodeReportsTruePeakOnly(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := filepath.Join(dir, "isp.wav")
+	if err := os.WriteFile(in, mediatest.IntersampleHotWAV(1, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Transcode(context.Background(), in, filepath.Join(dir, "isp.flac"), Spec{Codec: CodecFLAC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := res.Levels
+	if l.ClippedSamples != 0 || !l.Quantized || l.TruePeak < 1.1 || l.TruePeak > 1.3 {
+		t.Errorf("Levels = %+v, want no clipped samples and a ~1.2 true peak", l)
+	}
+	if !strings.Contains(l.Note(), "true peak:") {
+		t.Errorf("Note() = %q, want the true-peak wording", l.Note())
+	}
 }
 
 func TestCodecStringExtensionLossless(t *testing.T) {
@@ -223,6 +299,30 @@ func TestRenderCutRemuxOpusIsLossless(t *testing.T) {
 	}
 	if !res.Applied {
 		t.Error("cut not applied")
+	}
+	if res.Levels != (Levels{}) {
+		t.Errorf("cut-remux Levels = %+v, want zero (a packet copy re-derives no samples)", res.Levels)
+	}
+}
+
+func TestRenderCutReportsLevels(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	out := filepath.Join(t.TempDir(), "cut.flac")
+	// The fixture's overs all land in the first ~13ms, inside the kept span, so
+	// the cut re-encode must clamp and report all 26 of them.
+	res, err := r.Render(context.Background(), hotFixture(t, 13), out, CutSpec{
+		Keeps:  []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}},
+		Total:  time.Second,
+		Encode: Spec{Codec: CodecFLAC},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Levels.ClippedSamples != 26 {
+		t.Errorf("Levels = %+v, want 26 clipped samples", res.Levels)
+	}
+	if want := "clipping: 26 of "; !strings.Contains(res.Levels.Note(), want) {
+		t.Errorf("Note() = %q, want it to carry %q", res.Levels.Note(), want)
 	}
 }
 

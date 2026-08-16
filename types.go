@@ -733,6 +733,11 @@ const (
 	// layout. It is the only signal such a run has: nothing in the request says
 	// "6 channels", so a consumer has nothing to compare the output against.
 	WarnImplicitDownmix
+	// WarnOutputClipping reports that the delivered file's level is past full
+	// scale: samples the integer output could not carry were clamped, or the
+	// waveform between stored samples crosses full scale and playback can clip
+	// it. Detail carries WaxFlow's measurement of the delivered encode.
+	WarnOutputClipping
 )
 
 func (w WarningCode) String() string {
@@ -769,6 +774,8 @@ func (w WarningCode) String() string {
 		return "tag-carry-incomplete"
 	case WarnImplicitDownmix:
 		return "implicit-downmix"
+	case WarnOutputClipping:
+		return "output-clipping"
 	default:
 		return "unknown"
 	}

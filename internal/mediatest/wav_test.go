@@ -25,6 +25,26 @@ func TestSineWAVHeader(t *testing.T) {
 	}
 }
 
+func TestHotFloatWAVHeader(t *testing.T) {
+	b := HotFloatWAV(1, 2, 13)
+	if !bytes.Equal(b[0:4], []byte("RIFF")) || !bytes.Equal(b[8:12], []byte("WAVE")) {
+		t.Fatal("not a RIFF/WAVE file")
+	}
+	if tag := binary.LittleEndian.Uint16(b[20:22]); tag != 3 {
+		t.Errorf("format tag = %d, want 3 (IEEE float)", tag)
+	}
+	gotCh := binary.LittleEndian.Uint16(b[22:24])
+	rate := binary.LittleEndian.Uint32(b[24:28])
+	bits := binary.LittleEndian.Uint16(b[34:36])
+	if gotCh != 2 || rate != 44100 || bits != 32 {
+		t.Errorf("header ch=%d rate=%d bits=%d, want 2/44100/32", gotCh, rate, bits)
+	}
+	// 1s of float32 PCM at 44100 Hz for 2 channels, plus the 44-byte header.
+	if want := 44 + 44100*2*4; len(b) != want {
+		t.Errorf("len = %d, want %d", len(b), want)
+	}
+}
+
 func TestToneWAVDistinctFrequencies(t *testing.T) {
 	// Different tones must produce different samples (guards against a constant).
 	if bytes.Equal(ToneWAV(220, 1, 1, 44100), ToneWAV(880, 1, 1, 44100)) {

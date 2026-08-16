@@ -6,6 +6,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +103,44 @@ func probeChannels(t *testing.T, r *media.Runner, path string) int {
 func recordStages() (func(Stage), *[]Stage) {
 	var seen []Stage
 	return func(s Stage) { seen = append(seen, s) }, &seen
+}
+
+func TestRunReportsLevels(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	hot := filepath.Join(dir, "hot.wav")
+	if err := os.WriteFile(hot, mediatest.HotFloatWAV(1, 2, 13), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain transcode carries the encode's level measurement out of the result:
+	// the float fixture's 13 overs per channel all clip on the way to integer FLAC.
+	res, err := Run(context.Background(), r, hot, filepath.Join(dir, "out.flac"), Spec{Codec: media.CodecFLAC}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Levels.ClippedSamples != 26 || !res.Levels.Quantized {
+		t.Errorf("transcode Levels = %+v, want 26 clipped quantized samples", res.Levels)
+	}
+	if want := "clipping: 26 of "; !strings.Contains(res.Levels.Note(), want) {
+		t.Errorf("transcode Note() = %q, want it to carry %q", res.Levels.Note(), want)
+	}
+
+	// So does a cut, whose write goes through Render instead of Transcode. The
+	// overs sit in the first ~13ms, inside the kept half.
+	res, err = Run(context.Background(), r, hot, filepath.Join(dir, "cut.flac"), Spec{
+		Codec:  media.CodecFLAC,
+		Remove: []cutrange.Range{{Start: 500 * time.Millisecond, End: time.Second}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run (cut): %v", err)
+	}
+	if !res.Cut {
+		t.Fatal("cut not applied")
+	}
+	if res.Levels.ClippedSamples != 26 {
+		t.Errorf("cut Levels = %+v, want 26 clipped samples", res.Levels)
+	}
 }
 
 func TestRunMeasureOnly(t *testing.T) {
@@ -952,12 +992,9 @@ func TestRunForcedCopyIncompatibleContainerRejected(t *testing.T) {
 
 func assertHasStage(t *testing.T, seen []Stage, want Stage) {
 	t.Helper()
-	for _, s := range seen {
-		if s == want {
-			return
-		}
+	if !slices.Contains(seen, want) {
+		t.Errorf("stage %v not emitted; saw %v", want, seen)
 	}
-	t.Errorf("stage %v not emitted; saw %v", want, seen)
 }
 
 func fileExists(p string) bool {

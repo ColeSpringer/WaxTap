@@ -435,6 +435,68 @@ func warnLimiterTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result
 		math.Abs(miss), ls.Target, pres.LoudnessPasses, out.IntegratedLUFS))
 }
 
+// warnOutputClipping surfaces the pipeline's level measurement: WaxFlow read
+// the delivered encode past full scale, as clamped samples or as a true peak
+// the stored samples only cross between themselves. The note is WaxFlow's
+// wording; WaxTap adds the policy of when it is worth a warning and what to
+// suggest.
+//
+// A lossy source never warns. Its decoder legitimately reconstructs past full
+// scale on loud masters (a brickwalled release decodes with overs on most
+// commercial music), so the clamp is inherent to any faithful integer
+// conversion, and the post-clamp measurement carries no signal that could
+// separate that from a defect: the meter taps the chain output after the
+// quantizer, so the counts and peaks of an ordinary conversion look exactly
+// like a real one. The defects this warning exists for (a float master stored
+// past full scale, a normalization that attenuated but not enough) all read
+// from lossless sources, where a clipped sample is never the decoder's doing.
+func warnOutputClipping(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
+	note := pres.Levels.Note()
+	if note == "" || lossySource(pres.SourceCodec) {
+		return
+	}
+	em.warn(WarnOutputClipping, note+clipRemedy(ls, pres.Levels))
+}
+
+// lossySource reports whether the probed source codec name is a lossy family,
+// whose decode manufactures the overshoot warnOutputClipping would otherwise
+// report.
+func lossySource(codec string) bool {
+	switch codec {
+	case "opus", "aac", "mp3", "vorbis":
+		return true
+	}
+	return false
+}
+
+// clipRemedy picks the suffix for an output-clipping detail: the knob the run
+// has not turned yet, or nothing when every knob it has is already turned.
+func clipRemedy(ls *LoudnessSpec, l media.Levels) string {
+	if ls == nil || ls.Mode != LoudnessApply {
+		// The stored samples of a true-peak-only over are all in range, so the
+		// remedy names the true peak rather than telling the user their level is
+		// past full scale.
+		what := "the level"
+		if l.ClippedSamples == 0 {
+			what = "the true peak"
+		}
+		return "; normalize to bring " + what + " under full scale"
+	}
+	if ls.PeakMode == PeakLimit {
+		// Limit mode only runs the limiter on a boosting gain, so an attenuating
+		// pass on a hot source can still clip. Cap derives its clamp from the
+		// measured peak instead, which is the knob left to turn.
+		return clipRemedyCap
+	}
+	// Cap already held everything it could see; suggesting more would point at
+	// knobs already turned.
+	return ""
+}
+
+// clipRemedyCap is the remedy for a normalization that still clipped: shared
+// with the album path, whose runs are always normalizing.
+const clipRemedyCap = "; use --peak-mode cap to hold the true peak under the ceiling"
+
 // warnImplicitDownmix reports a channel fold the request never asked for: a
 // lossy encoder that cannot hold the source layout folds it to stereo, correctly,
 // and a run that halves a 5.1 master used to exit 0 with an empty warnings array

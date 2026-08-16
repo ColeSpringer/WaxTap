@@ -63,6 +63,9 @@ type CutResult struct {
 	Removed time.Duration
 	Mode    Mode
 	Applied bool
+	// Levels is WaxFlow's level measurement of the cut re-encode; see
+	// Result.Levels. It is always zero for a lossless cut-remux.
+	Levels Levels
 }
 
 // Render applies spec's cut to input and writes the result to output. Output is
@@ -98,6 +101,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	// nothing forces a decode (no downmix, gain, or crossfade).
 	tryRemux := spec.CopyCut && spec.Crossfade == 0 && spec.Encode.Channels == 0 && spec.Encode.GainDB == 0
 	mode := Mode(ModeAccurate)
+	var levels Levels
 	if tryRemux {
 		done, rerr := r.cutRemux(ctx, src, hint, outExt, spec.Keeps, spec.Total, staged)
 		if rerr != nil {
@@ -111,12 +115,12 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source codec (only Opus and AAC support a packet-level cut); drop --format copy / --cut-mode copy to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec)
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless source.
-			if err := r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+			if levels, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
 				return CutResult{}, classifyEngineError(err, input, output)
 			}
 		}
 	} else {
-		if err := r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+		if levels, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
 			return CutResult{}, classifyEngineError(err, input, output)
 		}
 	}
@@ -129,6 +133,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		Removed: spec.Total - cutrange.OutputDuration(spec.Keeps, spec.Crossfade),
 		Mode:    mode,
 		Applied: true,
+		Levels:  levels,
 	}, nil
 }
 
@@ -175,19 +180,23 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 }
 
 // cutReencode renders the cut by decoding: it slices the kept spans, concatenates
-// them (with an optional crossfade), and re-encodes with spec.Encode.
-func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) error {
+// them (with an optional crossfade), and re-encodes with spec.Encode. It reports
+// the encode's level measurement alongside; see Result.Levels.
+func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, error) {
 	med, err := r.openComposed(src, hint, spec.Keeps, spec.Total, spec.Crossfade)
 	if err != nil {
-		return err
+		return Levels{}, err
 	}
 	defer med.Close()
 
 	opts := encodeOptions(spec.Encode)
 	format, _ := codecFormat(spec.Encode.Codec)
 	opts.Container = containerFor(format, outExt)
-	_, err = r.engine.TranscodeMedia(ctx, med, dst, opts)
-	return err
+	tres, err := r.engine.TranscodeMedia(ctx, med, dst, opts)
+	if err != nil {
+		return Levels{}, err
+	}
+	return levelsOf(tres), nil
 }
 
 // openComposed builds the WaxFlow Media for the kept spans: a single Slice for
@@ -283,11 +292,7 @@ func toSpans(keeps []cutrange.Range, total time.Duration, rate int) []waxflow.Sp
 // default track does not have.
 func sampleBounds(k cutrange.Range, total time.Duration, rate int, trackSamples int64) (from, to int64) {
 	from = samplesOf(k.Start, rate)
-	end := k.End
-	if end > total {
-		end = total
-	}
-	to = samplesOf(end, rate)
+	to = samplesOf(min(k.End, total), rate)
 	if trackSamples > 0 {
 		if to > trackSamples {
 			to = trackSamples

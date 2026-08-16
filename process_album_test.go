@@ -113,6 +113,72 @@ func albumWarning(res *AlbumProcessResult, code WarningCode) (Warning, bool) {
 	return Warning{}, false
 }
 
+// TestProcessAlbumWarnsOutputClipping: clipping tracks aggregate into one
+// warning where the worst track speaks for the album (the way albumFold folds
+// the downmix observation), the clean track stays out of the count, and cap
+// mode, which clamps the album under the true-peak ceiling, must not warn at
+// all.
+func TestProcessAlbumWarnsOutputClipping(t *testing.T) {
+	dir := t.TempDir()
+	hot := filepath.Join(dir, "hot.wav")
+	if err := os.WriteFile(hot, mediatest.HotFloatWAV(1, 2, 13), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warm := filepath.Join(dir, "warm.wav")
+	if err := os.WriteFile(warm, mediatest.HotFloatWAV(1, 2, 5), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clean := synthSine(t, dir, "clean.flac", 1, "flac")
+	c := newOfflineClient(t)
+	ctx := context.Background()
+
+	// Limit mode aims straight at the target; the resulting few-dB attenuation
+	// leaves the ~+15.6 dB overs past full scale, so the encodes must clamp them.
+	tracks := []AlbumTrack{
+		{Input: warm, Output: filepath.Join(dir, "limit", "warm.flac")},
+		{Input: hot, Output: filepath.Join(dir, "limit", "hot.flac")},
+		{Input: clean, Output: filepath.Join(dir, "limit", "clean.flac")},
+	}
+	res, err := c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: FormatFLAC}, WithAlbumPeakMode(PeakLimit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clips []Warning
+	for _, w := range res.Warnings {
+		if w.Code == WarnOutputClipping {
+			clips = append(clips, w)
+		}
+	}
+	if len(clips) != 1 {
+		t.Fatalf("output-clipping warnings = %+v, want exactly one covering the album", clips)
+	}
+	// The worst track (26 clipped samples, not warm's 10) speaks for the album,
+	// the second clipping track is counted, and the remedy points at the peak
+	// mode, the knob an already-normalizing run has left.
+	for _, want := range []string{tracks[1].Output, "clipping: 26 of ", "and 1 more track", "--peak-mode cap"} {
+		if !strings.Contains(clips[0].Detail, want) {
+			t.Errorf("detail = %q, want it to carry %q", clips[0].Detail, want)
+		}
+	}
+	if strings.Contains(clips[0].Detail, "normalize") {
+		t.Errorf("detail = %q suggests normalizing to a run that just did", clips[0].Detail)
+	}
+
+	// Cap mode binds on the hot track's true peak and holds the whole album
+	// under the ceiling, so the same overs land below full scale.
+	capTracks := []AlbumTrack{
+		{Input: hot, Output: filepath.Join(dir, "cap", "hot.flac")},
+		{Input: clean, Output: filepath.Join(dir, "cap", "clean.flac")},
+	}
+	res, err = c.ProcessAlbum(ctx, capTracks, -14, TranscodeSpec{Format: FormatFLAC}, WithAlbumPeakMode(PeakCap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, ok := albumWarning(res, WarnOutputClipping); ok {
+		t.Errorf("cap mode warned %q; the clamp should keep every sample under the ceiling", w.Detail)
+	}
+}
+
 // TestProcessAlbumCapPreservesSpacing is F3: the mandatory limiter pulled louder
 // tracks down harder, so inputs an exact distance apart came out closer together
 // with no way to opt out. The album-wide clamp leaves the limiter idle, so the
