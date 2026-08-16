@@ -194,14 +194,50 @@ func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
 	return fam != "" && format.CodecFamily(codec) == fam
 }
 
-// batchTransforms reports whether the spec requires rewriting matching codecs.
-// A file already in the target codec is otherwise left alone or copied through,
-// which would silently drop a --bitrate or --bit-depth request.
-func batchTransforms(spec waxtap.ProcessSpec) bool {
-	if spec.Downmix || spec.Loudness != nil {
+// specChangesAudio reports whether the spec requires rewriting a file whose codec
+// already matches the target. Such a file is otherwise left alone, copied
+// through, or remuxed, which would silently drop what was asked for.
+// srcChannels is the probed source channel count; 0 means unknown and answers
+// conservatively.
+func specChangesAudio(spec waxtap.ProcessSpec, srcChannels int) bool {
+	return audioChangeIsCertain(spec) || foldsChannels(spec, srcChannels)
+}
+
+// audioChangeIsCertain reports the half of specChangesAudio the source cannot
+// affect: a loudness pass, or an encoding knob the target's encoder reads.
+// Probing is pointless once this is true, so planBatchOutputs gates on it.
+//
+// A knob the encoder never reads is not a request to rewrite: honoring it would
+// spend a re-encode, and a generation of loss on a lossy target, on a value the
+// same run reports as ignored. knobConditional does count, since a promoted copy
+// honors it.
+func audioChangeIsCertain(spec waxtap.ProcessSpec) bool {
+	if spec.Loudness != nil {
 		return true
 	}
-	return spec.Transcode != nil && (spec.Transcode.Bitrate > 0 || spec.Transcode.BitDepth > 0)
+	t := spec.Transcode
+	if t == nil {
+		return false
+	}
+	return (t.Bitrate > 0 && bitrateEffect(t.Format).effect != knobIgnored) ||
+		(t.BitDepth > 0 && bitDepthEffect(t.Format).effect != knobIgnored)
+}
+
+// foldsChannels reports whether --downmix has anything to fold: a source with
+// more channels than the requested layout. A fold that matches the source is a
+// no-op the engine skips anyway (the pipeline computes fold = 0 from the same
+// comparison), so re-encoding for it costs a generation and delivers the same
+// audio.
+//
+// Unlike the knobs, this cannot be answered from the spec alone, so it is decided
+// per file. An unknown count (0, from a probe that failed or reported nothing)
+// keeps the old answer: assume the fold is real.
+func foldsChannels(spec waxtap.ProcessSpec, srcChannels int) bool {
+	if !spec.Downmix {
+		return false
+	}
+	target := spec.Channels.ChannelCount()
+	return target == 0 || srcChannels <= 0 || srcChannels > target
 }
 
 // extPossiblyCodec reports whether ext can contain the given codec family. It
@@ -240,12 +276,12 @@ func extPossiblyCodec(ext, family string) bool {
 	}
 }
 
-// batchProbeCodecs probes candidate files in parallel. Files that cannot be left
+// batchProbeAudio probes candidate files in parallel. Files that cannot be left
 // unchanged are not probed, and failed probes are omitted from the result.
-func batchProbeCodecs(ctx context.Context, inputs []string, family string, skip bool, probeCodec func(context.Context, string) (string, error)) map[string]string {
-	codecs := make(map[string]string)
+func batchProbeAudio(ctx context.Context, inputs []string, family string, skip bool, probeAudio func(context.Context, string) (waxtap.AudioProbe, error)) map[string]waxtap.AudioProbe {
+	probes := make(map[string]waxtap.AudioProbe)
 	if skip || family == "" {
-		return codecs
+		return probes
 	}
 	var todo []string
 	for _, in := range inputs {
@@ -254,7 +290,7 @@ func batchProbeCodecs(ctx context.Context, inputs []string, family string, skip 
 		}
 	}
 	if len(todo) == 0 {
-		return codecs
+		return probes
 	}
 
 	var mu sync.Mutex
@@ -277,23 +313,22 @@ func batchProbeCodecs(ctx context.Context, inputs []string, family string, skip 
 		go func(in string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if codec, err := probeCodec(ctx, in); err == nil {
+			if p, err := probeAudio(ctx, in); err == nil {
 				mu.Lock()
-				codecs[in] = codec
+				probes[in] = p
 				mu.Unlock()
 			}
 		}(in)
 	}
 	wg.Wait()
-	return codecs
+	return probes
 }
 
 // planBatchOutputs creates jobs for a transcode or normalize-apply batch. It
 // applies collision policy, rejects outputs that would overwrite another input,
-// and rejects multiple inputs that map to the same output. A file whose probed
-// codec already matches the target is left in place or copied unchanged into
-// dir, unless force is set.
-func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, recursive bool, tf waxtap.TranscodeFormat, spec waxtap.ProcessSpec, mode collisionMode, force bool, tag string, probeCodec func(context.Context, string) (string, error)) ([]batchJob, error) {
+// and rejects multiple inputs that map to the same output. A file the spec would
+// not change is left in place or copied unchanged into dir, unless force is set.
+func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, recursive bool, tf waxtap.TranscodeFormat, spec waxtap.ProcessSpec, mode collisionMode, force bool, tag string, probeAudio func(context.Context, string) (waxtap.AudioProbe, error)) ([]batchJob, error) {
 	if tf == waxtap.FormatCopy {
 		return nil, usagef("directory processing does not support --format copy; choose an encoded output format")
 	}
@@ -309,14 +344,16 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 	seenOut := map[string]string{}
 	fam := targetCodecFamily(tf)
 
-	// Probe candidates before planning so the probes can run in parallel.
-	// A failed probe leaves the file scheduled for normal processing.
-	codecs := batchProbeCodecs(ctx, inputs, fam, force || batchTransforms(spec), probeCodec)
+	// Probe candidates before planning so the probes can run in parallel. A failed
+	// probe leaves the file scheduled for normal processing. The gate is the
+	// source-independent half of the question: --downmix is settled per file
+	// below, from the count the probe reports.
+	probes := batchProbeAudio(ctx, inputs, fam, force || audioChangeIsCertain(spec), probeAudio)
 
 	jobs := make([]batchJob, 0, len(inputs))
 	for i, in := range inputs {
 		noop := false
-		if codec, ok := codecs[in]; ok && matchesTargetFamily(codec, tf) {
+		if p, ok := probes[in]; ok && matchesTargetFamily(p.Codec, tf) && !specChangesAudio(spec, p.Channels) {
 			noop = true
 		}
 

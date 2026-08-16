@@ -351,14 +351,21 @@ func resolveChannelsFlag(cmd *cobra.Command, cfg *appConfig, channels string) st
 	return channels
 }
 
+// effectiveDownmix returns the downmix setting in force: the explicit --downmix
+// flag, or the configured default when the flag is unset. validateLocalSourceFlags
+// asks the same question resolveChannels answers, so both read it here rather
+// than each deciding for itself.
+func effectiveDownmix(cmd *cobra.Command, cfg *appConfig, downmix bool) bool {
+	if !cmd.Flags().Changed("downmix") && cfg.downmix {
+		return true
+	}
+	return downmix
+}
+
 // resolveChannels returns and validates the effective channel layout and
 // downmix setting for a processing command.
 func resolveChannels(cmd *cobra.Command, cfg *appConfig, channels string, downmix bool) (waxtap.ChannelLayout, bool, error) {
-	channels = resolveChannelsFlag(cmd, cfg, channels)
-	if !cmd.Flags().Changed("downmix") && cfg.downmix {
-		downmix = true
-	}
-	return channelsAndDownmix(channels, downmix)
+	return channelsAndDownmix(resolveChannelsFlag(cmd, cfg, channels), effectiveDownmix(cmd, cfg, downmix))
 }
 
 // resolvedCacheDir returns the effective on-disk cache directory: the configured

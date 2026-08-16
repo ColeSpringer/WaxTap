@@ -9,9 +9,9 @@ import (
 )
 
 // inferableContainers are output extensions that name a container WaxTap can
-// produce. Extensions outside this set (codec names like ".alac", or unrelated
-// names like ".out") are not usable as a copy target: a re-encode picks the
-// container from the codec preset instead.
+// produce. An extension outside this set (a codec name like ".alac", an unrelated
+// name like ".out", or none at all) does not constrain the codec: the container
+// comes from the format instead, and the write is force-muxed.
 //
 // Dropped versus the ffmpeg era: ".w64" and ".caf" have no WaxFlow muxer (".m4a"
 // covers ".caf"'s ALAC).
@@ -40,17 +40,11 @@ func IsAIFFExt(ext string) bool {
 }
 
 // needsForcedMuxer reports whether the output path does not name a container
-// WaxTap can infer, so a copy has no container to target.
+// WaxTap can infer, so the container comes from the format rather than the
+// filename.
 func needsForcedMuxer(output string) bool {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
 	return !inferableContainers[ext]
-}
-
-// CanInferContainer reports whether path's extension names a container WaxTap can
-// produce. When false (extensionless or codec-named paths such as ".alac"), a
-// stream copy has no container to write into; callers encode instead.
-func CanInferContainer(path string) bool {
-	return !needsForcedMuxer(path)
 }
 
 // ContainerAccepts reports whether the container named by ext can hold the given

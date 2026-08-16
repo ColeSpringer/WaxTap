@@ -169,12 +169,27 @@ func humanLUFS(v float64) string {
 }
 
 // usageError marks a bad-arguments failure, which maps to exit code 2.
-type usageError struct{ msg string }
+//
+// flagsUnparsed marks the subset raised before the persistent flags were read: a
+// bad flag aborts the parse at that token, and an unknown command never reaches
+// parsing at all. Only those may re-read the command line for --json; after a
+// successful parse rootFlagsValue is the answer, and a second look would misread
+// `--format --json`, where --json is a flag's value rather than a request.
+type usageError struct {
+	msg           string
+	flagsUnparsed bool
+}
 
 func (e *usageError) Error() string { return e.msg }
 
 func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
+}
+
+// unparsedFlagsError builds the usage error for a failure that preceded flag
+// parsing. Only the two sites that can precede it use this.
+func unparsedFlagsError(msg string) error {
+	return &usageError{msg: msg, flagsUnparsed: true}
 }
 
 // alreadyRenderedError marks a failure that a command has already written.
@@ -232,9 +247,10 @@ type keptOutput struct {
 }
 
 // renderError writes the final command error as JSON or as a human-readable line.
-// Both forms use the same classification.
-func renderError(w io.Writer, jsonMode bool, err error) {
-	renderErrorKept(w, jsonMode, err, nil)
+// Both forms use the same classification. args is the command line the failure
+// came from, minus the program name; only the flag-ordering hint reads it.
+func renderError(w io.Writer, jsonMode bool, err error, args []string) {
+	renderErrorKept(w, jsonMode, err, args, nil)
 }
 
 // renderErrorKept is renderError plus the file a failed run left behind. Every
@@ -246,11 +262,11 @@ func renderError(w io.Writer, jsonMode bool, err error) {
 // A cancellation reported this way is still exit 130 and still a failure. Naming
 // the file does not promote it to a success, and the caller says so in the note
 // when post-processing (the info sidecar, the archive entry) did not run.
-func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
+func renderErrorKept(w io.Writer, jsonMode bool, err error, args []string, kept *keptOutput) {
 	if err == nil {
 		return
 	}
-	c := classifyError(err)
+	c := classifyArgs(err, args)
 	if jsonMode {
 		var je jsonError
 		je.SchemaVersion = schemaVersion
@@ -289,11 +305,19 @@ type classifiedError struct {
 }
 
 // classifyError maps a terminal error to its exit code, machine code, message,
-// and optional hint.
+// and optional hint, reading this process's command line for the flag-ordering
+// hint. Callers that hold the command line pass it to classifyArgs instead.
+func classifyError(err error) classifiedError {
+	return classifyArgs(err, os.Args[1:])
+}
+
+// classifyArgs is classifyError against a given command line. Only the
+// flag-ordering hint depends on args, so exit code, machine code, and message are
+// the same whatever is passed.
 //
 // Domain sentinels take precedence over wrapped transport and filesystem errors.
 // Structural checks therefore run after all sentinel checks.
-func classifyError(err error) classifiedError {
+func classifyArgs(err error, args []string) classifiedError {
 	if err == nil {
 		return classifiedError{}
 	}
@@ -379,7 +403,7 @@ func classifyError(err error) classifiedError {
 	case isCollisionError(err):
 		c.exitCode, c.code = 2, "usage"
 	case isUsageError(err):
-		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err)
+		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err, args)
 
 	// Deadlines during dialing and reading are both network timeouts.
 	case errors.Is(err, context.DeadlineExceeded):
@@ -835,15 +859,18 @@ func normalizeExecuteError(err error) error {
 	if _, ok := errors.AsType[*alreadyRenderedError](err); ok {
 		return err
 	}
+	// Cobra rejects an unknown command before parsing any flags, so a --json on
+	// that line never reached rootFlagsValue.
 	if msg := err.Error(); strings.HasPrefix(msg, "unknown command") || strings.HasPrefix(msg, "unknown subcommand") {
-		return &usageError{msg: msg}
+		return unparsedFlagsError(msg)
 	}
 	return err
 }
 
 // flagOrderHint adds CLI help for YouTube-looking arguments that Cobra or pflag
-// parsed before the command could receive them.
-func flagOrderHint(err error) string {
+// parsed before the command could receive them. args is the command line the
+// failure came from, minus the program name.
+func flagOrderHint(err error, args []string) string {
 	ue, ok := errors.AsType[*usageError](err)
 	if !ok {
 		return ""
@@ -862,7 +889,7 @@ func flagOrderHint(err error) string {
 	// consume a later subcommand while traversing flags, so when a flag precedes a
 	// real subcommand, explain the ordering. Keep the hint generic: a flag value can
 	// coincidentally equal a subcommand name.
-	if isUnknownCmd && flagBeforeSubcommand(os.Args[1:], rootSubcommandNames) {
+	if isUnknownCmd && flagBeforeSubcommand(args, rootSubcommandNames) {
 		return "a flag before the subcommand can be parsed as part of command lookup; put global flags (--json/--quiet/--verbose) before the subcommand and any command flags after it"
 	}
 	return ""

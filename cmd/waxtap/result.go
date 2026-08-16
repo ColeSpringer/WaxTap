@@ -13,10 +13,56 @@ import (
 // emitResult prints a single Result as human text or JSON.
 func emitResult(env *appEnv, res *waxtap.Result) error {
 	if env.jsonMode() {
-		return env.emitJSON(resultToJSON(res))
+		doc := resultToJSON(res)
+		if wroteNothing(env, res) {
+			// The measurement sank to io.Discard, so the engine's byte count and output
+			// format describe the input, not a file. The human renderer says "none
+			// (measurement only)"; dropping both is how JSON says it. Local sources
+			// already omitted the format, since formatDTOs gates it on Transcoded, so
+			// this is also what makes the two source kinds agree.
+			doc.OutputBytes, doc.OutputFormat = 0, nil
+		}
+		return env.emitJSON(doc)
 	}
 	renderResultHuman(env, res)
 	return nil
+}
+
+// skipJSON is the --json document for a run that wrote nothing because the output
+// already existed. It is a terminal outcome like any other, so it owes stdout a
+// document; download has emitted this shape since before the other commands did.
+type skipJSON struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Skipped       string `json:"skipped"`
+	OutputPath    string `json:"outputPath,omitempty"`
+}
+
+// emitSkip reports a run that wrote nothing because the output already existed:
+// the --json document, or under --quiet the existing path on stdout so
+// `out=$(waxtap ... --quiet)` yields a path for a skip as it does for a write, or
+// the human line on stderr. An empty path takes the pathless forms, which is
+// download's archive skip. JSON wins over quiet, matching emitResult.
+func emitSkip(env *appEnv, reason, path string) error {
+	if env.jsonMode() {
+		return env.emitJSON(skipJSON{schemaVersion, reason, displayPath(path)})
+	}
+	if path == "" {
+		env.info("skipped (%s)\n", reason)
+		return nil
+	}
+	if env.quiet() {
+		env.printf("%s\n", displayPath(path))
+		return nil
+	}
+	env.info("skipped (%s): %s\n", reason, displayPath(path))
+	return nil
+}
+
+// wroteNothing reports whether res is a measurement that produced no file. A
+// measure-only run streaming to stdout (download -o -) also has an empty
+// OutputPath but did deliver the audio, so audioStream excludes it.
+func wroteNothing(env *appEnv, res *waxtap.Result) bool {
+	return measureOnly(res) && res.OutputPath == "" && !env.audioStream
 }
 
 // displayPath normalizes a local path for reporting, so one document does not
@@ -77,9 +123,8 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	}
 	// A measure-only run that sank to io.Discard (normalize --measure-loudness) has
 	// no output path and meaningless OutputBytes, so name the intent instead of a
-	// phantom write. A measure-only run streaming to stdout (download -o -) also has
-	// an empty OutputPath but did deliver the audio, so audioStream excludes it.
-	measured := measureOnly(res) && res.OutputPath == "" && !env.audioStream
+	// phantom write.
+	measured := wroteNothing(env, res)
 	switch {
 	case measured:
 		env.printf("Output:   none (measurement only)\n")

@@ -26,7 +26,7 @@ type directoryTranscodeParams struct {
 
 // runDirectoryTranscode processes recognized audio files from a directory input.
 func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscodeParams) error {
-	if err := rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback"); err != nil {
+	if err := validateLocalSourceFlags(cmd, env.cfg, true, p.downmix); err != nil {
 		return err
 	}
 	if p.explicit != "" {
@@ -73,7 +73,7 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 	if len(inputs) == 0 {
 		env.info("no recognized audio files found in %s\n", p.root)
 	}
-	jobs, err := planBatchOutputs(ctx, inputs, p.root, p.dir, p.recursive, tf, spec, mode, p.force, "transcoded", env.client.ProbeCodec)
+	jobs, err := planBatchOutputs(ctx, inputs, p.root, p.dir, p.recursive, tf, spec, mode, p.force, "transcoded", env.client.ProbeAudio)
 	if err != nil {
 		return err
 	}
@@ -105,6 +105,12 @@ type directoryNormalizeParams struct {
 // normalizes by default and measures loudness when requested.
 func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalizeParams) error {
 	if err := validateNormalizeInputFlags(cmd, p.measure, true, false); err != nil {
+		return err
+	}
+	// --channels is the part only this call rejects; validateNormalizeInputFlags
+	// already covers the URL-selection flags for a directory, and repeating them
+	// costs nothing because both produce the same message.
+	if err := validateLocalSourceFlags(cmd, env.cfg, true, p.downmix); err != nil {
 		return err
 	}
 	if p.explicit != "" {
@@ -175,7 +181,7 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 		Channels:  layout,
 		Downmix:   doDownmix,
 	}
-	jobs, err := planBatchOutputs(ctx, inputs, p.root, p.dir, p.recursive, tf, spec, mode, false, "normalized", env.client.ProbeCodec)
+	jobs, err := planBatchOutputs(ctx, inputs, p.root, p.dir, p.recursive, tf, spec, mode, false, "normalized", env.client.ProbeAudio)
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
-	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
@@ -21,12 +20,26 @@ func isLocalFile(arg string) bool {
 	return err == nil && !fi.IsDir()
 }
 
-// validateLocalSourceFlags rejects URL-selection flags for a local input.
-func validateLocalSourceFlags(cmd *cobra.Command, source string) error {
-	if !isLocalFile(source) {
+// validateLocalSourceFlags rejects source-selection flags for a local input.
+// local is false only for a URL source; a directory batch is local by
+// construction.
+func validateLocalSourceFlags(cmd *cobra.Command, cfg *appConfig, local, downmix bool) error {
+	if !local {
 		return nil
 	}
-	return rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback")
+	if err := rejectChangedFlags(cmd, "is only used with a URL input", "itag", "codec", "source-policy", "no-fallback"); err != nil {
+		return err
+	}
+	// --channels gets its own message rather than joining the list above, because
+	// "is only used with a URL input" stops being true the moment --downmix is set:
+	// the fold needs a target. The message names both local input shapes, since a
+	// directory batch reaches here too. Only an explicit flag is rejected; a
+	// configured default exists to steer downloads and must not break local
+	// processing.
+	if cmd.Flags().Changed("channels") && !effectiveDownmix(cmd, cfg, downmix) {
+		return usagef("--channels selects among a video's source streams and has no effect on a local file or directory; use --downmix to fold to mono or stereo, or drop the flag")
+	}
+	return nil
 }
 
 // validateProcessSource reports whether source is usable by a process command:
@@ -146,7 +159,7 @@ func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 	}
 }
 
-// isLosslessFormat reports whether a transcode preset ignores --bitrate. The CLI
+// isLosslessFormat reports whether a transcode preset encodes losslessly. The CLI
 // keeps this small mirror because the TranscodeFormat-to-codec mapping is
 // unexported. FormatCopy is a remux, not an encoder, so it is included; note that
 // a copy the pipeline promotes to a re-encode is no longer one (see
@@ -168,38 +181,70 @@ func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
 // Vorbis still drops --bitrate, and one to a lossy codec still drops --bit-depth.
 const copyPromotionNote = "reaches a copy target only where the copy is promoted to a re-encode (an output container the source codec cannot enter, or --downmix)"
 
-// warnBitrateIgnored notes when --bitrate will not reach the encoder, so a user
-// who set it deliberately gets a signal instead of silence. Call it once per
-// invocation with the parsed format, not per batch item.
-func warnBitrateIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
-	if bitrate <= 0 {
-		return
-	}
-	switch {
-	case tf == waxtap.FormatCopy:
-		env.info("note: --bitrate %s\n", copyPromotionNote)
-	case isLosslessFormat(tf):
-		env.info("note: --bitrate is ignored for lossless targets\n")
-	case tf == waxtap.FormatVorbis:
-		// Vorbis is quality-driven (VBR); WaxFlow has no ABR rate control.
-		env.info("note: --bitrate is ignored for Vorbis, which is quality-driven (VBR)\n")
-	}
+// knobEffect says whether a target format's encoder uses an encoding knob. It is
+// one classification for two questions that must not drift apart: what the run
+// tells the user about the value, and whether setting it is a reason to re-encode
+// a file that already matches the target.
+type knobEffect int
+
+const (
+	knobHonored     knobEffect = iota // the encoder uses the value
+	knobIgnored                       // the encoder drops it; setting it changes nothing
+	knobConditional                   // copy: honored only where the copy is promoted (copyPromotionNote)
+)
+
+// knobNote is one knob's classification for one target format: what the encoder
+// does with the value, and the clause that says so. Both leave the same switch
+// arm, so a format cannot be reclassified while keeping a neighbor's explanation
+// (a lossy row inheriting "ignored for lossless targets" is exactly the drift the
+// enum exists to prevent). why is empty when the value is honored.
+type knobNote struct {
+	effect knobEffect
+	why    string
 }
 
-// warnBitDepthIgnored notes when --bit-depth will not reach the encoder. Lossy
-// targets always drop it: those rows encode in the float domain. Copy is
-// conditional rather than ignored, so it gets copyPromotionNote instead. Call it
-// once per invocation with the parsed format, not per batch item.
-func warnBitDepthIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitDepth int) {
-	if bitDepth <= 0 {
-		return
-	}
+// bitrateEffect classifies --bitrate for a target format.
+func bitrateEffect(tf waxtap.TranscodeFormat) knobNote {
 	switch {
 	case tf == waxtap.FormatCopy:
-		env.info("note: --bit-depth %s\n", copyPromotionNote)
-	case !isLosslessFormat(tf):
-		env.info("note: --bit-depth is ignored for lossy targets, which encode in the float domain\n")
+		return knobNote{knobConditional, copyPromotionNote}
+	case isLosslessFormat(tf):
+		return knobNote{knobIgnored, "is ignored for lossless targets"}
+	case tf == waxtap.FormatVorbis:
+		// Vorbis is quality-driven (VBR); WaxFlow has no ABR rate control.
+		return knobNote{knobIgnored, "is ignored for Vorbis, which is quality-driven (VBR)"}
 	}
+	return knobNote{effect: knobHonored}
+}
+
+// bitDepthEffect classifies --bit-depth for a target format. The lossless set
+// holds integer PCM; every lossy row encodes in the float domain.
+func bitDepthEffect(tf waxtap.TranscodeFormat) knobNote {
+	switch {
+	case tf == waxtap.FormatCopy:
+		return knobNote{knobConditional, copyPromotionNote}
+	case isLosslessFormat(tf):
+		return knobNote{effect: knobHonored}
+	}
+	return knobNote{knobIgnored, "is ignored for lossy targets, which encode in the float domain"}
+}
+
+// warnKnob notes when an encoding knob will not reach the encoder, so a user who
+// set it deliberately gets a signal instead of silence. Call it once per
+// invocation with the parsed format, not per batch item.
+func warnKnob(env *appEnv, flag string, value int, n knobNote) {
+	if value <= 0 || n.effect == knobHonored {
+		return
+	}
+	env.info("note: %s %s\n", flag, n.why)
+}
+
+func warnBitrateIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
+	warnKnob(env, "--bitrate", bitrate, bitrateEffect(tf))
+}
+
+func warnBitDepthIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitDepth int) {
+	warnKnob(env, "--bit-depth", bitDepth, bitDepthEffect(tf))
 }
 
 func newCutCmd() *cobra.Command {
@@ -248,7 +293,7 @@ func newCutCmd() *cobra.Command {
 			if fi, serr := os.Stat(source); serr == nil && fi.IsDir() {
 				return usagef("cut does not support a directory input; pass a single file or a YouTube URL")
 			}
-			if err := validateLocalSourceFlags(cmd, source); err != nil {
+			if err := validateLocalSourceFlags(cmd, env.cfg, isLocalFile(source), downmix); err != nil {
 				return err
 			}
 			if err := validateItag(cmd, itag); err != nil {
@@ -347,8 +392,7 @@ func newCutCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", displayPath(outPath))
-				return nil
+				return emitSkip(env, "exists", outPath)
 			}
 			warnALACToAlacExt(env, outPath, tf)
 			warnBitrateIgnored(env, tf, bitrate)
@@ -371,7 +415,7 @@ func newCutCmd() *cobra.Command {
 	f.StringVarP(&out, "out", "o", "", "output file path")
 	bindCutFlags(f, &ranges, &cutMode, &crossfade, &sbOnError)
 	bindSponsorBlockFlag(f, &sbCats, "remove SponsorBlock categories (YouTube only; comma-separated; bare flag selects music_offtopic; use sponsorblock to preview)")
-	f.StringVarP(&format, "format", "f", "", "also re-encode to: "+formatChoices(false))
+	f.StringVarP(&format, "format", "f", "", "also re-encode to: "+formatChoices(false)+formatSpellingNote)
 	bindBitrateFlag(f, &bitrate)
 	bindBitDepthFlag(f, &bitDepth)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
@@ -449,7 +493,7 @@ func newTranscodeCmd() *cobra.Command {
 			if err := rejectChangedFlags(cmd, "is only used with a directory input", "dir", "recursive", "concurrency"); err != nil {
 				return err
 			}
-			if err := validateLocalSourceFlags(cmd, source); err != nil {
+			if err := validateLocalSourceFlags(cmd, env.cfg, isLocalFile(source), downmix); err != nil {
 				return err
 			}
 			if err := validateItag(cmd, itag); err != nil {
@@ -489,8 +533,7 @@ func newTranscodeCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", displayPath(outPath))
-				return nil
+				return emitSkip(env, "exists", outPath)
 			}
 			warnALACToAlacExt(env, outPath, tf)
 			warnBitrateIgnored(env, tf, bitrate)
@@ -501,21 +544,32 @@ func newTranscodeCmd() *cobra.Command {
 			// is pending, stream-copy it instead of encoding it again. This avoids
 			// unnecessary work and an extra lossy pass for MP3, AAC, Opus, and Vorbis.
 			//
-			// The shortcut only works when the output extension names a container from
-			// the extension. Codec-name paths such as .alac rely on the encode preset
-			// to provide a muxer, and stream copy has no preset.
+			// The output path does not constrain this. A remux picks its container
+			// from the source codec and passes the extension only as an override, so a
+			// codec-named or extensionless path lands in the format's own default
+			// container, exactly as the encode path would leave it.
 			remuxNoop := false
-			if !force && spec.Transcode != nil && targetCodecFamily(tf) != "" && !batchTransforms(spec) &&
-				isLocalFile(source) && media.CanInferContainer(outPath) {
+			if !force && spec.Transcode != nil && targetCodecFamily(tf) != "" && !audioChangeIsCertain(spec) &&
+				isLocalFile(source) {
 				// Check the requested format before rewriting to copy, so an
 				// incompatible extension such as opus into .flac is still rejected.
 				if err := waxtap.ValidateProcessSpec(spec); err != nil {
 					return err
 				}
-				// If probing fails or reports a different codec family, run the normal
-				// encode path.
-				if probed, perr := env.client.ProbeCodec(cmd.Context(), source); perr == nil && matchesTargetFamily(probed, tf) {
+				// If probing fails, or the file is a different codec family, or the spec
+				// would still change its audio, run the normal encode path.
+				if p, perr := env.client.ProbeAudio(cmd.Context(), source); perr == nil &&
+					matchesTargetFamily(p.Codec, tf) && !specChangesAudio(spec, p.Channels) {
+					// Zero the knobs with the format: a copy has no encoder to hand them
+					// to. Only an inert knob can have reached here, since a honored one
+					// sets audioChangeIsCertain.
+					//
+					// Downmix stays set. It is inert by this probe's reckoning, and the
+					// pipeline reaches the same fold = 0 from its own; leaving it means a
+					// source that turns out to have more channels than seen here is still
+					// folded, rather than silently delivered wide.
 					spec.Transcode.Format = waxtap.FormatCopy
+					spec.Transcode.Bitrate, spec.Transcode.BitDepth = 0, 0
 					remuxNoop = true
 				}
 			}
@@ -537,7 +591,7 @@ func newTranscodeCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVarP(&out, "out", "o", "", "output file path (single file)")
-	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(true))
+	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(true)+formatSpellingNote)
 	bindBitrateFlag(f, &bitrate)
 	bindBitDepthFlag(f, &bitDepth)
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")

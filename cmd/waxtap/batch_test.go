@@ -39,9 +39,9 @@ func TestPlanBatchOutputsSkipsImpossibleProbes(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "a.flac", "b.mp3")
 	var probed sync.Map
-	probe := func(_ context.Context, path string) (string, error) {
+	probe := func(_ context.Context, path string) (waxtap.AudioProbe, error) {
 		probed.Store(filepath.Base(path), true)
-		return map[string]string{"a.flac": "flac", "b.mp3": "mp3"}[filepath.Base(path)], nil
+		return waxtap.AudioProbe{Codec: map[string]string{"a.flac": "flac", "b.mp3": "mp3"}[filepath.Base(path)], Channels: 2}, nil
 	}
 	inputs := []string{filepath.Join(root, "a.flac"), filepath.Join(root, "b.mp3")}
 	if _, err := planBatchOutputs(context.Background(), inputs, root, filepath.Join(root, "out"), false, waxtap.FormatMP3, waxtap.ProcessSpec{}, collisionFail, false, "transcoded", probe); err != nil {
@@ -241,13 +241,14 @@ func TestCollectAudioInputs(t *testing.T) {
 	})
 }
 
-// stubProbe returns codecs keyed by file basename.
-func stubProbe(codecs map[string]string) func(context.Context, string) (string, error) {
-	return func(_ context.Context, path string) (string, error) {
+// stubProbe returns codecs keyed by file basename, reported as stereo: these
+// cases are about the codec, not the layout.
+func stubProbe(codecs map[string]string) func(context.Context, string) (waxtap.AudioProbe, error) {
+	return func(_ context.Context, path string) (waxtap.AudioProbe, error) {
 		if c, ok := codecs[filepath.Base(path)]; ok {
-			return c, nil
+			return waxtap.AudioProbe{Codec: c, Channels: 2}, nil
 		}
-		return "", errors.New("no codec")
+		return waxtap.AudioProbe{}, errors.New("no codec")
 	}
 }
 

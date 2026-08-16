@@ -157,20 +157,30 @@ func isMeasureOnlySpec(s ProcessSpec) bool {
 		s.Transcode == nil && !s.Downmix && !cutRequested(s.Cut)
 }
 
-// ProbeCodec reports the codec name of the first audio stream in a local file,
-// such as "opus" or "aac". It returns ErrUnsupportedInput when the file has no
-// audio stream.
-func (c *Client) ProbeCodec(ctx context.Context, path string) (string, error) {
+// AudioProbe describes the first audio stream in a local file. It carries what a
+// caller needs in order to tell whether processing would change the audio at all,
+// rather than the whole probe: the codec the file is already in, and the layout
+// it already has.
+type AudioProbe struct {
+	// Codec is the codec name, such as "opus" or "aac".
+	Codec string
+	// Channels is the channel count, or 0 when the probe did not report one.
+	Channels int
+}
+
+// ProbeAudio reports the first audio stream in a local file. It returns
+// ErrUnsupportedInput when the file has no audio stream.
+func (c *Client) ProbeAudio(ctx context.Context, path string) (AudioProbe, error) {
 	runner := c.engine()
 	probe, err := runner.Probe(ctx, path)
 	if err != nil {
-		return "", err
+		return AudioProbe{}, err
 	}
 	audio, ok := probe.AudioStream()
 	if !ok {
-		return "", fmt.Errorf("%w: no audio stream in %s", ErrUnsupportedInput, path)
+		return AudioProbe{}, fmt.Errorf("%w: no audio stream in %s", ErrUnsupportedInput, path)
 	}
-	return audio.CodecName, nil
+	return AudioProbe{Codec: audio.CodecName, Channels: audio.Channels}, nil
 }
 
 // AlbumLoudnessResult reports a group loudness measurement plus per-track

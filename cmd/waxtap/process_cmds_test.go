@@ -340,9 +340,93 @@ func TestCutModeCopyRejectsEncode(t *testing.T) {
 	}
 }
 
+// TestLocalChannelsRejected: --channels picks among a video's source streams, so
+// on a local file it reached nothing. `--channels mono` on a 5.1 file delivered
+// six channels and said nothing about it.
+func TestLocalChannelsRejected(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	synthAudio(t, in, "flac")
+	batchDir := filepath.Join(dir, "batch")
+	if err := os.MkdirAll(batchDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	synthAudio(t, filepath.Join(batchDir, "a.flac"), "flac")
+
+	for _, c := range []struct {
+		name string
+		dir  bool
+		args []string
+	}{
+		{"transcode", false, []string{"transcode", in, "--format", "flac", "-o", filepath.Join(dir, "t.flac")}},
+		{"normalize", false, []string{"normalize", in, "--format", "flac", "-o", filepath.Join(dir, "n.flac")}},
+		{"cut", false, []string{"cut", in, "--cut-range", "0-0.3", "--format", "flac", "-o", filepath.Join(dir, "c.flac")}},
+		{"transcode dir", true, []string{"transcode", batchDir, "--format", "flac", "--dir", filepath.Join(dir, "td")}},
+		{"normalize dir", true, []string{"normalize", batchDir, "--format", "flac", "--dir", filepath.Join(dir, "nd")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := runProcessCmd(t, append(c.args, "--channels", "mono")...)
+			if !isUsageError(err) {
+				t.Fatalf("--channels mono on a local input = %v (%T), want a usageError", err, err)
+			}
+			// The message has to name the flag that does work here, or the only way
+			// forward is to drop the request.
+			if !strings.Contains(err.Error(), "--downmix") {
+				t.Errorf("message = %q, want it to point at --downmix", err)
+			}
+			// One helper serves files and directories, so its message cannot name an
+			// input kind the user did not pass.
+			if c.dir && strings.Contains(err.Error(), "a local file;") {
+				t.Errorf("message = %q, but the input was a directory", err)
+			}
+		})
+	}
+
+	// With --downmix the flag names the fold target, so it does reach the audio.
+	if err := runProcessCmd(t, "transcode", in, "--format", "flac",
+		"-o", filepath.Join(dir, "folded.flac"), "--channels", "mono", "--downmix"); err != nil {
+		t.Errorf("--channels mono --downmix = %v, want success", err)
+	}
+
+	// A configured default exists to steer downloads; breaking local processing
+	// with it would make the setting unusable.
+	t.Setenv("WAXTAP_CHANNELS", "mono")
+	if err := runProcessCmd(t, "transcode", in, "--format", "flac", "-o", filepath.Join(dir, "env.flac")); err != nil {
+		t.Errorf("WAXTAP_CHANNELS with no --channels flag = %v, want success", err)
+	}
+}
+
+// TestBatchDownmixIsDecidedPerFile: --downmix is a property of the source, not
+// of the spec, so a batch cannot answer it once for every file. The ones that
+// have channels to fold re-encode; the ones already at the target copy through.
+func TestBatchDownmixIsDecidedPerFile(t *testing.T) {
+	root := t.TempDir()
+	synthChannels(t, filepath.Join(root, "mono.opus"), "libopus", 1)
+	synthChannels(t, filepath.Join(root, "stereo.opus"), "libopus", 2)
+	outDir := filepath.Join(root, "out")
+
+	cmd := newTranscodeCmd()
+	cmd.SetArgs([]string{root, "--format", "opus", "--dir", outDir, "--channels", "mono", "--downmix"})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("transcode dir --downmix: %v\n%s", err, buf.String())
+	}
+	if got := buf.String(); !strings.Contains(got, "1 encoded, 1 copied") {
+		t.Errorf("want one encoded and one copied, got:\n%s", got)
+	}
+	// Both land at the requested layout whichever route they took.
+	for _, name := range []string{"mono.opus", "stereo.opus"} {
+		if ch := probeChannels(t, filepath.Join(outDir, name)); ch != 1 {
+			t.Errorf("%s output channels = %d, want 1", name, ch)
+		}
+	}
+}
+
 // TestBitDepthDefeatsBatchCopyThrough: a file already in the target codec is
 // normally copied through untouched, which would silently drop a --bit-depth
-// request. batchTransforms sends it to the encoder instead.
+// request. specChangesAudio sends it to the encoder instead.
 func TestBitDepthDefeatsBatchCopyThrough(t *testing.T) {
 	root := t.TempDir()
 	synthAudio(t, filepath.Join(root, "a.flac"), "flac")

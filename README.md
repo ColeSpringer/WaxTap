@@ -82,9 +82,22 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 ### Notes
 
 - `--channels mono|stereo|surround|any` picks a native layout, defaulting to
-  stereo. `--downmix` allows surround-to-stereo/mono; it never upmixes.
-  `--itag` names an exact encoding, so it overrides `--channels`; the run prints
-  a note when the delivered layout is not the one asked for.
+  stereo. It selects among a video's source streams, so it needs a URL input: on
+  a local file or a directory it exits 2, unless `--downmix` is set too, where it
+  names the fold target instead. (`normalize --album` and `--measure-loudness`
+  reject it either way; neither writes a layout you chose.) `--downmix` allows
+  surround-to-stereo/mono; it never upmixes, and on a file that already has the
+  target layout it is a no-op that costs no re-encode. `--itag` names an exact
+  encoding, so it overrides `--channels`; the run prints a note when the
+  delivered layout is not the one asked for.
+- `--format` names are case-insensitive and trimmed, and a few spellings are
+  aliases: `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, and
+  `remux` for copy.
+- `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
+  and `{index}`. `{index}` numbers playlist items and expands empty for a single
+  video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
+  gives `Song.opus`. It takes only one, so a placeholder padded on both sides
+  (`{index} - {title}.{ext}`) leaves the other separator behind as `- Song.opus`.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
   fallbacks. Results report the client that actually delivered.
 - Normalization applies one scalar gain. `--peak-mode cap` (the default) caps it
@@ -141,9 +154,14 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 - `--collision fail` (the default) and `auto-number` claim the output path with
   the publish itself, so two single-file runs writing the same path cannot both
   report success: the loser exits 2 with the existing-file message and the
-  winner's file is intact. `overwrite` opts into last-writer-wins. Two
-  exceptions: `normalize --album` writes its tracks with a replacing rename, and
-  on a filesystem without hard links (FAT, exFAT, some network shares) the
+  winner's file is intact. `overwrite` opts into last-writer-wins. `skip` leaves
+  the existing file alone and exits 0. On a single-file `transcode`, `normalize`,
+  or `cut` it reports `{"skipped":"exists"}` with the path under `--json`, and
+  prints that path under `--quiet` as a write does; `download` emits the same
+  document without a path, and a directory batch reports the skip as one of its
+  NDJSON item records.
+  Two exceptions: `normalize --album` writes its tracks with a replacing rename,
+  and on a filesystem without hard links (FAT, exFAT, some network shares) the
   publish degrades to a check-then-rename that a concurrent writer can still
   beat.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS

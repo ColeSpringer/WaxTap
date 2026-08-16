@@ -38,6 +38,12 @@ func rejectChangedFlags(cmd *cobra.Command, reason string, names ...string) erro
 // is what produced the half-wired AIFF the 2026-07-28 pass found.
 var transcodeFormatNames = []string{"flac", "alac", "wav", "aiff", "mp3", "aac", "opus", "vorbis"}
 
+// formatSpellingNote documents the aliases parseTranscodeFormat accepts beyond
+// the canonical names. It sits outside formatChoices, which is pinned to exactly
+// the format set, and omits remux=copy on purpose: cut and normalize share this
+// text and must not mention copy at all.
+const formatSpellingNote = " (case-insensitive; ogg=vorbis, m4a=aac, aif=aiff)"
+
 // formatChoices renders the --format choices for help text and errors. withCopy
 // prepends the copy pseudo-format, which remuxes rather than encoding, so the
 // commands that cannot remux (normalize, cut) leave it out.

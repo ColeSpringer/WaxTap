@@ -547,8 +547,8 @@ func TestIsAIFFExt(t *testing.T) {
 		}
 		// Each spelling is container-checked rather than force-muxed, so a mismatched
 		// format is rejected before the encode instead of writing the wrong bytes.
-		if !CanInferContainer("out." + ext) {
-			t.Errorf("CanInferContainer(out.%s) = false; an AIFF spelling must be container-checked", ext)
+		if needsForcedMuxer("out." + ext) {
+			t.Errorf("needsForcedMuxer(out.%s) = true; an AIFF spelling must be container-checked", ext)
 		}
 		if err := CheckOutputContainer(CodecAIFF, "out."+ext); err != nil {
 			t.Errorf("CheckOutputContainer(aiff, out.%s) = %v, want nil", ext, err)
@@ -577,8 +577,15 @@ func TestCheckOutputContainerAndInfer(t *testing.T) {
 	if err := CheckOutputContainer(CodecCopy, "out.flac"); err != nil {
 		t.Errorf("copy is never constrained: %v", err)
 	}
-	if !CanInferContainer("x.flac") || CanInferContainer("x.alac") || CanInferContainer("x") {
-		t.Error("CanInferContainer should accept .flac, reject codec-name/extensionless paths")
+	if needsForcedMuxer("x.flac") || !needsForcedMuxer("x.alac") || !needsForcedMuxer("x") {
+		t.Error("needsForcedMuxer should be false for .flac, true for codec-name/extensionless paths")
+	}
+	// A force-muxed path takes its container from the format, so its extension does
+	// not constrain the codec.
+	for _, out := range []string{"x.alac", "x"} {
+		if err := CheckOutputContainer(CodecFLAC, out); err != nil {
+			t.Errorf("CheckOutputContainer(flac, %q) = %v, want nil", out, err)
+		}
 	}
 }
 

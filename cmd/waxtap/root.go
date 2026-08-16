@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"runtime"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // rootFlags holds values for the persistent output flags. The package-level
@@ -16,6 +18,23 @@ type rootFlags struct {
 }
 
 var rootFlagsValue rootFlags
+
+// jsonRequested reports whether --json survives a parse of args. Flag parsing
+// aborts at the first bad flag, so a --json after one never reaches
+// rootFlagsValue, and the error still has to honor the contract. An allowlisted
+// parse gives real parser semantics: -- terminates, --json=false wins, and an
+// unknown flag's value is stripped without swallowing a following --json.
+//
+// A flag value that is literally "--json" is a benign false positive: a JSON
+// error document instead of a human one, on a path that is already failing.
+func jsonRequested(args []string) bool {
+	fs := pflag.NewFlagSet("probe", pflag.ContinueOnError)
+	fs.ParseErrorsAllowlist = pflag.ParseErrorsAllowlist{UnknownFlags: true}
+	fs.SetOutput(io.Discard)
+	v := fs.Bool("json", false, "")
+	_ = fs.Parse(args)
+	return *v
+}
 
 // newRootCmd builds the root command, its persistent flags, and the full
 // subcommand set. cobra adds the `help` and `completion` commands on its own.
@@ -71,7 +90,9 @@ func wrapUsageErrors(cmd *cobra.Command) {
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return &usageError{msg: err.Error()}
+		// Parsing stopped at the offending token, so anything after it (--json
+		// included) never landed in rootFlagsValue.
+		return unparsedFlagsError(err.Error())
 	})
 	if inner := cmd.Args; inner != nil {
 		cmd.Args = func(c *cobra.Command, args []string) error {

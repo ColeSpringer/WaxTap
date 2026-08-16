@@ -510,6 +510,47 @@ func synthCodec(name string) media.Codec {
 	}
 }
 
+// TestProbeAudioReportsChannels: the channel count decides whether a --downmix
+// has anything to fold, so a caller that only learns the codec has to assume the
+// worst and re-encode.
+func TestProbeAudioReportsChannels(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		channels int
+	}{{"mono.flac", 1}, {"stereo.flac", 2}, {"surround.flac", 6}} {
+		path := filepath.Join(dir, tc.name)
+		src := filepath.Join(t.TempDir(), "src.wav")
+		if err := os.WriteFile(src, mediatest.SineWAV(1, tc.channels), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := media.NewRunner(media.RunnerConfig{})
+		if _, err := r.Transcode(context.Background(), src, path, media.Spec{Codec: media.CodecFLAC}); err != nil {
+			t.Fatalf("synth %s: %v", tc.name, err)
+		}
+		got, err := c.ProbeAudio(context.Background(), path)
+		if err != nil {
+			t.Fatalf("ProbeAudio(%s): %v", tc.name, err)
+		}
+		if got.Codec != "flac" || got.Channels != tc.channels {
+			t.Errorf("ProbeAudio(%s) = %+v, want codec flac with %d channels", tc.name, got, tc.channels)
+		}
+	}
+
+	// A file with no audio stream is still reported as unsupported input.
+	empty := filepath.Join(dir, "empty.flac")
+	if err := os.WriteFile(empty, []byte("not flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ProbeAudio(context.Background(), empty); err == nil {
+		t.Error("ProbeAudio accepted a file with no audio stream")
+	}
+}
+
 // synthSine writes a steady stereo sine fixture in codec, via the in-process
 // engine over a pure-Go WAV (no external tools).
 func synthSine(t *testing.T, dir, name string, seconds int, codec string) string {

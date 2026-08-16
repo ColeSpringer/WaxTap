@@ -83,6 +83,16 @@ GOOS=darwin GOARCH=arm64 go build ./...
 Live tests can be rate-limited or bot-walled from CI or datacenter IPs. A skip is
 expected; a cipher failure is not.
 
+On Windows the suite can fail across every httptest-backed package at once with
+`connectex: Only one usage of each socket address`. That is ephemeral-port
+exhaustion, not a code failure: the default pool is 16384 ports and each is held
+for 120s after close. A full run costs about 135, so this only bites when
+something else on the box is already consuming the pool, and the retry tests in
+`internal/httpx` and `download` amplify it once dials start failing. Confirm with
+`netstat -an | grep -c TIME_WAIT`, work around it with `go test -p 1 ./...`, and
+remove the ceiling with `netsh int ipv4 set dynamicport tcp start=16384
+num=49151` (admin). Linux CI is unaffected.
+
 CI runs formatting, vet, builds, race tests, and cross-compiles. The daily
 `doctor` workflow fails only on exit 4; availability and rate-limit failures
 remain warnings.

@@ -103,9 +103,9 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.StringVar(&df.codec, "codec", "", "select the best source matching a codec (hard filter)")
 	f.StringVarP(&df.out, "out", "o", "", "output file path, or - for stdout (single video; - is not atomic: a mid-stream failure can leave a truncated stream, and the error/exit code go to stderr)")
 	f.StringVarP(&df.dir, "dir", "d", "", "output directory for templated filenames (default: .)")
-	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index})")
+	f.StringVar(&df.template, "output-template", defaultTemplate, "filename template ({title} {id} {author} {itag} {ext} {index}; {index} numbers playlist items and expands empty for a single video, taking one adjacent -, _, or space with it)")
 	bindCollisionFlag(f, &df.collisionStr)
-	f.StringVarP(&df.format, "format", "f", "", "output format: "+formatChoices(true))
+	f.StringVarP(&df.format, "format", "f", "", "output format: "+formatChoices(true)+formatSpellingNote)
 	bindBitrateFlag(f, &df.bitrate)
 	bindBitDepthFlag(f, &df.bitDepth)
 	bindSourceSelectionFlags(f, &df.channels, &df.downmix, &df.noFallback)
@@ -492,7 +492,9 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 			// stream, so the two can never both fire; reportKeptOutput's own guard is
 			// what enforces that.
 			err = finalError(ctx, err)
-			renderError(env.errOut, env.jsonMode(), err)
+			// No command line: the only hint that reads one is for an unknown
+			// command, and this seam is inside a command that already resolved and ran.
+			renderError(env.errOut, env.jsonMode(), err, nil)
 			err = alreadyRendered(err)
 		}()
 	}
@@ -502,14 +504,11 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 		return err
 	}
 	if skipped != "" {
-		rep.info("skipped (%s)\n", skipped)
-		if rep.jsonMode() {
-			return rep.emitJSON(struct {
-				SchemaVersion int    `json:"schemaVersion"`
-				Skipped       string `json:"skipped"`
-			}{schemaVersion, skipped})
-		}
-		return nil
+		// Pathless, which keeps this document byte-identical: resolveItem returns ""
+		// on a skip because the path it resolves feeds the cancellation stamp, and
+		// stamping a skipped item would let a file that was already sitting there be
+		// reported as one this run committed.
+		return emitSkip(rep, skipped, "")
 	}
 
 	// Stamp the output path before the download so a cancellation can tell a file
@@ -630,7 +629,8 @@ func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outP
 	if env.jsonMode() {
 		w = env.out
 	}
-	renderErrorKept(w, env.jsonMode(), err, kept)
+	// nil command line, for the reason the stdout-stream seam gives.
+	renderErrorKept(w, env.jsonMode(), err, nil, kept)
 	if df.archive != nil {
 		// finishItem never ran, so the file is not recorded and a re-run refetches it.
 		// Say so rather than letting the archive look authoritative.

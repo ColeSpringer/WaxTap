@@ -115,7 +115,7 @@ func newNormalizeCmd() *cobra.Command {
 				})
 			}
 
-			if err := validateLocalSourceFlags(cmd, source); err != nil {
+			if err := validateLocalSourceFlags(cmd, env.cfg, isLocalFile(source), downmix); err != nil {
 				return err
 			}
 			if err := validateNormalizeInputFlags(cmd, measure, false, false); err != nil {
@@ -171,8 +171,7 @@ func newNormalizeCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", displayPath(outPath))
-				return nil
+				return emitSkip(env, "exists", outPath)
 			}
 			warnBitrateIgnored(env, tf, bitrate)
 			warnBitDepthIgnored(env, tf, bitDepth)
@@ -193,7 +192,7 @@ func newNormalizeCmd() *cobra.Command {
 	f.BoolVar(&measure, "measure-loudness", false, "measure loudness without writing output")
 	f.Float64Var(&target, "loudness-target", -14, "target integrated loudness (LUFS)")
 	bindPeakModeFlag(f, &peakMode)
-	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(false))
+	f.StringVarP(&format, "format", "f", "", "output format: "+formatChoices(false)+formatSpellingNote)
 	bindBitrateFlag(f, &bitrate)
 	bindBitDepthFlag(f, &bitDepth)
 	f.StringVarP(&out, "out", "o", "", "output file path for one input")

@@ -184,7 +184,7 @@ func TestExitCodeFor(t *testing.T) {
 		{waxtap.ErrRateLimited, 5},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
 		{waxtap.ErrNeedsPOToken, 8},     // distinct precondition failure
-		{&usageError{"bad"}, 2},
+		{&usageError{msg: "bad"}, 2},
 		{waxtap.ErrInvalidVideoID, 2},
 		{waxtap.ErrVideoIDTooShort, 2},
 		{waxtap.ErrInvalidPlaylistID, 2},
@@ -597,7 +597,7 @@ func TestFlagOrderHint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := flagOrderHint(&usageError{msg: tc.msg})
+			got := flagOrderHint(&usageError{msg: tc.msg}, nil)
 			if tc.want == "" {
 				if got != "" {
 					t.Errorf("flagOrderHint(%q) = %q, want no hint", tc.msg, got)
@@ -618,7 +618,7 @@ func TestFlagOrderHint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected pflag to reject -bcdefghijk as shorthand flags")
 		}
-		if got := flagOrderHint(&usageError{msg: err.Error()}); !strings.Contains(got, "-- -bcdefghijk") {
+		if got := flagOrderHint(&usageError{msg: err.Error()}, nil); !strings.Contains(got, "-- -bcdefghijk") {
 			t.Errorf("hint = %q, want the leading-dash guidance", got)
 		}
 	})
@@ -627,7 +627,7 @@ func TestFlagOrderHint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected info to reject the unknown --collision flag")
 		}
-		if got := flagOrderHint(&usageError{msg: err.Error()}); got != "" {
+		if got := flagOrderHint(&usageError{msg: err.Error()}, nil); got != "" {
 			t.Errorf("hint = %q, want none for an 11-char long flag", got)
 		}
 	})
@@ -657,30 +657,37 @@ func TestFlagBeforeSubcommand(t *testing.T) {
 }
 
 func TestFlagOrderHint_GenericOrder(t *testing.T) {
-	saved := os.Args
-	defer func() { os.Args = saved }()
+	// The command line is a parameter, so these cases read it straight rather than
+	// standing in for the process by mutating os.Args.
 
 	// A flag before the subcommand can make cobra report the next token as an
 	// unknown command. The hint explains ordering even when the token is not
 	// target-shaped, and it does not name a specific subcommand.
-	os.Args = []string{"waxtap", "--no-cache", "--cache-dir", "/p", "info", "dQw4w9WgXcQ"}
-	got := flagOrderHint(&usageError{msg: `unknown command "/p" for "waxtap"`})
+	got := flagOrderHint(&usageError{msg: `unknown command "/p" for "waxtap"`},
+		[]string{"--no-cache", "--cache-dir", "/p", "info", "dQw4w9WgXcQ"})
 	if !strings.Contains(got, "before the subcommand") || !strings.Contains(got, "after it") {
 		t.Errorf("flagOrderHint = %q, want the generic flag-ordering guidance", got)
 	}
 
 	// A flag value that coincides with a subcommand name must not be reported as the
 	// swallowed subcommand; the generic hint avoids naming it.
-	os.Args = []string{"waxtap", "--cache-dir", "version", "abc123"}
-	got = flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`})
+	got = flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`},
+		[]string{"--cache-dir", "version", "abc123"})
 	if strings.Contains(got, "version") {
 		t.Errorf("flagOrderHint = %q, must not name a flag value as the subcommand", got)
 	}
 
 	// A genuine subcommand typo (no preceding flag) gets no generic hint.
-	os.Args = []string{"waxtap", "boguscmd"}
-	if got := flagOrderHint(&usageError{msg: `unknown command "boguscmd" for "waxtap"`}); got != "" {
+	if got := flagOrderHint(&usageError{msg: `unknown command "boguscmd" for "waxtap"`},
+		[]string{"boguscmd"}); got != "" {
 		t.Errorf("flagOrderHint = %q, want no hint for a bare subcommand typo", got)
+	}
+
+	// The hint follows the args it is handed, not this process's command line.
+	// report is driven with synthetic args, and a hint computed from `go test`'s
+	// own flags would be nonsense on that path.
+	if got := flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`}, nil); got != "" {
+		t.Errorf("flagOrderHint = %q, want no hint when no command line is given", got)
 	}
 }
 
@@ -710,7 +717,7 @@ func TestRootSubcommandNamesMatchTree(t *testing.T) {
 }
 
 func TestErrorCode(t *testing.T) {
-	if got := errorCode(&usageError{"x"}); got != "usage" {
+	if got := errorCode(&usageError{msg: "x"}); got != "usage" {
 		t.Errorf("errorCode(usage) = %q", got)
 	}
 	if got := errorCode(waxtap.ErrPlaylistParse); got != "stale-parser" {
@@ -825,8 +832,8 @@ func TestRenderErrorKept(t *testing.T) {
 	err := errors.New("something failed")
 	for _, jsonMode := range []bool{false, true} {
 		var plain, kept bytes.Buffer
-		renderError(&plain, jsonMode, err)
-		renderErrorKept(&kept, jsonMode, err, nil)
+		renderError(&plain, jsonMode, err, nil)
+		renderErrorKept(&kept, jsonMode, err, nil, nil)
 		if plain.String() != kept.String() {
 			t.Errorf("jsonMode=%v: nil kept diverged from renderError:\n%q\n%q", jsonMode, plain.String(), kept.String())
 		}
@@ -834,7 +841,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// Human form: the existing error line, then a note naming the file.
 	var human bytes.Buffer
-	renderErrorKept(&human, false, context.Canceled, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&human, false, context.Canceled, nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
 	got := human.String()
 	if !strings.HasPrefix(got, "waxtap: canceled\n") {
 		t.Errorf("human output does not start with the usual error line:\n%q", got)
@@ -849,7 +856,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// JSON form: additive fields on the existing envelope.
 	var doc bytes.Buffer
-	renderErrorKept(&doc, true, context.Canceled, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&doc, true, context.Canceled, nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
 	var envelope struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		OutputPath    string `json:"outputPath"`
@@ -874,7 +881,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// The fields are omitempty, so an ordinary failure document does not gain keys.
 	var bare bytes.Buffer
-	renderError(&bare, true, err)
+	renderError(&bare, true, err, nil)
 	if strings.Contains(bare.String(), "outputPath") {
 		t.Errorf("ordinary error document gained an outputPath key:\n%s", bare.String())
 	}
