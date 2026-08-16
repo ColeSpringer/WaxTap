@@ -503,13 +503,27 @@ const (
 // atomic rename); filename templating, sanitization, and collision handling are
 // the CLI's job, not the library's.
 type Output struct {
-	kind   outputKind
-	path   string
-	writer io.Writer
+	kind      outputKind
+	path      string
+	writer    io.Writer
+	exclusive bool
 }
 
-// ToFile delivers to an exact file path (written atomically via a temp + rename).
+// ToFile delivers to an exact file path (written atomically via a temp + rename),
+// replacing an existing file.
 func ToFile(path string) Output { return Output{kind: outputFile, path: path} }
+
+// ToNewFile delivers to a file path that must not already exist, failing with
+// fs.ErrExist when one is.
+//
+// The publish itself is exclusive rather than a check before it, so two runs
+// racing for one path cannot both report success: the loser fails and the
+// winner's file is intact. Prefer it over ToFile plus a stat whenever an
+// existing file is an error. A filesystem without hard links degrades to a stat
+// and a rename, where a concurrent writer can still be lost.
+func ToNewFile(path string) Output {
+	return Output{kind: outputFile, path: path, exclusive: true}
+}
 
 // ToWriter delivers to a caller-provided writer (bounded memory, no atomicity
 // guarantee).
@@ -635,12 +649,16 @@ const (
 	StageAnalyzing                // measuring loudness
 	StageCutting                  // removing time ranges
 	StageNormalizing              // applying loudness normalization
-	StageTranscoding              // encoding or remuxing audio
+	StageTranscoding              // encoding audio
 	StageFinalizing               // delivering the completed output
 	StageSkipped                  // skipping work because output already exists
 	StageWarning                  // reporting a non-fatal warning
 	StageDone                     // reporting successful completion
 	StageFailed                   // reporting terminal failure
+	// StageRemuxing copies packets into another container with no re-encode. It is
+	// appended rather than placed beside StageTranscoding so the existing values
+	// keep their numbers.
+	StageRemuxing
 )
 
 func (s Stage) String() string {
@@ -663,6 +681,8 @@ func (s Stage) String() string {
 		return "normalizing"
 	case StageTranscoding:
 		return "transcoding"
+	case StageRemuxing:
+		return "remuxing"
 	case StageFinalizing:
 		return "finalizing"
 	case StageSkipped:

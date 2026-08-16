@@ -39,7 +39,8 @@ const (
 	StageAnalyzing                // measuring loudness
 	StageCutting                  // removing time ranges
 	StageNormalizing              // applying loudness normalization
-	StageTranscoding              // encoding or remuxing audio
+	StageTranscoding              // encoding audio
+	StageRemuxing                 // copying packets into another container
 )
 
 func (s Stage) String() string {
@@ -54,6 +55,8 @@ func (s Stage) String() string {
 		return "normalizing"
 	case StageTranscoding:
 		return "transcoding"
+	case StageRemuxing:
+		return "remuxing"
 	default:
 		return "unknown"
 	}
@@ -360,7 +363,15 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			}
 			return nil
 		}
-		send(StageTranscoding)
+		// Branch on the encoder's own codec, not spec.Codec: spec.Codec is
+		// reassigned above by container resolution and the downmix fold, so a
+		// --format copy promoted to a real encoder would otherwise still say
+		// "remuxing".
+		if enc.Codec == media.CodecCopy {
+			send(StageRemuxing)
+		} else {
+			send(StageTranscoding)
+		}
 		_, err := r.Transcode(ctx, input, output, enc)
 		return err
 	}

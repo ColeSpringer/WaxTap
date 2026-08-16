@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,8 +93,10 @@ func TestRenderResultHumanWarningDedup(t *testing.T) {
 		var out, errOut bytes.Buffer
 		env := &appEnv{out: &out, errOut: &errOut, cfg: &appConfig{quiet: true}}
 		renderResultHuman(env, res)
-		if got := strings.TrimRight(out.String(), "\n"); got != "/out.flac" {
-			t.Errorf("quiet stdout = %q, want exactly the output path", got)
+		// The reported path is normalized for the host OS, so compare against the
+		// same helper rather than a hardcoded separator.
+		if got, want := strings.TrimRight(out.String(), "\n"), displayPath("/out.flac"); got != want {
+			t.Errorf("quiet stdout = %q, want exactly the output path %q", got, want)
 		}
 		if e := errOut.String(); !strings.Contains(e, "served WEB") || !strings.Contains(e, "fallback-profile") {
 			t.Errorf("quiet warnings should go to stderr with their code:\n%s", e)
@@ -154,7 +157,7 @@ func TestRenderResultHumanMeasureOnly(t *testing.T) {
 			SourceFormat: waxtap.Format{Itag: 251, Codec: "opus"},
 			SourceBytes:  86700, OutputBytes: 86700,
 		})
-		if !strings.Contains(out, "Output:   /out.opus") {
+		if !strings.Contains(out, "Output:   "+displayPath("/out.opus")) {
 			t.Errorf("a written copy should still show its path:\n%s", out)
 		}
 		if !strings.Contains(out, " in, ") {
@@ -187,4 +190,67 @@ func TestRenderResultHumanMeasureOnly(t *testing.T) {
 			t.Errorf("delivered audio must not be labeled measurement-only:\n%s", got)
 		}
 	})
+}
+
+// TestDisplayPath covers F7: reported paths use one separator per document, and
+// the guards that keep the normalizer from mangling non-paths.
+func TestDisplayPath(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"relative slash path", "album/track_m0.flac", "album" + sep + "track_m0.flac"},
+		{"already native", filepath.Join("album", "out", "track.flac"), filepath.Join("album", "out", "track.flac")},
+		// Separators only. Resolving ".." lexically would rename the file through a
+		// symlinked directory, and these paths are meant to be opened.
+		{"dot segments are preserved", "links/../real/out.mp3", filepath.FromSlash("links/../real/out.mp3")},
+		// Guards: an empty path, the stdout sink, and anything URL-shaped pass
+		// through. filepath.Clean would turn "https://x/y" into "https:\x\y".
+		{"empty", "", ""},
+		{"stdout sink", "-", "-"},
+		{"https url", "https://example.com/a/b", "https://example.com/a/b"},
+		{"http url", "http://example.com/a/b", "http://example.com/a/b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := displayPath(tc.in); got != tc.want {
+				t.Errorf("displayPath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDisplayPathWindowsDriveLetter guards the one case the URL check could get
+// wrong: an absolute Windows path parses as a scheme "c", so single-letter
+// schemes must not be treated as URLs. It runs everywhere because displayPath is
+// not OS-conditional.
+func TestDisplayPathWindowsDriveLetter(t *testing.T) {
+	got := displayPath(`C:/out/track.flac`)
+	if strings.Contains(got, "://") {
+		t.Errorf("displayPath(%q) = %q, want a cleaned path, not a URL passthrough", `C:/out/track.flac`, got)
+	}
+	if !strings.Contains(got, "track.flac") {
+		t.Errorf("displayPath(%q) = %q, want it to keep the filename", `C:/out/track.flac`, got)
+	}
+}
+
+// TestResultJSONPathsShareOneSeparator is F7's reported symptom: one document
+// carrying "album/track.flac" as input and "album\out\track.flac" as output.
+func TestResultJSONPathsShareOneSeparator(t *testing.T) {
+	m := resultToJSON(&waxtap.Result{
+		SourceKind: waxtap.SourceLocalFile,
+		InputPath:  "album/track_m0.flac",
+		OutputPath: filepath.Join("album", "out", "track_m0.flac"),
+	})
+	sep := string(filepath.Separator)
+	for _, p := range []string{m.InputPath, m.OutputPath} {
+		if !strings.Contains(p, sep) {
+			t.Errorf("path %q does not use the OS separator %q", p, sep)
+		}
+		if other := map[bool]string{true: "/", false: `\`}[sep == `\`]; strings.Contains(p, other) {
+			t.Errorf("path %q mixes separators (found %q)", p, other)
+		}
+	}
 }

@@ -988,3 +988,79 @@ func TestRunReportsSourceChannels(t *testing.T) {
 		t.Errorf("output channels = %+v, want fewer than the source's %d", a, res.SourceChannels)
 	}
 }
+
+// TestRunCopyRemuxReportsRemuxing covers F9: `--format copy` reported
+// "transcoding" because the write closure sent StageTranscoding unconditionally.
+// It also pins the subtle half: a copy the pipeline promotes to a real encoder
+// must still report transcoding, so the branch has to read the encoder's own
+// codec and not the requested spec.
+func TestRunCopyRemuxReportsRemuxing(t *testing.T) {
+	r := newTestRunner(t)
+
+	t.Run("copy remux reports remuxing", func(t *testing.T) {
+		dir := t.TempDir()
+		in := synthSine(t, dir, "in.flac", 2, "flac")
+		emit, seen := recordStages()
+		res, err := Run(t.Context(), r, in, filepath.Join(dir, "out.mka"),
+			Spec{Codec: media.CodecCopy, Remux: true}, emit)
+		if err != nil {
+			t.Fatalf("Run remux: %v", err)
+		}
+		if res.Transcoded {
+			t.Error("a container copy re-encoded nothing; Transcoded should stay false")
+		}
+		assertHasStage(t, *seen, StageRemuxing)
+		for _, s := range *seen {
+			if s == StageTranscoding {
+				t.Errorf("a copy remux must not report transcoding; saw %v", *seen)
+			}
+		}
+	})
+
+	// A requested downmix promotes a copy to a real encode at the source codec.
+	// That is a transcode however it was requested, and it is exactly the case
+	// branching on the requested spec.Codec would get wrong: spec.Codec is
+	// reassigned before the write closure is built.
+	t.Run("promoted copy still reports transcoding", func(t *testing.T) {
+		dir := t.TempDir()
+		in := synthSurround(t, dir, "in.flac", 2, "flac")
+		if got := probeChannels(t, r, in); got != 6 {
+			t.Skipf("synth produced %d channels, want 6", got)
+		}
+		emit, seen := recordStages()
+		res, err := Run(t.Context(), r, in, filepath.Join(dir, "out.flac"),
+			Spec{Codec: media.CodecCopy, Downmix: 2}, emit)
+		if err != nil {
+			t.Fatalf("Run promoted copy: %v", err)
+		}
+		if !res.Transcoded {
+			t.Error("a copy promoted to an encoder should report Transcoded")
+		}
+		assertHasStage(t, *seen, StageTranscoding)
+		for _, s := range *seen {
+			if s == StageRemuxing {
+				t.Errorf("a promoted copy must not report remuxing; saw %v", *seen)
+			}
+		}
+	})
+}
+
+// TestStageStringsAreDistinct guards the label the CLI renders: progress.go
+// prints Stage.String() directly, so a new stage needs no rendering change but
+// does need a name of its own.
+func TestStageStringsAreDistinct(t *testing.T) {
+	seen := map[string]Stage{}
+	for _, s := range []Stage{StageProbing, StageAnalyzing, StageCutting, StageNormalizing, StageTranscoding, StageRemuxing} {
+		name := s.String()
+		if name == "unknown" {
+			t.Errorf("stage %d renders as %q", s, name)
+		}
+		if prev, dup := seen[name]; dup {
+			t.Errorf("stages %d and %d share the label %q", prev, s, name)
+		}
+		seen[name] = s
+	}
+	if got := StageRemuxing.String(); got != "remuxing" {
+		t.Errorf("StageRemuxing.String() = %q, want %q", got, "remuxing")
+	}
+}

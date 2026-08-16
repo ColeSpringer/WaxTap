@@ -55,7 +55,7 @@ type batchItemRecord struct {
 // itemRecord builds an item record. Measure records contain loudness instead of
 // an output path.
 func itemRecord(o batchOutcome, measure bool) batchItemRecord {
-	rec := batchItemRecord{SchemaVersion: schemaVersion, Type: "item", Index: o.index + 1, Input: o.input, Status: o.status.String()}
+	rec := batchItemRecord{SchemaVersion: schemaVersion, Type: "item", Index: o.index + 1, Input: displayPath(o.input), Status: o.status.String()}
 	if o.err != nil {
 		rec.Error = friendlyError(o.err)
 	}
@@ -65,7 +65,7 @@ func itemRecord(o batchOutcome, measure bool) batchItemRecord {
 			rec.IntegratedLUFS = &lufs
 		}
 	} else if o.status != statusUnchanged {
-		rec.Output = o.output
+		rec.Output = displayPath(o.output)
 	}
 	if o.result != nil {
 		for _, w := range o.result.Warnings {
@@ -91,19 +91,20 @@ func emitBatchProcess(env *appEnv, outcomes []batchOutcome, ignored int, fmtName
 		return
 	}
 	for _, o := range outcomes {
+		in, out := displayPath(o.input), displayPath(o.output)
 		switch o.status {
 		case statusOK:
-			env.printf("ok:        %s -> %s\n", o.input, o.output)
+			env.printf("ok:        %s -> %s\n", in, out)
 		case statusCopied:
-			env.printf("copied:    %s -> %s (already %s)\n", o.input, o.output, fmtName)
+			env.printf("copied:    %s -> %s (already %s)\n", in, out, fmtName)
 		case statusUnchanged:
-			env.printf("unchanged: %s\n", o.input)
+			env.printf("unchanged: %s\n", in)
 		case statusSkipped:
-			env.printf("skip:      %s (exists)\n", o.output)
+			env.printf("skip:      %s (exists)\n", out)
 		case statusNotRun:
-			env.printf("not run:   %s\n", o.input)
+			env.printf("not run:   %s\n", in)
 		case statusError:
-			env.printf("FAIL:      %s: %s\n", o.input, friendlyError(o.err))
+			env.printf("FAIL:      %s: %s\n", in, friendlyError(o.err))
 		}
 	}
 	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "encoded")
@@ -184,7 +185,7 @@ func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) {
 	tw.Flush()
 	for _, o := range outcomes {
 		if o.status == statusError {
-			env.printf("FAIL: %s: %s\n", o.input, friendlyError(o.err))
+			env.printf("FAIL: %s: %s\n", displayPath(o.input), friendlyError(o.err))
 		}
 	}
 	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "measured")
@@ -196,8 +197,8 @@ func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) {
 // omitted.
 func emitBatchSummaryHuman(env *appEnv, c batchCounts, verb string) {
 	total := c.processed + c.copied + c.unchanged + c.ignored + c.failed + c.skipped + c.notRun
-	line := fmt.Sprintf("%d files: %d %s, %d copied, %d unchanged, %d failed",
-		total, c.processed, verb, c.copied, c.unchanged, c.failed)
+	line := fmt.Sprintf("%s: %d %s, %d copied, %d unchanged, %d failed",
+		countOf(total, "file"), c.processed, verb, c.copied, c.unchanged, c.failed)
 	if c.ignored > 0 {
 		line += fmt.Sprintf(", %d ignored", c.ignored)
 	}

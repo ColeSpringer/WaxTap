@@ -216,3 +216,41 @@ func TestInfoLiveStatusJSON(t *testing.T) {
 		}
 	})
 }
+
+// TestNoteInfoChannelLayout covers F5's second case: `info --channels mono`
+// selects the best available stream and used to report the mismatch nowhere.
+func TestNoteInfoChannelLayout(t *testing.T) {
+	formats := []waxtap.Format{{Itag: 251, Channels: 2}, {Itag: 258, Channels: 6}}
+	selErr := errors.New("no best audio")
+	cases := []struct {
+		name     string
+		layout   waxtap.ChannelLayout
+		explicit bool
+		formats  []waxtap.Format
+		bestIdx  int
+		bestErr  error
+		want     string // substring expected in the note; "" means no note
+	}{
+		{"mono request on a stereo best", waxtap.LayoutMono, true, formats, 0, nil, "requested mono; best audio is stereo (2ch)"},
+		{"stereo request on a surround best", waxtap.LayoutStereo, true, formats, 1, nil, "requested stereo; best audio is 6ch"},
+		{"satisfied request stays quiet", waxtap.LayoutStereo, true, formats, 0, nil, ""},
+		{"default (not explicit) stays quiet", waxtap.LayoutStereo, false, formats, 1, nil, ""},
+		{"any never notes", waxtap.LayoutAny, true, formats, 1, nil, ""},
+		{"selection failure stays quiet", waxtap.LayoutMono, true, formats, -1, selErr, ""},
+		{"index out of range stays quiet", waxtap.LayoutMono, true, formats, 9, nil, ""},
+		{"unknown channel count stays quiet", waxtap.LayoutMono, true, []waxtap.Format{{Itag: 140}}, 0, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			noteInfoChannelLayout(noteEnv(&buf), tc.layout, tc.explicit, tc.formats, tc.bestIdx, tc.bestErr)
+			got := buf.String()
+			switch {
+			case tc.want == "" && got != "":
+				t.Errorf("note = %q, want none", got)
+			case tc.want != "" && !strings.Contains(got, tc.want):
+				t.Errorf("note = %q, want substring %q", got, tc.want)
+			}
+		})
+	}
+}

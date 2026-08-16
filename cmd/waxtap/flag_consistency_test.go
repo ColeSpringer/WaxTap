@@ -294,3 +294,42 @@ func TestSingleDownloadRejectsPlaylistOnlyFlags(t *testing.T) {
 		t.Errorf("single download --concurrency: err = %v (%T), want *usageError", err, err)
 	}
 }
+
+// TestSponsorBlockURLOnCapableCommandsOnly pins F12's flag split:
+// --sponsorblock-url is offered only by the commands that can reach
+// SponsorBlock, and --sponsorblock tracks the same set. The other five bind
+// bindNetworkFlags and used to advertise a flag they then ignored.
+func TestSponsorBlockURLOnCapableCommandsOnly(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmd     *cobra.Command
+		capable bool
+	}{
+		{"download", newDownloadCmd(), true},
+		{"cut", newCutCmd(), true},
+		{"sponsorblock", newSponsorBlockCmd(), true},
+		{"doctor", newDoctorCmd(), false},
+		{"formats", newFormatsCmd(), false},
+		{"info", newInfoCmd(), false},
+		{"normalize", newNormalizeCmd(), false},
+		{"transcode", newTranscodeCmd(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.cmd.Flags()
+			if has := f.Lookup("sponsorblock-url") != nil; has != tc.capable {
+				t.Errorf("%s --sponsorblock-url present = %v, want %v", tc.name, has, tc.capable)
+			}
+			// The two flags must not drift apart: --sponsorblock-url is only useful
+			// where segments are actually fetched.
+			if has := f.Lookup("sponsorblock") != nil; has != tc.capable {
+				t.Errorf("%s --sponsorblock present = %v, want %v", tc.name, has, tc.capable)
+			}
+			// Every one of these binds the rest of the network set, which is what made
+			// the stale flag easy to miss.
+			if f.Lookup("proxy") == nil {
+				t.Errorf("%s should still expose the shared network flags", tc.name)
+			}
+		})
+	}
+}

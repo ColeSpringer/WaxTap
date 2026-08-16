@@ -24,7 +24,10 @@ var exitCodeTable = []exitCodeEntry{
 	{5, "rate limited"},
 	// 6 is retired (formerly "ffmpeg/ffprobe not found"). WaxTap is now a single
 	// static binary with no external runtime dependency, so the code is left
-	// unused rather than renumbered to keep the taxonomy stable.
+	// unused rather than renumbered to keep the taxonomy stable. It is listed so
+	// the table is exhaustive and matches README rather than showing a gap a
+	// reader has to explain.
+	{6, "retired (formerly ffmpeg/ffprobe not found); never returned"},
 	{7, "incomplete stream or expired stream URL (another client may work)"},
 	{8, "PO token required (none configured, mint failed, or YouTube rejected it)"},
 	{9, "network failure (a proxy that is unreachable or rejects CONNECT, unreachable sidecar, connection error, or an upstream HTTP error response)"},

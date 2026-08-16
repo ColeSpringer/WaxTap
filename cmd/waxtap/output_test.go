@@ -839,7 +839,9 @@ func TestRenderErrorKept(t *testing.T) {
 	if !strings.HasPrefix(got, "waxtap: canceled\n") {
 		t.Errorf("human output does not start with the usual error line:\n%q", got)
 	}
-	for _, want := range []string{"note:", "/out/track.flac", "4096 bytes"} {
+	// The kept path is reported, so it is normalized like every other reported
+	// path, in both the human line and the JSON envelope's outputPath.
+	for _, want := range []string{"note:", displayPath("/out/track.flac"), "4096 bytes"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("human output missing %q:\n%s", want, got)
 		}
@@ -863,7 +865,7 @@ func TestRenderErrorKept(t *testing.T) {
 	if envelope.SchemaVersion != schemaVersion {
 		t.Errorf("schemaVersion = %d, want %d", envelope.SchemaVersion, schemaVersion)
 	}
-	if envelope.OutputPath != "/out/track.flac" || envelope.OutputBytes != 4096 {
+	if envelope.OutputPath != displayPath("/out/track.flac") || envelope.OutputBytes != 4096 {
 		t.Errorf("envelope = %+v, want the kept path and byte count", envelope)
 	}
 	if envelope.Error.Code != "canceled" {
@@ -910,5 +912,88 @@ func TestFriendlyError_IncompleteStreamWithoutAttempts(t *testing.T) {
 	}
 	if got := friendlyError(&waxtap.IncompleteDeliveryError{Err: waxtap.ErrIncompleteStream}); got != "the download ended before the full stream was received" {
 		t.Errorf("msg = %q, want the fixed sentence alone", got)
+	}
+}
+
+// TestClassifyError_OutputCollision covers F6's reporting half: an exclusive
+// publish that lost the race is a collision, not a raw OS I/O failure, so it
+// exits like the sequential pre-flight instead of exit 10 with
+// "rename race3.mp3: Access is denied.".
+func TestClassifyError_OutputCollision(t *testing.T) {
+	exists := tempfile.WrapOutput("publish", &fs.PathError{Op: "publish", Path: "/out/race3.mp3", Err: fs.ErrExist})
+
+	c := classifyError(exists)
+	if c.exitCode != 2 || c.code != "usage" {
+		t.Errorf("collision = %+v, want usage/2", c)
+	}
+	if !strings.Contains(c.message, "output file already exists: /out/race3.mp3") {
+		t.Errorf("message = %q, want the existing-file wording naming the path", c.message)
+	}
+	// Every CLI path stats the destination before starting, so a collision that
+	// only shows up at publish time means the file appeared mid-run. Saying that
+	// is the one wording that is also right under --collision auto-number, which
+	// already picked a free name and cannot be told to pick one again.
+	if !strings.Contains(c.message, "while this run was working") {
+		t.Errorf("message = %q, want it to say the file appeared mid-run", c.message)
+	}
+	if strings.Contains(c.message, "auto-number") {
+		t.Errorf("message = %q, must not advise a mode that may already be set and cannot help", c.message)
+	}
+	// Scripts read the exit code and the machine code; those match the sequential
+	// pre-flight collision exactly.
+	seq := classifyError(usagef("output file already exists: %s (set --collision to auto-number, overwrite, or skip)", "/out/race3.mp3"))
+	if seq.exitCode != c.exitCode || seq.code != c.code {
+		t.Errorf("concurrent loser = %+v, sequential = %+v; want the same exit code and machine code", c, seq)
+	}
+}
+
+// TestFriendlyError_OutputStepScopesConcurrencyNote pins that the "another
+// process" clause rides only on the publish steps. On a create, chmod, sync, or
+// close failure it points away from the real cause.
+func TestFriendlyError_OutputStepScopesConcurrencyNote(t *testing.T) {
+	const clause = "another process may be writing"
+	cases := []struct {
+		op   string
+		want bool
+	}{
+		{"publish", true},
+		{"rename", true},
+		{"create", false},
+		{"chmod", false},
+		{"sync", false},
+		{"close", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			err := tempfile.WrapOutput(tc.op, &fs.PathError{Op: tc.op, Path: "/out/x.flac", Err: errFake("no space left on device")})
+			msg := friendlyError(err)
+			if got := strings.Contains(msg, clause); got != tc.want {
+				t.Errorf("%s message = %q; concurrency clause present = %v, want %v", tc.op, msg, got, tc.want)
+			}
+			if !strings.Contains(msg, "no space left on device") {
+				t.Errorf("%s message = %q, want it to keep the OS reason", tc.op, msg)
+			}
+		})
+	}
+}
+
+// TestFriendlyError_OutputPublishFailure covers the other tempfile.OutputError
+// branch: a real publish failure names the step, the destination, and the OS
+// reason, and stays exit 10.
+func TestFriendlyError_OutputPublishFailure(t *testing.T) {
+	re := tempfile.WrapOutput("rename", &fs.PathError{Op: "rename", Path: "/out/race3.mp3", Err: errFake("Access is denied.")})
+
+	c := classifyError(re)
+	if c.exitCode != 10 || c.code != "io" {
+		t.Errorf("publish failure = %+v, want io/10", c)
+	}
+	for _, want := range []string{"could not rename the finished file", "/out/race3.mp3", "Access is denied.", "another process may be writing the same output path"} {
+		if !strings.Contains(c.message, want) {
+			t.Errorf("message = %q, want it to contain %q", c.message, want)
+		}
+	}
+	// The bare OS sentence is not what the user sees any more.
+	if strings.HasPrefix(c.message, "rename ") {
+		t.Errorf("message = %q, want the explained form, not the raw OS error", c.message)
 	}
 }

@@ -30,7 +30,10 @@ func TestWarnChannelLayout(t *testing.T) {
 		{"explicit stereo on mono", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo}, res(1, 1), "requested stereo; delivered mono (1ch)"},
 		{"default stereo satisfied", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo}, res(2, 2), ""},
 		{"not explicit", &downloadFlags{channelsExplicit: false, layout: waxtap.LayoutSurround}, res(2, 2), ""},
-		{"itag ignores layout", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutSurround, itag: 251}, res(2, 2), ""},
+		// An exact --itag bypasses the layout preference in format.Select, so the
+		// mismatch is reported with that reason instead of being suppressed.
+		{"itag names the reason", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo, itag: 258}, res(6, 6), "--itag names an exact encoding, so --channels did not affect selection; requested stereo, delivered 6ch"},
+		{"itag satisfying the layout stays quiet", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo, itag: 251}, res(2, 2), ""},
 		{"any never warns", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutAny}, res(2, 2), ""},
 		{"unknown delivered count", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutSurround}, res(0, 0), ""},
 		{"falls back to source channels", &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutSurround}, res(0, 2), "delivered stereo (2ch)"},
@@ -326,5 +329,111 @@ func TestMeasureNote(t *testing.T) {
 				t.Errorf("measureNote emitted=%v (%q), want %v", got, buf.String(), tc.want)
 			}
 		})
+	}
+}
+
+// TestConcurrencyClampNoteDeferred covers F11: resolve ran clampConcurrency
+// before runDownload classified the argument, so a single video was told its
+// --concurrency had been clamped and then told the flag does not apply at all.
+func TestConcurrencyClampNoteDeferred(t *testing.T) {
+	t.Run("clampConcurrency is silent and reports the clamp", func(t *testing.T) {
+		n, clamped, err := clampConcurrency(1000)
+		if err != nil {
+			t.Fatalf("clampConcurrency: %v", err)
+		}
+		if n != maxConcurrency || !clamped {
+			t.Errorf("clampConcurrency(1000) = (%d, %v), want (%d, true)", n, clamped, maxConcurrency)
+		}
+		if n, clamped, err := clampConcurrency(4); err != nil || n != 4 || clamped {
+			t.Errorf("clampConcurrency(4) = (%d, %v, %v), want (4, false, nil)", n, clamped, err)
+		}
+		// Zero is preserved so each caller applies its own default.
+		if n, _, err := clampConcurrency(0); err != nil || n != 0 {
+			t.Errorf("clampConcurrency(0) = (%d, %v), want (0, nil)", n, err)
+		}
+		if _, _, err := clampConcurrency(-1); err == nil {
+			t.Error("clampConcurrency(-1) should be a usage error")
+		}
+	})
+
+	t.Run("single video rejects the flag without noting a clamp", func(t *testing.T) {
+		cmd := newDownloadCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetArgs([]string{"dummyVideo0", "--concurrency", "1000"})
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		if _, ok := errors.AsType[*usageError](err); !ok {
+			t.Fatalf("err = %v (%T), want *usageError rejecting --concurrency", err, err)
+		}
+		if strings.Contains(errOut.String()+out.String(), "clamping to") {
+			t.Errorf("a rejected --concurrency must not also report a clamp:\n%s%s", errOut.String(), out.String())
+		}
+	})
+
+	// Batch keeps the note: --concurrency is valid there and the clamp changes what runs.
+	t.Run("batch still notes the clamp", func(t *testing.T) {
+		var buf bytes.Buffer
+		n, err := batchConcurrency(noteEnv(&buf), 1000)
+		if err != nil {
+			t.Fatalf("batchConcurrency: %v", err)
+		}
+		if n != maxConcurrency {
+			t.Errorf("batchConcurrency(1000) = %d, want %d", n, maxConcurrency)
+		}
+		if !strings.Contains(buf.String(), "clamping to") {
+			t.Errorf("batch note = %q, want the clamp note", buf.String())
+		}
+	})
+}
+
+// TestCountOf pins the one pluralizer every count goes through, so "1 files"
+// cannot come back one summary line at a time.
+func TestCountOf(t *testing.T) {
+	cases := []struct {
+		n    int
+		unit string
+		want string
+	}{
+		{0, "file", "0 files"},
+		{1, "file", "1 file"},
+		{2, "file", "2 files"},
+		{1, "item", "1 item"},
+		{3, "item", "3 items"},
+		{1, "error", "1 error"},
+		{2, "error", "2 errors"},
+	}
+	for _, tc := range cases {
+		if got := countOf(tc.n, tc.unit); got != tc.want {
+			t.Errorf("countOf(%d, %q) = %q, want %q", tc.n, tc.unit, got, tc.want)
+		}
+	}
+}
+
+// TestWarnChannelLayoutItagNoteOnce covers the playlist case: the --itag note is
+// the same sentence for every item because the itag fixes the encoding, so a
+// 200-item run must not print 200 copies of it. The delivered-vs-requested note
+// stays per item, since that one varies with the video.
+func TestWarnChannelLayoutItagNoteOnce(t *testing.T) {
+	res := &waxtap.Result{OutputFormat: waxtap.Format{Channels: 6}, SourceFormat: waxtap.Format{Channels: 6}}
+
+	var buf bytes.Buffer
+	df := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo, itag: 258}
+	env := noteEnv(&buf)
+	for range 5 {
+		warnChannelLayout(env, df, res)
+	}
+	if got := strings.Count(buf.String(), "--itag names an exact encoding"); got != 1 {
+		t.Errorf("itag note printed %d times, want 1:\n%s", got, buf.String())
+	}
+
+	var buf2 bytes.Buffer
+	noItag := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo}
+	env2 := noteEnv(&buf2)
+	for range 3 {
+		warnChannelLayout(env2, noItag, res)
+	}
+	if got := strings.Count(buf2.String(), "requested stereo; delivered"); got != 3 {
+		t.Errorf("per-item note printed %d times, want 3 (it varies with the video)", got)
 	}
 }

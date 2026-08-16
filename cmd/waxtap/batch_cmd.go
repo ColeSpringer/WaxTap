@@ -77,7 +77,7 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 	if err != nil {
 		return err
 	}
-	processFn := fileProcessFn(env, spec)
+	processFn := fileProcessFn(env, spec, mode)
 	outcomes := runBatchJobs(ctx, jobs, concurrency, processFn, batchProgress(env, len(jobs)))
 	emitBatchProcess(env, outcomes, ignored, transcodeExt(tf))
 	return batchExit(ctx, outcomes)
@@ -179,17 +179,20 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 	if err != nil {
 		return err
 	}
-	processFn := fileProcessFn(env, spec)
+	processFn := fileProcessFn(env, spec, mode)
 	outcomes := runBatchJobs(ctx, jobs, concurrency, processFn, batchProgress(env, len(jobs)))
 	emitBatchProcess(env, outcomes, ignored, transcodeExt(tf))
 	return batchExit(ctx, outcomes)
 }
 
 // fileProcessFn returns a processor that gives each job its own output path.
-func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec) func(context.Context, string, string) (*waxtap.Result, error) {
+// The collision mode decides whether that delivery is exclusive, the same as on
+// the single-file commands: planBatchOutputs resolves collisions within this
+// run, but another process can still hold the path.
+func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec, mode collisionMode) func(context.Context, string, string) (*waxtap.Result, error) {
 	return func(ctx context.Context, input, output string) (*waxtap.Result, error) {
 		s := spec
-		s.Output = waxtap.ToFile(output)
+		s.Output = outputFor(output, mode)
 		return env.client.Process(ctx, waxtap.ProcessRequest{Input: input, ProcessSpec: s})
 	}
 }
@@ -198,9 +201,15 @@ func fileProcessFn(env *appEnv, spec waxtap.ProcessSpec) func(context.Context, s
 // default, or an explicit --concurrency 0) means serial; only negatives are
 // rejected. It does not auto-detect cores.
 func batchConcurrency(env *appEnv, n int) (int, error) {
-	n, err := clampConcurrency(env, n)
+	requested := n
+	n, clamped, err := clampConcurrency(n)
 	if err != nil {
 		return 0, err
+	}
+	// --concurrency is valid here, so the note belongs on this path and must not
+	// be lost when clampConcurrency stops printing it itself.
+	if clamped {
+		noteConcurrencyClamp(env, requested)
 	}
 	if n == 0 {
 		n = 1

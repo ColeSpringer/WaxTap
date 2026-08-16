@@ -58,6 +58,43 @@ func (e *emitter) warn(code WarningCode, detail string) {
 	e.raw(Event{Stage: StageWarning, Warning: &w})
 }
 
+// warnNth records a warning whose detail is built from its ordinal among the
+// warnings this job has already recorded under code or any of alsoCount. One
+// entry per event is intended for a few codes (a session rotation, a URL
+// refresh), and two entries with an identical code and detail read as a
+// duplicated bug report rather than as a run that rotated twice, so those
+// entries number themselves.
+//
+// alsoCount shares one sequence across codes that report the same underlying
+// event in different words: a rotation is also a refresh, so numbering them
+// separately would produce warning ordinals that do not add up against the
+// refresh count on the completion breadcrumb.
+//
+// The count and the append are one critical section, so concurrent callers
+// cannot draw the same ordinal. It is job-wide rather than per-attempt: a
+// whole-chain retry runs on a fresh attempt with its own counters, and its
+// rotation is still the job's second.
+//
+// detail runs under the warnings lock, so it must not touch the emitter: warn,
+// collected, and emitThrottle all take the same non-reentrant mutex. Keep it a
+// pure formatter of its argument.
+func (e *emitter) warnNth(code WarningCode, detail func(n int) string, alsoCount ...WarningCode) {
+	counts := func(c WarningCode) bool {
+		return c == code || slices.Contains(alsoCount, c)
+	}
+	e.warnMu.Lock()
+	n := 1
+	for _, w := range e.warnings {
+		if counts(w.Code) {
+			n++
+		}
+	}
+	w := Warning{Code: code, Detail: detail(n)}
+	e.warnings = append(e.warnings, w)
+	e.warnMu.Unlock()
+	e.raw(Event{Stage: StageWarning, Warning: &w})
+}
+
 func (e *emitter) done()            { e.raw(Event{Stage: StageDone}) }
 func (e *emitter) failed(err error) { e.raw(Event{Stage: StageFailed, Err: err}) }
 
@@ -142,6 +179,8 @@ func mapPipelineStage(s pipeline.Stage) Stage {
 		return StageNormalizing
 	case pipeline.StageTranscoding:
 		return StageTranscoding
+	case pipeline.StageRemuxing:
+		return StageRemuxing
 	default:
 		return StageProbing
 	}

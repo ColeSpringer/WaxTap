@@ -347,13 +347,13 @@ func newCutCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", outPath)
+				env.info("skipped (exists): %s\n", displayPath(outPath))
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
 			warnBitrateIgnored(env, tf, bitrate)
 			warnBitDepthIgnored(env, tf, bitDepth)
-			spec.Output = waxtap.ToFile(outPath)
+			spec.Output = outputFor(outPath, mc)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
@@ -381,6 +381,7 @@ func newCutCmd() *cobra.Command {
 	bindCollisionFlag(f, &collisionStr)
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
+	bindSponsorBlockURLFlag(f)
 	bindPlayerExtractionFlags(f)
 	return cmd
 }
@@ -488,13 +489,13 @@ func newTranscodeCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", outPath)
+				env.info("skipped (exists): %s\n", displayPath(outPath))
 				return nil
 			}
 			warnALACToAlacExt(env, outPath, tf)
 			warnBitrateIgnored(env, tf, bitrate)
 			warnBitDepthIgnored(env, tf, bitDepth)
-			spec.Output = waxtap.ToFile(outPath)
+			spec.Output = outputFor(outPath, mc)
 
 			// If a local file already uses the requested codec and no other transform
 			// is pending, stream-copy it instead of encoding it again. This avoids

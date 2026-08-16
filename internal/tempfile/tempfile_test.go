@@ -2,6 +2,7 @@ package tempfile
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,5 +359,250 @@ func TestScratchCleanup(t *testing.T) {
 	// Idempotent.
 	if err := cleanup(); err != nil {
 		t.Fatalf("second cleanup: %v", err)
+	}
+}
+
+// TestCommitNew publishes onto a free path and leaves nothing staged behind.
+func TestCommitNew(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.bin")
+
+	f, err := New(final)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Discard()
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.CommitNew(); err != nil {
+		t.Fatalf("CommitNew: %v", err)
+	}
+	got, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("content = %q, want %q", got, "hello")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want 1 (only the final file); the staged link was not removed", len(entries))
+	}
+}
+
+// TestCommitNewRefusesOccupiedPath is the F6 guarantee: the publish itself is
+// what claims the path, so the loser fails and the existing file is untouched.
+func TestCommitNewRefusesOccupiedPath(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(final, []byte("winner"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	f, err := New(final)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Discard()
+	if _, err := f.Write([]byte("loser")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	err = f.CommitNew()
+	if err == nil {
+		t.Fatal("CommitNew onto an existing path succeeded, want fs.ErrExist")
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("CommitNew error = %v, want it to wrap fs.ErrExist", err)
+	}
+	var oe *OutputError
+	if !errors.As(err, &oe) {
+		t.Fatalf("CommitNew error = %T, want an *OutputError", err)
+	}
+	if oe.Op != "publish" {
+		t.Errorf("Op = %q, want %q", oe.Op, "publish")
+	}
+	if !strings.Contains(err.Error(), final) {
+		t.Errorf("message = %q, want it to name the destination", err.Error())
+	}
+
+	got, _ := os.ReadFile(final)
+	if string(got) != "winner" {
+		t.Fatalf("existing file = %q, want it left intact", got)
+	}
+	// Discard must still clear the staged file the loser wrote.
+	if err := f.Discard(); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want 1; the failed publish left a temp behind", len(entries))
+	}
+}
+
+// TestExternalCommitNew mirrors TestCommitNew for the staged-by-another-writer
+// type, which is the seam Process and Download publish through.
+func TestExternalCommitNew(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.flac")
+
+	e, err := NewExternal(final, "")
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	defer e.Discard()
+	if filepath.Ext(e.Path()) != ".flac" {
+		t.Fatalf("staged path %q, want it to keep the destination extension", e.Path())
+	}
+	if err := os.WriteFile(e.Path(), []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+	if err := e.CommitNew(); err != nil {
+		t.Fatalf("CommitNew: %v", err)
+	}
+	if got, _ := os.ReadFile(final); string(got) != "audio" {
+		t.Fatalf("content = %q, want %q", got, "audio")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want 1", len(entries))
+	}
+
+	// A second run staging the same destination loses the race.
+	e2, err := NewExternal(final, "")
+	if err != nil {
+		t.Fatalf("NewExternal (second): %v", err)
+	}
+	defer e2.Discard()
+	if err := os.WriteFile(e2.Path(), []byte("other"), 0o644); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+	if err := e2.CommitNew(); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("CommitNew error = %v, want fs.ErrExist", err)
+	}
+	if got, _ := os.ReadFile(final); string(got) != "audio" {
+		t.Fatalf("delivered file = %q, want the winner's bytes", got)
+	}
+}
+
+// TestPublishNewRefusesOccupiedPath covers the link path directly, without a
+// staged File or External in the way.
+func TestPublishNewRefusesOccupiedPath(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "staged.bin")
+	dst := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("seed src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("winner"), 0o644); err != nil {
+		t.Fatalf("seed dst: %v", err)
+	}
+	if err := PublishNew(src, dst); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("PublishNew onto an occupied path = %v, want fs.ErrExist", err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "winner" {
+		t.Fatalf("destination = %q, want it untouched", got)
+	}
+
+	free := filepath.Join(dir, "free.bin")
+	if err := PublishNew(src, free); err != nil {
+		t.Fatalf("PublishNew onto a free path: %v", err)
+	}
+	if got, _ := os.ReadFile(free); string(got) != "payload" {
+		t.Fatalf("published = %q, want %q", got, "payload")
+	}
+	if _, err := os.Stat(src); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("source still present after PublishNew (stat err = %v)", err)
+	}
+}
+
+// TestPublishNewFallsBackWithoutHardLinks covers the FAT/exFAT/SMB path, where
+// os.Link is unavailable and the publish degrades to a stat and a rename. It
+// forces that branch through the link seam, because a test filesystem that
+// supports hard links never reaches it otherwise: without this, a regression
+// that dropped the exists check and started overwriting on those filesystems
+// would pass every test in this package.
+func TestPublishNewFallsBackWithoutHardLinks(t *testing.T) {
+	noLinks := func(t *testing.T) {
+		t.Helper()
+		prev := link
+		link = func(string, string) error {
+			return &os.LinkError{Op: "link", Err: errors.ErrUnsupported}
+		}
+		t.Cleanup(func() { link = prev })
+	}
+
+	t.Run("free path publishes by rename", func(t *testing.T) {
+		noLinks(t)
+		dir := t.TempDir()
+		src := filepath.Join(dir, "staged.bin")
+		dst := filepath.Join(dir, "out.bin")
+		if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+			t.Fatalf("seed src: %v", err)
+		}
+		if err := PublishNew(src, dst); err != nil {
+			t.Fatalf("PublishNew with no link support: %v", err)
+		}
+		if got, _ := os.ReadFile(dst); string(got) != "payload" {
+			t.Errorf("published = %q, want %q", got, "payload")
+		}
+		if _, err := os.Stat(src); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("source still present after the rename fallback (stat err = %v)", err)
+		}
+	})
+
+	// The fallback is not atomic against a concurrent writer, but it must still
+	// refuse a destination that is already there.
+	t.Run("occupied path is still refused", func(t *testing.T) {
+		noLinks(t)
+		dir := t.TempDir()
+		src := filepath.Join(dir, "staged.bin")
+		dst := filepath.Join(dir, "out.bin")
+		if err := os.WriteFile(src, []byte("loser"), 0o644); err != nil {
+			t.Fatalf("seed src: %v", err)
+		}
+		if err := os.WriteFile(dst, []byte("winner"), 0o644); err != nil {
+			t.Fatalf("seed dst: %v", err)
+		}
+		err := PublishNew(src, dst)
+		if !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("PublishNew onto an occupied path = %v, want fs.ErrExist", err)
+		}
+		if got, _ := os.ReadFile(dst); string(got) != "winner" {
+			t.Errorf("destination = %q, want it untouched by the fallback", got)
+		}
+	})
+}
+
+// TestDiscardClearsAStagedLeftover covers the unlink that PublishNew is allowed
+// to lose: the destination is published either way, and Discard is the retry
+// that keeps a staged file (which carries the destination's extension) from
+// being picked up later as a real input.
+func TestDiscardClearsAStagedLeftover(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "out.flac")
+
+	e, err := NewExternal(final, "")
+	if err != nil {
+		t.Fatalf("NewExternal: %v", err)
+	}
+	if err := os.WriteFile(e.Path(), []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+	if err := e.CommitNew(); err != nil {
+		t.Fatalf("CommitNew: %v", err)
+	}
+	// Stand in for an unlink that lost the race: the publish succeeded, and the
+	// staged copy is still on disk with an audio extension.
+	if err := os.WriteFile(e.Path(), []byte("leftover"), 0o644); err != nil {
+		t.Fatalf("recreate staged: %v", err)
+	}
+	if err := e.Discard(); err != nil {
+		t.Fatalf("Discard after commit: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want 1; Discard did not clear the leftover", len(entries))
+	}
+	if got, _ := os.ReadFile(final); string(got) != "audio" {
+		t.Errorf("published file = %q, want it untouched by Discard", got)
 	}
 }

@@ -418,10 +418,19 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 		lastExpiry = nplan.Direct.ExpiresAt
 		identityGen = rext.IdentityGeneration()
 		stats.recordRefresh(identityGen)
+		// One warning per event is intended, so each carries its ordinal rather
+		// than arriving as an indistinguishable duplicate. Both codes share one
+		// sequence because a rotation is also a refresh: numbering them apart
+		// would give a reader "refresh 1, rotation 1, refresh 2" for what the
+		// completion breadcrumb counts as three refreshes.
 		if rotated {
-			em.warn(WarnSessionRotated, "the server rejected a stream URL well before its expiry; continuing with a new session")
+			em.warnNth(WarnSessionRotated, func(n int) string {
+				return fmt.Sprintf("the server rejected a stream URL well before its expiry; continuing with a new session (refresh %d)", n)
+			}, WarnURLReResolved)
 		} else {
-			em.warn(WarnURLReResolved, "stream URL re-resolved after expiry")
+			em.warnNth(WarnURLReResolved, func(n int) string {
+				return fmt.Sprintf("stream URL re-resolved after expiry (refresh %d)", n)
+			}, WarnSessionRotated)
 		}
 		return toSource(*nplan.Direct), nil
 	}
@@ -1096,8 +1105,23 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *emitter) (*Result, error) {
 	switch req.Output.kind {
 	case outputFile:
-		a, r, _, err := c.acquireAndDownload(ctx, req, id, em, func(*acquired) string { return req.Output.path })
+		// An exclusive output downloads to a staging path beside the destination,
+		// so the link below is what claims it. Every retried attempt rewrites the
+		// same staging path, as they do the destination today.
+		staging, err := stageExclusive(req.Output)
 		if err != nil {
+			return nil, err
+		}
+		dst := req.Output.path
+		if staging != nil {
+			defer staging.Discard() // no-op after a successful publish
+			dst = staging.Path()
+		}
+		a, r, _, err := c.acquireAndDownload(ctx, req, id, em, func(*acquired) string { return dst })
+		if err != nil {
+			return nil, err
+		}
+		if err := publishProduced(dst, staging, req.Output); err != nil {
 			return nil, err
 		}
 		em.stage(StageFinalizing)
@@ -1161,6 +1185,16 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 	if req.Output.kind == outputFile {
 		pipeOut = req.Output.path
 	}
+	// An exclusive output stages beside the destination so the publish below, not
+	// the pipeline's own write, is what claims the path.
+	staging, err := stageExclusive(req.Output)
+	if err != nil {
+		return nil, err
+	}
+	if staging != nil {
+		defer staging.Discard() // no-op after a successful publish
+		pipeOut = staging.Path()
+	}
 
 	deliver, res, err := c.produce(ctx, req, id, jobDir, pipeOut, em)
 	if err != nil {
@@ -1170,12 +1204,10 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 	em.stage(StageFinalizing)
 	switch req.Output.kind {
 	case outputFile:
-		if deliver != req.Output.path {
-			// Measure-only/no-op: the pipeline wrote nothing, so move the staged
-			// source into place.
-			if err := moveFile(deliver, req.Output.path); err != nil {
-				return nil, err
-			}
+		// A measure-only or no-op pass wrote nothing, so deliver is the staged
+		// source in jobDir and publishProduced moves it into place.
+		if err := publishProduced(deliver, staging, req.Output); err != nil {
+			return nil, err
 		}
 		res.OutputPath = req.Output.path
 		res.OutputBytes = fileSize(req.Output.path)
@@ -1248,7 +1280,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// downmix needs the probe to decide whether to fold. An embed post-pass may
 	// still tag the staged source in place.
 	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil && !req.Downmix {
-		c.embedMetadata(ctx, srcPath, embedExt, a.video, eo, em)
+		c.embedMetadata(ctx, srcPath, req.Output.path, embedExt, a.video, eo, em)
 		res := &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      a.video.ID,
@@ -1284,7 +1316,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// A rendered cut moved every later chapter mark; the embed pass remaps them
 	// onto the delivered timeline.
 	eo.cut = appliedCutFrom(pres)
-	c.embedMetadata(ctx, deliver, embedExt, a.video, eo, em)
+	c.embedMetadata(ctx, deliver, req.Output.path, embedExt, a.video, eo, em)
 
 	var explicit []cutrange.Range
 	if req.Cut != nil {

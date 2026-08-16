@@ -31,6 +31,17 @@ func bindNetworkFlags(f *pflag.FlagSet) {
 	f.Duration("cooldown", 0, "base host cooldown after a rate-limit response (0 = none)")
 	f.String("hl", "", "InnerTube host language, e.g. en, de, ja (default: en)")
 	f.String("gl", "", "content region hint, e.g. US, DE, JP (default: US)")
+}
+
+// bindSponsorBlockURLFlag registers --sponsorblock-url, for the three commands
+// that can reach SponsorBlock. It is deliberately not part of bindNetworkFlags:
+// doctor, formats, info, normalize, and transcode bind that set but have no
+// SponsorBlock capability, so the flag was offered and then ignored there.
+//
+// loadConfig still reads the value by name through flagPtr, whose flags.Changed
+// returns false for an absent flag, so the config-file key and the environment
+// variable are unaffected on every command.
+func bindSponsorBlockURLFlag(f *pflag.FlagSet) {
 	f.String("sponsorblock-url", "", "override the SponsorBlock API base URL (default: public server)")
 }
 

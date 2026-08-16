@@ -64,6 +64,16 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		defer os.RemoveAll(jobDir)
 		pipeOut = filepath.Join(jobDir, "output"+outputExt(req.Transcode, srcExt))
 	}
+	// An exclusive file output stages beside the destination instead: the publish
+	// below, not the pipeline's own write, is what claims the path.
+	staging, err := stageExclusive(req.Output)
+	if err != nil {
+		return nil, err
+	}
+	if staging != nil {
+		defer staging.Discard() // no-op after a successful publish
+		pipeOut = staging.Path()
+	}
 
 	em.stage(StageStaging)
 	ranges := cutRanges(processRanges(req.Cut))
@@ -96,24 +106,20 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		// re-encode and no cut means the output is a whole-file packet copy, the
 		// one case where own-audio tags still hold.
 		remuxed := !pres.Transcoded && !pres.Cut
-		c.carryTags(ctx, req.Input, deliver, appliedCutFrom(pres), remuxed, em)
+		c.carryTags(ctx, req.Input, deliver, req.Output.path, appliedCutFrom(pres), remuxed, em)
 	}
 
 	em.stage(StageFinalizing)
 	switch req.Output.kind {
 	case outputFile:
-		switch {
-		case deliver == req.Output.path:
-			// The pipeline wrote the destination directly.
-		case measureOnly:
-			// Measure-only: copy the unchanged input (never move it).
-			if err := copyFile(req.Input, req.Output.path); err != nil {
+		// Measure-only delivers the caller's own input, which must be copied and
+		// never moved, so it is settled before the shared publish.
+		if measureOnly {
+			if err := copyFile(req.Input, req.Output.path, req.Output.exclusive); err != nil {
 				return nil, err
 			}
-		default:
-			if err := moveFile(deliver, req.Output.path); err != nil {
-				return nil, err
-			}
+		} else if err := publishProduced(deliver, staging, req.Output); err != nil {
+			return nil, err
 		}
 		res.OutputPath = req.Output.path
 		res.OutputBytes = fileSize(req.Output.path)
@@ -283,6 +289,11 @@ func WithAlbumPeakMode(m PeakMode) AlbumOption {
 // Each track's embedded metadata is carried onto its output, the same pass
 // Process runs; carry losses accumulate in the result's Warnings, as does a
 // delivered loudness that misses the target.
+//
+// Tracks are written by path rather than through an [Output], so each one
+// publishes with a replacing rename: [ToNewFile]'s exclusive delivery is not
+// available here, and two concurrent runs writing one album directory can still
+// lose a track.
 func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target float64, spec TranscodeSpec, opts ...AlbumOption) (*AlbumProcessResult, error) {
 	if len(tracks) == 0 {
 		return nil, fmt.Errorf("waxtap.ProcessAlbum: no inputs")
@@ -382,7 +393,9 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album tracks are always re-encoded, so no cut remap and no own-audio
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
 		// gain just changed the loudness it describes.
-		c.carryTags(ctx, t.Input, t.Output, nil, false, em)
+		// Album tracks are written straight to their destinations, so the file
+		// warnings name is the file that was written.
+		c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, em)
 		res.Outputs[i] = t.Output
 	}
 	fold.warn(em, codec)

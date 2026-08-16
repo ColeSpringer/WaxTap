@@ -48,6 +48,7 @@ func newSponsorBlockCmd() *cobra.Command {
 	bindSponsorBlockFlag(cmd.Flags(), &categories, "categories to preview (comma-separated; bare flag selects music_offtopic)")
 	bindConfigFlags(cmd.Flags())
 	bindNetworkFlags(cmd.Flags())
+	bindSponsorBlockURLFlag(cmd.Flags())
 	return cmd
 }
 

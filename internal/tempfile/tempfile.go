@@ -8,6 +8,7 @@ package tempfile
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,52 @@ func WrapOutput(op string, err error) error {
 		return nil
 	}
 	return &OutputError{Op: op, cause: err}
+}
+
+// PublishNew publishes src as dst without replacing anything already there. src
+// must live on the destination's filesystem, which is what New and NewExternal
+// guarantee by staging in the destination directory.
+//
+// os.Link fails with EEXIST when dst exists, on both POSIX and Windows/NTFS, so
+// the existence check and the publish are one operation: two processes racing
+// for the same output path cannot both succeed. src is removed once the link is
+// in place, so the net effect matches Commit's rename.
+//
+// Filesystems without hard links (FAT, exFAT, some network shares) fall back to
+// a stat and an os.Rename. That fallback still refuses an existing destination,
+// but the two steps are not atomic, so a concurrent writer can still be lost.
+//
+// A failure to unlink src after a successful link is not an error: the
+// destination is published either way. Discard removes the leftover.
+// link is os.Link, replaced in tests to exercise the no-hard-link fallback on a
+// filesystem that does support links.
+var link = os.Link
+
+func PublishNew(src, dst string) error {
+	err := link(src, dst)
+	switch {
+	case err == nil:
+		_ = os.Remove(src)
+		return nil
+	case errors.Is(err, fs.ErrExist):
+		return existsError(dst)
+	}
+	// Any other link failure is read as "this filesystem will not link". A real
+	// permission or path problem fails again on the rename below and is reported
+	// from there, so nothing is swallowed.
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return existsError(dst)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return WrapOutput("publish", retargetPathError(dst, err))
+	}
+	return nil
+}
+
+// existsError reports an occupied destination. It unwraps to fs.ErrExist so
+// callers can tell a collision from an I/O failure.
+func existsError(dst string) error {
+	return WrapOutput("publish", &os.PathError{Op: "publish", Path: dst, Err: fs.ErrExist})
 }
 
 // retargetPathError replaces temp paths in OS errors with finalPath. That keeps
@@ -87,8 +134,16 @@ func chmodUmask(path string) error {
 }
 
 // Commit flushes and closes the temp, then atomically renames it to the final
-// path. After a successful Commit, Discard is a no-op.
-func (f *File) Commit() error {
+// path, replacing an existing file. After a successful Commit, Discard is a
+// no-op.
+func (f *File) Commit() error { return f.commit(false) }
+
+// CommitNew is Commit for a destination that must not already exist. It
+// publishes through PublishNew, so an occupied path fails with an OutputError
+// wrapping fs.ErrExist instead of overwriting.
+func (f *File) CommitNew() error { return f.commit(true) }
+
+func (f *File) commit(exclusive bool) error {
 	if f.committed {
 		return nil
 	}
@@ -99,20 +154,29 @@ func (f *File) Commit() error {
 	if err := f.close(); err != nil {
 		return WrapOutput("close", retargetPathError(f.finalPath, err))
 	}
-	if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
+	if exclusive {
+		if err := PublishNew(f.tmpPath, f.finalPath); err != nil {
+			return err
+		}
+	} else if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
 		return WrapOutput("rename", retargetPathError(f.finalPath, err))
 	}
 	f.committed = true
 	return nil
 }
 
-// Discard closes and removes the temp file. It is safe to call multiple times
-// and is a no-op after a successful Commit.
+// Discard closes and removes the temp file. It is safe to call multiple times.
+//
+// After a successful Commit the temp is already gone, so this is a no-op, with
+// one exception worth the extra syscall: CommitNew links and then unlinks the
+// staged file, and if that unlink lost a race (an antivirus scanner or indexer
+// holding the handle) the staged copy survives. Retrying here usually clears it,
+// which matters because a staged name keeps the destination's extension, so a
+// later directory run would otherwise pick the leftover up as an input.
 func (f *File) Discard() error {
-	if f.committed {
-		return nil
+	if !f.committed {
+		_ = f.close()
 	}
-	_ = f.close()
 	if err := os.Remove(f.tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -171,25 +235,34 @@ func NewExternal(finalPath, ext string) (*External, error) {
 // Path returns the temp path reserved for the external writer.
 func (e *External) Path() string { return e.tmpPath }
 
-// Commit atomically renames the temp path to the final path. After a successful
-// Commit, Discard is a no-op.
-func (e *External) Commit() error {
+// Commit atomically renames the temp path to the final path, replacing an
+// existing file. After a successful Commit, Discard is a no-op.
+func (e *External) Commit() error { return e.commit(false) }
+
+// CommitNew is Commit for a destination that must not already exist. It
+// publishes through PublishNew, so an occupied path fails with an OutputError
+// wrapping fs.ErrExist instead of overwriting.
+func (e *External) CommitNew() error { return e.commit(true) }
+
+func (e *External) commit(exclusive bool) error {
 	if e.committed {
 		return nil
 	}
-	if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
+	if exclusive {
+		if err := PublishNew(e.tmpPath, e.finalPath); err != nil {
+			return err
+		}
+	} else if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
 		return WrapOutput("rename", retargetPathError(e.finalPath, err))
 	}
 	e.committed = true
 	return nil
 }
 
-// Discard removes the temp path. It is safe to call multiple times and is a
-// no-op after a successful Commit.
+// Discard removes the temp path. It is safe to call multiple times, and after a
+// successful Commit there is normally nothing left to remove; see File.Discard
+// for the one case where there is.
 func (e *External) Discard() error {
-	if e.committed {
-		return nil
-	}
 	if err := os.Remove(e.tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

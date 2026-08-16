@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/colespringer/waxtap/v3"
 )
 
 // defaultTemplate includes the video ID to avoid collisions between repeated
@@ -268,6 +270,24 @@ func parseCollisionMode(s string) (collisionMode, error) {
 		return collisionSkip, nil
 	default:
 		return collisionFail, usagef("invalid --collision %q (want fail|overwrite|auto-number|skip)", s)
+	}
+}
+
+// outputFor builds the delivery sink for a resolved path under mode. fail and
+// auto-number both mean "this path must be free", so they deliver exclusively
+// and a concurrent run that lost the race fails instead of silently losing its
+// output. overwrite opts into last-writer-wins, and skip already tolerates an
+// existing file.
+//
+// resolveCollision's stat stays in front of this as a pre-flight, so the
+// sequential case still fails early with the fuller message; it is no longer
+// the correctness mechanism.
+func outputFor(path string, mode collisionMode) waxtap.Output {
+	switch mode {
+	case collisionFail, collisionAutoNumber:
+		return waxtap.ToNewFile(path)
+	default:
+		return waxtap.ToFile(path)
 	}
 }
 

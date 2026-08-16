@@ -171,12 +171,12 @@ func newNormalizeCmd() *cobra.Command {
 				return err
 			}
 			if skip {
-				env.info("skipped (exists): %s\n", outPath)
+				env.info("skipped (exists): %s\n", displayPath(outPath))
 				return nil
 			}
 			warnBitrateIgnored(env, tf, bitrate)
 			warnBitDepthIgnored(env, tf, bitDepth)
-			spec.Output = waxtap.ToFile(outPath)
+			spec.Output = outputFor(outPath, mc)
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
 				return err
@@ -392,7 +392,7 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 	// Per-track values are input measurements; processed output is not measured here.
 	fmt.Fprintln(tw, "#\tIN-LUFS\tOUTPUT")
 	for i := range res.Outputs {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), res.Outputs[i])
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), displayPath(res.Outputs[i]))
 	}
 	tw.Flush()
 	return nil
@@ -407,9 +407,9 @@ type albumTrackJSON struct {
 func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []string) []albumTrackJSON {
 	out := make([]albumTrackJSON, len(perTrack))
 	for i, l := range perTrack {
-		out[i] = albumTrackJSON{Input: inputs[i], IntegratedLUFS: jsonFloat(l.IntegratedLUFS)}
+		out[i] = albumTrackJSON{Input: displayPath(inputs[i]), IntegratedLUFS: jsonFloat(l.IntegratedLUFS)}
 		if outputs != nil {
-			out[i].Output = outputs[i]
+			out[i].Output = displayPath(outputs[i])
 		}
 	}
 	return out

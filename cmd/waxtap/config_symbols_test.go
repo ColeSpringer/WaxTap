@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/spf13/cobra"
 )
 
 // TestTranslateConfigSymbols covers each Go option field name that may appear in
@@ -127,5 +128,25 @@ func TestConfigSymbolTranslation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSponsorBlockBaseURLNamesEverySurface guards the one setting in the
+// replacer that is not reachable by flag on every command: only download, cut,
+// and sponsorblock bind --sponsorblock-url, so a message naming just the flag
+// sends a `normalize` user to a flag that command rejects.
+func TestSponsorBlockBaseURLNamesEverySurface(t *testing.T) {
+	got := translateConfigSymbols(`invalid SponsorBlock BaseURL "not-a-url": must use http or https`)
+	for _, want := range []string{"--sponsorblock-url", "sponsorBlockBaseURL", "WAXTAP_SPONSORBLOCK_BASE_URL"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message = %q, want it to name %q", got, want)
+		}
+	}
+	// The commands that cannot take the flag still reach this error through the
+	// config file and the environment, so both must be offered.
+	for _, cmd := range []*cobra.Command{newNormalizeCmd(), newTranscodeCmd(), newInfoCmd(), newFormatsCmd(), newDoctorCmd()} {
+		if cmd.Flags().Lookup("sponsorblock-url") != nil {
+			t.Fatalf("%s binds --sponsorblock-url; this test's premise is stale", cmd.Name())
+		}
 	}
 }

@@ -34,13 +34,17 @@ func embedRequested(s ProcessSpec) bool {
 // leaves valid audio, never failing the download. targetExt is the extension the
 // delivered file will carry (empty for a stream sink), so the post-pass never
 // remuxes into a container the extension would then misname.
-func (c *Client) embedMetadata(ctx context.Context, path, targetExt string, v *youtube.Video, o embedOptions, em *emitter) {
+//
+// dest is the path warnings name. The pass runs on a staged or job-temp file
+// whose name the user never asked for and will never see, so warnings report
+// the destination instead; "" falls back to path.
+func (c *Client) embedMetadata(ctx context.Context, path, dest, targetExt string, v *youtube.Video, o embedOptions, em *emitter) {
 	if v == nil || (!o.thumbnail && !o.metadata) {
 		return
 	}
 	skipReason, err := c.doEmbed(ctx, path, targetExt, v, o)
 	if err != nil {
-		em.warn(WarnMetadataEmbed, fmt.Sprintf("could not embed metadata into %s: %v", filepath.Base(path), err))
+		em.warn(WarnMetadataEmbed, fmt.Sprintf("could not embed metadata into %s: %v", warnName(dest, path), err))
 		return
 	}
 	if skipReason != "" {

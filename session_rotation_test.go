@@ -201,16 +201,25 @@ func TestDownload_RotatesGuestSessionOnEarly403(t *testing.T) {
 	}
 
 	var rotated, reResolved bool
+	var rotateDetail string
 	for _, warn := range res.Warnings {
 		switch warn.Code {
 		case WarnSessionRotated:
 			rotated = true
+			rotateDetail = warn.Detail
 		case WarnURLReResolved:
 			reResolved = true
 		}
 	}
 	if !rotated {
 		t.Errorf("Warnings = %v, want WarnSessionRotated", res.Warnings)
+	}
+	// Each entry carries its ordinal. Two identical entries in one warnings array
+	// read as a duplicated bug report rather than as a run that rotated twice,
+	// which is what the 2026-08-15 pass filed. The ordinal counts refreshes, not
+	// rotations, so it reconciles with the completion breadcrumb's refresh count.
+	if !strings.Contains(rotateDetail, "(refresh 1)") {
+		t.Errorf("rotation detail = %q, want it to carry the refresh ordinal", rotateDetail)
 	}
 	if reResolved {
 		t.Errorf("Warnings = %v; the rotated refresh must not also claim a plain re-resolve", res.Warnings)
@@ -241,9 +250,23 @@ func TestDownload_NoRotationOnExpiry403(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
+	var reResolves []string
 	for _, warn := range res.Warnings {
 		if warn.Code == WarnSessionRotated {
 			t.Errorf("Warnings = %v; an expiry 403 must not rotate the identity mid-download", res.Warnings)
+		}
+		if warn.Code == WarnURLReResolved {
+			reResolves = append(reResolves, warn.Detail)
+		}
+	}
+	// Repeated re-resolves are numbered for the same reason rotations are: this
+	// path emits several, and identical details cannot be told apart.
+	if len(reResolves) == 0 {
+		t.Fatalf("Warnings = %v, want at least one WarnURLReResolved", res.Warnings)
+	}
+	for i, d := range reResolves {
+		if want := fmt.Sprintf("(refresh %d)", i+1); !strings.Contains(d, want) {
+			t.Errorf("re-resolve warning %d = %q, want it to carry %q", i+1, d, want)
 		}
 	}
 	// The refreshes stayed on the flagged identity and kept 403ing; the retry then

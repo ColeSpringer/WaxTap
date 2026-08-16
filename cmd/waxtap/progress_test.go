@@ -59,3 +59,19 @@ func TestProgress_TTYRendersByteProgress(t *testing.T) {
 		t.Fatalf("expected a live byte bar on a TTY, got %q", out)
 	}
 }
+
+// TestProgress_RemuxingStageNeedsNoRendererChange confirms F9's assumption:
+// renderStage prints Stage.String(), so the new stage shows its own label with
+// no case added here.
+func TestProgress_RemuxingStageNeedsNoRendererChange(t *testing.T) {
+	var buf bytes.Buffer
+	r := &progressReporter{w: &buf, enabled: true, tty: false}
+
+	r.handle(waxtap.Event{Stage: waxtap.StageRemuxing})
+	if got := buf.String(); !strings.Contains(got, "remuxing\n") {
+		t.Errorf("progress output = %q, want a remuxing line", got)
+	}
+	if strings.Contains(buf.String(), "unknown") {
+		t.Errorf("progress output = %q, want the stage's own label", buf.String())
+	}
+}

@@ -3,7 +3,6 @@ package waxtap
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/colespringer/waxlabel"
@@ -26,7 +25,11 @@ import (
 // own audio (ReplayGain, encoder stamps, an AcoustID fingerprint), which is
 // right for a re-encode or cut; a remux leaves the audio untouched, so those
 // values still hold and are restored.
-func (c *Client) carryTags(ctx context.Context, srcPath, outPath string, cut *appliedCut, remuxed bool, em *emitter) {
+//
+// dest is the path warnings name. It differs from outPath when the output is
+// staged for an exclusive publish, where outPath is a temp name the user never
+// asked for and will never see; "" falls back to outPath.
+func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) {
 	src, err := waxlabel.ParseFile(ctx, srcPath)
 	if err != nil {
 		// An unreadable tag form carried nothing before either, so there is no
@@ -37,7 +40,7 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath string, cut *ap
 	if src.Tags().Len() == 0 && len(src.Pictures()) == 0 && len(src.Chapters()) == 0 && len(src.SyncedLyrics()) == 0 {
 		return
 	}
-	out := filepath.Base(outPath)
+	out := warnName(dest, outPath)
 	warn := func(detail string) { em.warn(WarnTagCarry, detail) }
 
 	dst, err := waxlabel.ParseFile(ctx, outPath)

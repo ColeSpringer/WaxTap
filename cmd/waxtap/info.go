@@ -70,6 +70,11 @@ func newInfoCmd() *cobra.Command {
 				bestIdx, bestErr = sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
 			}
 
+			// Same rule download uses for channelsExplicit: a configured default is
+			// as deliberate as the flag, and the built-in stereo default stays quiet.
+			explicit := cmd.Flags().Changed("channels") || env.cfg.channels != ""
+			noteInfoChannelLayout(env, layout, explicit, video.Formats, bestIdx, bestErr)
+
 			if env.jsonMode() {
 				return emitInfoJSON(env, info, bestIdx, bestErr, resolved)
 			}
@@ -86,6 +91,24 @@ func newInfoCmd() *cobra.Command {
 	bindNetworkFlags(cmd.Flags())
 	bindPlayerExtractionFlags(cmd.Flags())
 	return cmd
+}
+
+// noteInfoChannelLayout reports when the row shown as "Best audio" does not
+// satisfy an explicitly requested layout. Selection prefers the layout but falls
+// back to the best available stream, so the mismatch is a note rather than an
+// error, the same as download's warnChannelLayout.
+func noteInfoChannelLayout(env *appEnv, layout waxtap.ChannelLayout, explicit bool, formats []waxtap.Format, bestIdx int, bestErr error) {
+	if !explicit || layout == waxtap.LayoutAny || bestErr != nil {
+		return
+	}
+	if bestIdx < 0 || bestIdx >= len(formats) {
+		return
+	}
+	delivered := formats[bestIdx].Channels
+	if delivered <= 0 || layout.Matches(delivered) {
+		return
+	}
+	env.info("note: requested %s; best audio is %s\n", layout, channelCountLabel(delivered))
 }
 
 func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr error, rs *waxtap.ResolvedStream, showURLs bool) {

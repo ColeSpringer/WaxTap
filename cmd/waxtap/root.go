@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"runtime"
+
 	"github.com/spf13/cobra"
 )
 
@@ -33,6 +36,9 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
+	// cobra's built-in template prints "waxtap version <v>"; match newVersionCmd
+	// so the flag and the subcommand agree, Go version included.
+	root.SetVersionTemplate(fmt.Sprintf("waxtap {{.Version}} (%s)\n", runtime.Version()))
 
 	// Keep only output flags persistent. Other flags belong to the commands that
 	// use them, so extraction flags follow the subcommand.

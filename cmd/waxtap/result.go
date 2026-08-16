@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,6 +17,32 @@ func emitResult(env *appEnv, res *waxtap.Result) error {
 	}
 	renderResultHuman(env, res)
 	return nil
+}
+
+// displayPath normalizes a local path for reporting, so one document does not
+// mix separators: paths WaxTap builds use the OS separator while paths echoed
+// from user input keep whatever was typed. Apply it where a path is reported,
+// never where one is parsed, so error messages still quote what the user gave.
+//
+// It converts separators and nothing else. filepath.Clean would also resolve
+// ".." lexically, which is wrong for a path a script is meant to open: through
+// a symlinked directory "links/../real/out.mp3" and "real/out.mp3" name
+// different files, and --quiet stdout and --json outputPath are exactly that
+// kind of path.
+//
+// It guards rather than assumes. "" and "-" (the stdout sink) pass through, and
+// so does anything that parses as an absolute URL, since FromSlash would rewrite
+// "https://x/y" to "https:\\x\y" on Windows. Result.InputPath is local-only
+// today, but this must not depend on that staying true.
+func displayPath(p string) string {
+	if p == "" || p == "-" {
+		return p
+	}
+	// A single-letter scheme is a Windows drive letter ("C:/out/x.flac"), not a URL.
+	if u, err := url.Parse(p); err == nil && u.IsAbs() && len(u.Scheme) > 1 {
+		return p
+	}
+	return filepath.FromSlash(p)
 }
 
 // measureOnly reports whether res is a pure loudness measurement: loudness was
@@ -31,7 +59,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	// empty OutputPath and prints nothing.
 	if env.quiet() {
 		if res.OutputPath != "" {
-			env.printf("%s\n", res.OutputPath)
+			env.printf("%s\n", displayPath(res.OutputPath))
 		}
 		for _, w := range res.Warnings {
 			fmt.Fprintf(env.errOut, "warning:  [%s] %s\n", w.Code, w.Detail)
@@ -40,7 +68,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	}
 	switch res.SourceKind {
 	case waxtap.SourceLocalFile:
-		env.printf("Input:    %s\n", res.InputPath)
+		env.printf("Input:    %s\n", displayPath(res.InputPath))
 	default:
 		if res.Title != "" {
 			env.printf("Title:    %s\n", res.Title)
@@ -56,7 +84,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	case measured:
 		env.printf("Output:   none (measurement only)\n")
 	case res.OutputPath != "":
-		env.printf("Output:   %s\n", res.OutputPath)
+		env.printf("Output:   %s\n", displayPath(res.OutputPath))
 	default:
 		env.printf("Output:   (streamed)\n")
 	}
@@ -183,8 +211,8 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		SourceKind:          res.SourceKind.String(),
 		VideoID:             res.VideoID,
 		Title:               res.Title,
-		InputPath:           res.InputPath,
-		OutputPath:          res.OutputPath,
+		InputPath:           displayPath(res.InputPath),
+		OutputPath:          displayPath(res.OutputPath),
 		Client:              res.Client,
 		SourceBytes:         res.SourceBytes,
 		OutputBytes:         res.OutputBytes,

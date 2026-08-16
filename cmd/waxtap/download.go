@@ -61,11 +61,19 @@ type downloadFlags struct {
 	maxSleepInterval time.Duration
 	listOnly         bool
 
+	// concurrencyClamped holds the value the user asked for when resolve lowered
+	// it to maxConcurrency, and zero otherwise, so the note can be printed on the
+	// playlist path where the value is used.
+	concurrencyClamped int
+
 	collision        collisionMode        // resolved in RunE
 	layout           waxtap.ChannelLayout // resolved in RunE from --channels
 	channelsExplicit bool                 // true when a flag or config value requested a layout
-	archive          *downloadArchive
-	streamW          io.Writer // stdout sink when --out is "-"; nil for a file sink
+	// itagLayoutNote keeps the --itag-overrides---channels note to one per run:
+	// it is the same sentence for every item, and OnItem may run concurrently.
+	itagLayoutNote sync.Once
+	archive        *downloadArchive
+	streamW        io.Writer // stdout sink when --out is "-"; nil for a file sink
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -122,6 +130,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
+	bindSponsorBlockURLFlag(f)
 	bindPlayerExtractionFlags(f)
 }
 
@@ -176,17 +185,27 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 const maxConcurrency = 64
 
 // clampConcurrency validates the requested concurrency. It preserves zero so
-// each caller can choose its own default. Values above maxConcurrency are
-// clamped after a note is printed.
-func clampConcurrency(env *appEnv, n int) (int, error) {
+// each caller can choose its own default, and reports whether the value was
+// clamped instead of printing.
+//
+// The note is the caller's to print, and only where the value is used: resolve
+// runs before the argument is classified, so printing here told a single-video
+// download that its --concurrency had been clamped moments before rejecting the
+// flag as inapplicable.
+func clampConcurrency(n int) (clamped int, wasClamped bool, err error) {
 	if n < 0 {
-		return 0, usagef("--concurrency must be non-negative")
+		return 0, false, usagef("--concurrency must be non-negative")
 	}
 	if n > maxConcurrency {
-		env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", n, maxConcurrency, maxConcurrency)
-		return maxConcurrency, nil
+		return maxConcurrency, true, nil
 	}
-	return n, nil
+	return n, false, nil
+}
+
+// noteConcurrencyClamp prints the clamp note. Call it where the clamped value is
+// actually used.
+func noteConcurrencyClamp(env *appEnv, requested int) {
+	env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", requested, maxConcurrency, maxConcurrency)
 }
 
 // resolve validates download flags and computes values used by every item. It
@@ -311,10 +330,19 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	if df.maxDownloads < 0 {
 		return usagef("--max-downloads must be non-negative")
 	}
-	// Preserve zero so the library applies the playlist default.
-	n, err := clampConcurrency(env, df.concurrency)
+	// Preserve zero so the library applies the playlist default. The note is
+	// deferred to the playlist path, which is the only caller that uses the value;
+	// a single-video input rejects --concurrency outright.
+	// Reset first, for the same reason df.streamW is: resolve mutates
+	// df.concurrency in place, so a reused command struct would otherwise report
+	// a clamp from an earlier run against an already-clamped value.
+	df.concurrencyClamped = 0
+	n, clamped, err := clampConcurrency(df.concurrency)
 	if err != nil {
 		return err
+	}
+	if clamped {
+		df.concurrencyClamped = df.concurrency
 	}
 	df.concurrency = n
 	if df.maxSleepInterval > 0 && df.sleepInterval == 0 {
@@ -363,6 +391,12 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 			return err
 		}
 		return emitPlaylistList(env, pl)
+	}
+
+	// Report the clamp here rather than in resolve: this is the only path that
+	// uses the value, and --list rejects the flag outright.
+	if df.concurrencyClamped > 0 {
+		noteConcurrencyClamp(env, df.concurrencyClamped)
 	}
 
 	out := &syncWriter{env: env}
@@ -659,9 +693,9 @@ func noteKeptItem(ctx context.Context, env *appEnv, df *downloadFlags, stamps *i
 	if kept == nil {
 		return
 	}
-	env.info("note: the finished file was kept: %s (%d bytes)\n", kept.path, kept.bytes)
+	env.info("note: the finished file was kept: %s (%d bytes)\n", displayPath(kept.path), kept.bytes)
 	if df.archive != nil {
-		env.info("note: %s was not added to the download archive; a re-run will fetch it again\n", kept.path)
+		env.info("note: %s was not added to the download archive; a re-run will fetch it again\n", displayPath(kept.path))
 	}
 }
 
@@ -681,10 +715,15 @@ func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 }
 
 // warnChannelLayout reports when the delivered audio does not satisfy an
-// explicitly requested layout. Exact itag selections, LayoutAny, and unknown
-// channel counts do not produce a warning.
+// explicitly requested layout. LayoutAny and unknown channel counts do not
+// produce a warning.
+//
+// An exact --itag is still reported, with the reason: format.Select's itag
+// branch deliberately ignores the layout, so --channels never affected the
+// selection. That is documented behavior rather than an error, so it is a note
+// and not an exit-2 rejection.
 func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
-	if !df.channelsExplicit || df.itag > 0 || df.layout == waxtap.LayoutAny {
+	if !df.channelsExplicit || df.layout == waxtap.LayoutAny {
 		return
 	}
 	delivered := res.OutputFormat.Channels
@@ -697,6 +736,15 @@ func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
 		}
 	}
 	if delivered <= 0 || df.layout.Matches(delivered) {
+		return
+	}
+	if df.itag > 0 {
+		// The itag fixes the encoding, so every item of a playlist run reports the
+		// same thing. Say it once, the way --bitrate and --bit-depth do.
+		df.itagLayoutNote.Do(func() {
+			env.info("note: --itag names an exact encoding, so --channels did not affect selection; requested %s, delivered %s\n",
+				df.layout, channelCountLabel(delivered))
+		})
 		return
 	}
 	env.info("note: requested %s; delivered %s\n", df.layout, channelCountLabel(delivered))
@@ -757,7 +805,7 @@ func channelCountLabel(ch int) string {
 // operations suppress the note because the output is no longer an unaltered copy.
 func measureNote(env *appEnv, res *waxtap.Result) {
 	if measureOnly(res) && res.OutputPath != "" {
-		env.info("note: wrote unaltered copy to %s\n", res.OutputPath)
+		env.info("note: wrote unaltered copy to %s\n", displayPath(res.OutputPath))
 	}
 }
 
@@ -811,7 +859,7 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 	if df.streamW != nil {
 		spec.Output = waxtap.ToWriter(df.streamW)
 	} else {
-		spec.Output = waxtap.ToFile(outPath)
+		spec.Output = outputFor(outPath, df.collision)
 	}
 	// Publish date and chapters come only from the watch-page pass, and both
 	// --embed-metadata and --write-info-json promise them.

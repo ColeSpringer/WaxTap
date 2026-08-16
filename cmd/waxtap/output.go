@@ -257,7 +257,8 @@ func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
 		je.Error.Code = c.code
 		je.Error.Message = c.message
 		if kept != nil {
-			je.OutputPath, je.OutputBytes = kept.path, kept.bytes
+			// Same key resultToJSON emits, so it gets the same normalization.
+			je.OutputPath, je.OutputBytes = displayPath(kept.path), kept.bytes
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -269,7 +270,7 @@ func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
 		fmt.Fprintf(w, "  hint: %s\n", c.hint)
 	}
 	if kept != nil {
-		fmt.Fprintf(w, "  note: the finished file was kept: %s (%d bytes)\n", kept.path, kept.bytes)
+		fmt.Fprintf(w, "  note: the finished file was kept: %s (%d bytes)\n", displayPath(kept.path), kept.bytes)
 	}
 }
 
@@ -373,6 +374,10 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 2, "invalid-input"
 	case errors.Is(err, waxtap.ErrInvalidConfig):
 		c.exitCode, c.code = 2, "invalid-config"
+	// An exclusive publish that lost the path is a collision, not an I/O failure,
+	// so it exits like the pre-flight check that a sequential run would have hit.
+	case isCollisionError(err):
+		c.exitCode, c.code = 2, "usage"
 	case isUsageError(err):
 		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err)
 
@@ -545,7 +550,42 @@ func friendlyError(err error) string {
 	if hse, ok := errors.AsType[*waxtap.HTTPStatusError](err); ok {
 		return fmt.Sprintf("%s returned HTTP %d", httpStatusSource(hse.URL), hse.StatusCode)
 	}
+	// Staging and publishing failures otherwise surface as a bare OS error naming
+	// a step the user never asked for ("rename out.mp3: Access is denied.").
+	if oe, ok := errors.AsType[*tempfile.OutputError](err); ok {
+		return outputFailureMessage(oe)
+	}
 	return err.Error()
+}
+
+// outputFailureMessage renders a staging or publish failure. Everything else in
+// this file would otherwise surface these as a bare OS sentence naming a step
+// the user never asked for.
+//
+// An occupied destination reached at publish time is its own case. Every CLI
+// path stats the destination first, so the file appeared while this run was
+// working: saying so is both more accurate than the pre-flight's wording and
+// the only version that is right under --collision auto-number, which picked a
+// free name and cannot be told to pick one again. The exit code and machine
+// code stay identical to the pre-flight collision, which is what scripts read.
+//
+// The concurrency note rides only on the publish steps. Appending it to a
+// create, chmod, sync, or close failure would point away from the real cause;
+// "no space left on device" is a full disk, not a competing writer.
+func outputFailureMessage(oe *tempfile.OutputError) string {
+	path, reason := "the output path", error(oe)
+	if pe, ok := errors.AsType[*os.PathError](oe); ok {
+		path, reason = pe.Path, pe.Err
+	}
+	if errors.Is(oe, fs.ErrExist) {
+		return fmt.Sprintf("output file already exists: %s (another process created it while this run was working; set --collision to overwrite or skip to allow that)", path)
+	}
+	msg := fmt.Sprintf("could not %s the finished file at %s: %v", oe.Op, path, reason)
+	switch oe.Op {
+	case "publish", "rename":
+		msg += "; another process may be writing the same output path"
+	}
+	return msg
 }
 
 // incompleteStreamMessage renders an incomplete delivery: the fixed sentence,
@@ -616,7 +656,12 @@ var configSymbolReplacer = strings.NewReplacer(
 	// config.go currently catches these conflicts before waxtap.New does.
 	"PlayerContextProvider requires a POTokenProvider", "--player-context-url requires --potoken-url",
 	"non-empty VisitorData", "non-empty --visitor-data",
-	"invalid SponsorBlock BaseURL", "invalid --sponsorblock-url",
+	// Unlike every other entry here, this setting is not reachable by flag on
+	// every command: only download, cut, and sponsorblock bind
+	// --sponsorblock-url, while the config key and environment variable work
+	// everywhere. Naming the flag alone sent a `normalize` user to a flag that
+	// command rejects, so name the setting and let the user pick a surface.
+	"invalid SponsorBlock BaseURL", "invalid SponsorBlock base URL (--sponsorblock-url, sponsorBlockBaseURL, or WAXTAP_SPONSORBLOCK_BASE_URL)",
 )
 
 // translateConfigSymbols rewrites Go option field names in a config error message
@@ -744,6 +789,13 @@ func isLocalIOError(err error) bool {
 func isOutputError(err error) bool {
 	_, ok := errors.AsType[*tempfile.OutputError](err)
 	return ok
+}
+
+// isCollisionError reports whether an exclusive publish found the destination
+// already taken. It is a subset of isOutputError and is classified first.
+func isCollisionError(err error) bool {
+	oe, ok := errors.AsType[*tempfile.OutputError](err)
+	return ok && errors.Is(oe, fs.ErrExist)
 }
 
 // isUsageError reports whether err marks a bad-arguments failure.

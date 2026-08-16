@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/url"
 	"os"
@@ -757,7 +758,9 @@ func streamFileTo(w io.Writer, path string) (int64, error) {
 }
 
 // copyFile copies src to dst atomically (temp + rename in dst's directory).
-func copyFile(src, dst string) error {
+// exclusive publishes onto a free path only, failing with fs.ErrExist when
+// something is already there.
+func copyFile(src, dst string, exclusive bool) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -771,6 +774,9 @@ func copyFile(src, dst string) error {
 	if _, err := io.Copy(tf, in); err != nil {
 		return err
 	}
+	if exclusive {
+		return tf.CommitNew()
+	}
 	return tf.Commit()
 }
 
@@ -780,11 +786,85 @@ func moveFile(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
-	if err := copyFile(src, dst); err != nil {
+	if err := copyFile(src, dst, false); err != nil {
 		return err
 	}
 	_ = os.Remove(src)
 	return nil
+}
+
+// moveFileNew is moveFile for a destination that must not already exist. A src
+// on the destination's filesystem publishes with a hard link; anything else
+// (a job temp dir on another device) is copied into the destination directory
+// first, so the final step is exclusive either way.
+func moveFileNew(src, dst string) error {
+	err := tempfile.PublishNew(src, dst)
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if cerr := copyFile(src, dst, true); cerr != nil {
+		return cerr
+	}
+	_ = os.Remove(src)
+	return nil
+}
+
+// deliverFile publishes the produced file src as out's path, honoring out's
+// exclusivity. Callers that let a producer write the destination directly do not
+// reach it.
+func deliverFile(src string, out Output) error {
+	if out.exclusive {
+		return moveFileNew(src, out.path)
+	}
+	return moveFile(src, out.path)
+}
+
+// warnName is the file name to use in a warning about a written output. A
+// staged delivery writes a temp path the user never asked for and will never
+// see, so warnings name the destination instead. An empty dest (a writer sink,
+// which has no path) falls back to the file actually written.
+func warnName(dest, written string) string {
+	if dest == "" {
+		dest = written
+	}
+	return filepath.Base(dest)
+}
+
+// publishProduced delivers the file a producer wrote to out. It is the one
+// statement of "publish the staged file, or move the produced one, never both",
+// shared by Process, deliverSource, and downloadAndProcess so the three cannot
+// drift into meaning different things.
+//
+// deliver must be the path the producer actually wrote. A caller whose producer
+// may deliver something it must not move (Client.Process hands back the
+// untouched input for a measure-only pass) handles that case before calling.
+func publishProduced(deliver string, staging *tempfile.External, out Output) error {
+	switch {
+	case staging != nil && deliver == staging.Path():
+		// Exclusive: publish the staged output onto a path nothing else holds.
+		return staging.CommitNew()
+	case deliver == out.path:
+		return nil // the producer wrote the destination directly
+	default:
+		return deliverFile(deliver, out)
+	}
+}
+
+// stageExclusive reserves a staging path next to an exclusive output's
+// destination, for a producer that writes its output path directly (the
+// pipeline, or the downloader). Publishing that staged file is then what claims
+// the destination, so the producer never holds it, and the loudness converge
+// loop is free to rewrite the staged path.
+//
+// It returns nil for a non-exclusive or non-file output; the caller keeps
+// writing the destination directly, as before. Callers must defer Discard.
+func stageExclusive(out Output) (*tempfile.External, error) {
+	if out.kind != outputFile || !out.exclusive {
+		return nil, nil
+	}
+	// An empty ext keeps the destination's extension on the staged name, which
+	// the container-inferring encoders need.
+	return tempfile.NewExternal(out.path, "")
 }
 
 // selectIndex resolves an audio selector against the candidate formats. An

@@ -83,6 +83,8 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 - `--channels mono|stereo|surround|any` picks a native layout, defaulting to
   stereo. `--downmix` allows surround-to-stereo/mono; it never upmixes.
+  `--itag` names an exact encoding, so it overrides `--channels`; the run prints
+  a note when the delivered layout is not the one asked for.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
   fallbacks. Results report the client that actually delivered.
 - Normalization applies one scalar gain. `--peak-mode cap` (the default) caps it
@@ -136,6 +138,14 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   or delivers the audio uncut with a warning.
 - Playlist downloads support `--concurrency`, pacing, attempt limits, collision
   policies, and yt-dlp-compatible `--download-archive` files.
+- `--collision fail` (the default) and `auto-number` claim the output path with
+  the publish itself, so two single-file runs writing the same path cannot both
+  report success: the loser exits 2 with the existing-file message and the
+  winner's file is intact. `overwrite` opts into last-writer-wins. Two
+  exceptions: `normalize --album` writes its tracks with a replacing rename, and
+  on a filesystem without hard links (FAT, exFAT, some network shares) the
+  publish degrades to a check-then-rename that a concurrent writer can still
+  beat.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
   cache; `--no-cache` disables it.
 

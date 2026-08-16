@@ -356,11 +356,17 @@ func TestMapPipelineStage(t *testing.T) {
 		pipeline.StageCutting:     StageCutting,
 		pipeline.StageNormalizing: StageNormalizing,
 		pipeline.StageTranscoding: StageTranscoding,
+		pipeline.StageRemuxing:    StageRemuxing,
 	}
 	for in, want := range cases {
 		if got := mapPipelineStage(in); got != want {
 			t.Errorf("mapPipelineStage(%v) = %v, want %v", in, got, want)
 		}
+	}
+	// The public label is part of the event contract; a copy remux reports it
+	// instead of "transcoding".
+	if got := StageRemuxing.String(); got != "remuxing" {
+		t.Errorf("StageRemuxing.String() = %q, want %q", got, "remuxing")
 	}
 }
 

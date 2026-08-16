@@ -45,7 +45,7 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 		default:
 			rec.Status = "ok"
 			if res != nil {
-				rec.OutputPath = res.OutputPath
+				rec.OutputPath = displayPath(res.OutputPath)
 				rec.Client = res.Client
 				for _, w := range res.Warnings {
 					rec.Warnings = append(rec.Warnings, warningJSON{Code: w.Code.String(), Detail: w.Detail})
@@ -72,7 +72,7 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 		if res != nil {
 			path = res.OutputPath
 		}
-		fmt.Fprintf(s.env.out, "[%02d] ok: %s -> %s\n", num, title, path)
+		fmt.Fprintf(s.env.out, "[%02d] ok: %s -> %s\n", num, title, displayPath(path))
 	}
 }
 
@@ -126,27 +126,29 @@ func (s *syncWriter) emitSummary(sum playlistSummary) error {
 		}
 		fmt.Fprintf(s.env.out, "%s\n", line)
 		if sum.enumErrors > 0 {
-			fmt.Fprintf(s.env.out, "warning: %d playlist enumeration error(s); some entries may be missing\n", sum.enumErrors)
+			fmt.Fprintf(s.env.out, "warning: %s during playlist enumeration; some entries may be missing\n", countOf(sum.enumErrors, "error"))
 		}
 	}
 	switch {
 	case failed > 0 && sum.enumErrors > 0:
-		return fmt.Errorf("%d of %d items failed and enumeration was incomplete (%d error(s))", failed, sum.total, sum.enumErrors)
+		return fmt.Errorf("%d of %d items failed and enumeration was incomplete (%s)", failed, sum.total, countOf(sum.enumErrors, "error"))
 	case failed > 0:
 		return fmt.Errorf("%d of %d playlist items failed", failed, sum.total)
 	case sum.enumErrors > 0:
-		return fmt.Errorf("playlist enumeration incomplete: %d error(s); some entries may be missing", sum.enumErrors)
+		return fmt.Errorf("playlist enumeration incomplete: %s; some entries may be missing", countOf(sum.enumErrors, "error"))
 	default:
 		return nil
 	}
 }
 
-// itemCount formats n with the correct singular or plural unit.
-func itemCount(n int) string {
+// countOf formats n with unit, pluralized by adding an "s" unless n is exactly
+// one. Every count the CLI prints goes through it, so "1 files" cannot come
+// back one summary line at a time.
+func countOf(n int, unit string) string {
 	if n == 1 {
-		return "1 item"
+		return "1 " + unit
 	}
-	return fmt.Sprintf("%d items", n)
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // emitPlaylistList prints enumerated entries without downloading (the --list flag).
@@ -173,7 +175,7 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	}
 
 	if pl.Title != "" {
-		env.printf("%s (%s)\n\n", pl.Title, itemCount(len(pl.Entries)))
+		env.printf("%s (%s)\n\n", pl.Title, countOf(len(pl.Entries), "item"))
 	}
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tID\tDURATION\tTITLE")
