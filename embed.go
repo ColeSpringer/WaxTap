@@ -290,6 +290,11 @@ func pictureCapableExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case "webm", "aac", "wav", "aiff", "aif", "aifc", "afc":
 		return false
+	case "wv", "ape", "wma":
+		// APEv2 as WaxTap writes it holds no pictures, and WMA is decode-only.
+		// Without these a cover-art request on a source delivered under one of
+		// these names would "helpfully" remux Opus into Ogg bytes misnamed .wv.
+		return false
 	}
 	return true
 }

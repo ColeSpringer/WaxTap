@@ -8,10 +8,16 @@ import (
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
-// inferableContainers are output extensions that name a container WaxTap can
-// produce. An extension outside this set (a codec name like ".alac", an unrelated
-// name like ".out", or none at all) does not constrain the codec: the container
-// comes from the format instead, and the write is force-muxed.
+// inferableContainers are output extensions that name a container WaxTap
+// recognizes, so the extension constrains the output rather than being
+// force-muxed over. An extension outside this set (a codec name like ".alac",
+// an unrelated name like ".out", or none at all) does not constrain the codec:
+// the container comes from the format instead, and the write is force-muxed.
+//
+// Almost all of these are containers WaxTap can produce. ".wma" is the one it
+// can only read (WaxFlow has no WMA muxer): it is listed so ContainerAccepts
+// rejects every codec under that name, instead of the force-mux path writing,
+// say, FLAC bytes into a file every player will read as Windows Media.
 //
 // Dropped versus the ffmpeg era: ".w64" and ".caf" have no WaxFlow muxer (".m4a"
 // covers ".caf"'s ALAC).
@@ -20,6 +26,7 @@ var inferableContainers = map[string]bool{
 	"mp4": true, "aac": true, "ogg": true, "oga": true, "opus": true,
 	"webm": true, "mka": true, "mkv": true,
 	"aiff": true, "aif": true, "aifc": true, "afc": true,
+	"wv": true, "ape": true, "wma": true,
 }
 
 // IsAIFFExt reports whether ext names an AIFF container. WaxFlow's aiff row
@@ -60,6 +67,12 @@ func needsForcedMuxer(output string) bool {
 func ContainerAccepts(ext, codecName string) bool {
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	c := strings.ToLower(codecName)
+	// HE-AAC lives in exactly the AAC family's containers (WaxFlow's he-aac row
+	// shares the aac row's container set by design), so one fold here answers
+	// for every arm instead of an "|| he-aac" in each.
+	if c == "he-aac" {
+		c = "aac"
+	}
 	isPCM := c == "wav" || strings.HasPrefix(c, "pcm")
 	if IsAIFFExt(ext) {
 		// Ahead of the switch so all four spellings share one answer. Not isPCM:
@@ -76,7 +89,9 @@ func ContainerAccepts(ext, codecName string) bool {
 	case "m4a", "mp4", "m4b":
 		return c == "aac" || c == "alac"
 	case "aac":
-		// .aac selects the raw ADTS stream, which carries AAC only (not ALAC).
+		// .aac selects the raw ADTS stream, which carries the AAC family only
+		// (not ALAC). HE-AAC rides it with implicit signalling; WaxFlow declines
+		// the one shape ADTS cannot legally carry (downsampled SBR) at plan time.
 		return c == "aac"
 	case "ogg", "oga":
 		return c == "vorbis" || c == "opus" || c == "flac"
@@ -88,11 +103,21 @@ func ContainerAccepts(ext, codecName string) bool {
 		// Matroska carries the codecs WaxFlow can mux into it. MP3 and ALAC have no
 		// Matroska form in WaxFlow (mp3 has no alternate container; alac only maps to
 		// progressive MP4), so they are excluded to keep this in step with the engine.
+		// WavPack has a Matroska form in the wild (A_WAVPACK4) but WaxFlow does not
+		// write it, so it is excluded for the same reason.
 		switch c {
 		case "opus", "vorbis", "aac", "flac":
 			return true
 		}
 		return isPCM
+	case "wv":
+		return c == "wavpack"
+	case "ape":
+		return c == "ape"
+	case "wma":
+		// Decode-only: WaxFlow has no WMA muxer, so nothing WaxTap writes may
+		// carry the name.
+		return false
 	}
 	return true
 }
@@ -102,6 +127,9 @@ func ContainerAccepts(ext, codecName string) bool {
 // of the extensions ContainerAccepts allows. Unknown codecs return nil.
 func ContainersFor(codecName string) []string {
 	c := strings.ToLower(codecName)
+	if c == "he-aac" {
+		c = "aac" // one container family; see ContainerAccepts
+	}
 	switch {
 	case c == "flac":
 		return []string{".flac", ".mka"}
@@ -122,6 +150,10 @@ func ContainersFor(codecName string) []string {
 		return []string{".opus", ".webm", ".ogg", ".mka"}
 	case c == "vorbis":
 		return []string{".ogg", ".webm", ".mka"}
+	case c == "wavpack":
+		return []string{".wv"}
+	case c == "ape":
+		return []string{".ape"}
 	}
 	return nil
 }

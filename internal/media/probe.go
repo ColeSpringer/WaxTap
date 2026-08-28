@@ -15,6 +15,12 @@ import (
 type ProbeResult struct {
 	Format  ProbeFormat   // container metadata
 	Streams []ProbeStream // audio tracks
+	// Tags are the source's embedded tags under canonical uppercase keys
+	// (TITLE, ARTIST, ...), as far as the demuxer parses them (WavPack and APE
+	// APEv2 text items, ASF metadata, MP4 ilst). Nil when the container carries
+	// none or the demuxer does not read them; WaxLabel remains the authority
+	// for the formats it can parse.
+	Tags map[string][]string
 }
 
 // ProbeFormat describes the container.
@@ -90,7 +96,7 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, input, h
 // track, so a file whose default audio is not its longest track must not report
 // a longer duration than the track a cut will actually address.
 func mapProbe(info *format.Info, size int64) ProbeResult {
-	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}}
+	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags}
 	stream := func(t container.Track) ProbeStream {
 		return ProbeStream{
 			CodecType:  "audio",

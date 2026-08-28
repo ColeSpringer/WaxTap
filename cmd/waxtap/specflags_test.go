@@ -233,10 +233,10 @@ func TestTranscodeFormatParity(t *testing.T) {
 // TestFormatChoicesRendersOneList: the four --format help strings and the parse
 // error all come from transcodeFormatNames, so they cannot drift apart.
 func TestFormatChoicesRendersOneList(t *testing.T) {
-	if got, want := formatChoices(false), "flac|alac|wav|aiff|mp3|aac|opus|vorbis"; got != want {
+	if got, want := formatChoices(false), "flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis"; got != want {
 		t.Errorf("formatChoices(false) = %q, want %q", got, want)
 	}
-	if got, want := formatChoices(true), "copy|flac|alac|wav|aiff|mp3|aac|opus|vorbis"; got != want {
+	if got, want := formatChoices(true), "copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis"; got != want {
 		t.Errorf("formatChoices(true) = %q, want %q", got, want)
 	}
 	// copy/remux is a pseudo-format: the commands that must encode omit it.
@@ -381,5 +381,30 @@ func TestParseCategories(t *testing.T) {
 	}
 	if _, err := parseCategories("notacategory"); err == nil {
 		t.Error("expected error for invalid category")
+	}
+}
+
+// TestIsLosslessFormatEnginePinned pins the CLI's hand-maintained lossless set
+// to the engine's own classification, so a format added to one cannot silently
+// classify differently in the other (the knob notes and clipping suppression
+// both key on it).
+func TestIsLosslessFormatEnginePinned(t *testing.T) {
+	for _, name := range transcodeFormatNames {
+		lossy, known := media.LossyFormat(name)
+		if !known {
+			t.Errorf("engine does not know %q", name)
+			continue
+		}
+		tf, err := parseTranscodeFormat(name)
+		if err != nil {
+			t.Fatalf("parseTranscodeFormat(%q): %v", name, err)
+		}
+		if got := isLosslessFormat(tf); got != !lossy {
+			t.Errorf("isLosslessFormat(%q) = %v, engine says lossy=%v", name, got, lossy)
+		}
+	}
+	// Copy is WaxTap's own pseudo-format: a remux re-encodes nothing.
+	if !isLosslessFormat(waxtap.FormatCopy) {
+		t.Error("isLosslessFormat(FormatCopy) = false, want true")
 	}
 }

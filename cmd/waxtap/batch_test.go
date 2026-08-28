@@ -27,10 +27,44 @@ func TestExtPossiblyCodec(t *testing.T) {
 		{".webm", "opus", true}, {".webm", "aac", false},
 		{".mka", "aac", true}, {".mka", "flac", true}, // matroska is general-purpose
 		{".xyz", "mp3", true}, // unknown: probe rather than guess
+		// HE-AAC is an AAC-family resident of the same containers.
+		{".m4a", "he-aac", true}, {".m4b", "he-aac", true}, {".aac", "he-aac", true},
+		{".flac", "he-aac", false},
+		// WavPack and APE fit only their own extensions; WMA never matches a
+		// target family (decode-only).
+		{".wv", "wavpack", true}, {".wv", "flac", false},
+		{".ape", "ape", true}, {".ape", "wavpack", false},
+		{".wma", "aac", false}, {".wma", "wavpack", false},
 	}
 	for _, c := range cases {
 		if got := extPossiblyCodec(c.ext, c.family); got != c.want {
 			t.Errorf("extPossiblyCodec(%q,%q) = %v, want %v", c.ext, c.family, got, c.want)
+		}
+	}
+}
+
+// TestMatchesTargetFamilyHEAAC pins the AAC/HE-AAC asymmetry: an aac target
+// leaves an HE-AAC file alone (WaxFlow copies it under its own identity, so
+// "matches" avoids a lossy LC re-encode), while an he-aac target on an AAC-LC
+// file is a real encode request and must not match.
+func TestMatchesTargetFamilyHEAAC(t *testing.T) {
+	cases := []struct {
+		codec string
+		tf    waxtap.TranscodeFormat
+		want  bool
+	}{
+		{"he-aac", waxtap.FormatAAC, true},
+		{"aac", waxtap.FormatAAC, true},
+		{"he-aac", waxtap.FormatHEAAC, true},
+		{"aac", waxtap.FormatHEAAC, false},
+		{"wavpack", waxtap.FormatWavPack, true},
+		{"ape", waxtap.FormatAPE, true},
+		{"wavpack", waxtap.FormatAPE, false},
+		{"wma", waxtap.FormatAAC, false},
+	}
+	for _, c := range cases {
+		if got := matchesTargetFamily(c.codec, c.tf); got != c.want {
+			t.Errorf("matchesTargetFamily(%q, %v) = %v, want %v", c.codec, c.tf, got, c.want)
 		}
 	}
 }

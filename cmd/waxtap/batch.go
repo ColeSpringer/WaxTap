@@ -25,6 +25,9 @@ var audioExts = map[string]bool{
 	".opus": true, ".ogg": true, ".alac": true, ".mka": true, ".webm": true,
 	".aiff": true, ".aif": true, ".aifc": true, ".afc": true,
 	".oga": true, ".mp4": true, ".m4b": true, ".mkv": true,
+	// .wma is WMA's audio spelling; .asf, the same container, is left out like
+	// the other loose spellings above since it usually names video.
+	".wv": true, ".ape": true, ".wma": true,
 }
 
 // collectAudioInputs returns recognized audio files under root in sorted order.
@@ -175,12 +178,18 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 		return "alac"
 	case waxtap.FormatAAC:
 		return "aac"
+	case waxtap.FormatHEAAC:
+		return "he-aac"
 	case waxtap.FormatMP3:
 		return "mp3"
 	case waxtap.FormatOpus:
 		return "opus"
 	case waxtap.FormatVorbis:
 		return "vorbis"
+	case waxtap.FormatWavPack:
+		return "wavpack"
+	case waxtap.FormatAPE:
+		return "ape"
 	default:
 		return "" // WAV, AIFF, copy, and unknown formats cannot be confirmed as matches.
 	}
@@ -189,9 +198,22 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 // matchesTargetFamily reports whether a probed codec is one that tf produces.
 // Formats without a stable codec family, such as WAV, AIFF, and copy, return
 // false so single-file and batch planning use the same conservative rule.
+//
+// An aac target also matches an HE-AAC source: WaxFlow keeps such a copy under
+// its own identity (its format=aac remux redirects to the he-aac row), so
+// "already matches" here means the file is copied through rather than lossily
+// re-encoded to AAC-LC, the same choice the engine makes. The reverse does not
+// hold: an he-aac target on an AAC-LC source is a real (down)encode request.
 func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
 	fam := targetCodecFamily(tf)
-	return fam != "" && format.CodecFamily(codec) == fam
+	if fam == "" {
+		return false
+	}
+	got := format.CodecFamily(codec)
+	if tf == waxtap.FormatAAC && got == "he-aac" {
+		return true
+	}
+	return got == fam
 }
 
 // specChangesAudio reports whether the spec requires rewriting a file whose codec
@@ -244,6 +266,9 @@ func foldsChannels(spec waxtap.ProcessSpec, srcChannels int) bool {
 // only filters probe candidates; every possible match is still confirmed with
 // a probe. General-purpose and unknown containers return true.
 func extPossiblyCodec(ext, family string) bool {
+	if family == "he-aac" {
+		family = "aac" // one container family; see media.ContainerAccepts
+	}
 	switch ext {
 	case ".flac":
 		return family == "flac"
@@ -261,6 +286,12 @@ func extPossiblyCodec(ext, family string) bool {
 		return family == "vorbis" || family == "opus" || family == "flac"
 	case ".webm":
 		return family == "opus" || family == "vorbis"
+	case ".wv":
+		return family == "wavpack"
+	case ".ape":
+		return family == "ape"
+	case ".wma":
+		return false // decode-only: no target family ever produces WMA.
 	case ".wav", ".aiff", ".aif", ".aifc", ".afc":
 		return false // PCM is not one of the comparable target families.
 	case ".mp4", ".mkv":

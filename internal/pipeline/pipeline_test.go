@@ -1101,3 +1101,165 @@ func TestStageStringsAreDistinct(t *testing.T) {
 		t.Errorf("StageRemuxing.String() = %q, want %q", got, "remuxing")
 	}
 }
+
+// taggedWV encodes a stereo sine to WavPack with mux-time tags (one own-audio
+// value included) and returns its path.
+func taggedWV(t *testing.T, dir, name string) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "src.wav")
+	if err := os.WriteFile(src, mediatest.SineWAV(2, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, name)
+	r := newTestRunner(t)
+	spec := media.Spec{Codec: media.CodecWavPack, Tags: []media.Tag{
+		{Key: "TITLE", Value: "Pipeline Tagged"},
+		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-2.00 dB"},
+	}}
+	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
+		t.Fatalf("synth tagged wv: %v", err)
+	}
+	return out
+}
+
+func probeTag(t *testing.T, r *media.Runner, path, key string) string {
+	t.Helper()
+	pr, err := r.Probe(context.Background(), path)
+	if err != nil {
+		t.Fatalf("probe %s: %v", path, err)
+	}
+	if vs := pr.Tags[key]; len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+
+// A downmix with no transcode target promotes into the source's own family;
+// for a WavPack source that family embeds tags at mux time, and the pipeline's
+// probe fallback carries the source's text tags onto the re-encode with the
+// own-audio values dropped. CarrySourceTags gates the fallback: local
+// processing sets it, downloads do not.
+func TestRunDownmixPromotionCarriesProbedTags(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := taggedWV(t, dir, "in.wv")
+	out := filepath.Join(dir, "mono.wv")
+	res, err := Run(context.Background(), r, in, out, Spec{Downmix: 1, CarrySourceTags: true}, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.OutputCodec != media.CodecWavPack || !res.Transcoded {
+		t.Fatalf("result = codec %v transcoded %v, want a wavpack re-encode", res.OutputCodec, res.Transcoded)
+	}
+	if got := probeTag(t, r, out, "TITLE"); got != "Pipeline Tagged" {
+		t.Errorf("TITLE = %q, want the probed source tag carried", got)
+	}
+	if got := probeTag(t, r, out, "REPLAYGAIN_TRACK_GAIN"); got != "" {
+		t.Errorf("ReplayGain = %q, want dropped on a re-encode", got)
+	}
+}
+
+// An explicit remux of a WavPack source (--format copy) keeps every tag,
+// own-audio values included: the audio bytes are unchanged.
+func TestRunRemuxWavPackKeepsAllTags(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := taggedWV(t, dir, "in.wv")
+	out := filepath.Join(dir, "copy.wv")
+	res, err := Run(context.Background(), r, in, out, Spec{Remux: true}, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Transcoded {
+		t.Error("remux reported Transcoded")
+	}
+	if got := probeTag(t, r, out, "TITLE"); got != "Pipeline Tagged" {
+		t.Errorf("TITLE = %q, want carried", got)
+	}
+	if got := probeTag(t, r, out, "REPLAYGAIN_TRACK_GAIN"); got != "-2.00 dB" {
+		t.Errorf("ReplayGain = %q, want kept on a whole-file copy", got)
+	}
+}
+
+// Caller-supplied tags win over the probe fallback and reach the muxer: the
+// source is a tagged WavPack whose own TITLE must not appear when the caller
+// supplied a different set, even with the fallback armed.
+func TestRunSpecTagsReachMuxEmbedTarget(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := taggedWV(t, dir, "in.wv")
+	out := filepath.Join(dir, "out.wv")
+	spec := Spec{
+		Codec:           media.CodecWavPack,
+		Tags:            []media.Tag{{Key: "ARTIST", Value: "Caller"}},
+		CarrySourceTags: true,
+	}
+	if _, err := Run(context.Background(), r, in, out, spec, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := probeTag(t, r, out, "ARTIST"); got != "Caller" {
+		t.Errorf("ARTIST = %q, want the caller's tag", got)
+	}
+	if got := probeTag(t, r, out, "TITLE"); got != "" {
+		t.Errorf("TITLE = %q, want the probe fallback suppressed by the caller's set", got)
+	}
+}
+
+// Without CarrySourceTags a mux-tagged encode that got no Tags stays untagged:
+// a download that did not ask for metadata must not inherit the stream's own
+// container tags.
+func TestRunNoCarrySourceTagsStaysUntagged(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := taggedWV(t, dir, "in.wv")
+	out := filepath.Join(dir, "out.wv")
+	if _, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecWavPack}, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := probeTag(t, r, out, "TITLE"); got != "" {
+		t.Errorf("TITLE = %q, want no tags without CarrySourceTags", got)
+	}
+}
+
+// A cut into a .wv container the source codec cannot enter promotes to the
+// WavPack encoder, the same rule every other container promotion follows. (An
+// explicit --format copy into .wv stays a rejection: that request contradicts
+// itself, and TestRunRemux's family covers it.)
+func TestRunCutIntoWVPromotes(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.flac", 2, "flac")
+	out := filepath.Join(dir, "out.wv")
+	spec := Spec{Remove: []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}}}
+	res, err := Run(context.Background(), r, in, out, spec, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.OutputCodec != media.CodecWavPack || !res.Transcoded || !res.Cut {
+		t.Errorf("result = codec %v transcoded %v cut %v, want a cut wavpack encode", res.OutputCodec, res.Transcoded, res.Cut)
+	}
+}
+
+func TestSourceEncodeCodecNewFamilies(t *testing.T) {
+	cases := []struct {
+		name string
+		want media.Codec
+		ok   bool
+	}{
+		{"he-aac", media.CodecHEAAC, true},
+		{"wavpack", media.CodecWavPack, true},
+		{"ape", media.CodecAPE, true},
+		{"wma", media.CodecCopy, false}, // decode-only: no encoder keeps the family
+	}
+	for _, c := range cases {
+		got, ok := sourceEncodeCodec(c.name, "")
+		if got != c.want || ok != c.ok {
+			t.Errorf("sourceEncodeCodec(%q) = %v,%v want %v,%v", c.name, got, ok, c.want, c.ok)
+		}
+	}
+	for ext, want := range map[string]media.Codec{"wv": media.CodecWavPack, "ape": media.CodecAPE} {
+		if got, ok := containerCodec(ext); !ok || got != want {
+			t.Errorf("containerCodec(%q) = %v,%v want %v,true", ext, got, ok, want)
+		}
+	}
+}

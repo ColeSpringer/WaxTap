@@ -132,6 +132,9 @@ func TestCodecStringExtensionLossless(t *testing.T) {
 		{CodecOpus, "opus", "opus", false},
 		{CodecVorbis, "vorbis", "ogg", false},
 		{CodecAIFF, "aiff", "aiff", true},
+		{CodecHEAAC, "he-aac", "m4a", false},
+		{CodecWavPack, "wavpack", "wv", true},
+		{CodecAPE, "ape", "ape", true},
 	}
 	for _, tc := range cases {
 		if got := tc.c.String(); got != tc.str {
@@ -165,6 +168,26 @@ func TestEncodeOptionsBitrateDefaults(t *testing.T) {
 	if o := encodeOptions(Spec{Codec: CodecFLAC, Channels: 2, GainDB: -3}); o.Channels != 2 || o.GainDB != -3 || o.BitDepth != 0 {
 		t.Errorf("FLAC opts = %+v, want channels 2, gain -3, keep depth", o)
 	}
+	// HE-AAC rides the AAC bitrate anchor with its own low-rate default; WaxTap
+	// encodes v1 only, so the v2 selector must stay off.
+	if o := encodeOptions(Spec{Codec: CodecHEAAC}); o.Format != "he-aac" || o.AACBitrate != defaultHEAACBitrate || o.HEAACv2 {
+		t.Errorf("HE-AAC default = %+v, want format he-aac at %d, v1", o, defaultHEAACBitrate)
+	}
+	if o := encodeOptions(Spec{Codec: CodecHEAAC, Bitrate: 48000}); o.AACBitrate != 48000 {
+		t.Errorf("HE-AAC override = %d, want 48000", o.AACBitrate)
+	}
+	// The lossless WavPack/APE rows take no bitrate and keep the level defaults.
+	if o := encodeOptions(Spec{Codec: CodecWavPack}); o.Format != "wavpack" || o.WavPackLevel != 0 {
+		t.Errorf("WavPack = %+v, want format wavpack at the default level", o)
+	}
+	if o := encodeOptions(Spec{Codec: CodecAPE}); o.Format != "ape" || o.APELevel != 0 {
+		t.Errorf("APE = %+v, want format ape at the default level", o)
+	}
+	// Spec.Tags ride onto the engine options for the mux-tagged outputs.
+	tags := []Tag{{Key: "TITLE", Value: "t"}}
+	if o := encodeOptions(Spec{Codec: CodecWavPack, Tags: tags}); len(o.Tags) != 1 || o.Tags[0].Key != "TITLE" {
+		t.Errorf("WavPack tags = %+v, want the spec's tags", o.Tags)
+	}
 }
 
 func TestCodecNameBoundary(t *testing.T) {
@@ -172,6 +195,7 @@ func TestCodecNameBoundary(t *testing.T) {
 	cases := map[codec.ID]string{
 		codec.Opus: "opus", codec.AACLC: "aac", codec.FLAC: "flac",
 		codec.ALAC: "alac", codec.MP3: "mp3", codec.Vorbis: "vorbis", codec.PCM: "pcm",
+		codec.HEAAC: "he-aac", codec.WavPack: "wavpack", codec.APE: "ape", codec.WMA: "wma",
 	}
 	for id, want := range cases {
 		if got := codecName(id); got != want {
@@ -181,13 +205,18 @@ func TestCodecNameBoundary(t *testing.T) {
 	// codecToFormat is the write-direction inverse for the remuxable codecs. PCM is
 	// excluded because its wire layout belongs to the container, so no packet copy
 	// survives (see TestPCMRemuxDeclined).
-	for _, id := range []codec.ID{codec.Opus, codec.AACLC, codec.FLAC, codec.ALAC, codec.MP3, codec.Vorbis} {
+	for _, id := range []codec.ID{codec.Opus, codec.AACLC, codec.HEAAC, codec.FLAC, codec.ALAC, codec.MP3, codec.Vorbis, codec.WavPack, codec.APE} {
 		if _, ok := codecToFormat(id); !ok {
 			t.Errorf("codecToFormat(%v) not ok", id)
 		}
 	}
 	if _, ok := codecToFormat(codec.PCM); ok {
 		t.Error("codecToFormat(pcm) ok = true; PCM must decline so the caller gets ErrIncompatibleSpec, not an engine error")
+	}
+	// WMA is decode-only upstream: no output row exists, so a remux must decline
+	// with WaxTap's own wording rather than reach the engine.
+	if _, ok := codecToFormat(codec.WMA); ok {
+		t.Error("codecToFormat(wma) ok = true; WMA has no WaxFlow output row and must decline")
 	}
 }
 
@@ -235,6 +264,9 @@ func TestTranscodeRoundTripsCodecs(t *testing.T) {
 		{"out.opus", CodecOpus, "opus"},
 		{"out.ogg", CodecVorbis, "vorbis"},
 		{"out.m4a", CodecAAC, "aac"},
+		{"out_he.m4a", CodecHEAAC, "he-aac"},
+		{"out.wv", CodecWavPack, "wavpack"},
+		{"out.ape", CodecAPE, "ape"},
 	} {
 		out := encodeFixture(t, r, dir, tc.name, tc.c)
 		pr, err := r.Probe(context.Background(), out)
@@ -429,6 +461,15 @@ func TestContainerAcceptsTable(t *testing.T) {
 		// Matroska takes PCM through the wav row. The aiff row has no alternate
 		// container, so aiff into .mka has to be rejected before the encode.
 		{"mka", "aiff", false}, {"mka", "pcm_s16le", true},
+		// HE-AAC rides everywhere the AAC family does, and nowhere else.
+		{"m4a", "he-aac", true}, {"mp4", "he-aac", true}, {"m4b", "he-aac", true},
+		{"aac", "he-aac", true}, {"mka", "he-aac", true},
+		{"webm", "he-aac", false}, {"ogg", "he-aac", false},
+		// WavPack and APE fit only their own containers; WaxFlow writes neither
+		// into Matroska.
+		{"wv", "wavpack", true}, {"wv", "flac", false}, {"wv", "ape", false},
+		{"ape", "ape", true}, {"ape", "wavpack", false},
+		{"mka", "wavpack", false}, {"mka", "ape", false},
 	}
 	for _, c := range cases {
 		if got := ContainerAccepts(c.ext, c.codec); got != c.want {
@@ -472,6 +513,14 @@ func TestContainerForFormatAware(t *testing.T) {
 		{"aac", "aac", "adts"},
 		{"flac", "flac", ""},
 		{"mp3", "mp3", ""},
+		// HE-AAC is MP4 like the rest of its family, and ADTS on a .aac path.
+		{"he-aac", "m4a", "progressive"},
+		{"he-aac", "", "progressive"},
+		{"he-aac", "aac", "adts"},
+		{"he-aac", "mka", "mka"},
+		// WavPack and APE have no alternate containers; any override would error.
+		{"wavpack", "wv", ""},
+		{"ape", "ape", ""},
 		// The aiff row has no alternate container, so any override would error.
 		{"aiff", "aiff", ""},
 		{"aiff", "aif", ""},
@@ -829,4 +878,259 @@ func mustProbe(t *testing.T, r *Runner, path string) ProbeResult {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// wvTagFixture encodes a stereo sine to WavPack with a mux-time tag set that
+// includes an own-audio value, and returns its path. The APEv2 block the muxer
+// writes is the file's only tag form.
+func wvTagFixture(t *testing.T, r *Runner, dir string) string {
+	t.Helper()
+	src := wavFixture(t, 3, 2)
+	out := filepath.Join(dir, "tagged.wv")
+	spec := Spec{Codec: CodecWavPack, Tags: []Tag{
+		{Key: "TITLE", Value: "Tagged Sine"},
+		{Key: "ARTIST", Value: "WaxTap Test"},
+		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-3.00 dB"},
+	}}
+	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
+		t.Fatalf("encode wv: %v", err)
+	}
+	return out
+}
+
+func tagValue(pr ProbeResult, key string) string {
+	if vs := pr.Tags[key]; len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+
+// The WavPack muxer embeds Spec.Tags as APEv2, the demuxer reads them back
+// through the probe, and a whole-file remux carries them, own-audio values
+// included (the audio bytes are unchanged, so ReplayGain still holds).
+func TestWavPackTagsEmbedAndRemuxCarry(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := wvTagFixture(t, r, dir)
+
+	pr := mustProbe(t, r, in)
+	if got := tagValue(pr, "TITLE"); got != "Tagged Sine" {
+		t.Fatalf("encoded TITLE = %q, want %q (tags = %v)", got, "Tagged Sine", pr.Tags)
+	}
+
+	out := filepath.Join(dir, "copy.wv")
+	if _, err := r.Transcode(context.Background(), in, out, Spec{Codec: CodecCopy}); err != nil {
+		t.Fatalf("remux: %v", err)
+	}
+	pr = mustProbe(t, r, out)
+	if a, _ := pr.AudioStream(); a.CodecName != "wavpack" {
+		t.Errorf("remux codec = %q, want wavpack", a.CodecName)
+	}
+	if got := tagValue(pr, "TITLE"); got != "Tagged Sine" {
+		t.Errorf("remuxed TITLE = %q, want %q", got, "Tagged Sine")
+	}
+	if got := tagValue(pr, "REPLAYGAIN_TRACK_GAIN"); got != "-3.00 dB" {
+		t.Errorf("remuxed ReplayGain = %q, want kept on a whole-file copy", got)
+	}
+}
+
+// A copy cut of a WavPack source falls back to a re-encode: WavPack is not on
+// WaxFlow's cut allowlist (lossless, so the re-encode costs CPU and zero
+// generation loss, the ALAC rule). The fallback honors CutSpec.Encode.Tags,
+// which is how the pipeline's probed-tag carry reaches a cut .wv output.
+func TestCutWavPackFallsBackToReencodeWithTags(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := wvTagFixture(t, r, dir)
+	out := filepath.Join(dir, "cut.wv")
+	res, err := r.Render(context.Background(), in, out, CutSpec{
+		Keeps:   []cutrange.Range{{Start: 0, End: time.Second}},
+		Total:   3 * time.Second,
+		CopyCut: true,
+		Encode:  Spec{Codec: CodecWavPack, Tags: []Tag{{Key: "TITLE", Value: "Tagged Sine"}}},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if res.Mode != ModeAccurate {
+		t.Errorf("wavpack cut mode = %v, want ModeAccurate (not on the cut allowlist)", res.Mode)
+	}
+	pr := mustProbe(t, r, out)
+	if a, _ := pr.AudioStream(); a.CodecName != "wavpack" {
+		t.Errorf("cut codec = %q, want wavpack (fallback keeps the family)", a.CodecName)
+	}
+	if got := tagValue(pr, "TITLE"); got != "Tagged Sine" {
+		t.Errorf("cut TITLE = %q, want the Encode spec's tags embedded", got)
+	}
+}
+
+// The APE muxer takes the same mux-time tags.
+func TestAPETagsEmbed(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	src := wavFixture(t, 2, 2)
+	out := filepath.Join(dir, "tagged.ape")
+	spec := Spec{Codec: CodecAPE, Tags: []Tag{{Key: "ALBUM", Value: "Test Album"}}}
+	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
+		t.Fatalf("encode ape: %v", err)
+	}
+	pr := mustProbe(t, r, out)
+	if a, _ := pr.AudioStream(); a.CodecName != "ape" {
+		t.Errorf("codec = %q, want ape", a.CodecName)
+	}
+	if got := tagValue(pr, "ALBUM"); got != "Test Album" {
+		t.Errorf("ALBUM = %q, want %q (tags = %v)", got, "Test Album", pr.Tags)
+	}
+}
+
+// A copy of an HE-AAC source keeps its identity: the probe reports he-aac and
+// the remux carries the packets rather than declining (pre-bump the codec ID
+// did not exist; a decline here would break --format copy on such files).
+func TestHEAACRemuxKeepsIdentity(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := encodeFixture(t, r, dir, "he.m4a", CodecHEAAC)
+	pr := mustProbe(t, r, in)
+	if a, _ := pr.AudioStream(); a.CodecName != "he-aac" {
+		t.Fatalf("encoded codec = %q, want he-aac", a.CodecName)
+	}
+	out := filepath.Join(dir, "copy.m4a")
+	if _, err := r.Transcode(context.Background(), in, out, Spec{Codec: CodecCopy}); err != nil {
+		t.Fatalf("remux: %v", err)
+	}
+	pr = mustProbe(t, r, out)
+	if a, _ := pr.AudioStream(); a.CodecName != "he-aac" {
+		t.Errorf("remuxed codec = %q, want he-aac (identity preserved)", a.CodecName)
+	}
+}
+
+func TestTagsFromMapDeterministic(t *testing.T) {
+	m := map[string][]string{
+		"TITLE":  {"a"},
+		"ARTIST": {"x", "y"},
+	}
+	want := []Tag{{Key: "ARTIST", Value: "x"}, {Key: "ARTIST", Value: "y"}, {Key: "TITLE", Value: "a"}}
+	for range 8 { // map order is random; the output must not be
+		got := TagsFromMap(m)
+		if len(got) != len(want) {
+			t.Fatalf("TagsFromMap = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("TagsFromMap[%d] = %v, want %v", i, got[i], want[i])
+			}
+		}
+	}
+	if TagsFromMap(nil) != nil {
+		t.Error("TagsFromMap(nil) should be nil")
+	}
+}
+
+func TestDropOwnAudioTags(t *testing.T) {
+	in := []Tag{
+		{Key: "TITLE", Value: "t"},
+		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-1.0 dB"},
+		{Key: "ARTIST", Value: "a"},
+	}
+	got := DropOwnAudioTags(in)
+	if len(got) != 2 || got[0].Key != "TITLE" || got[1].Key != "ARTIST" {
+		t.Errorf("DropOwnAudioTags = %v, want TITLE and ARTIST only", got)
+	}
+}
+
+// HE-AAC's cut-remux is positional in WaxFlow's allowlist: a cut keeping the
+// stream head packet-copies, one starting later declines and re-encodes. Both
+// halves are pinned so an upstream allowlist change surfaces here instead of
+// silently changing what a cut costs.
+func TestRenderCutHEAACHeadOnly(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := encodeFixture(t, r, dir, "he.m4a", CodecHEAAC)
+
+	head := filepath.Join(dir, "head.m4a")
+	res, err := r.Render(context.Background(), in, head, CutSpec{
+		Keeps:   []cutrange.Range{{Start: 0, End: time.Second}},
+		Total:   3 * time.Second,
+		CopyCut: true,
+		Encode:  Spec{Codec: CodecHEAAC},
+	})
+	if err != nil {
+		t.Fatalf("head cut: %v", err)
+	}
+	if res.Mode != ModeCopy {
+		t.Errorf("head-keeping HE-AAC cut mode = %v, want ModeCopy", res.Mode)
+	}
+
+	mid := filepath.Join(dir, "mid.m4a")
+	res, err = r.Render(context.Background(), in, mid, CutSpec{
+		Keeps:   []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		Total:   3 * time.Second,
+		CopyCut: true,
+		Encode:  Spec{Codec: CodecHEAAC},
+	})
+	if err != nil {
+		t.Fatalf("mid cut: %v", err)
+	}
+	if res.Mode != ModeAccurate {
+		t.Errorf("mid-stream HE-AAC cut mode = %v, want ModeAccurate (WaxFlow cuts HE-AAC only from the stream head)", res.Mode)
+	}
+}
+
+// The RequireCopy refusal for a positionally-declined HE-AAC cut names the
+// constraint rather than implying the file is not AAC.
+func TestRenderRequireCopyHEAACMidStream(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := encodeFixture(t, r, dir, "he.m4a", CodecHEAAC)
+	_, err := r.Render(context.Background(), in, filepath.Join(dir, "cut.m4a"), CutSpec{
+		Keeps:       []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		Total:       3 * time.Second,
+		CopyCut:     true,
+		RequireCopy: true,
+		Encode:      Spec{Codec: CodecHEAAC},
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+	if !strings.Contains(err.Error(), "stream start") {
+		t.Errorf("err = %v, want it to name HE-AAC's head-only constraint", err)
+	}
+}
+
+// A copy-cut source with no same-family encoder (WMA) fails with WaxTap's own
+// wording instead of reaching the engine with an empty format.
+func TestRenderCutCopyFallbackNeedsEncoder(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	in := filepath.Join(t.TempDir(), "in.wav")
+	if err := os.WriteFile(in, mediatest.SineWAV(3, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// PCM declines the cut-remux like WMA does, and a CodecCopy fallback is the
+	// same impossible spec either way.
+	_, err := r.Render(context.Background(), in, filepath.Join(t.TempDir(), "out.wav"), CutSpec{
+		Keeps:   []cutrange.Range{{Start: 0, End: time.Second}},
+		Total:   3 * time.Second,
+		CopyCut: true,
+		Encode:  Spec{Codec: CodecCopy},
+	})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+	if !strings.Contains(err.Error(), "pass an explicit format") {
+		t.Errorf("err = %v, want the --format escape named", err)
+	}
+}
+
+// encodeOptions is the one funnel every encode passes through, so it, not each
+// caller, enforces that only the mux-tagged formats get mux-time tags: any
+// other muxer would embed them too and its finished file then gets the
+// WaxLabel post-pass as well, two conflicting tag sets.
+func TestEncodeOptionsGatesTagsOnMuxEmbed(t *testing.T) {
+	tags := []Tag{{Key: "TITLE", Value: "t"}}
+	if o := encodeOptions(Spec{Codec: CodecFLAC, Tags: tags}); len(o.Tags) != 0 {
+		t.Errorf("FLAC opts.Tags = %v, want none (post-pass owns FLAC tagging)", o.Tags)
+	}
+	if o := encodeOptions(Spec{Codec: CodecAPE, Tags: tags}); len(o.Tags) != 1 {
+		t.Errorf("APE opts.Tags = %v, want the spec's tags", o.Tags)
+	}
 }

@@ -7,8 +7,8 @@ go 1.26
 retract v3.0.0
 
 require (
-	github.com/colespringer/waxflow v0.0.0-20260816051810-ba4adcdb22b9
-	github.com/colespringer/waxlabel v1.4.1
+	github.com/colespringer/waxflow v0.0.0-20260821144713-192e0e1f6706
+	github.com/colespringer/waxlabel v1.5.0
 	github.com/dop251/goja v0.0.0-20260723142020-b4aef50fa347
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

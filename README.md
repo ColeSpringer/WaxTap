@@ -90,9 +90,15 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   target layout it is a no-op that costs no re-encode. `--itag` names an exact
   encoding, so it overrides `--channels`; the run prints a note when the
   delivered layout is not the one asked for.
-- `--format` names are case-insensitive and trimmed, and a few spellings are
-  aliases: `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, and
-  `remux` for copy.
+- `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
+  Names are case-insensitive and trimmed, and a few spellings are aliases:
+  `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, `wv` for
+  wavpack, `heaac` for he-aac, and `remux` for copy. `he-aac` encodes HE-AAC v1
+  in `.m4a` at 64 kbps by default (a low-bitrate preset; `aac` stays the
+  256 kbps AAC-LC one), and `--format aac` on a source that is already HE-AAC
+  copies it under its own identity rather than re-encoding it to AAC-LC.
+  WavPack, Monkey's Audio (APE), and WMA files are also accepted as local
+  inputs; WMA is decode-only, so `--format copy` on one is refused.
 - `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
   and `{index}`. `{index}` numbers playlist items and expands empty for a single
   video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
@@ -119,8 +125,12 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
   AIFF. That is lossless but larger, and some older DAWs and hardware players
   reject float WAV. `--bit-depth 16|24` forces integer output for
-  wav/aiff/flac/alac; narrowing is dithered (TPDF), not truncated. The lossy
-  formats encode in float and ignore it.
+  wav/aiff/flac/alac/wavpack/ape; narrowing is dithered (TPDF), not truncated.
+  The lossy formats encode in float and ignore it. WavPack and APE hold integer
+  PCM only, so a float decode quantizes to 24 bits there by default, and both
+  hold at most stereo: a surround source is refused rather than silently folded
+  (pass `--downmix`). APE additionally caps at 24 bits and refuses a 32-bit
+  integer source rather than narrowing it silently (pass `--bit-depth 24`).
 - `--embed-thumbnail` writes the video's thumbnail as front cover art, and
   `--embed-metadata` writes title, artist, date, and chapters. Chapter marks
   follow any cut: shifted by the audio removed before them, dropped when their
@@ -144,7 +154,9 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   Chapter marks follow a cut the same way the embed flags do. Tags describing
   the source audio itself (ReplayGain, encoder stamps) carry only on a pure
   `--format copy` remux; a re-encode or cut invalidates them, so they are left
-  off.
+  off. WavPack and APE outputs take their tags as an APEv2 block written with
+  the audio: text tags carry (from WavPack/APE/WMA sources too), while cover
+  art and chapters have no form there and are reported as carry losses.
 - SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
   exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
   outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal

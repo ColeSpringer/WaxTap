@@ -167,7 +167,8 @@ func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 func isLosslessFormat(tf waxtap.TranscodeFormat) bool {
 	return tf == waxtap.FormatCopy || tf == waxtap.FormatFLAC ||
 		tf == waxtap.FormatALAC || tf == waxtap.FormatWAV ||
-		tf == waxtap.FormatAIFF
+		tf == waxtap.FormatAIFF || tf == waxtap.FormatWavPack ||
+		tf == waxtap.FormatAPE
 }
 
 // copyPromotionNote is the shared reason --bitrate and --bit-depth cannot be
@@ -452,8 +453,9 @@ func newTranscodeCmd() *cobra.Command {
 		Use:   "transcode <input> [output]",
 		Short: "Transcode a local file or YouTube audio to another format",
 		Long: "Re-encode audio to a target format. The format comes from --format or is\n" +
-			"inferred from the output file extension. FLAC/ALAC/WAV are lossless\n" +
-			"re-encodes (no further loss); copy/remux is the only no-re-encode path.\n" +
+			"inferred from the output file extension. FLAC/ALAC/WAV/WavPack/APE are\n" +
+			"lossless re-encodes (no further loss); copy/remux is the only no-re-encode\n" +
+			"path.\n" +
 			"When both --format and an output extension are given, the extension must be\n" +
 			"a container that can hold the format (for example, mp3 uses .mp3 or .mka,\n" +
 			"not .flac).\n\n" +
@@ -549,6 +551,7 @@ func newTranscodeCmd() *cobra.Command {
 			// codec-named or extensionless path lands in the format's own default
 			// container, exactly as the encode path would leave it.
 			remuxNoop := false
+			probedCodec := ""
 			if !force && spec.Transcode != nil && targetCodecFamily(tf) != "" && !audioChangeIsCertain(spec) &&
 				isLocalFile(source) {
 				// Check the requested format before rewriting to copy, so an
@@ -571,6 +574,7 @@ func newTranscodeCmd() *cobra.Command {
 					spec.Transcode.Format = waxtap.FormatCopy
 					spec.Transcode.Bitrate, spec.Transcode.BitDepth = 0, 0
 					remuxNoop = true
+					probedCodec = p.Codec
 				}
 			}
 
@@ -584,7 +588,10 @@ func newTranscodeCmd() *cobra.Command {
 				return err
 			}
 			if remuxNoop {
-				env.info("note: %s is already %s; copied without re-encoding (use --force to re-encode)\n", source, targetCodecFamily(tf))
+				// The probed codec, not the requested family: an HE-AAC file
+				// satisfies --format aac by copying, and calling it "aac" here
+				// while the result line says he-aac would have the two disagree.
+				env.info("note: %s is already %s; copied without re-encoding (use --force to re-encode)\n", source, probedCodec)
 			}
 			return emitResult(env, res)
 		},

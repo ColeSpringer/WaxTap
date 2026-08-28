@@ -295,8 +295,8 @@ type ProcessRequest struct {
 }
 
 // TranscodeFormat names an output preset. FormatCopy is the only no-re-encode
-// path. FLAC, ALAC, WAV, and AIFF preserve the decoded samples, but they are
-// still decode-and-encode passes when the source is YouTube audio.
+// path. FLAC, ALAC, WAV, AIFF, WavPack, and APE preserve the decoded samples,
+// but they are still decode-and-encode passes when the source is YouTube audio.
 type TranscodeFormat uint8
 
 const (
@@ -309,6 +309,23 @@ const (
 	FormatOpus                          // Opus audio
 	FormatVorbis                        // Vorbis audio
 	FormatAIFF                          // uncompressed PCM in an AIFF container
+	// FormatHEAAC is HE-AAC v1 (SBR over a half-rate AAC-LC core), delivered in
+	// an .m4a container like FormatAAC but aimed at low bitrates (the preset
+	// default is 64 kbps against AAC-LC's 256). A request for FormatAAC on a
+	// source that is already HE-AAC copies it under its own identity rather
+	// than re-encoding to AAC-LC.
+	FormatHEAAC
+	// FormatWavPack is WavPack lossless audio (.wv). It holds mono or stereo
+	// only; a wider source is refused rather than silently folded (set Downmix
+	// to choose the fold). Metadata is embedded by the muxer as an APEv2
+	// block: text tags carry, pictures and chapters have no APEv2 form here
+	// and are reported as carry losses.
+	FormatWavPack
+	// FormatAPE is Monkey's Audio lossless audio (.ape), with the same APEv2
+	// metadata behavior as FormatWavPack. It holds 8/16/24-bit integer PCM in
+	// mono or stereo only; a 32-bit integer source is refused rather than
+	// silently narrowed (ask for BitDepth 24).
+	FormatAPE
 )
 
 // TranscodeSpec requests re-encoding. An explicit FormatCopy remuxes (container
@@ -321,9 +338,11 @@ type TranscodeSpec struct {
 	// Zero selects the preset default. Ignored by lossless presets.
 	Bitrate int
 	// BitDepth forces integer output at 16 or 24 bits for the presets that hold
-	// integer PCM (WAV, AIFF, FLAC, ALAC). Zero, the default, follows the decoded
-	// stream, so a lossy source (which decodes to float) yields 32-bit float WAV
-	// and 24-bit FLAC. Narrowing is dithered, not truncated.
+	// integer PCM (WAV, AIFF, FLAC, ALAC, WavPack, APE). Zero, the default,
+	// follows the decoded stream, so a lossy source (which decodes to float)
+	// yields 32-bit float WAV and 24-bit FLAC. Narrowing is dithered, not
+	// truncated. APE holds nothing wider than 24 bits, so a 32-bit integer
+	// source needs BitDepth 24 there (see FormatAPE).
 	//
 	// The lossy presets encode in the float domain and ignore it silently, as does
 	// FormatCopy; only the CLI notes that. A value outside {0, 16, 24} is still
@@ -738,6 +757,13 @@ const (
 	// waveform between stored samples crosses full scale and playback can clip
 	// it. Detail carries WaxFlow's measurement of the delivered encode.
 	WarnOutputClipping
+	// WarnImplicitLossy reports that a lossless source was re-encoded to a
+	// lossy codec the request never named: the spec asked for a copy (or
+	// nothing), and automatic processing picked the output container's default
+	// encoder because the source codec cannot enter that container. The result
+	// line already names the codec written; this is the signal that quality was
+	// lost where none of the request said it would be.
+	WarnImplicitLossy
 )
 
 func (w WarningCode) String() string {
@@ -776,6 +802,8 @@ func (w WarningCode) String() string {
 		return "implicit-downmix"
 	case WarnOutputClipping:
 		return "output-clipping"
+	case WarnImplicitLossy:
+		return "implicit-lossy"
 	default:
 		return "unknown"
 	}

@@ -177,7 +177,7 @@ func bindBitrateFlag(f *pflag.FlagSet, bitrate *int) {
 // bindBitDepthFlag registers --bit-depth with the shared help text. Only the
 // integer-PCM formats honor it; the lossy encoders run in float and drop it.
 func bindBitDepthFlag(f *pflag.FlagSet, bitDepth *int) {
-	f.IntVar(bitDepth, "bit-depth", 0, "output bit depth for wav/aiff/flac/alac: 16 or 24 (0 follows the source)")
+	f.IntVar(bitDepth, "bit-depth", 0, "output bit depth for wav/aiff/flac/alac/wavpack/ape: 16 or 24 (0 follows the source)")
 }
 
 // bindPeakModeFlag registers --peak-mode with the shared help text.

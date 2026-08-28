@@ -32,17 +32,18 @@ func rejectChangedFlags(cmd *cobra.Command, reason string, names ...string) erro
 }
 
 // transcodeFormatNames lists the encoded output formats --format accepts, in the
-// order help text and error messages present them. It is the one place the set is
-// written down, and TestTranscodeFormatParity pins it to the engine's
-// media.OutputFormats(): a format WaxFlow registers and WaxTap forgets to expose
-// is what produced the half-wired AIFF the 2026-07-28 pass found.
-var transcodeFormatNames = []string{"flac", "alac", "wav", "aiff", "mp3", "aac", "opus", "vorbis"}
+// order help text and error messages present them: the lossless set, then the
+// lossy set. It is the one place the set is written down, and
+// TestTranscodeFormatParity pins it to the engine's media.OutputFormats(): a
+// format WaxFlow registers and WaxTap forgets to expose is what produced the
+// half-wired AIFF the 2026-07-28 pass found.
+var transcodeFormatNames = []string{"flac", "alac", "wav", "aiff", "wavpack", "ape", "mp3", "aac", "he-aac", "opus", "vorbis"}
 
 // formatSpellingNote documents the aliases parseTranscodeFormat accepts beyond
 // the canonical names. It sits outside formatChoices, which is pinned to exactly
 // the format set, and omits remux=copy on purpose: cut and normalize share this
 // text and must not mention copy at all.
-const formatSpellingNote = " (case-insensitive; ogg=vorbis, m4a=aac, aif=aiff)"
+const formatSpellingNote = " (case-insensitive; ogg=vorbis, m4a=aac, aif=aiff, wv=wavpack, heaac=he-aac)"
 
 // formatChoices renders the --format choices for help text and errors. withCopy
 // prepends the copy pseudo-format, which remuxes rather than encoding, so the
@@ -75,10 +76,16 @@ func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
 		return waxtap.FormatMP3, nil
 	case "aac", "m4a":
 		return waxtap.FormatAAC, nil
+	case "he-aac", "heaac":
+		return waxtap.FormatHEAAC, nil
 	case "opus":
 		return waxtap.FormatOpus, nil
 	case "vorbis", "ogg":
 		return waxtap.FormatVorbis, nil
+	case "wavpack", "wv":
+		return waxtap.FormatWavPack, nil
+	case "ape":
+		return waxtap.FormatAPE, nil
 	default:
 		return 0, usagef("unknown transcode format %q (want %s)", s, formatChoices(true))
 	}
@@ -90,7 +97,7 @@ func transcodeExt(f waxtap.TranscodeFormat) string {
 	switch f {
 	case waxtap.FormatFLAC:
 		return "flac"
-	case waxtap.FormatALAC, waxtap.FormatAAC:
+	case waxtap.FormatALAC, waxtap.FormatAAC, waxtap.FormatHEAAC:
 		return "m4a"
 	case waxtap.FormatWAV:
 		return "wav"
@@ -102,6 +109,10 @@ func transcodeExt(f waxtap.TranscodeFormat) string {
 		return "opus"
 	case waxtap.FormatVorbis:
 		return "ogg"
+	case waxtap.FormatWavPack:
+		return "wv"
+	case waxtap.FormatAPE:
+		return "ape"
 	default:
 		return ""
 	}

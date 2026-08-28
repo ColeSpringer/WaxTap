@@ -2,11 +2,15 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
+	wlerr "github.com/colespringer/waxlabel/waxerr"
 )
 
 // carryTags copies the input file's embedded metadata (tags, pictures,
@@ -32,8 +36,14 @@ import (
 func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) {
 	src, err := waxlabel.ParseFile(ctx, srcPath)
 	if err != nil {
-		// An unreadable tag form carried nothing before either, so there is no
-		// demonstrable loss to warn about.
+		if errors.Is(err, wlerr.ErrUnsupportedFormat) {
+			// WaxLabel cannot identify the source (WavPack, APE, WMA), but the
+			// engine's demuxer may still have read its text tags; carry those.
+			c.carryProbedTags(ctx, srcPath, outPath, dest, remuxed, em)
+			return
+		}
+		// A readable format whose parse failed carried nothing before either,
+		// so there is no demonstrable loss to warn about.
 		c.log.Debug("tag carry: source not readable", "path", srcPath, "err", err)
 		return
 	}
@@ -89,6 +99,77 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 		return
 	}
 	c.log.Debug("tag carry: metadata carried", "from", srcPath, "to", outPath)
+}
+
+// carryProbedTags is the tag carry for sources WaxLabel cannot identify
+// (WavPack, APE, WMA): the engine's demuxer parses their text tags, and this
+// writes those onto a WaxLabel-writable output. On a re-encode or cut, tags
+// describing the source's own audio are dropped, the transfer's own rule; a
+// whole-file remux keeps them, since the audio bytes are unchanged. Pictures
+// are not read by the demuxers, so there is no demonstrable picture loss to
+// warn about; a source with no readable tags carries nothing, silently, as
+// before.
+func (c *Client) carryProbedTags(ctx context.Context, srcPath, outPath, dest string, remuxed bool, em *emitter) {
+	// Parse the destination first: the wv/ape own-format outputs are
+	// unreadable here and already took their tags at mux time, so failing on
+	// them costs no source probe.
+	dst, err := waxlabel.ParseFile(ctx, outPath)
+	if err != nil {
+		c.log.Debug("tag carry: output not readable for probed-tag carry", "path", outPath, "err", err)
+		return
+	}
+	pr, err := c.engine().Probe(ctx, srcPath)
+	if err != nil || len(pr.Tags) == 0 {
+		c.log.Debug("tag carry: source not readable", "path", srcPath, "err", err)
+		return
+	}
+	out := warnName(dest, outPath)
+	ed := dst.Edit()
+	wrote, skipped := false, 0
+	for _, k := range slices.Sorted(maps.Keys(pr.Tags)) {
+		// A demuxer-read key is validated per key rather than trusted: WaxFlow's
+		// key rules are looser than WaxLabel's, and Prepare rejects a whole edit
+		// on its first bad key, which would turn one odd APEv2 item into a fully
+		// untagged output.
+		key, kerr := tag.ParseKey(k)
+		if kerr != nil {
+			skipped++
+			continue
+		}
+		if !remuxed && key.DescribesOwnAudio() {
+			continue
+		}
+		ed.Set(key, pr.Tags[k]...)
+		wrote = true
+	}
+	if !wrote {
+		if skipped > 0 {
+			em.warn(WarnTagCarry, fmt.Sprintf("could not carry metadata into %s: %d tags have keys the tag library rejects", out, skipped))
+		}
+		return
+	}
+	plan, err := ed.Prepare()
+	if err != nil {
+		em.warn(WarnTagCarry, fmt.Sprintf("could not carry metadata into %s: %v", out, err))
+		return
+	}
+	_, note, err := executeSaveBack(ctx, plan)
+	if err != nil {
+		em.warn(WarnTagCarry, fmt.Sprintf("could not carry metadata into %s: %v", out, err))
+		return
+	}
+	var notes []string
+	if skipped > 0 {
+		notes = append(notes, fmt.Sprintf("%d tags dropped (keys the tag library rejects)", skipped))
+	}
+	if note != "" {
+		notes = append(notes, note)
+	}
+	if len(notes) > 0 {
+		em.warn(WarnTagCarry, fmt.Sprintf("metadata carried to %s with losses: %s", out, strings.Join(notes, "; ")))
+		return
+	}
+	c.log.Debug("tag carry: probed metadata carried", "from", srcPath, "to", outPath)
 }
 
 // transferLosses lists a transfer's dropped or downgraded items, one note per

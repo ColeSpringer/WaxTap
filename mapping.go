@@ -43,6 +43,12 @@ func transcodeCodec(f TranscodeFormat) media.Codec {
 		return media.CodecOpus
 	case FormatVorbis:
 		return media.CodecVorbis
+	case FormatHEAAC:
+		return media.CodecHEAAC
+	case FormatWavPack:
+		return media.CodecWavPack
+	case FormatAPE:
+		return media.CodecAPE
 	default:
 		return media.CodecCopy
 	}
@@ -65,7 +71,9 @@ func transcodeTarget(t *TranscodeSpec) format.Target {
 		return format.Target{Lossless: true}
 	}
 	switch t.Format {
-	case FormatAAC:
+	case FormatAAC, FormatHEAAC:
+		// HE-AAC shares the AAC family: YouTube's mp4a itags are the nearest
+		// native source for either target.
 		return format.Target{Codec: "aac"}
 	case FormatOpus:
 		return format.Target{Codec: "opus"}
@@ -463,10 +471,47 @@ func warnOutputClipping(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
 // report.
 func lossySource(codec string) bool {
 	switch codec {
-	case "opus", "aac", "mp3", "vorbis":
+	case "opus", "aac", "he-aac", "mp3", "vorbis", "wma":
 		return true
 	}
 	return false
+}
+
+// losslessSource reports whether the probed source codec name is a lossless
+// family. It is not lossySource's complement: an unknown codec is neither, so
+// each warning that keys on the distinction fails closed rather than firing on
+// a codec it cannot classify. TestSourceCodecClassParity pins both tables to
+// media.Codec.IsLossless.
+func losslessSource(codec string) bool {
+	switch codec {
+	case "flac", "alac", "wavpack", "ape", "wav", "aiff":
+		return true
+	}
+	return strings.HasPrefix(codec, "pcm")
+}
+
+// warnImplicitLossy reports a lossy re-encode of a lossless source that the
+// request never named: the spec asked for a copy (or nothing at all), and
+// automatic processing promoted it to the output container's default encoder
+// because the source codec cannot enter that container. A cut of in.wv written
+// to out.mka re-encodes to Opus this way, correctly, and used to say so only in
+// the result's codec field. A request that names any encode took its cost
+// knowingly, lossy targets included, and does not warn.
+func warnImplicitLossy(em *emitter, spec ProcessSpec, pres pipeline.Result) {
+	if transcodeCodec(specFormat(spec.Transcode)) != media.CodecCopy {
+		return
+	}
+	if !pres.Transcoded || pres.OutputCodec.IsLossless() || !losslessSource(pres.SourceCodec) {
+		return
+	}
+	detail := fmt.Sprintf("the request named no encode, but %s audio cannot enter the output container, so it was re-encoded to %s (lossy)",
+		pres.SourceCodec, pres.OutputCodec)
+	if exts := media.ContainersFor(pres.SourceCodec); len(exts) > 0 {
+		detail += fmt.Sprintf("; keep the codec with a matching extension (%s) or pass a lossless --format", strings.Join(exts, "/"))
+	} else {
+		detail += "; pass a lossless --format to avoid the quality loss"
+	}
+	em.warn(WarnImplicitLossy, detail)
 }
 
 // clipRemedy picks the suffix for an output-clipping detail: the knob the run

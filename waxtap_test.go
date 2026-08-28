@@ -858,14 +858,17 @@ func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
 // a row registered upstream cannot pass unnoticed.
 func TestTranscodeCodecParity(t *testing.T) {
 	byEngineName := map[string]TranscodeFormat{
-		"flac":   FormatFLAC,
-		"alac":   FormatALAC,
-		"wav":    FormatWAV,
-		"aiff":   FormatAIFF,
-		"mp3":    FormatMP3,
-		"aac":    FormatAAC,
-		"opus":   FormatOpus,
-		"vorbis": FormatVorbis,
+		"flac":    FormatFLAC,
+		"alac":    FormatALAC,
+		"wav":     FormatWAV,
+		"aiff":    FormatAIFF,
+		"mp3":     FormatMP3,
+		"aac":     FormatAAC,
+		"he-aac":  FormatHEAAC,
+		"opus":    FormatOpus,
+		"vorbis":  FormatVorbis,
+		"wavpack": FormatWavPack,
+		"ape":     FormatAPE,
 	}
 	for _, name := range media.OutputFormats() {
 		f, ok := byEngineName[name]

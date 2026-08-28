@@ -110,11 +110,18 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		if done {
 			mode = ModeCopy
 		} else {
-			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC).
+			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
+			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
 			if spec.RequireCopy {
-				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source codec (only Opus and AAC support a packet-level cut); drop --format copy / --cut-mode copy to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec)
+				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (Opus and AAC support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop --format copy / --cut-mode copy to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec)
 			}
-			// Fall through to a re-encode, which stays lossless for a lossless source.
+			// Fall through to a re-encode, which stays lossless for a lossless
+			// source. A copy spec whose source has no same-family encoder (WMA)
+			// has no fallback to fall to; failing here names the escape, where
+			// the engine would only say "no output format requested".
+			if spec.Encode.Codec == CodecCopy {
+				return CutResult{}, fmt.Errorf("%w: this source codec cannot be packet-cut and has no same-family encoder; pass an explicit format (e.g. flac) to render the cut", waxerr.ErrIncompatibleSpec)
+			}
 			if levels, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
 				return CutResult{}, classifyEngineError(err, input, output)
 			}
@@ -155,6 +162,11 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 		return false, nil // unknown codec: let the re-encode path handle it
 	}
 	spans := toSpans(keeps, total, track.Fmt.Rate)
+	// No Tags here: WaxFlow's cut allowlist declines the mux-tagged codecs
+	// (WavPack, APE), so a cut of one always re-encodes and the fallback's
+	// Encode.Tags carry the metadata. TestCutWavPackFallsBackToReencodeWithTags
+	// pins the decline; if WaxFlow ever allowlists them, that test fails and
+	// this rung must start carrying DropOwnAudioTags(remuxTags(...)).
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
 
 	plan, err := r.engine.PlanCut(track, opts, spans, grid)

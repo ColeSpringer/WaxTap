@@ -99,6 +99,13 @@ func (r *Runner) Engine() *waxflow.Engine { return r.engine }
 // doctor command reports it as WaxTap's capability set.
 func OutputFormats() []string { return waxflow.OutputFormats() }
 
+// LossyFormat reports whether the named engine output format is lossy, and
+// whether the engine knows the name at all. It is the engine's own
+// classification, re-exported so the hand-maintained losslessness tables (the
+// CLI's isLosslessFormat, the facade's lossySource) can be pinned to it in
+// tests instead of drifting apart by hand.
+func LossyFormat(name string) (lossy, known bool) { return waxflow.LossyFormat(name) }
+
 func (r *Runner) acquire(ctx context.Context) error {
 	if r.sem == nil {
 		return nil
