@@ -108,7 +108,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 			env.printf("%s\n", displayPath(res.OutputPath))
 		}
 		for _, w := range res.Warnings {
-			fmt.Fprintf(env.errOut, "warning:  [%s] %s\n", w.Code, w.Detail)
+			fmt.Fprintf(env.errOut, "warning: [%s] %s\n", w.Code, w.Detail)
 		}
 		return
 	}
@@ -152,25 +152,46 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 		env.printf("Applied:  %s\n", effects)
 	}
 	if res.Loudness != nil {
-		renderLoudness(env, res.Loudness)
+		renderLoudness(env, res)
 	}
 	// Warnings were already printed live on stderr during the non-quiet run.
 }
 
-func renderLoudness(env *appEnv, l *waxtap.LoudnessResult) {
+// renderLoudness prints the measurement block. A non-finite figure renders as
+// "n/a", which says nothing on its own, so each one is followed by the reason
+// the library recorded for it.
+func renderLoudness(env *appEnv, res *waxtap.Result) {
+	l := res.Loudness
 	if l.Input != nil {
 		env.printf("Loudness: input %s LUFS, true-peak %s dBTP, LRA %s\n",
 			humanLUFS(l.Input.IntegratedLUFS), humanLUFS(l.Input.TruePeakDBTP), humanLUFS(l.Input.LRA))
+		if nonFinite(l.Input.IntegratedLUFS) {
+			env.printf("          (%s)\n", unmeasurableNote(res, "input"))
+		}
 	}
 	if l.Output != nil {
 		env.printf("          output %s LUFS (target %s)\n", humanLUFS(l.Output.IntegratedLUFS), humanLUFS(l.Target))
-		// l.Output is set only in apply mode. A clip shorter than the LUFS gate yields
-		// a non-finite integrated loudness (NaN or -Inf), which humanLUFS renders as
-		// "n/a"; say why so the line does not read as a verified normalization.
 		if nonFinite(l.Output.IntegratedLUFS) {
-			env.printf("          (output integrated loudness could not be measured: clip too short to gate)\n")
+			env.printf("          (%s)\n", unmeasurableNote(res, "output"))
 		}
 	}
+}
+
+// unmeasurableNote returns the library's explanation for side's unusable
+// figure. The warning already reads as a sentence naming its side, so it is
+// echoed whole rather than rebuilt here, which keeps one wording for the two
+// surfaces to drift apart in.
+//
+// The fallback covers a result carrying a non-finite figure with no warning to
+// go with it: older library versions, and a caller that filtered the warnings.
+// It says less, and it never guesses a cause.
+func unmeasurableNote(res *waxtap.Result, side string) string {
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnLoudnessUnmeasurable && strings.HasPrefix(w.Detail, side+" ") {
+			return w.Detail
+		}
+	}
+	return side + " integrated loudness could not be measured"
 }
 
 // effectSummary joins the applied effects into a short comma-separated list.

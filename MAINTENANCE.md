@@ -133,16 +133,15 @@ single-client file looks like:
 {
   "profiles": [
     {
-      "name": "ANDROID_VR",
-      "innerTubeName": "ANDROID_VR",
-      "innerTubeId": 28,
-      "version": "1.65.10",
-      "userAgent": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-      "deviceMake": "Oculus",
-      "deviceModel": "Quest 3",
-      "osName": "Android",
-      "osVersion": "12L",
-      "androidSdkVersion": 32
+      "name": "VISIONOS",
+      "innerTubeName": "VISIONOS",
+      "innerTubeId": 101,
+      "version": "1.02",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+      "deviceMake": "Apple",
+      "deviceModel": "RealityDevice17,1",
+      "osName": "visionOS",
+      "osVersion": "26.5.23O471"
     }
   ]
 }
@@ -272,7 +271,7 @@ download fails.
 
 ## SABR audio
 
-ANDROID_VR uses direct signed URLs. WEB-family clients expose URL-less audio over
+VISIONOS, ANDROID_VR, and IOS use direct signed URLs. WEB-family clients expose URL-less audio over
 SABR/UMP, implemented in `youtube/internal/sabr`. SABR is sequential and cannot
 use the parallel chunk downloader.
 

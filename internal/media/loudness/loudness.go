@@ -49,6 +49,11 @@ type Loudness struct {
 	TruePeakDBTP   float64 // true peak, dBTP (-Inf for silence)
 	LRA            float64 // loudness range, LU
 	SamplePeakDB   float64 // sample peak, dBFS (-Inf for silence)
+	// Duration is how much audio the meter actually read (frames measured over
+	// the source rate), 0 when the rate is unknown. It exists so a caller can
+	// hold the measurement against the probed length: a decode that ends early
+	// on a probe-clean file leaves this as the only evidence.
+	Duration time.Duration
 }
 
 // Finite reports whether the integrated loudness, true peak, and range are all
@@ -64,12 +69,16 @@ func (l Loudness) Finite() bool {
 }
 
 func fromResult(res *waxflow.AnalyzeResult) Loudness {
-	return Loudness{
+	l := Loudness{
 		IntegratedLUFS: res.IntegratedLUFS,
 		TruePeakDBTP:   res.TruePeakDB,
 		LRA:            res.LoudnessRange,
 		SamplePeakDB:   res.SamplePeakDB,
 	}
+	if res.Format.Rate > 0 {
+		l.Duration = time.Duration(float64(res.Samples) / float64(res.Format.Rate) * float64(time.Second))
+	}
+	return l
 }
 
 // Measure measures the loudness of a whole local file. channels (1 or 2) folds

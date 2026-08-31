@@ -383,14 +383,14 @@ func TestRenderRequireCopyRejectsFlac(t *testing.T) {
 	in := encodeFixture(t, r, dir, "in.flac", CodecFLAC)
 	out := filepath.Join(dir, "cut.flac")
 	_, err := r.Render(context.Background(), in, out, CutSpec{
-		Keeps:       []cutrange.Range{{Start: 0, End: time.Second}},
-		Total:       3 * time.Second,
-		CopyCut:     true,
-		RequireCopy: true, // explicit copy: no re-encode fallback allowed
-		Encode:      Spec{Codec: CodecFLAC},
+		Keeps:             []cutrange.Range{{Start: 0, End: time.Second}},
+		Total:             3 * time.Second,
+		CopyCut:           true,
+		RequireCopyFormat: true, // explicit copy: no re-encode fallback allowed
+		Encode:            Spec{Codec: CodecFLAC},
 	})
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-		t.Fatalf("RequireCopy FLAC cut err = %v, want ErrIncompatibleSpec", err)
+		t.Fatalf("explicit-copy FLAC cut err = %v, want ErrIncompatibleSpec", err)
 	}
 	if fileExists(out) {
 		t.Error("rejected cut wrote output")
@@ -1046,18 +1046,18 @@ func TestRenderCutHEAACHeadOnly(t *testing.T) {
 	}
 }
 
-// The RequireCopy refusal for a positionally-declined HE-AAC cut names the
+// The explicit-copy refusal for a positionally-declined HE-AAC cut names the
 // constraint rather than implying the file is not AAC.
 func TestRenderRequireCopyHEAACMidStream(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
 	in := encodeFixture(t, r, dir, "he.m4a", CodecHEAAC)
 	_, err := r.Render(context.Background(), in, filepath.Join(dir, "cut.m4a"), CutSpec{
-		Keeps:       []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
-		Total:       3 * time.Second,
-		CopyCut:     true,
-		RequireCopy: true,
-		Encode:      Spec{Codec: CodecHEAAC},
+		Keeps:              []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+		Total:              3 * time.Second,
+		CopyCut:            true,
+		RequireCopyCutMode: true,
+		Encode:             Spec{Codec: CodecHEAAC},
 	})
 	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
@@ -1099,5 +1099,77 @@ func TestEncodeOptionsNeverPassesTags(t *testing.T) {
 		if o := encodeOptions(Spec{Codec: c}); len(o.Tags) != 0 {
 			t.Errorf("%v opts.Tags = %v, want none (the post-pass owns metadata)", c, o.Tags)
 		}
+	}
+}
+
+// A tolerant parser that works around damage must say so: the probe carries
+// WaxFlow's warnings through, so a caller can tell a short file from a short
+// recording. The clamped duration is the other half: the damaged file must not
+// keep claiming the length its header declares.
+func TestProbeSurfacesDamageWarnings(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+
+	intact := wavFixture(t, 2, 2)
+	full, err := r.Probe(ctx, intact)
+	if err != nil {
+		t.Fatalf("probe intact: %v", err)
+	}
+	if len(full.Warnings) != 0 {
+		t.Errorf("Warnings = %v on an undamaged file, want none", full.Warnings)
+	}
+
+	truncated := filepath.Join(t.TempDir(), "short.wav")
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(truncated, whole[:len(whole)/2], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	short, err := r.Probe(ctx, truncated)
+	if err != nil {
+		t.Fatalf("probe truncated: %v", err)
+	}
+	if len(short.Warnings) == 0 {
+		t.Fatal("Warnings is empty on a truncated file, want the tolerated damage reported")
+	}
+	if short.Format.Duration >= full.Format.Duration {
+		t.Errorf("duration = %v on half a file, want less than the intact %v", short.Format.Duration, full.Format.Duration)
+	}
+}
+
+// TestShortDecodeNotes pins the thresholds: a real mid-file failure trips, the
+// frame-level drift ordinary encoders produce does not, and neither does a
+// proportionally tiny shortfall on very long audio.
+func TestShortDecodeNotes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		got      time.Duration
+		declared time.Duration
+		want     bool
+	}{
+		{"corrupt frame stops the decode", 1800 * time.Millisecond, 3 * time.Second, true},
+		{"encoder padding drift", 2950 * time.Millisecond, 3 * time.Second, false},
+		{"seconds lost on long audio", 10*time.Minute - 5*time.Second, 10 * time.Minute, true},
+		{"framing drift on long audio", 10*time.Hour - 200*time.Millisecond, 10 * time.Hour, false},
+		{"most of a short file gone", 400 * time.Millisecond, time.Second, true},
+		{"unknown declared", time.Second, 0, false},
+		{"unknown got", 0, time.Second, false},
+		{"delivered long", 3 * time.Second, 2 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			note := ShortDecodeNote(tc.got, tc.declared)
+			if got := note != ""; got != tc.want {
+				t.Fatalf("ShortDecodeNote(%v, %v) = %q, want note=%v", tc.got, tc.declared, note, tc.want)
+			}
+			if tc.want && !strings.Contains(note, "did not read") {
+				t.Errorf("note = %q, want it to say the remainder did not read", note)
+			}
+			if m := ShortMeasureNote(tc.got, tc.declared); (m != "") != tc.want {
+				t.Errorf("ShortMeasureNote(%v, %v) = %q, want note=%v", tc.got, tc.declared, m, tc.want)
+			}
+		})
 	}
 }

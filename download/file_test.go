@@ -191,8 +191,10 @@ func TestToFile_RefreshExhausted(t *testing.T) {
 
 	src := Source{URL: srv.URL + "?tok=bad", ContentLength: int64(len(payload))}
 	_, err := d.ToFile(context.Background(), src, path, refresh, nil)
-	if !errors.Is(err, waxerr.ErrURLExpired) {
-		t.Fatalf("err = %v, want ErrURLExpired", err)
+	// Refreshes that never deliver a byte are stopped by the no-progress
+	// refusal (the incomplete-delivery class) before the budget can matter.
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream", err)
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Fatal("output file should not exist after failure")

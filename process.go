@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxtap/v3/internal/media"
@@ -90,6 +92,8 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
+	warnInputDamage(em, pres)
+	warnLoudnessUnmeasurable(em, pres)
 
 	srcFmt := Format{
 		Codec:     pres.SourceCodec,
@@ -226,7 +230,7 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 	runner := c.engine()
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths)
 	if err != nil {
-		return nil, err
+		return nil, albumTrackError(err, paths)
 	}
 	res := &AlbumLoudnessResult{
 		Album:    loudnessInfo(album),
@@ -361,7 +365,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs)
 	if err != nil {
-		return nil, err
+		return nil, albumTrackError(err, inputs)
 	}
 
 	// One uniform gain for the whole album, capped or limited per the peak mode.
@@ -393,6 +397,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	var fold albumFold
 	var levels albumLevels
 	var carry albumCarryWarns
+	var damaged albumDamageWarns
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -400,13 +405,14 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album mode writes through runner.Transcode rather than the pipeline, so
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
-		srcCh, srcCodec := probeAudio(ctx, runner, t.Input)
+		srcCh, srcCodec, damage := probeAudio(ctx, runner, t.Input)
+		damaged.observe(t.Input, damage)
 		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
 		levels.observe(t.Output, srcCodec, tres.Levels)
-		outCh, _ := probeAudio(ctx, runner, t.Output)
+		outCh, _, _ := probeAudio(ctx, runner, t.Output)
 		fold.observe(srcCh, outCh)
 		// Album tracks are always re-encoded, so no cut remap and no own-audio
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
@@ -422,8 +428,14 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	fold.warn(em, codec)
 	levels.warn(em, ao.peakMode)
 	carry.warn(em)
+	damaged.warn(em)
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
+	// The album figure is one measurement over the whole timeline, and the
+	// meter reports how much of it it read.
+	if cause := unmeasurableLoudnessCause(album.Duration, &album); cause != "" {
+		em.warn(WarnLoudnessUnmeasurable, "album integrated loudness could not be measured: "+cause)
+	}
 	res.Warnings = em.collected()
 	return res, nil
 }
@@ -456,6 +468,40 @@ func (f *albumFold) warn(em *emitter, c media.Codec) {
 // sentence N times. The first track's detail speaks for the album, with a
 // count of the others; any other warning code a track emits passes through
 // unfolded.
+// albumDamageWarns folds per-track input-damage notes into one album warning,
+// the same way every other ProcessAlbum warning aggregates: the first track's
+// detail leads and the rest are counted, so a batch of damaged rips does not
+// bury the summary under one warning per file.
+type albumDamageWarns struct {
+	first string
+	n     int
+}
+
+func (a *albumDamageWarns) observe(track string, notes []string) {
+	note := inputDamageNote(notes)
+	if note == "" {
+		return
+	}
+	a.n++
+	if a.n == 1 {
+		// Named per track: an album warning that did not say which file is
+		// damaged would send the listener through the whole record to find it.
+		a.first = filepath.Base(track) + ": " + note
+	}
+}
+
+func (a *albumDamageWarns) warn(em *emitter) {
+	switch {
+	case a.n == 0:
+		return
+	case a.n == 2:
+		a.first += " (and 1 more track)"
+	case a.n > 2:
+		a.first += fmt.Sprintf(" (and %d more tracks)", a.n-1)
+	}
+	em.warn(WarnInputDamage, a.first)
+}
+
 type albumCarryWarns struct {
 	first string
 	n     int
@@ -536,15 +582,36 @@ func (a *albumLevels) warn(em *emitter, mode PeakMode) {
 // probeChannels reports a file's channel count, or 0 when it cannot be probed.
 // It is best-effort on purpose: it exists to describe a fold, and failing to
 // describe one must not fail the album.
-func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string) {
+// timelineMemberRe matches the index in WaxFlow's "timeline member N" album
+// errors. Kept deliberately narrow: a non-match only means the error goes out
+// without a filename, never that it goes missing.
+var timelineMemberRe = regexp.MustCompile(`timeline member (\d+)`)
+
+// albumTrackError names the track file behind a WaxFlow timeline error, which
+// reports members by index. An album error that says "member 1" makes the user
+// count their inputs; one that names the file does not. Anything the pattern
+// does not match passes through unchanged.
+func albumTrackError(err error, inputs []string) error {
+	m := timelineMemberRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return err
+	}
+	idx, aerr := strconv.Atoi(m[1])
+	if aerr != nil || idx < 0 || idx >= len(inputs) {
+		return err
+	}
+	return fmt.Errorf("track %s: %w", filepath.Base(inputs[idx]), err)
+}
+
+func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string, damage []string) {
 	pr, err := r.Probe(ctx, path)
 	if err != nil {
-		return 0, ""
+		return 0, "", nil
 	}
 	if a, ok := pr.AudioStream(); ok {
-		return a.Channels, a.CodecName
+		return a.Channels, a.CodecName, pr.Warnings
 	}
-	return 0, ""
+	return 0, "", pr.Warnings
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only

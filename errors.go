@@ -23,8 +23,9 @@ var (
 	ErrLiveContent    = waxerr.ErrLiveContent
 	ErrLiveNotStarted = waxerr.ErrLiveNotStarted
 	// ErrAgeRestricted, ErrMembersOnly, and ErrGeoBlocked are specific availability
-	// verdicts. The default ANDROID_VR client bypasses age-gating, so
-	// ErrAgeRestricted is near-unreachable unless a stricter client is forced.
+	// verdicts. The token-free native clients leading the default chain have
+	// bypassed age-gating in testing, so ErrAgeRestricted is near-unreachable
+	// unless a stricter client is forced.
 	ErrAgeRestricted  = waxerr.ErrAgeRestricted
 	ErrMembersOnly    = waxerr.ErrMembersOnly
 	ErrGeoBlocked     = waxerr.ErrGeoBlocked

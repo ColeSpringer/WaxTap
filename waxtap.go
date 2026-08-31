@@ -330,8 +330,8 @@ func WithChannels(layout ChannelLayout) ReadOption {
 
 // WithFullMetadata makes Info and InfoResult run a token-free watch-page pass
 // that backfills PublishDate (when the primary client omitted it), Chapters, and
-// Availability. The default ANDROID_VR client omits these, so this is what makes
-// them reliable across clients. InfoResult.FullMetadata reports whether the data
+// Availability. The native clients leading the default chain (VISIONOS,
+// ANDROID_VR) omit these, so this is what makes them reliable across clients. InfoResult.FullMetadata reports whether the data
 // was populated.
 //
 // It costs one extra HTTP request unless the primary extraction already scraped

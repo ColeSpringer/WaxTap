@@ -130,6 +130,19 @@ const innerTubeOrigin = "https://www.youtube.com"
 // These values change when YouTube rotates clients. Callers can supply
 // Config.Profiles to override the built-ins.
 var (
+	profileVisionOS = ClientProfile{
+		Name:          "VISIONOS",
+		InnerTubeName: "VISIONOS",
+		InnerTubeID:   101,
+		Version:       "1.02",
+		UserAgent:     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+		// Apple Vision Pro fingerprint used by the visionos InnerTube client.
+		DeviceMake:        "Apple",
+		DeviceModel:       "RealityDevice17,1",
+		OSName:            "visionOS",
+		OSVersion:         "26.5.23O471",
+		SupportsPlaylists: false,
+	}
 	profileAndroidVR = ClientProfile{
 		Name:          "ANDROID_VR",
 		InnerTubeName: "ANDROID_VR",
@@ -250,8 +263,10 @@ func BuildClientChain(name string, chromeMajor int) ([]ClientProfile, error) {
 		base = profileIOS
 	case "android_vr":
 		base = profileAndroidVR
+	case "visionos":
+		base = profileVisionOS
 	default:
-		return nil, fmt.Errorf("unknown client %q (want one of: web, ios, android_vr, web_embedded)", name)
+		return nil, fmt.Errorf("unknown client %q (want one of: web, ios, android_vr, visionos, web_embedded)", name)
 	}
 	return []ClientProfile{makeProfile(base)}, nil
 }
@@ -264,6 +279,7 @@ func buildDefaultProfiles(webUA string) []ClientProfile {
 	embedded := profileWebEmbedded
 	embedded.UserAgent = webUA
 	return []ClientProfile{
+		makeProfile(profileVisionOS),
 		makeProfile(profileAndroidVR),
 		makeProfile(web),
 		makeProfile(profileIOS),

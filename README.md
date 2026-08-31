@@ -12,8 +12,10 @@ plain download keeps the selected source stream without re-encoding.
 ## Highlights
 
 - Pure-Go extraction via InnerTube and goja. No `yt-dlp` dependency.
-- Token-free ANDROID_VR is the default. Full WEB audio is opt-in and needs an
-  attested identity; forced iOS delivery is best-effort.
+- Token-free VISIONOS is the default, with ANDROID_VR as fallback (since
+  2026-08 the server refuses ANDROID_VR delivery of videos longer than about a
+  minute). Full WEB audio is opt-in and needs an attested identity; forced iOS
+  delivery is best-effort.
 - One pure-Go pass can combine cuts, SponsorBlock removal, normalization, and
   transcoding, via the WaxFlow audio engine.
 - Lossless output such as FLAC is still a re-encode of YouTube's lossy source.
@@ -151,7 +153,10 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   carries the input's embedded metadata - tags, cover art, chapters, synced
   lyrics - onto the rewritten output. Anything the output format cannot hold is
   reported as the `tag-carry-incomplete` warning, never dropped silently.
-  Chapter marks follow a cut the same way the embed flags do. Tags describing
+  Chapter marks follow a cut the same way the embed flags do. Synced lyric
+  lines follow a cut too, and a line whose timestamp lands in removed audio is
+  dropped - including a line at 0:00 when the cut starts at zero - and reported
+  through the same warning. Tags describing
   the source audio itself (ReplayGain, encoder stamps) carry only on a pure
   `--format copy` remux; a re-encode or cut invalidates them, so they are left
   off. WavPack and APE outputs are tagged the same way as every other format:
@@ -295,7 +300,7 @@ config/environment only.
 
 ## PO tokens and WEB
 
-ANDROID_VR is token-free for public videos. WEB-family clients use URL-less
+VISIONOS and ANDROID_VR are token-free for public videos. WEB-family clients use URL-less
 SABR/UMP audio, and complete delivery needs three things together: a GVS-scope
 PO-token provider (`Options.POTokenProvider` or `--potoken-url`), an attested
 identity (a `/player-context` handoff or an adopted `/session`), and a shared

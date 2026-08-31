@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,5 +253,188 @@ func TestCarryTagsUntaggedSourceSilent(t *testing.T) {
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("untagged carry warned: %+v", res.Warnings)
+	}
+}
+
+// lyricedFLAC builds a 10 s FLAC carrying chapters at 0/2/5 s and one synced
+// lyric set with lines at 1.5 s and 3 s. It is separate from taggedFLAC so the
+// chapter tests keep their own fixture and their no-warning assertions.
+func lyricedFLAC(t *testing.T, dir string) string {
+	t.Helper()
+	ctx := context.Background()
+	wav := filepath.Join(dir, "lyriced.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(10, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flac := filepath.Join(dir, "lyriced.flac")
+	if _, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+		Input: wav,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(flac),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	}); err != nil {
+		t.Fatalf("fixture transcode: %v", err)
+	}
+	doc, err := waxlabel.ParseFile(ctx, flac)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	plan, perr := doc.Edit().
+		Set(tag.Title, "Lyriced Title").
+		SetChapters(
+			waxlabel.Chapter{Start: 0, Title: "One"},
+			waxlabel.Chapter{Start: 2 * time.Second, Title: "Two"},
+			waxlabel.Chapter{Start: 5 * time.Second, Title: "Three"},
+		).
+		SetSyncedLyrics(waxlabel.SyncedLyrics{
+			Language: "eng",
+			Lines: []waxlabel.SyncedLine{
+				{Time: 1500 * time.Millisecond, Text: "first"},
+				{Time: 3 * time.Second, Text: "second"},
+			},
+		}).
+		Prepare()
+	if perr != nil {
+		t.Fatalf("prepare fixture tags: %v", perr)
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		t.Fatalf("write fixture tags: %v", err)
+	}
+	return flac
+}
+
+// Synced lyrics follow a cut the way chapters do: survivors shift by the audio
+// removed before them, and a line whose instant was removed goes with it. Each
+// row re-checks the chapters, which guards the chained-document rewrite: a
+// lyrics save built on the pre-chapter document would put the old marks back.
+func TestCarryTagsCutRemapsSyncedLyrics(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		remove     TimeRange
+		wantTimes  []time.Duration
+		wantNote   string // "" means no WarnTagCarry at all
+		wantChapts []time.Duration
+	}{
+		{
+			name:       "head cut shifts both lines",
+			remove:     TimeRange{Start: 0, End: 1 * time.Second},
+			wantTimes:  []time.Duration{500 * time.Millisecond, 2 * time.Second},
+			wantChapts: []time.Duration{0, 1 * time.Second, 4 * time.Second},
+		},
+		{
+			name:      "a line inside the removed span is dropped",
+			remove:    TimeRange{Start: 2 * time.Second, End: 5 * time.Second},
+			wantTimes: []time.Duration{1500 * time.Millisecond},
+			wantNote:  "1 synced lyric line pointed at removed audio",
+		},
+		{
+			name:     "removing everything they point at drops the set",
+			remove:   TimeRange{Start: 0, End: 6 * time.Second},
+			wantNote: "2 synced lyric lines",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := lyricedFLAC(t, dir)
+			out := filepath.Join(dir, "cut.flac")
+
+			res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+				Input: in,
+				ProcessSpec: ProcessSpec{
+					Output:    ToFile(out),
+					Transcode: &TranscodeSpec{Format: FormatFLAC},
+					Cut:       &CutSpec{Ranges: []TimeRange{tc.remove}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+
+			detail := warningDetail(res, WarnTagCarry)
+			if tc.wantNote == "" {
+				if detail != "" {
+					t.Errorf("carry warned: %q", detail)
+				}
+			} else if !strings.Contains(detail, tc.wantNote) {
+				t.Errorf("carry note = %q, want it to contain %q", detail, tc.wantNote)
+			}
+
+			doc, err := waxlabel.ParseFile(ctx, out)
+			if err != nil {
+				t.Fatalf("parse output: %v", err)
+			}
+			var got []time.Duration
+			for _, sl := range doc.SyncedLyrics() {
+				for _, l := range sl.Lines {
+					got = append(got, l.Time)
+				}
+			}
+			if !equalTimes(got, tc.wantTimes) {
+				t.Errorf("lyric times = %v, want %v", got, tc.wantTimes)
+			}
+			if tc.wantChapts != nil {
+				var chs []time.Duration
+				for _, c := range doc.Chapters() {
+					chs = append(chs, c.Start)
+				}
+				if !equalTimes(chs, tc.wantChapts) {
+					t.Errorf("chapter starts = %v, want %v (the lyrics rewrite must build on the remapped chapters)", chs, tc.wantChapts)
+				}
+			}
+		})
+	}
+}
+
+// A source whose only metadata is a synced-lyrics set, cut so that every line
+// goes, ends with an empty destination: the warning lead must say no metadata
+// carried, not "carried with losses" from the pre-rewrite transfer report.
+func TestCarryTagsCutEmptyingOnlyMetadataSaysNothingCarried(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "plain.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(10, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flac := filepath.Join(dir, "lyriconly.flac")
+	if _, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+		Input:       wav,
+		ProcessSpec: ProcessSpec{Output: ToFile(flac), Transcode: &TranscodeSpec{Format: FormatFLAC}},
+	}); err != nil {
+		t.Fatalf("fixture transcode: %v", err)
+	}
+	doc, err := waxlabel.ParseFile(ctx, flac)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, perr := doc.Edit().SetSyncedLyrics(waxlabel.SyncedLyrics{
+		Language: "eng",
+		Lines:    []waxlabel.SyncedLine{{Time: 3 * time.Second, Text: "only"}},
+	}).Prepare()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+		Input: flac,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "cut.flac")),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+			Cut:       &CutSpec{Ranges: []TimeRange{{Start: 2 * time.Second, End: 5 * time.Second}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	detail := warningDetail(res, WarnTagCarry)
+	if detail == "" {
+		t.Fatalf("no tag-carry warning; warnings = %+v", res.Warnings)
+	}
+	if !strings.Contains(detail, "no metadata carried") {
+		t.Errorf("detail = %q, want the no-metadata lead: nothing remains on the output", detail)
 	}
 }

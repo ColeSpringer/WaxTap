@@ -117,6 +117,7 @@ func (r *resumableReader) Read(p []byte) (int, error) {
 		if n > 0 {
 			r.offset += int64(n)
 			r.rep.add(int64(n))
+			r.shared.noteDelivered(int64(n))
 		}
 		if err == nil {
 			return n, nil
@@ -191,10 +192,10 @@ func (r *resumableReader) openNext() error {
 			if rerr == nil {
 				continue // refreshed: retry without spending an attempt
 			}
-			// A spent budget drops this 403 into the ordinary ladder below, which it
-			// never used to reach. Every other refresh outcome is terminal, and so is a
-			// 410 whatever the budget says.
-			if !errors.Is(rerr, errRefreshBudgetSpent) || gone(nr.failure) {
+			// A declined refresh drops this 403 into the ordinary ladder below,
+			// which it never used to reach. Every other refresh outcome is
+			// terminal, and so is a 410 whatever the budget says.
+			if !refreshDeclined(rerr) || gone(nr.failure) {
 				return rerr
 			}
 			err = rerr

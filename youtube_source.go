@@ -893,7 +893,7 @@ func (a *attemptErrors) rendered() []string {
 //
 // The chain's single preferred cause is what classification needs, but it is not
 // what diagnosis needs. [waxerr.PreferErr] ranks ErrIncompleteStream and
-// ErrURLExpired equally and keeps the first, so an ANDROID_VR chunk that ended
+// ErrURLExpired equally and keeps the first, so a VISIONOS chunk that ended
 // short followed by an IOS attempt that spent its refresh budget keeps only the
 // short chunk, dropping the one fact that separates a truncated body from an
 // exhausted budget. Attempts keeps all of them.
@@ -1311,6 +1311,10 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
+	// Input damage is deliberately not reported here: a YouTube container either
+	// probes exactly or fails outright, so the only thing this could describe is
+	// a delivery of ours that came up short, which is not the user's input.
+	warnLoudnessUnmeasurable(em, pres)
 
 	deliver := pres.OutputPath
 	if deliver == "" {

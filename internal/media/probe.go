@@ -21,6 +21,16 @@ type ProbeResult struct {
 	// none or the demuxer does not read them; WaxLabel remains the authority
 	// for the formats it can parse.
 	Tags map[string][]string
+	// Warnings are WaxFlow's notes on input damage its tolerant parser worked
+	// around: a declared length the frames do not reach, unparsable bytes
+	// skipped, a chunk size clamped to the file. Nil for an undamaged input.
+	//
+	// They matter because the parser's tolerance is otherwise invisible: the
+	// probe reports the length it could actually read, so a truncated file and
+	// a short recording look alike without them. Damage the parser does not
+	// notice leaves this empty (a rewritten frame inside a file of the right
+	// length reads as clean), so an empty list is not a certificate of health.
+	Warnings []string
 }
 
 // ProbeFormat describes the container.
@@ -96,7 +106,7 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, input, h
 // track, so a file whose default audio is not its longest track must not report
 // a longer duration than the track a cut will actually address.
 func mapProbe(info *format.Info, size int64) ProbeResult {
-	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags}
+	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags, Warnings: info.Warnings}
 	stream := func(t container.Track) ProbeStream {
 		return ProbeStream{
 			CodecType:  "audio",

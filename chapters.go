@@ -66,3 +66,51 @@ func remapChapters(chs []waxlabel.Chapter, cut *appliedCut) []waxlabel.Chapter {
 	}
 	return out
 }
+
+// remapSyncedLyrics maps lyric sets from the source timeline onto a cut's
+// output timeline. A line whose instant lies in a removed span is dropped,
+// because its timestamp would otherwise point at audio that is no longer there;
+// the rest shift by the audio removed before them. Sets left with no lines are
+// removed, and dropped counts every line that went.
+//
+// The rule is the line's instant, not a span, because a lyric line has no
+// duration of its own: it is the moment its text appears. That makes one case
+// worth stating plainly: a cut starting at zero removes a line at 0:00, since
+// the instant it marks is exactly the audio the cut took.
+//
+// Only instants inside the source ([0, total)) are the cut's to judge. A line
+// at or past the declared end marks no removed audio whatever the cut did, so
+// it survives and shifts like everything after the removals, which lands it at
+// the output's end.
+func remapSyncedLyrics(sls []waxlabel.SyncedLyrics, cut *appliedCut) (out []waxlabel.SyncedLyrics, dropped int) {
+	removed := func(t time.Duration) bool {
+		if t < 0 || t >= cut.total {
+			return false // outside the source: nothing there was cut
+		}
+		for _, k := range cut.keeps {
+			if t >= k.Start && t < k.End {
+				return false
+			}
+		}
+		return true
+	}
+	for _, sl := range sls {
+		lines := make([]waxlabel.SyncedLine, 0, len(sl.Lines))
+		for _, l := range sl.Lines {
+			if removed(l.Time) {
+				dropped++
+				continue
+			}
+			l.Time = cutrange.MapTime(cut.keeps, cut.crossfade, l.Time)
+			lines = append(lines, l)
+		}
+		if len(lines) == 0 {
+			// WaxLabel's SetSyncedLyrics silently skips an empty set, so an
+			// emptied one is dropped here where its lines can still be counted.
+			continue
+		}
+		sl.Lines = lines
+		out = append(out, sl)
+	}
+	return out, dropped
+}

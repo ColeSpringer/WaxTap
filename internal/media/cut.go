@@ -50,11 +50,31 @@ type CutSpec struct {
 	Total     time.Duration
 	Crossfade time.Duration
 	CopyCut   bool
-	// RequireCopy fails the cut rather than re-encoding when WaxFlow declines the
-	// lossless cut-remux. It expresses an explicit copy request (--format copy or
-	// --cut-mode copy): silently re-encoding would break the caller's promise.
-	RequireCopy bool
-	Encode      Spec
+	// RequireCopyCutMode and RequireCopyFormat each fail the cut rather than
+	// re-encoding when WaxFlow declines the lossless cut-remux: an explicit copy
+	// request, which silently re-encoding would break.
+	//
+	// They are two fields rather than one bool so the refusal can name the flag
+	// the caller actually passed. They are independent and may both be set.
+	RequireCopyCutMode bool // --cut-mode copy
+	RequireCopyFormat  bool // --format copy
+	Encode             Spec
+}
+
+// requireCopy reports whether either explicit copy request is in force.
+func (s CutSpec) requireCopy() bool { return s.RequireCopyCutMode || s.RequireCopyFormat }
+
+// copyFlags names the copy requests this spec carries, for advice that tells
+// the caller to drop a flag they actually wrote.
+func (s CutSpec) copyFlags() string {
+	switch {
+	case s.RequireCopyCutMode && s.RequireCopyFormat:
+		return "--format copy / --cut-mode copy"
+	case s.RequireCopyCutMode:
+		return "--cut-mode copy"
+	default:
+		return "--format copy"
+	}
 }
 
 // CutResult reports a completed cut.
@@ -112,8 +132,8 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		} else {
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
-			if spec.RequireCopy {
-				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (Opus and AAC support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop --format copy / --cut-mode copy to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec)
+			if spec.requireCopy() {
+				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (Opus and AAC support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, spec.copyFlags())
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless
 			// source. A copy spec whose source has no same-family encoder (WMA)

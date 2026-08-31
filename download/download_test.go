@@ -195,6 +195,10 @@ func TestSharedSource_RefreshExhausted(t *testing.T) {
 
 	gen := 0
 	for i := range 4 {
+		// Bytes land between refreshes so the no-progress bail stays out of the
+		// way: this test is about the flat budget, which only a moving stream
+		// reaches.
+		s.noteDelivered(1 << 10)
 		_, g, err := s.renew(context.Background(), gen, nil)
 		gen = g
 		switch {
@@ -203,6 +207,92 @@ func TestSharedSource_RefreshExhausted(t *testing.T) {
 		case i >= 2 && !errors.Is(err, waxerr.ErrURLExpired):
 			t.Fatalf("attempt %d: err = %v, want ErrURLExpired", i, err)
 		}
+	}
+}
+
+// Consecutive refreshes with nothing delivered in between mean every new
+// session served nothing, so renew stops there instead of spending the rest of
+// a budget that cannot help. One repeat is allowed: a rotation that works works
+// on its first try. The stop is the incomplete-delivery class, not an expiry:
+// nothing here expired.
+func TestSharedSource_NoProgressRefusalStops(t *testing.T) {
+	var calls atomic.Int32
+	s := newSharedSource(Source{URL: "v1"}, func(context.Context, *potoken.HTTPFailure) (Source, error) {
+		calls.Add(1)
+		return Source{URL: "fresh"}, nil
+	}, 5)
+
+	gen := 0
+	var err error
+	for range 3 {
+		_, gen, err = s.renew(context.Background(), gen, nil)
+	}
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want ErrIncompleteStream", err)
+	}
+	if errors.Is(err, waxerr.ErrURLExpired) {
+		t.Fatalf("err = %v claims an expiry; the server refused fresh URLs, nothing expired", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("refresh called %d times, want 2 before the bail; the budget of 5 must not be spent", got)
+	}
+	if !strings.Contains(err.Error(), "no bytes") {
+		t.Errorf("err = %q, want it to report that nothing was delivered", err)
+	}
+	if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "budget") {
+		t.Errorf("err = %q, want no expiry or budget prose in a refusal", err)
+	}
+}
+
+// A refusal partway through names how much arrived before the stall rather than
+// claiming a delivery that never started.
+func TestSharedSource_NoProgressRefusalNamesDelivered(t *testing.T) {
+	s := newSharedSource(Source{URL: "v1"}, func(context.Context, *potoken.HTTPFailure) (Source, error) {
+		return Source{URL: "fresh"}, nil
+	}, 5)
+
+	s.noteDelivered(983040)
+	gen := 0
+	var err error
+	for range 4 {
+		_, gen, err = s.renew(context.Background(), gen, nil)
+	}
+	if !strings.Contains(err.Error(), "983040") {
+		t.Fatalf("err = %q, want it to name the 983040 bytes that did arrive", err)
+	}
+}
+
+// Genuine expiries stay out of the no-progress run entirely: two 410s at the
+// same position must not prime the bail for the next ordinary 403.
+func TestSharedSource_GoneRefreshesDoNotPrimeTheBail(t *testing.T) {
+	var calls atomic.Int32
+	s := newSharedSource(Source{URL: "v1"}, func(context.Context, *potoken.HTTPFailure) (Source, error) {
+		calls.Add(1)
+		return Source{URL: "fresh"}, nil
+	}, 5)
+
+	goneFailure := &potoken.HTTPFailure{StatusCode: http.StatusGone}
+	gen := 0
+	var err error
+	for range 2 {
+		if _, gen, err = s.renew(context.Background(), gen, goneFailure); err != nil {
+			t.Fatalf("410 renew: %v", err)
+		}
+	}
+	// The following ordinary 403s start their own run: one repeat is still
+	// allowed before the bail, so the third 403-shaped request bails, not the
+	// first.
+	for range 2 {
+		if _, gen, err = s.renew(context.Background(), gen, nil); err != nil {
+			t.Fatalf("403 renew after 410s: %v", err)
+		}
+	}
+	_, _, err = s.renew(context.Background(), gen, nil)
+	if !errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Fatalf("err = %v, want the bail only after two no-progress 403 refreshes of their own", err)
+	}
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("refresh called %d times, want 4 (two 410s uncounted + two 403s)", got)
 	}
 }
 

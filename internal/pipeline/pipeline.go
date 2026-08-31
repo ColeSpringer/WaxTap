@@ -125,6 +125,14 @@ type Result struct {
 	// compare it against OutputProbe to detect a fold the encoder applied on its
 	// own, which no field of the request would otherwise reveal.
 	SourceChannels int
+	// SourceWarnings are the input probe's damage notes (media.ProbeResult
+	// .Warnings), carried so a caller can report that the delivered audio is
+	// the readable part of a damaged file rather than all of it.
+	//
+	// Only the input probe contributes. The output probe below is of a file
+	// this pipeline just wrote, where damage would be an encoder defect rather
+	// than something to warn the user about their input.
+	SourceWarnings []string
 
 	Cut     bool          // an effective cut was rendered
 	Removed time.Duration // audio removed by the cut
@@ -210,10 +218,17 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		}
 		effectiveCut = cutrange.OutputDuration(keeps, 0) < total
 		// Reject caller-supplied spans that do not intersect the media before
-		// opening the output.
+		// opening the output. When the probe worked around damage, the duration
+		// here is the clamped one, and the user's ranges were likely written
+		// against the length the header still claims, so the rejection carries
+		// the probe's own note about why the file reads short.
 		if !effectiveCut && spec.RejectEmptyRemoval {
-			return Result{}, fmt.Errorf("%w: cut ranges %s do not intersect the media (duration %s)",
-				waxerr.ErrIncompatibleSpec, formatRanges(spec.Remove), total.Round(time.Second))
+			damage := ""
+			if len(probe.Warnings) > 0 {
+				damage = "; " + probe.Warnings[0]
+			}
+			return Result{}, fmt.Errorf("%w: cut ranges %s do not intersect the media (duration %s%s)",
+				waxerr.ErrIncompatibleSpec, formatRanges(spec.Remove), total.Round(time.Second), damage)
 		}
 	}
 	if effectiveCut && spec.Crossfade > 0 {
@@ -235,6 +250,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		srcChannels = audio.Channels
 	}
 	res.SourceChannels = srcChannels
+	res.SourceWarnings = probe.Warnings
 
 	// Reduce the channel count only when the source exceeds the requested target.
 	fold := 0
@@ -316,8 +332,16 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	}
 
 	// Nothing to write: a measure-only or fully no-op spec. The caller delivers
-	// the input unchanged.
+	// the input unchanged. The meter's own read length is checked on the way
+	// out: with no output file to compare, a measurement that covered less of
+	// the track than the probe declared is the only sign the file does not
+	// decode to its declared length (mid-file corruption probes clean).
 	if !effectiveCut && !transcoding && !apply && !remux {
+		if measure {
+			if note := media.ShortMeasureNote(measured.Duration, total); note != "" {
+				res.SourceWarnings = append(res.SourceWarnings, note)
+			}
+		}
 		return res, nil
 	}
 
@@ -350,12 +374,13 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				}
 			}
 			cres, err := r.Render(ctx, input, output, media.CutSpec{
-				Keeps:       keeps,
-				Total:       total,
-				Crossfade:   spec.Crossfade,
-				CopyCut:     copyCut,
-				RequireCopy: spec.CutMode == media.ModeCopy || remux,
-				Encode:      fallback,
+				Keeps:              keeps,
+				Total:              total,
+				Crossfade:          spec.Crossfade,
+				CopyCut:            copyCut,
+				RequireCopyCutMode: spec.CutMode == media.ModeCopy,
+				RequireCopyFormat:  remux,
+				Encode:             fallback,
 			})
 			if err != nil {
 				return err
@@ -435,6 +460,20 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// the job.
 	if op, perr := r.Probe(ctx, output); perr == nil {
 		res.OutputProbe = &op
+		// A decode path (re-encode or rendered cut) that delivered materially
+		// less audio than the source declared means the decode ended early on a
+		// file the probe passed clean - the one shape of input damage with no
+		// probe warning to carry. A pure remux is exempt: it moves packets
+		// without decoding, so the output declares whatever the input declared.
+		if res.Transcoded || res.Cut {
+			want := total
+			if effectiveCut {
+				want = cutrange.OutputDuration(keeps, spec.Crossfade)
+			}
+			if note := media.ShortDecodeNote(op.Format.Duration, want); note != "" {
+				res.SourceWarnings = append(res.SourceWarnings, note)
+			}
+		}
 	}
 	return res, nil
 }

@@ -825,7 +825,7 @@ func noteUseBothWebSourcesIfActionable(env *appEnv, res *waxtap.Result, err erro
 //
 // The fallback signal is WarnWebContextFallback, not a "client != WEB_CONTEXT"
 // check: that warning fires only when a configured WEB context did not deliver, so
-// the default chain settling on ANDROID_VR (the client that works out of the box)
+// the default chain settling on VISIONOS (the client that works out of the box)
 // on a partial-WEB config no longer trips the note on every success. Plain
 // IO/disk/network errors are not WEB-relevant.
 func webOutcomeActionable(res *waxtap.Result, err error) bool {

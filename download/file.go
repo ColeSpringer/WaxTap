@@ -198,10 +198,10 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 				if rerr == nil {
 					continue // retry with the refreshed URL; no attempt spent
 				}
-				// A spent budget drops this 403 into the ordinary ladder below, which it
-				// never used to reach. Every other refresh outcome is terminal, and so is
-				// a 410 whatever the budget says.
-				if !errors.Is(rerr, errRefreshBudgetSpent) || gone(nr.failure) {
+				// A declined refresh drops this 403 into the ordinary ladder below,
+				// which it never used to reach. Every other refresh outcome is
+				// terminal, and so is a 410 whatever the budget says.
+				if !refreshDeclined(rerr) || gone(nr.failure) {
 					return rerr
 				}
 				err = rerr
@@ -218,6 +218,9 @@ func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource,
 
 		w := &countingWriter{w: io.NewOffsetWriter(f, span.start), rep: rep}
 		n, copyErr := io.Copy(w, io.LimitReader(resp.Body, expected))
+		// Bytes that arrived count as progress even when this span retries: the
+		// server served them, which is the fact the no-progress bail reads.
+		shared.noteDelivered(n)
 		drainClose(resp)
 		if cancel != nil {
 			cancel()

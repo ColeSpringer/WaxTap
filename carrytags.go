@@ -70,13 +70,52 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	// re-encode, so a remuxed output never has one. Both re-edit the document
 	// the transfer returned, the blessed path for writing after an in-place
 	// commit (and a no-op plan still returns the unchanged document).
+	// The fix-ups can empty what the transfer wrote (a cut that removes every
+	// chapter or lyric line), and the "carried" vs "no metadata carried" lead
+	// below must describe the output as delivered, not as the transfer report
+	// left it.
+	var chaptersCleared, lyricsCleared bool
 	switch {
-	case cut != nil && chaptersLanded(report):
-		fixNote, ferr := rewriteChapters(ctx, postDoc, outPath, remapChapters(src.Chapters(), cut))
-		if ferr != nil {
-			notes = append(notes, fmt.Sprintf("chapters describe the uncut input and could not be remapped: %v", ferr))
-		} else if fixNote != "" {
-			notes = append(notes, fixNote)
+	case cut != nil:
+		// Each fix-up chains on the document the previous one saved. Re-editing
+		// the transfer's document after a save would write the stale chapter
+		// set back over the remapped one.
+		doc := postDoc
+		if chaptersLanded(report) {
+			remapped := remapChapters(src.Chapters(), cut)
+			saved, fixNote, ferr := rewriteChapters(ctx, doc, outPath, remapped)
+			if ferr != nil {
+				notes = append(notes, fmt.Sprintf("chapters describe the uncut input and could not be remapped: %v", ferr))
+			} else {
+				doc = saved
+				chaptersCleared = len(remapped) == 0
+				if fixNote != "" {
+					notes = append(notes, fixNote)
+				}
+			}
+		}
+		if lyricsLanded(report) {
+			sls := src.SyncedLyrics()
+			origSets := 0
+			for _, sl := range sls {
+				if len(sl.Lines) > 0 {
+					origSets++
+				}
+			}
+			remapped, dropped := remapSyncedLyrics(sls, cut)
+			_, fixNote, ferr := rewriteSyncedLyrics(ctx, doc, outPath, remapped)
+			switch {
+			case ferr != nil:
+				notes = append(notes, fmt.Sprintf("synced lyrics describe the uncut input and could not be remapped: %v", ferr))
+			default:
+				lyricsCleared = len(remapped) == 0
+				if fixNote != "" {
+					notes = append(notes, fixNote)
+				}
+				if dropped > 0 {
+					notes = append(notes, lyricsDropNote(dropped, origSets-len(remapped), origSets))
+				}
+			}
 		}
 	case remuxed:
 		fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report)
@@ -89,10 +128,11 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 
 	if len(notes) > 0 {
 		lead := "metadata carried to %s with losses: %s"
-		if !transferLanded(report) {
-			// Nothing reached the destination, so a "carried with losses"
-			// claim would be false (a source whose only metadata is a chapter
-			// set, carried into a format that stores none).
+		if !landedRemains(report, chaptersCleared, lyricsCleared) {
+			// Nothing remains on the destination, so a "carried with losses"
+			// claim would be false: either nothing landed (a source whose only
+			// metadata is a chapter set, carried into a format that stores
+			// none) or everything that landed was cleared by a fix-up.
 			lead = "no metadata carried to %s: %s"
 		}
 		warn(fmt.Sprintf(lead, out, strings.Join(capNotes(notes), "; ")))
@@ -101,11 +141,19 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	c.log.Debug("tag carry: metadata carried", "from", srcPath, "to", outPath)
 }
 
-// transferLanded reports whether any item actually reached the destination
-// (carried or downgraded). Excluded and dropped items move nothing.
-func transferLanded(r waxlabel.TransferReport) bool {
+// landedRemains reports whether anything the transfer wrote (carried or
+// downgraded; excluded and dropped items move nothing) is still on the
+// destination after the fix-ups. A chapter or lyric set the cut remap cleared
+// landed and then left again, and must not be counted as delivered.
+func landedRemains(r waxlabel.TransferReport, chaptersCleared, lyricsCleared bool) bool {
 	for _, it := range r.Items {
-		if it.Disposition == waxlabel.Carried || it.Disposition == waxlabel.Lossy {
+		if it.Disposition != waxlabel.Carried && it.Disposition != waxlabel.Lossy {
+			continue
+		}
+		switch {
+		case it.Kind == waxlabel.TransferChapter && chaptersCleared:
+		case it.Kind == waxlabel.TransferSyncedLyric && lyricsCleared:
+		default:
 			return true
 		}
 	}
@@ -199,12 +247,48 @@ func docOrParse(ctx context.Context, d *waxlabel.Document, path string) (*waxlab
 	return waxlabel.ParseFile(ctx, path)
 }
 
+// lyricsLanded reports whether the transfer wrote a synced-lyrics set (carried
+// or downgraded); a dropped set needs no follow-up removal.
+func lyricsLanded(r waxlabel.TransferReport) bool {
+	for _, it := range r.Items {
+		if it.Kind == waxlabel.TransferSyncedLyric &&
+			(it.Disposition == waxlabel.Carried || it.Disposition == waxlabel.Lossy) {
+			return true
+		}
+	}
+	return false
+}
+
+// lyricsDropNote reports lines whose instants the cut removed. setsDropped of
+// origSets is how many whole sets were emptied and removed with them: "1 line
+// dropped" reads very differently when it was the only line a language had,
+// and a document with several languages must say which fraction of them went.
+func lyricsDropNote(dropped, setsDropped, origSets int) string {
+	note := fmt.Sprintf("%d synced lyric lines pointed at removed audio and were dropped", dropped)
+	if dropped == 1 {
+		note = "1 synced lyric line pointed at removed audio and was dropped"
+	}
+	switch {
+	case setsDropped == 0:
+	case setsDropped == origSets && origSets == 1:
+		note += "; the set was dropped"
+	case setsDropped == origSets:
+		note += fmt.Sprintf("; all %d sets were dropped", origSets)
+	default:
+		note += fmt.Sprintf("; %d of %d sets were dropped", setsDropped, origSets)
+	}
+	return note
+}
+
 // rewriteChapters replaces the chapter set the transfer just wrote. It exists
 // for the cut case only, where the carried offsets describe the uncut input.
-func rewriteChapters(ctx context.Context, doc *waxlabel.Document, path string, chs []waxlabel.Chapter) (string, error) {
+//
+// It returns the saved document so a following fix-up edits what is on disk
+// rather than the pre-save one.
+func rewriteChapters(ctx context.Context, doc *waxlabel.Document, path string, chs []waxlabel.Chapter) (*waxlabel.Document, string, error) {
 	d, err := docOrParse(ctx, doc, path)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	ed := d.Edit()
 	if len(chs) == 0 {
@@ -214,10 +298,30 @@ func rewriteChapters(ctx context.Context, doc *waxlabel.Document, path string, c
 	}
 	plan, err := ed.Prepare()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	_, note, err := executeSaveBack(ctx, plan)
-	return note, err
+	return executeSaveBack(ctx, plan)
+}
+
+// rewriteSyncedLyrics replaces the synced-lyrics sets the transfer just wrote,
+// for the same reason as rewriteChapters: the carried timestamps describe the
+// uncut input.
+func rewriteSyncedLyrics(ctx context.Context, doc *waxlabel.Document, path string, sls []waxlabel.SyncedLyrics) (*waxlabel.Document, string, error) {
+	d, err := docOrParse(ctx, doc, path)
+	if err != nil {
+		return nil, "", err
+	}
+	ed := d.Edit()
+	if len(sls) == 0 {
+		ed.ClearSyncedLyrics()
+	} else {
+		ed.SetSyncedLyrics(sls...)
+	}
+	plan, err := ed.Prepare()
+	if err != nil {
+		return nil, "", err
+	}
+	return executeSaveBack(ctx, plan)
 }
 
 // restoreOwnAudio writes back the own-audio tags the transfer excluded. It

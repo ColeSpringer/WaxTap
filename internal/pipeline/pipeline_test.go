@@ -899,23 +899,56 @@ func TestRunCopyCutFlacRejected(t *testing.T) {
 	dir := t.TempDir()
 	in := synthSine(t, dir, "in.flac", 4, "flac")
 
-	specs := map[string]Spec{
+	// The advice must name the flag the caller actually passed: telling someone
+	// to drop --format copy when they never wrote it sends them looking for a
+	// flag that is not in their command.
+	specs := map[string]struct {
+		spec   Spec
+		want   []string
+		reject string
+	}{
 		"cut-mode copy": {
-			Remove:  []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
-			Codec:   media.CodecCopy,
-			CutMode: media.ModeCopy,
+			spec: Spec{
+				Remove:  []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+				Codec:   media.CodecCopy,
+				CutMode: media.ModeCopy,
+			},
+			want:   []string{"--cut-mode copy"},
+			reject: "--format copy",
 		},
 		"format copy": {
-			Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
-			Codec:  media.CodecCopy,
-			Remux:  true,
+			spec: Spec{
+				Remove: []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+				Codec:  media.CodecCopy,
+				Remux:  true,
+			},
+			want:   []string{"--format copy"},
+			reject: "--cut-mode copy",
+		},
+		"both flags": {
+			spec: Spec{
+				Remove:  []cutrange.Range{{Start: time.Second, End: 2 * time.Second}},
+				Codec:   media.CodecCopy,
+				CutMode: media.ModeCopy,
+				Remux:   true,
+			},
+			want: []string{"--format copy", "--cut-mode copy"},
 		},
 	}
-	for name, spec := range specs {
+	for name, tc := range specs {
 		out := filepath.Join(dir, "out.flac")
-		_, err := Run(context.Background(), r, in, out, spec, nil)
+		_, err := Run(context.Background(), r, in, out, tc.spec, nil)
 		if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 			t.Errorf("%s into .flac err = %v, want ErrIncompatibleSpec", name, err)
+			continue
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%s err = %q, want it to name %q", name, err, w)
+			}
+		}
+		if tc.reject != "" && strings.Contains(err.Error(), tc.reject) {
+			t.Errorf("%s err = %q, must not name %q, which was not passed", name, err, tc.reject)
 		}
 		if fileExists(out) {
 			t.Errorf("%s wrote output despite rejection", name)

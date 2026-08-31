@@ -83,7 +83,7 @@ type Options struct {
 
 	// Client, when non-empty, forces a single built-in client as the whole
 	// strategy chain instead of the default multi-client fallback. Valid values
-	// are "web", "ios", "android_vr", and "web_embedded". It applies the built-in
+	// are "web", "ios", "android_vr", "visionos", and "web_embedded". It applies the built-in
 	// WEB-family User-Agent / ChromeMajor treatment. It is mutually exclusive with
 	// ProfileOverridePath. A configured PlayerContextProvider is tried before
 	// this chain; the forced client serves as its fallback.

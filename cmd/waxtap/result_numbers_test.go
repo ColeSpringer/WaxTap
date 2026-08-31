@@ -32,29 +32,65 @@ func TestResultJSONOutputFormatNumbers(t *testing.T) {
 	}
 }
 
-// TestRenderLoudnessSubGateNote checks that a non-finite output loudness (a clip
-// too short to gate) is flagged so the normalize result is not read as verified.
-func TestRenderLoudnessSubGateNote(t *testing.T) {
-	cases := []struct {
-		name   string
-		output float64
-		want   bool
+// TestRenderLoudnessUnmeasurableNote checks that an unusable loudness figure is
+// followed by the reason the library gave for it, on whichever side it applies
+// to, so an "n/a" is never left to be read as a verified normalization.
+func TestRenderLoudnessUnmeasurableNote(t *testing.T) {
+	const silence = "the audio is digital silence"
+	for _, tc := range []struct {
+		name     string
+		input    float64
+		output   float64
+		warnings []waxtap.Warning
+		want     string // substring the note must carry, "" for no note at all
+		reject   string // substring the note must not carry
 	}{
-		{"NaN output", math.NaN(), true},
-		{"negative inf output", math.Inf(-1), true},
-		{"finite output", -14.0, false},
-	}
-	for _, tc := range cases {
+		{
+			name:     "silent output echoes its cause",
+			input:    -20,
+			output:   math.Inf(-1),
+			warnings: []waxtap.Warning{{Code: waxtap.WarnLoudnessUnmeasurable, Detail: "output integrated loudness could not be measured: " + silence}},
+			want:     silence,
+			reject:   "too short",
+		},
+		{
+			name:   "unexplained output falls back without guessing",
+			input:  -20,
+			output: math.NaN(),
+			want:   "output integrated loudness could not be measured",
+			reject: silence,
+		},
+		{
+			name:   "finite output says nothing",
+			input:  -20,
+			output: -14.0,
+			reject: "could not be measured",
+		},
+		{
+			name:     "silent input is explained under its own line",
+			input:    math.Inf(-1),
+			output:   -14.0,
+			warnings: []waxtap.Warning{{Code: waxtap.WarnLoudnessUnmeasurable, Detail: "input integrated loudness could not be measured: " + silence}},
+			want:     "input integrated loudness could not be measured: " + silence,
+		},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
-			renderLoudness(env, &waxtap.LoudnessResult{
-				Input:  &waxtap.LoudnessInfo{IntegratedLUFS: -20},
-				Output: &waxtap.LoudnessInfo{IntegratedLUFS: tc.output},
-				Target: -14,
+			renderLoudness(env, &waxtap.Result{
+				Warnings: tc.warnings,
+				Loudness: &waxtap.LoudnessResult{
+					Input:  &waxtap.LoudnessInfo{IntegratedLUFS: tc.input},
+					Output: &waxtap.LoudnessInfo{IntegratedLUFS: tc.output},
+					Target: -14,
+				},
 			})
-			if got := strings.Contains(out.String(), "too short to gate"); got != tc.want {
-				t.Errorf("note present = %v, want %v; output:\n%s", got, tc.want, out.String())
+			got := out.String()
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("output missing %q:\n%s", tc.want, got)
+			}
+			if tc.reject != "" && strings.Contains(got, tc.reject) {
+				t.Errorf("output must not carry %q:\n%s", tc.reject, got)
 			}
 		})
 	}

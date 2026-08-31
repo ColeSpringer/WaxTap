@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// YouTube's no-PO-token clients, including ANDROID_VR, usually need a coherent
+// YouTube's no-PO-token clients, including VISIONOS and ANDROID_VR, usually need a coherent
 // logged-out identity: visitorData plus the cookies issued with it. A synthetic
 // visitorData value alone can still trip the bot check.
 //

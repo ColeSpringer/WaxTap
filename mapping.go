@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -464,6 +465,100 @@ func warnOutputClipping(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
 		return
 	}
 	em.warn(WarnOutputClipping, note+clipRemedy(ls, pres.Levels))
+}
+
+// minGateableDuration is the length of one EBU R128 momentary block. Integrated
+// loudness is the gated mean of those blocks, so audio shorter than one block
+// yields nothing to gate and has no integrated loudness to report: not a
+// measurement that failed, but one that does not exist.
+const minGateableDuration = 400 * time.Millisecond
+
+// unmeasurableLoudnessCause explains a non-finite integrated loudness, or ""
+// when l is nil or its integrated loudness is finite.
+//
+// d is the duration of the audio measured; d <= 0 means it is unknown, and the
+// too-short cause is then not claimed rather than guessed at. The order matters:
+// a 200 ms silence is both too short and silent, and the length is the more
+// useful thing to be told, because it is the one the user can change.
+func unmeasurableLoudnessCause(d time.Duration, l *loudness.Loudness) string {
+	if l == nil || !nonFiniteFloat(l.IntegratedLUFS) {
+		return ""
+	}
+	switch {
+	case d > 0 && d < minGateableDuration:
+		// Truncated, not rounded: a 399.7 ms clip must not render as "400ms,
+		// shorter than the 400 ms block".
+		return fmt.Sprintf("the clip is %s, shorter than the 400 ms block EBU R128 gating needs", d.Truncate(time.Millisecond))
+	case math.IsInf(l.SamplePeakDB, -1):
+		return "the audio is digital silence"
+	default:
+		return "the signal stays below the R128 gates (under -70 LUFS, or the relative gate removed every block)"
+	}
+}
+
+// nonFiniteFloat reports whether v is NaN or infinite, the two shapes an
+// unusable measurement arrives in.
+func nonFiniteFloat(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
+
+// warnLoudnessUnmeasurable reports each measured side whose integrated loudness
+// came back non-finite, so the nulls in --json and the "n/a" in the human
+// output arrive explained rather than merely blank.
+//
+// Both sides are reported when both are unusable. They fail for the same reason
+// here but not always (a cut can leave an output shorter than its input), and
+// a reader checking that a normalization landed reads the output line.
+func warnLoudnessUnmeasurable(em *emitter, pres pipeline.Result) {
+	if pres.LoudnessMeasured && pres.InputLoudness != nil {
+		// The meter's own read length decides the too-short case: it is what the
+		// gate actually saw, where the container's declared duration can overstate
+		// it (a cut, or a decode that ended early on a damaged file).
+		d := pres.InputLoudness.Duration
+		if d == 0 {
+			d = pres.SourceDuration - pres.Removed
+		}
+		if cause := unmeasurableLoudnessCause(d, pres.InputLoudness); cause != "" {
+			em.warn(WarnLoudnessUnmeasurable, "input integrated loudness could not be measured: "+cause)
+		}
+	}
+	if pres.LoudnessApplied && pres.OutputLoudness != nil {
+		d := pres.OutputLoudness.Duration
+		if d == 0 && pres.OutputProbe != nil {
+			d = pres.OutputProbe.Format.Duration
+		}
+		if cause := unmeasurableLoudnessCause(d, pres.OutputLoudness); cause != "" {
+			em.warn(WarnLoudnessUnmeasurable, "output integrated loudness could not be measured: "+cause)
+		}
+	}
+}
+
+// warnInputDamage reports a local input the decoder had to work around, so a
+// short output is explained rather than merely delivered. The run succeeds:
+// the audio that read is real audio, and the only alternative is refusing a
+// file the user can still use.
+//
+// Only local processing calls this. A YouTube delivery cannot produce it (the
+// containers on that path either probe exactly or fail outright), and firing it
+// there would blame the user's input for a delivery of ours that came up short.
+func warnInputDamage(em *emitter, pres pipeline.Result) {
+	if note := inputDamageNote(pres.SourceWarnings); note != "" {
+		em.warn(WarnInputDamage, note)
+	}
+}
+
+// inputDamageNote renders the source's damage notes as one detail line, or ""
+// when there are none. The notes stand on their own, in the decoder's (or the
+// short-decode check's) exact words: a lead like "the source is damaged" read
+// well on a truncated file and lied about the rest, since the decoder's
+// tolerated-damage list also carries notes about files that play fine (an extra
+// stream ignored, a trailing tag skipped, a rescaled timescale).
+//
+// The notes are copied because capNotes truncates in place and the probe's
+// slice belongs to its caller.
+func inputDamageNote(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	return strings.Join(capNotes(slices.Clone(notes)), "; ")
 }
 
 // lossySource reports whether the probed source codec name is a lossy family,

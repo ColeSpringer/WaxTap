@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxtap/v3/internal/httpx"
@@ -240,10 +241,30 @@ type sharedSource struct {
 	refresh  RefreshFunc
 	maxRef   int
 	refCount int
+
+	// delivered counts every byte a sink has received, across all workers.
+	// lastDelivered is its value at the previous refresh, and sameProgress
+	// counts consecutive refreshes with nothing delivered in between.
+	// Together they detect a stream no amount of re-signing is moving, and
+	// unlike a per-request offset they mean the same thing on the sequential
+	// path and under parallel chunks. -1 means no refresh has happened yet,
+	// so the first one can never look like a repeat.
+	delivered     atomic.Int64
+	lastDelivered int64
+	sameProgress  int
 }
 
 func newSharedSource(src Source, refresh RefreshFunc, maxRef int) *sharedSource {
-	return &sharedSource{src: src, refresh: refresh, maxRef: maxRef}
+	return &sharedSource{src: src, refresh: refresh, maxRef: maxRef, lastDelivered: -1}
+}
+
+// noteDelivered records n bytes handed to a sink. Both delivery paths call it
+// as bytes land, so renew can tell a refresh that follows real progress from
+// one that follows nothing.
+func (s *sharedSource) noteDelivered(n int64) {
+	if n > 0 {
+		s.delivered.Add(n)
+	}
 }
 
 // current returns the live Source and its generation.
@@ -263,6 +284,58 @@ func (s *sharedSource) current() (Source, int) {
 // server-side refusal rather than a stale signature. It still wraps ErrURLExpired,
 // because the exit class and the caller's client-fallback behavior are the same.
 var errRefreshBudgetSpent = fmt.Errorf("%w: refresh budget spent", waxerr.ErrURLExpired)
+
+// noProgressLimit is how many consecutive refreshes may run with nothing
+// delivered in between before further re-resolves are declined. One repeat is
+// allowed because a rotation that works has historically worked on its first
+// try, so a single no-progress retry is the escape doing its job; a second says
+// the server is refusing the stream rather than the signature.
+const noProgressLimit = 2
+
+// refusalError declines a refresh for a stream that no fresh session has
+// moved. It is not terminal on its own, which looks like a weaker stop than it
+// is: re-resolving is the expensive half (each one is a fresh identity
+// bootstrap and player call) and that is what this stops, while the cheap
+// in-place retries below it still run, because a burst of stray 403s with no
+// bytes in between is indistinguishable from a refusal here and does recover
+// on retry. Making this terminal reintroduced exactly that failure
+// (TestToFile_TransientForbiddenSurvivesSpentRefreshBudget).
+//
+// It unwraps to [waxerr.ErrIncompleteStream] because nothing expired: the URLs
+// were new every time and the server declined them all, which is the
+// incomplete-delivery class the facade already retries on another client (and
+// ranks equally with ErrURLExpired for fallback). Wrapping the budget sentinel
+// instead put "stream URL expired: refresh budget spent" in front of a message
+// whose whole point is that no expiry happened.
+type refusalError struct {
+	delivered int64 // bytes the whole download had received when it stalled
+	sessions  int   // consecutive fresh sessions that added nothing
+}
+
+func (e *refusalError) Error() string {
+	// Zero delivered is the shape measured in the field (2026-08-31: on the
+	// guest path, videos longer than about a minute are refused from the first
+	// byte), where "capped at byte 0" would describe a cap that never began
+	// rather than a delivery that never started.
+	if e.delivered == 0 {
+		return fmt.Sprintf("download: the server delivered no bytes on %d consecutive fresh sessions; it is refusing this stream rather than expiring its URL", e.sessions)
+	}
+	return fmt.Sprintf("download: the server stopped after %d bytes and delivered nothing more on %d consecutive fresh sessions; the delivery cap is holding", e.delivered, e.sessions)
+}
+
+func (e *refusalError) Unwrap() error { return waxerr.ErrIncompleteStream }
+
+// refreshDeclined reports a refresh the shared source refused to perform (the
+// budget is spent, or fresh sessions are provably not moving the stream), the
+// two outcomes the callers' retry ladders treat as retryable rather than
+// terminal.
+func refreshDeclined(err error) bool {
+	if errors.Is(err, errRefreshBudgetSpent) {
+		return true
+	}
+	_, ok := errors.AsType[*refusalError](err)
+	return ok
+}
 
 // renew refreshes the Source for generation gen. If another worker has already
 // advanced the generation, renew returns the current Source without calling
@@ -285,6 +358,11 @@ var errRefreshBudgetSpent = fmt.Errorf("%w: refresh budget spent", waxerr.ErrURL
 // which case it delivers the whole file. Refreshes therefore count how many
 // sessions were tried, which does not scale with size, and the refund never
 // fired on the failure it was written for.
+//
+// The delivered counter is the same observation read the other way: a budget
+// spent with nothing delivered bought nothing, so [noProgressLimit] stops
+// re-resolving before the count runs out. See [refusalError] for why that stop
+// is not terminal.
 func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTPFailure) (Source, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -294,12 +372,32 @@ func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTP
 	if s.refresh == nil {
 		return s.src, s.gen, fmt.Errorf("%w: no refresh callback configured", waxerr.ErrURLExpired)
 	}
+	// A refresh with nothing delivered since the previous one means the session
+	// in between served no bytes at all, so more of them only make the same
+	// failure slower.
+	//
+	// A 410 is exempt from the run entirely, check and count alike: there the
+	// server said this URL is gone, which is the one case where re-resolving is
+	// the documented answer, and letting genuine expiries prime the bail would
+	// hand the next ordinary 403 a refusal it did not earn.
+	cur := s.delivered.Load()
+	repeat := cur == s.lastDelivered
+	if repeat && !gone(failure) && s.sameProgress >= noProgressLimit {
+		return s.src, s.gen, &refusalError{delivered: cur, sessions: s.sameProgress}
+	}
 	if s.refCount >= s.maxRef {
 		return s.src, s.gen, fmt.Errorf("%w: the server kept rejecting the stream after %d re-resolves", errRefreshBudgetSpent, s.maxRef)
 	}
 	newSrc, err := s.refresh(ctx, failure)
 	if err != nil {
 		return s.src, s.gen, err
+	}
+	if !gone(failure) {
+		if repeat {
+			s.sameProgress++
+		} else {
+			s.lastDelivered, s.sameProgress = cur, 1
+		}
 	}
 	s.src = newSrc
 	s.gen++
@@ -312,9 +410,10 @@ func (s *sharedSource) renew(ctx context.Context, gen int, failure *potoken.HTTP
 // immediately against the new URL, without spending a retry attempt.
 //
 // A non-nil error is for the caller's ordinary ladder to judge: [retryable]
-// accepts a spent budget, so that 403 gets the backoff-and-retry it never used to
-// get, and rejects everything else the refresh can report. Both download paths
-// share this to keep the decision in one place.
+// accepts a declined refresh (budget spent, or no progress across sessions), so
+// that 403 gets the backoff-and-retry it never used to get, and rejects
+// everything else the refresh can report. Both download paths share this to
+// keep the decision in one place.
 func handleRefresh(ctx context.Context, shared *sharedSource, gen int, failure *potoken.HTTPFailure) error {
 	_, _, err := shared.renew(ctx, gen, failure)
 	return err

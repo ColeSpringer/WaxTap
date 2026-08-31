@@ -49,9 +49,9 @@ var (
 	// not begun, or a live stream that is offline. It may become available later,
 	// which distinguishes it from ErrLiveContent (a stream currently live).
 	ErrLiveNotStarted = errors.New("waxtap: live stream has not started")
-	// ErrAgeRestricted indicates an age-gated video. The default token-free
-	// ANDROID_VR client bypasses age-gating, so this is near-unreachable unless a
-	// stricter client is forced.
+	// ErrAgeRestricted indicates an age-gated video. The token-free native
+	// clients leading the default chain have bypassed age-gating in testing, so
+	// this is near-unreachable unless a stricter client is forced.
 	ErrAgeRestricted = errors.New("waxtap: age-restricted video")
 	// ErrMembersOnly indicates a video available only to channel members.
 	ErrMembersOnly = errors.New("waxtap: members-only video")

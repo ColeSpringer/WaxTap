@@ -21,7 +21,12 @@ func profileByName(t *testing.T, name string) ClientProfile {
 }
 
 func TestDefaultChainOrder(t *testing.T) {
-	want := []string{"ANDROID_VR", "WEB", "IOS", "WEB_EMBEDDED_PLAYER"}
+	// VISIONOS leads: since 2026-08-17 the server refuses ANDROID_VR delivery of
+	// videos longer than about a minute from the first byte (yt-dlp dropped the
+	// client from its defaults for the same reason), while VISIONOS is token-free
+	// and delivers in full. ANDROID_VR stays as a fallback; it still serves
+	// short videos and the gate is a server experiment that may move again.
+	want := []string{"VISIONOS", "ANDROID_VR", "WEB", "IOS", "WEB_EMBEDDED_PLAYER"}
 	got := make([]string, 0, len(DefaultProfiles()))
 	for _, p := range DefaultProfiles() {
 		got = append(got, p.Name)
@@ -31,13 +36,40 @@ func TestDefaultChainOrder(t *testing.T) {
 	}
 }
 
+// TestVisionOSFingerprint checks the visionos request shape: the lead
+// token-free client, identity verified against yt-dlp INNERTUBE_CLIENTS on
+// 2026-08-31. Bump Version, UserAgent, and OSVersion together when refreshing.
+func TestVisionOSFingerprint(t *testing.T) {
+	p := DefaultProfiles()[0]
+	if p.Name != "VISIONOS" {
+		t.Fatalf("first profile = %q, want VISIONOS (the no-token lead client)", p.Name)
+	}
+	if p.InnerTubeID != 101 {
+		t.Errorf("VISIONOS InnerTubeID = %d, want 101", p.InnerTubeID)
+	}
+	if len(p.RequiresPOTokens) != 0 {
+		t.Errorf("VISIONOS requires PO tokens %v, want none (the whole point of the client)", p.RequiresPOTokens)
+	}
+	if p.NeedsSignatureTimestamp {
+		t.Error("VISIONOS needs a signature timestamp; it is a native client and must not")
+	}
+
+	ictx := New(Config{}).newInnertubeContext(makeProfile(profileVisionOS), newSession("US"))
+	if ictx.Client.DeviceMake != "Apple" ||
+		ictx.Client.DeviceModel != "RealityDevice17,1" ||
+		ictx.Client.OSName != "visionOS" ||
+		ictx.Client.OSVersion == "" {
+		t.Errorf("visionos InnerTube context missing fingerprint: %+v", ictx.Client)
+	}
+	if ictx.Client.AndroidSDKVersion != 0 {
+		t.Errorf("visionos context carries androidSdkVersion %d; an Apple device must not", ictx.Client.AndroidSDKVersion)
+	}
+}
+
 // TestAndroidVRFingerprint checks the android_vr request shape. The device and
 // OS fields must stay populated and must reach the InnerTube body context.
 func TestAndroidVRFingerprint(t *testing.T) {
-	p := DefaultProfiles()[0]
-	if p.Name != "ANDROID_VR" {
-		t.Fatalf("first profile = %q, want ANDROID_VR (the no-token lead client)", p.Name)
-	}
+	p := profileByName(t, "ANDROID_VR")
 	if p.AndroidSDKVersion == 0 || p.DeviceMake == "" || p.DeviceModel == "" || p.OSName == "" || p.OSVersion == "" {
 		t.Fatalf("ANDROID_VR profile missing device fingerprint: %+v", p)
 	}
@@ -162,5 +194,20 @@ func TestCanonicalizeScopes_DoesNotAliasInput(t *testing.T) {
 	in[0] = potoken.ScopeNone
 	if got[0] != potoken.ScopePlayer {
 		t.Errorf("result aliases input: got[0] = %v after mutating input", got[0])
+	}
+}
+
+// A forced --client visionos builds a one-element chain, like every other
+// built-in name.
+func TestBuildClientChainVisionOS(t *testing.T) {
+	chain, err := BuildClientChain("visionos", 0)
+	if err != nil {
+		t.Fatalf("BuildClientChain(visionos): %v", err)
+	}
+	if len(chain) != 1 || chain[0].Name != "VISIONOS" {
+		t.Fatalf("chain = %+v, want exactly the VISIONOS profile", chain)
+	}
+	if _, err := BuildClientChain("bogus", 0); err == nil || !strings.Contains(err.Error(), "visionos") {
+		t.Errorf("unknown-client error = %v, want it to list visionos among the choices", err)
 	}
 }

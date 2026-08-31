@@ -30,6 +30,28 @@ func ToneWAV(freqHz float64, seconds, channels, rate int) []byte {
 	})
 }
 
+// ToneWAVMs is ToneWAV in milliseconds, for clips too short to express in whole
+// seconds. It exists for the R128 gating boundary: integrated loudness needs at
+// least one 400 ms momentary block, so the fixtures that straddle that line are
+// necessarily sub-second.
+func ToneWAVMs(freqHz float64, ms, channels, rate int) []byte {
+	if rate <= 0 {
+		rate = 44100
+	}
+	const amp = 0.5 // ~-6 dBFS
+	frames := ms * rate / 1000
+	return pcmWAV(frames, channels, rate, func(i int) float64 {
+		return amp * math.Sin(2*math.Pi*freqHz*float64(i)/float64(rate))
+	})
+}
+
+// SilenceWAV returns a 16-bit PCM WAV of digital silence: every sample zero,
+// seconds long, channels wide, 44100 Hz. Its integrated loudness and peaks are
+// -Inf, which is the other way a measurement comes back unusable.
+func SilenceWAV(seconds, channels int) []byte {
+	return pcmWAV(seconds*44100, channels, 44100, func(int) float64 { return 0 })
+}
+
 // QuietWithTransientWAV returns a 16-bit PCM WAV of a quiet 440 Hz sine (~-40
 // dBFS) carrying one half-millisecond full-scale transient, 44100 Hz.
 //

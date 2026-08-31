@@ -428,7 +428,7 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 		}
 		name := r.Header.Get("X-Youtube-Client-Name")
 		names = append(names, name)
-		if name == "28" { // ANDROID_VR is age-gated; IOS delivers
+		if name == "101" || name == "28" { // VISIONOS and ANDROID_VR age-gated; IOS delivers
 			return fixtureResp(http.StatusOK, login), nil
 		}
 		return fixtureResp(http.StatusOK, ok), nil
@@ -443,9 +443,9 @@ func TestExtract_FallsBackAcrossClients(t *testing.T) {
 	}
 	// Without a PO token, the WEB-family clients (WEB=1, WEB_EMBEDDED=56)
 	// short-circuit at the token fetch and make no /player call, so only
-	// ANDROID_VR and IOS do.
+	// VISIONOS, ANDROID_VR, and IOS do.
 	// (TestExtract_PlayabilityErrorTriesAllClients covers the token-present chain.)
-	if want := []string{"28", "5"}; !slicesEqual(names, want) {
+	if want := []string{"101", "28", "5"}; !slicesEqual(names, want) {
 		t.Errorf("client order = %v, want %v", names, want)
 	}
 }

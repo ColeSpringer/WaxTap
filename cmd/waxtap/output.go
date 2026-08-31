@@ -831,7 +831,7 @@ func isUsageError(err error) bool {
 // embedHint returns fallback guidance for a web_embedded playability error.
 func embedHint(err error) string {
 	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok && pe.Embed {
-		return "web_embedded currently falls back to web; use --client web or --client android_vr"
+		return "web_embedded currently falls back to web; use --client web or --client visionos"
 	}
 	return ""
 }

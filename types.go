@@ -765,6 +765,26 @@ const (
 	// line already names the codec written; this is the signal that quality was
 	// lost where none of the request said it would be.
 	WarnImplicitLossy
+	// WarnInputDamage reports problems in a local input the decoder worked
+	// around: a header declaring more audio than the file holds, bytes that did
+	// not parse, or a decode that ended short of the declared length. Detail
+	// carries the decoder's notes in its own words (or the short-decode
+	// observation), because the tolerated-damage list also includes advisory
+	// notes about files that play fine, and a blanket "damaged" lead would
+	// overclaim for those. The run still succeeds, because the readable audio
+	// is real audio and refusing it would help nobody.
+	//
+	// Absence is not a clean bill of health. Damage that leaves a file the
+	// right length and its headers consistent (a rewritten frame in the middle)
+	// probes without complaint; only a decode reaching it surfaces the
+	// short-decode note.
+	WarnInputDamage
+	// WarnLoudnessUnmeasurable reports an integrated loudness that came back
+	// non-finite, and why. Detail names the side ("input" or "output") and the
+	// cause: too short to gate, digital silence, or a signal the R128 gates
+	// removed entirely. The measurement itself is still reported as null, which
+	// is honest but says nothing; this says what happened.
+	WarnLoudnessUnmeasurable
 )
 
 func (w WarningCode) String() string {
@@ -805,6 +825,10 @@ func (w WarningCode) String() string {
 		return "output-clipping"
 	case WarnImplicitLossy:
 		return "implicit-lossy"
+	case WarnInputDamage:
+		return "input-damage"
+	case WarnLoudnessUnmeasurable:
+		return "loudness-unmeasurable"
 	default:
 		return "unknown"
 	}
