@@ -121,15 +121,20 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	case outputFile:
 		// Measure-only delivers the caller's own input, which must be copied and
 		// never moved, so it is settled before the shared publish.
+		var published string
+		var perr error
 		if measureOnly {
-			if err := copyFile(req.Input, req.Output.path, req.Output.exclusive); err != nil {
-				return nil, err
-			}
-		} else if err := publishProduced(deliver, staging, req.Output); err != nil {
-			return nil, err
+			published, perr = copyFile(req.Input, req.Output.path, req.Output)
+		} else {
+			published, perr = publishProduced(deliver, staging, req.Output)
 		}
-		res.OutputPath = req.Output.path
-		res.OutputBytes = fileSize(req.Output.path)
+		if perr != nil {
+			return nil, perr
+		}
+		// A renumbering output lands beside the requested path, so the truthful
+		// path is the publish's, not the request's.
+		res.OutputPath = published
+		res.OutputBytes = fileSize(published)
 	case outputWriter:
 		n, err := streamFileTo(req.Output.writer, deliver)
 		if err != nil {

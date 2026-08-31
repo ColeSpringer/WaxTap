@@ -606,3 +606,157 @@ func TestDiscardClearsAStagedLeftover(t *testing.T) {
 		t.Errorf("published file = %q, want it untouched by Discard", got)
 	}
 }
+
+func TestNumberedVariant(t *testing.T) {
+	join := filepath.Join
+	dir := "/out"
+	for _, tc := range []struct {
+		path string
+		n    int
+		want string
+	}{
+		{join(dir, "t.flac"), 1, join(dir, "t (1).flac")},
+		{join(dir, "t.flac"), 12, join(dir, "t (12).flac")},
+		// Appending is unconditional: a parenthesized number in the requested
+		// name may be title content ("Symphony No. 5 (2)"), so the pre-flight
+		// must never strip it. Continuing an existing sequence is the publish
+		// retry's job, expressed through splitNumbered.
+		{join(dir, "t (3).flac"), 1, join(dir, "t (3) (1).flac")},
+		{join(dir, "noext"), 1, join(dir, "noext (1)")},
+		// filepath.Ext reads a leading-dot name as all extension, so the number
+		// lands before it. Odd, but it is the convention the CLI pre-flight has
+		// always used and this function exists to be the single copy of it.
+		{join(dir, ".hidden"), 1, join(dir, " (1).hidden")},
+		{join(dir, "t (x).flac"), 1, join(dir, "t (x) (1).flac")},
+		{join(dir, "t ().flac"), 1, join(dir, "t () (1).flac")},
+	} {
+		if got := NumberedVariant(tc.path, tc.n); got != tc.want {
+			t.Errorf("NumberedVariant(%q, %d) = %q, want %q", tc.path, tc.n, got, tc.want)
+		}
+	}
+}
+
+func TestSplitNumbered(t *testing.T) {
+	join := filepath.Join
+	dir := "/out"
+	for _, tc := range []struct {
+		path     string
+		wantBase string
+		wantN    int
+	}{
+		{join(dir, "t.flac"), join(dir, "t.flac"), 0},
+		{join(dir, "t (3).flac"), join(dir, "t.flac"), 3},
+		{join(dir, "t (x).flac"), join(dir, "t (x).flac"), 0},
+		{join(dir, "t ().flac"), join(dir, "t ().flac"), 0},
+		// Only the outermost suffix is one publish generation's worth.
+		{join(dir, "t (2) (3).flac"), join(dir, "t (2).flac"), 3},
+	} {
+		base, n := splitNumbered(tc.path)
+		if base != tc.wantBase || n != tc.wantN {
+			t.Errorf("splitNumbered(%q) = %q, %d; want %q, %d", tc.path, base, n, tc.wantBase, tc.wantN)
+		}
+	}
+}
+
+// An auto-number pre-flight picks a free name by stat, which a concurrent
+// writer can take before the publish. Renumbering at publish is what makes N
+// racing runs produce N files instead of N-1 plus a failure.
+func TestPublishNewNumbered(t *testing.T) {
+	stage := func(t *testing.T, dir, content string) string {
+		t.Helper()
+		src := filepath.Join(dir, "staged.part")
+		if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	occupy := func(t *testing.T, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if err := os.WriteFile(p, []byte("taken"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("free path publishes exactly", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "out.flac")
+		got, err := PublishNewNumbered(stage(t, dir, "mine"), dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != dst {
+			t.Errorf("published %q, want %q", got, dst)
+		}
+	})
+
+	t.Run("renumbers past taken paths", func(t *testing.T) {
+		for taken, want := range map[int]string{1: "out (1).flac", 2: "out (2).flac"} {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "out.flac")
+			occupy(t, dst)
+			for n := 1; n < taken; n++ {
+				occupy(t, NumberedVariant(dst, n))
+			}
+			got, err := PublishNewNumbered(stage(t, dir, "mine"), dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if filepath.Base(got) != want {
+				t.Errorf("published %q, want %q", filepath.Base(got), want)
+			}
+			b, err := os.ReadFile(got)
+			if err != nil || string(b) != "mine" {
+				t.Errorf("published content = %q, %v; want %q", b, err, "mine")
+			}
+		}
+	})
+
+	t.Run("an already numbered destination continues its sequence", func(t *testing.T) {
+		// The pre-flight picked "out (3).flac" because out..out (2) were taken;
+		// a racing writer then took it too. The retry continues at (4) rather
+		// than nesting a second suffix that would grow on every retry.
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "out (3).flac")
+		occupy(t, dst)
+		got, err := PublishNewNumbered(stage(t, dir, "mine"), dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Base(got) != "out (4).flac" {
+			t.Errorf("published %q, want %q", filepath.Base(got), "out (4).flac")
+		}
+	})
+
+	t.Run("bounded", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "out.flac")
+		occupy(t, dst, NumberedVariant(dst, 1), NumberedVariant(dst, 2))
+		_, err := publishNewNumbered(stage(t, dir, "mine"), dst, 2)
+		if !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("err = %v, want it to unwrap to fs.ErrExist", err)
+		}
+		if _, ok := errors.AsType[*OutputError](err); !ok {
+			t.Errorf("err = %v (%T), want an *OutputError", err, err)
+		}
+		// Exhaustion is a distinct condition: advising --collision auto-number
+		// would be advising the mode that just failed.
+		if !errors.Is(err, ErrRenumberExhausted) {
+			t.Errorf("err = %v, want it to unwrap to ErrRenumberExhausted", err)
+		}
+	})
+
+	t.Run("other failures surface unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		// A destination directory that does not exist is not a collision, so it
+		// must fail immediately rather than being retried 1000 times.
+		_, err := PublishNewNumbered(stage(t, dir, "mine"), filepath.Join(dir, "nope", "out.flac"))
+		if err == nil {
+			t.Fatal("err = nil, want the missing-directory failure")
+		}
+		if errors.Is(err, fs.ErrExist) {
+			t.Errorf("err = %v, want it reported as itself, not as a collision", err)
+		}
+	})
+}

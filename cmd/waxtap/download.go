@@ -610,6 +610,12 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 // on ctx.Err() rather than context.Canceled for the same reason finalError does: a
 // root deadline, if one is ever wired in, leaves a complete file behind exactly the
 // same way and deserves the same note.
+// Under --collision auto-number the stamped path is the pre-flight's pick, which
+// the publish may renumber past. That opens two small windows, both bounded by
+// publish-to-return: a renumbered file this note cannot name, and, in the other
+// direction, a concurrent writer's file landing at the stamped path being
+// attributed to this run. The alternative is stamping names nothing can know in
+// advance, so the gap stands; every other cancellation is covered.
 func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outPath string, before outputStamp, err error) error {
 	// A stdout stream has no output path, so this and the audio-sink render seam in
 	// runSingleDownload can never both fire; no guard is needed for that.
@@ -666,7 +672,10 @@ func (s *itemStamps) record(id, path string) {
 	s.m[id] = st
 }
 
-// kept reports the file now at id's output path when this run put it there.
+// kept reports the file now at id's output path when this run put it there. It
+// reads the pre-flight path, so an auto-number publish that renumbered past it
+// is invisible here, and a concurrent writer landing on that path inside the
+// same window can be misattributed; see reportKeptOutput for why both stand.
 func (s *itemStamps) kept(id string) *keptOutput {
 	s.mu.Lock()
 	st, ok := s.m[id]
@@ -836,10 +845,12 @@ func webOutcomeActionable(res *waxtap.Result, err error) bool {
 			}
 		}
 	}
+	// SponsorBlock is a ProviderError too, but a WEB session would not have
+	// changed anything it does; the nudge is for delivery-side providers.
 	return errors.Is(err, waxtap.ErrIncompleteStream) ||
 		errors.Is(err, waxtap.ErrExtractionFailed) ||
 		errors.Is(err, waxtap.ErrNeedsPOToken) ||
-		isProviderError(err)
+		(isProviderError(err) && !isSponsorBlockProvider(err))
 }
 
 // buildRequest assembles a Download request for url delivering to outPath.

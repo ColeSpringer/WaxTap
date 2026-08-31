@@ -67,6 +67,10 @@ func (c *Client) newBootstrappedSession(ctx context.Context) (*session, error) {
 	vd, gen, err := c.bootstrapVisitorData(ctx)
 	if err != nil {
 		c.log.DebugContext(ctx, "visitor bootstrap failed; using synthetic visitorData", "err", err)
+		// Keep what the workaround discards: if the budget this request spent
+		// dying leaves the rest of the extraction with bare deadlines, this is
+		// the only error in the session that names the cause.
+		sess.bootstrapErr = err
 		return sess, nil
 	}
 	sess.learnVisitorData(vd) // no-op when empty; marks the session bootstrapped

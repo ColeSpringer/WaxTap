@@ -405,21 +405,25 @@ func classifyArgs(err error, args []string) classifiedError {
 	case isUsageError(err):
 		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err, args)
 
+	// A proxy that hung until the deadline leaves both markers in one chain, and
+	// only this order decides between them. The proxy is the actionable half:
+	// "timeout" would send the user at their connection rather than the setting.
+	case isProxyError(err):
+		// A proxy that answered CONNECT is demonstrably reachable, so the generic
+		// reachability hint would contradict its own message.
+		c.exitCode, c.code, c.hint = 9, "network", proxyHint(err)
+
 	// Deadlines during dialing and reading are both network timeouts.
 	case errors.Is(err, context.DeadlineExceeded):
 		c.exitCode, c.code = 9, "timeout"
 
 	// Structural fallbacks apply only when no domain sentinel or timeout matched.
-	case isProxyError(err):
-		// A proxy that answered CONNECT is demonstrably reachable, so the generic
-		// reachability hint would contradict its own message.
-		c.exitCode, c.code, c.hint = 9, "network", proxyHint(err)
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
 		c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
 		c.hint = sidecarAuthHint(sre.StatusCode)
 	case isProviderError(err):
-		c.exitCode, c.code, c.hint = 9, "network", "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
+		c.exitCode, c.code, c.hint = 9, "network", providerHint(err)
 	// An upstream service that answers with an error status is the same failure
 	// class as one that cannot be reached; only the hint differs.
 	case hasHTTPStatus:
@@ -443,11 +447,23 @@ const (
 	cipherSolveHint      = "full WEB audio needs an attested identity; supply both --player-context-url and --session-url (both also require --potoken-url)"
 )
 
+// watchPageSuffix labels a Client line whose delivery came from the watch-page
+// scrape. The client name is identical either way, so without this the two
+// deliveries are indistinguishable in the output.
+func watchPageSuffix(via bool) string {
+	if via {
+		return " (via watch page)"
+	}
+	return ""
+}
+
 // emitWatchPageBreadcrumb notes on stderr that forced WEB metadata was served
 // from the watch page, which does not need a PO token. The note is limited to
 // forced WEB so the default client chain does not print a misleading token hint
-// after falling back to the watch page. The info and formats commands call it
-// before their output branch so human and JSON modes behave the same.
+// after falling back to the watch page. Only formats still calls it: info
+// replaced it with the Client line's "(via watch page)" suffix, which carries
+// the delivery fact but not the no-token detail, while formats has no Client
+// line to carry either.
 func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
 		env.info("note: WEB metadata via the watch-page fallback (no PO token)\n")
@@ -588,10 +604,11 @@ func friendlyError(err error) string {
 //
 // An occupied destination reached at publish time is its own case. Every CLI
 // path stats the destination first, so the file appeared while this run was
-// working: saying so is both more accurate than the pre-flight's wording and
-// the only version that is right under --collision auto-number, which picked a
-// free name and cannot be told to pick one again. The exit code and machine
-// code stay identical to the pre-flight collision, which is what scripts read.
+// working: saying so is more accurate than the pre-flight's wording. Only
+// --collision fail reaches here now, since auto-number renumbers at publish
+// rather than failing, so auto-number is a real remedy to offer. The exit code
+// and machine code stay identical to the pre-flight collision, which is what
+// scripts read.
 //
 // The concurrency note rides only on the publish steps. Appending it to a
 // create, chmod, sync, or close failure would point away from the real cause;
@@ -601,8 +618,13 @@ func outputFailureMessage(oe *tempfile.OutputError) string {
 	if pe, ok := errors.AsType[*os.PathError](oe); ok {
 		path, reason = pe.Path, pe.Err
 	}
+	// Renumbering ran out of numbers: only auto-number can produce this, so
+	// advising auto-number would name the mode that just failed.
+	if errors.Is(oe, tempfile.ErrRenumberExhausted) {
+		return fmt.Sprintf("output file already exists: %s, and so does every numbered variant tried; clean up the directory or choose a different output name", path)
+	}
 	if errors.Is(oe, fs.ErrExist) {
-		return fmt.Sprintf("output file already exists: %s (another process created it while this run was working; set --collision to overwrite or skip to allow that)", path)
+		return fmt.Sprintf("output file already exists: %s (another process created it while this run was working; set --collision to auto-number, overwrite, or skip to allow that)", path)
 	}
 	msg := fmt.Sprintf("could not %s the finished file at %s: %v", oe.Op, path, reason)
 	switch oe.Op {
@@ -753,11 +775,30 @@ func isProxyError(err error) bool {
 	return strings.Contains(err.Error(), "proxyconnect")
 }
 
-// isProviderError reports whether err came from a player-context or session
-// provider. PO-token provider failures use ErrNeedsPOToken instead.
+// providerHint names the remedy for the provider that failed. SponsorBlock is
+// not a sidecar the user starts, so the sidecar-URL advice would be wrong there;
+// every other provider is one of the two sidecars.
+func providerHint(err error) string {
+	if isSponsorBlockProvider(err) {
+		return "the SponsorBlock server returned an unusable response; retry later, or check --sponsorblock-url if one is set"
+	}
+	return "start the provider sidecar or correct its URL (--player-context-url/--session-url)"
+}
+
+// isProviderError reports whether err came from a provider WaxTap calls over
+// HTTP (player-context, session, or SponsorBlock). PO-token provider failures
+// use ErrNeedsPOToken instead. Callers whose advice fits only the sidecars
+// should pair this with isSponsorBlockProvider.
 func isProviderError(err error) bool {
 	_, ok := errors.AsType[*waxtap.ProviderError](err)
 	return ok
+}
+
+// isSponsorBlockProvider reports a provider error attributed to SponsorBlock,
+// the one provider that is neither a sidecar nor part of stream delivery.
+func isSponsorBlockProvider(err error) bool {
+	pe, ok := errors.AsType[*waxtap.ProviderError](err)
+	return ok && pe.Endpoint == "SponsorBlock"
 }
 
 // isSidecarConnection reports whether err contains a sidecar connection failure.
@@ -847,8 +888,9 @@ func errorHint(err error) string { return classifyError(err).hint }
 func exitCodeFor(err error) int { return classifyError(err).exitCode }
 
 // normalizeExecuteError converts Cobra's untyped unknown-command errors into
-// usage errors.
-func normalizeExecuteError(err error) error {
+// usage errors. args is the command line the failure came from, minus the
+// program name.
+func normalizeExecuteError(err error, args []string) error {
 	if err == nil {
 		return nil
 	}
@@ -861,10 +903,20 @@ func normalizeExecuteError(err error) error {
 	}
 	// Cobra rejects an unknown command before parsing any flags, so a --json on
 	// that line never reached rootFlagsValue.
-	if msg := err.Error(); strings.HasPrefix(msg, "unknown command") || strings.HasPrefix(msg, "unknown subcommand") {
-		return unparsedFlagsError(msg)
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "unknown command") && !strings.HasPrefix(msg, "unknown subcommand") {
+		return err
 	}
-	return err
+	// Cobra consumes a flag it does not know before it looks up the command, so
+	// the token it blames is whatever followed. Naming the flag says what the
+	// user has to change; the reported token is a bystander. Only the three
+	// persistent bools below are registered at the root, so any other flag in
+	// that position is unknown there whether or not a subcommand defines it.
+	if flag, ok := misplacedFlag(args, rootSubcommandNames); ok {
+		return unparsedFlagsError(fmt.Sprintf(
+			"unknown global flag %q: only --json, --quiet, and --verbose may precede the subcommand; move other flags after it", flag))
+	}
+	return unparsedFlagsError(msg)
 }
 
 // flagOrderHint adds CLI help for YouTube-looking arguments that Cobra or pflag
@@ -884,14 +936,9 @@ func flagOrderHint(err error, args []string) string {
 	if dtok, ok := dashFlagToken(ue.msg); ok && looksLikeYouTubeTarget(dtok) {
 		return fmt.Sprintf("a leading-dash video ID is parsed as flags; pass it after -- (e.g. `-- %s`) or use the full https://youtu.be/%s URL", dtok, dtok)
 	}
-	// A non-target token can be reported as the command, for example
-	// `--no-cache --cache-dir /p info <id>` as `unknown command "/p"`. cobra can
-	// consume a later subcommand while traversing flags, so when a flag precedes a
-	// real subcommand, explain the ordering. Keep the hint generic: a flag value can
-	// coincidentally equal a subcommand name.
-	if isUnknownCmd && flagBeforeSubcommand(args, rootSubcommandNames) {
-		return "a flag before the subcommand can be parsed as part of command lookup; put global flags (--json/--quiet/--verbose) before the subcommand and any command flags after it"
-	}
+	// The misplaced-flag shape (`--no-cache info <id>` reported as an unknown
+	// command) does not reach here: normalizeExecuteError rewrites its message
+	// to name the flag before classification ever runs, so no hint is needed.
 	return ""
 }
 
@@ -906,24 +953,57 @@ var rootSubcommandNames = map[string]bool{
 	"help": true, "completion": true,
 }
 
-// flagBeforeSubcommand reports whether a flag token precedes the first recognized
-// subcommand in args. cobra traversal can consume a later subcommand after an
-// unknown bare boolean flag, turning `waxtap --no-cache info <id>` into
-// `unknown command "<id>"`; this detects that shape. A bare "-" (stdin) and "--"
-// (terminator) are not flags. A subcommand with no preceding flag yields false so a
-// genuine command typo is not given an ordering hint. A flag value can coincide with
-// a subcommand name, so callers should use only generic guidance.
-func flagBeforeSubcommand(args []string, names map[string]bool) bool {
+// rootPersistentFlag reports a token that spells one of the root's own
+// persistent flags, which are the only flags legal before the subcommand. The
+// set is the three bools newRootCmd registers, in long, =value, shorthand, and
+// combined-shorthand form.
+func rootPersistentFlag(tok string) bool {
+	if long, _, ok := strings.Cut(tok, "="); ok {
+		tok = long
+	}
+	switch tok {
+	case "--json", "--quiet", "--verbose":
+		return true
+	}
+	// A shorthand cluster like -qv is every shorthand it combines.
+	if len(tok) < 2 || tok[0] != '-' || tok[1] == '-' {
+		return false
+	}
+	for _, r := range tok[1:] {
+		if r != 'q' && r != 'v' {
+			return false
+		}
+	}
+	return true
+}
+
+// misplacedFlag returns the first non-persistent flag token preceding the first
+// recognized subcommand in args. cobra traversal can consume a later subcommand
+// after an unknown bare boolean flag, turning `waxtap --no-cache info <id>`
+// into `unknown command "<id>"`; this detects that shape and names the flag to
+// blame. The root's own persistent flags are skipped: they are legal in that
+// position, so `--json --bogus info <id>` blames --bogus, not --json. A bare
+// "-" (stdin) and "--" (terminator) are not flags. A subcommand with no
+// preceding blamable flag yields false so a genuine command typo is not given
+// an ordering hint.
+//
+// The token returned is the flag, never the subcommand: a flag value can
+// coincide with a subcommand name, so nothing here may claim which subcommand
+// the user meant.
+func misplacedFlag(args []string, names map[string]bool) (string, bool) {
 	firstFlag := -1
 	for i, a := range args {
-		if firstFlag < 0 && len(a) > 1 && a[0] == '-' && a != "--" {
+		if firstFlag < 0 && len(a) > 1 && a[0] == '-' && a != "--" && !rootPersistentFlag(a) {
 			firstFlag = i
 		}
 		if names[a] {
-			return firstFlag >= 0 && firstFlag < i
+			if firstFlag >= 0 && firstFlag < i {
+				return args[firstFlag], true
+			}
+			return "", false
 		}
 	}
-	return false
+	return "", false
 }
 
 // unknownCommandToken extracts the quoted token from a cobra "unknown command"

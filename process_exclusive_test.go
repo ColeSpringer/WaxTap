@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
@@ -194,4 +195,97 @@ func TestProcessToNewFileWarningsNameTheDestination(t *testing.T) {
 			t.Errorf("warning %s names the staging file: %q", w.Code, w.Detail)
 		}
 	}
+}
+
+// An auto-number collision policy picks its name by stat, then publishes. A
+// writer that takes the name in between makes the exclusive publish fail, which
+// is the right answer for --collision fail and the wrong one here: the whole
+// point of auto-number is that a taken name means "use the next one".
+func TestProcessToNewNumberedFileSequential(t *testing.T) {
+	dir := t.TempDir()
+	in := writeWAV(t, dir, "in.wav")
+	out := filepath.Join(dir, "out.flac")
+	if err := os.WriteFile(out, []byte("taken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := mustClient(t).Process(context.Background(), ProcessRequest{
+		Input:       in,
+		ProcessSpec: ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC}, Output: ToNewNumberedFile(out)},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if want := filepath.Join(dir, "out (1).flac"); res.OutputPath != want {
+		t.Fatalf("OutputPath = %q, want %q", res.OutputPath, want)
+	}
+	if res.OutputBytes <= 0 {
+		t.Errorf("OutputBytes = %d, want the renumbered file's size", res.OutputBytes)
+	}
+	if b, err := os.ReadFile(out); err != nil || string(b) != "taken" {
+		t.Errorf("the occupying file was disturbed: %q, %v", b, err)
+	}
+	if extra := leftovers(t, dir, in, out, res.OutputPath); len(extra) != 0 {
+		t.Errorf("leftovers: %v", extra)
+	}
+}
+
+// N runs racing for one basename must produce N files. The numbering itself is
+// not deterministic under concurrency, so only distinctness is asserted.
+func TestProcessToNewNumberedFileRace(t *testing.T) {
+	dir := t.TempDir()
+	in := writeWAV(t, dir, "in.wav")
+	out := filepath.Join(dir, "out.flac")
+
+	const runners = 8
+	c := mustClient(t)
+	paths := make([]string, runners)
+	errs := make([]error, runners)
+	var wg sync.WaitGroup
+	for i := range runners {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := c.Process(context.Background(), ProcessRequest{
+				Input:       in,
+				ProcessSpec: ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC}, Output: ToNewNumberedFile(out)},
+			})
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			paths[i] = res.OutputPath
+		}()
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("runner %d: %v", i, err)
+		}
+		if seen[paths[i]] {
+			t.Fatalf("two runners published %q", paths[i])
+		}
+		seen[paths[i]] = true
+		if fi, err := os.Stat(paths[i]); err != nil || fi.Size() == 0 {
+			t.Fatalf("runner %d output %q: %v (size check)", i, paths[i], err)
+		}
+	}
+	if len(seen) != runners {
+		t.Fatalf("published %d distinct paths, want %d", len(seen), runners)
+	}
+	if extra := leftovers(t, dir, append(paths, in)...); len(extra) != 0 {
+		t.Errorf("leftovers: %v", extra)
+	}
+}
+
+// mustClient builds a default client for the publish tests.
+func mustClient(t *testing.T) *Client {
+	t.Helper()
+	c, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

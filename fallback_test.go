@@ -443,3 +443,24 @@ func TestAttemptErrorsRenderedRedactsURLs(t *testing.T) {
 		t.Errorf("aggregate leaked the signature: %v", e)
 	}
 }
+
+// A watch-page delivery reports a client name like any other, so the attempt is
+// the only thing that separates a scrape from a player response. Result carries
+// it so the CLI and --json can say which one delivered.
+func TestAcquiredViaWatchPage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		attempt youtube.AttemptID
+		want    bool
+	}{
+		{"watch page", youtube.AttemptWatchPage, true},
+		{"web context", youtube.AttemptWebContext, false},
+		{"unset", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (&acquired{attempt: tc.attempt}).viaWatchPage(); got != tc.want {
+				t.Errorf("viaWatchPage() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

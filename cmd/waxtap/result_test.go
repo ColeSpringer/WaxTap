@@ -254,3 +254,42 @@ func TestResultJSONPathsShareOneSeparator(t *testing.T) {
 		}
 	}
 }
+
+// The download/process summary needs the same distinction info's does: a
+// watch-page delivery is not what the Client name alone implies.
+func TestResultJSONViaWatchPage(t *testing.T) {
+	decode := func(res *waxtap.Result) map[string]any {
+		t.Helper()
+		b, err := json.Marshal(resultToJSON(res))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	via := decode(&waxtap.Result{SourceKind: waxtap.SourceYouTube, Client: "WEB", ViaWatchPage: true})
+	if via["viaWatchPage"] != true {
+		t.Errorf("viaWatchPage = %v, want true", via["viaWatchPage"])
+	}
+	if _, ok := decode(&waxtap.Result{SourceKind: waxtap.SourceYouTube, Client: "WEB"})["viaWatchPage"]; ok {
+		t.Error("viaWatchPage must be omitted for a player delivery, keeping the key additive")
+	}
+}
+
+func TestResultHumanClientViaWatchPage(t *testing.T) {
+	render := func(res *waxtap.Result) string {
+		var out bytes.Buffer
+		renderResultHuman(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, res)
+		return out.String()
+	}
+	got := render(&waxtap.Result{SourceKind: waxtap.SourceYouTube, Client: "WEB", ViaWatchPage: true})
+	if !strings.Contains(got, "Client:   WEB (via watch page)") {
+		t.Errorf("want the watch-page suffix, got:\n%s", got)
+	}
+	if got := render(&waxtap.Result{SourceKind: waxtap.SourceYouTube, Client: "WEB"}); strings.Contains(got, "watch page") {
+		t.Errorf("a player delivery must carry no suffix, got:\n%s", got)
+	}
+}

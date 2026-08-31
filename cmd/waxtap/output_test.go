@@ -565,7 +565,7 @@ func TestFriendlyError_SponsorBlockNotMisattributed(t *testing.T) {
 // TestNormalizeExecuteError_FlagOrder verifies that a Cobra unknown-command for a
 // YouTube-looking token becomes a usage error (exit 2) with the flag-order hint.
 func TestNormalizeExecuteError_FlagOrder(t *testing.T) {
-	err := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`))
+	err := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`), []string{"dQw4w9WgXcQ"})
 	if got := exitCodeFor(err); got != 2 {
 		t.Errorf("unknown-command exit = %d, want 2", got)
 	}
@@ -573,12 +573,100 @@ func TestNormalizeExecuteError_FlagOrder(t *testing.T) {
 		t.Errorf("hint = %q, want a download suggestion", hint)
 	}
 	// A non-target unknown command becomes a plain usage error with no hint.
-	plain := normalizeExecuteError(errFake(`unknown command "boguscmd" for "waxtap"`))
+	plain := normalizeExecuteError(errFake(`unknown command "boguscmd" for "waxtap"`), []string{"boguscmd"})
 	if got := exitCodeFor(plain); got != 2 {
 		t.Errorf("bogus-command exit = %d, want 2", got)
 	}
 	if hint := errorHint(plain); hint != "" {
 		t.Errorf("hint = %q, want none for a non-target token", hint)
+	}
+}
+
+// A flag before the subcommand makes cobra blame the token after it, so
+// `waxtap --bogus info <id>` is reported as an unknown command "<id>" and the
+// target-shaped hint then suggests downloading the video the user asked for
+// info about. Naming the flag says what actually went wrong.
+func TestNormalizeExecuteError_MisplacedFlagNamed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"unknown flag", []string{"--bogus", "info", "dummyVideo0"}},
+		{"real flag in the wrong place", []string{"--no-cache", "info", "dummyVideo0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := normalizeExecuteError(errFake(`unknown command "dummyVideo0" for "waxtap"`), tc.args)
+			if got := exitCodeFor(err); got != 2 {
+				t.Errorf("exit = %d, want 2", got)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.args[0]) {
+				t.Errorf("msg = %q, want the misplaced flag named", msg)
+			}
+			if strings.Contains(msg, "unknown command") {
+				t.Errorf("msg = %q, want the misleading unknown-command wording replaced", msg)
+			}
+			for _, global := range []string{"--json", "--quiet", "--verbose"} {
+				if !strings.Contains(msg, global) {
+					t.Errorf("msg = %q, want it to list %s", msg, global)
+				}
+			}
+			// The message carries the guidance, so a second copy as a hint would
+			// print the same advice twice.
+			if hint := errorHint(err); hint != "" {
+				t.Errorf("hint = %q, want none once the message says it", hint)
+			}
+		})
+	}
+
+	// A flag value that coincides with a subcommand name is named as neither:
+	// the rewrite blames the flag, so the value cannot be mistaken for the
+	// command the user meant.
+	coincide := normalizeExecuteError(errFake(`unknown command "abc123" for "waxtap"`), []string{"--cache-dir", "version", "abc123"})
+	if msg := coincide.Error(); !strings.Contains(msg, "--cache-dir") || strings.Contains(msg, `"version"`) {
+		t.Errorf("msg = %q, want the flag blamed and the value not treated as the subcommand", msg)
+	}
+
+	// A genuine subcommand typo has no flag to blame and keeps cobra's wording.
+	typo := normalizeExecuteError(errFake(`unknown command "boguscmd" for "waxtap"`), []string{"boguscmd"})
+	if !strings.Contains(typo.Error(), "unknown command") {
+		t.Errorf("msg = %q, want cobra's wording for a bare typo", typo)
+	}
+	// A target with no subcommand after it is a missing subcommand, not a
+	// misplaced flag: the download suggestion is still the useful answer.
+	target := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`), []string{"--json", "dQw4w9WgXcQ"})
+	if !strings.Contains(errorHint(target), "waxtap download") {
+		t.Errorf("hint = %q, want the download suggestion preserved", errorHint(target))
+	}
+}
+
+func TestMisplacedFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string // "" means no misplaced flag
+	}{
+		{"flag before subcommand", []string{"--no-cache", "--cache-dir", "/p", "info", "id"}, "--no-cache"},
+		{"single flag before subcommand", []string{"--no-cache", "info", "id"}, "--no-cache"},
+		{"subcommand first", []string{"info", "--no-cache", "id"}, ""},
+		{"no subcommand", []string{"--json", "boguscmd"}, ""},
+		{"bare dash is not a flag", []string{"-", "info"}, ""},
+		{"terminator is not a flag", []string{"--", "info"}, ""},
+		{"alias recognized", []string{"--no-cache", "sb", "id"}, "--no-cache"},
+		{"shorthand", []string{"-x", "info", "id"}, "-x"},
+		// The root's own persistent flags are legal before the subcommand, so
+		// the one to blame is the first token that is not one of them.
+		{"legit global flag skipped", []string{"--json", "--bogus", "info", "id"}, "--bogus"},
+		{"legit shorthand skipped", []string{"-q", "-v", "--bogus", "info", "id"}, "--bogus"},
+		{"legit with value form skipped", []string{"--json=true", "--bogus", "info", "id"}, "--bogus"},
+		{"only legit flags is not misplaced", []string{"--json", "-q", "info", "id"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := misplacedFlag(tc.args, rootSubcommandNames)
+			if ok != (tc.want != "") || got != tc.want {
+				t.Errorf("misplacedFlag(%v) = %q,%v, want %q,%v", tc.args, got, ok, tc.want, tc.want != "")
+			}
+		})
 	}
 }
 
@@ -633,61 +721,20 @@ func TestFlagOrderHint(t *testing.T) {
 	})
 }
 
-func TestFlagBeforeSubcommand(t *testing.T) {
-	cases := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{"flag before subcommand", []string{"--no-cache", "--cache-dir", "/p", "info", "id"}, true},
-		{"single flag before subcommand", []string{"--no-cache", "info", "id"}, true},
-		{"subcommand first", []string{"info", "--no-cache", "id"}, false},
-		{"no subcommand", []string{"--json", "boguscmd"}, false},
-		{"bare dash is not a flag", []string{"-", "info"}, false},
-		{"terminator is not a flag", []string{"--", "info"}, false},
-		{"alias recognized", []string{"--no-cache", "sb", "id"}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := flagBeforeSubcommand(tc.args, rootSubcommandNames); got != tc.want {
-				t.Errorf("flagBeforeSubcommand(%v) = %v, want %v", tc.args, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFlagOrderHint_GenericOrder(t *testing.T) {
-	// The command line is a parameter, so these cases read it straight rather than
-	// standing in for the process by mutating os.Args.
-
-	// A flag before the subcommand can make cobra report the next token as an
-	// unknown command. The hint explains ordering even when the token is not
-	// target-shaped, and it does not name a specific subcommand.
+func TestFlagOrderHint_NoMisplacedFlagHint(t *testing.T) {
+	// The misplaced-flag shape is rewritten by normalizeExecuteError before
+	// classification, so flagOrderHint must add nothing for it: the message
+	// already carries the guidance, and a hint would print it twice.
 	got := flagOrderHint(&usageError{msg: `unknown command "/p" for "waxtap"`},
 		[]string{"--no-cache", "--cache-dir", "/p", "info", "dQw4w9WgXcQ"})
-	if !strings.Contains(got, "before the subcommand") || !strings.Contains(got, "after it") {
-		t.Errorf("flagOrderHint = %q, want the generic flag-ordering guidance", got)
+	if got != "" {
+		t.Errorf("flagOrderHint = %q, want none; the rewritten message carries the guidance", got)
 	}
 
-	// A flag value that coincides with a subcommand name must not be reported as the
-	// swallowed subcommand; the generic hint avoids naming it.
-	got = flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`},
-		[]string{"--cache-dir", "version", "abc123"})
-	if strings.Contains(got, "version") {
-		t.Errorf("flagOrderHint = %q, must not name a flag value as the subcommand", got)
-	}
-
-	// A genuine subcommand typo (no preceding flag) gets no generic hint.
+	// A genuine subcommand typo (no preceding flag) gets no hint either.
 	if got := flagOrderHint(&usageError{msg: `unknown command "boguscmd" for "waxtap"`},
 		[]string{"boguscmd"}); got != "" {
 		t.Errorf("flagOrderHint = %q, want no hint for a bare subcommand typo", got)
-	}
-
-	// The hint follows the args it is handed, not this process's command line.
-	// report is driven with synthetic args, and a hint computed from `go test`'s
-	// own flags would be nonsense on that path.
-	if got := flagOrderHint(&usageError{msg: `unknown command "abc123" for "waxtap"`}, nil); got != "" {
-		t.Errorf("flagOrderHint = %q, want no hint when no command line is given", got)
 	}
 }
 
@@ -755,6 +802,32 @@ func TestIsProxyError(t *testing.T) {
 	if !isProxyError(&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusProxyAuthRequired}}) {
 		t.Error("a non-200 CONNECT response should be detected as a proxy failure")
 	}
+	// A deadline that expired during the CONNECT leaves both markers in one
+	// chain; the proxy is still what failed.
+	both := &url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: context.DeadlineExceeded}}
+	if !isProxyError(both) {
+		t.Error("a proxyconnect carrying a deadline should still be detected as a proxy failure")
+	}
+}
+
+// A proxy that hangs until the operation deadline expires must be reported as a
+// proxy failure. Both markers sit in the chain, so only the case order decides,
+// and "timeout" with no mention of the proxy sends the user looking at their
+// network instead of the setting that broke.
+func TestClassifyError_ProxyDeadline(t *testing.T) {
+	both := &url.Error{Op: "Get", URL: "x", Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: context.DeadlineExceeded}}
+	c := classifyError(both)
+	if c.exitCode != 9 || c.code != "network" {
+		t.Errorf("proxy deadline = %+v, want network/9", c)
+	}
+	if !strings.Contains(c.hint, "proxy") {
+		t.Errorf("proxy deadline hint = %q, want the proxy named", c.hint)
+	}
+	// A deadline with no proxy in the chain keeps the timeout classification.
+	bare := &url.Error{Op: "Get", URL: "x", Err: context.DeadlineExceeded}
+	if c := classifyError(bare); c.code != "timeout" || c.exitCode != 9 {
+		t.Errorf("bare deadline = %+v, want timeout/9", c)
+	}
 }
 
 func TestFriendlyError_ProxyConnectStatus(t *testing.T) {
@@ -816,7 +889,7 @@ func TestAlreadyRenderedMarker(t *testing.T) {
 	// normalizeExecuteError must not strip the marker even when the cause's message
 	// begins with "unknown ..." (which would otherwise rewrap it as a usage error).
 	marker := alreadyRendered(errFake(`unknown subcommand "x" for "waxtap doctor"`))
-	if _, ok := errors.AsType[*alreadyRenderedError](normalizeExecuteError(marker)); !ok {
+	if _, ok := errors.AsType[*alreadyRenderedError](normalizeExecuteError(marker, nil)); !ok {
 		t.Error("normalizeExecuteError stripped the already-rendered marker")
 	}
 }
@@ -937,14 +1010,16 @@ func TestClassifyError_OutputCollision(t *testing.T) {
 		t.Errorf("message = %q, want the existing-file wording naming the path", c.message)
 	}
 	// Every CLI path stats the destination before starting, so a collision that
-	// only shows up at publish time means the file appeared mid-run. Saying that
-	// is the one wording that is also right under --collision auto-number, which
-	// already picked a free name and cannot be told to pick one again.
+	// only shows up at publish time means the file appeared mid-run.
 	if !strings.Contains(c.message, "while this run was working") {
 		t.Errorf("message = %q, want it to say the file appeared mid-run", c.message)
 	}
-	if strings.Contains(c.message, "auto-number") {
-		t.Errorf("message = %q, must not advise a mode that may already be set and cannot help", c.message)
+	// auto-number renumbers at publish rather than failing, so only --collision
+	// fail reaches here and every listed mode is a real remedy.
+	for _, mode := range []string{"auto-number", "overwrite", "skip"} {
+		if !strings.Contains(c.message, mode) {
+			t.Errorf("message = %q, want it to offer --collision %s", c.message, mode)
+		}
 	}
 	// Scripts read the exit code and the machine code; those match the sequential
 	// pre-flight collision exactly.
@@ -1002,5 +1077,41 @@ func TestFriendlyError_OutputPublishFailure(t *testing.T) {
 	// The bare OS sentence is not what the user sees any more.
 	if strings.HasPrefix(c.message, "rename ") {
 		t.Errorf("message = %q, want the explained form, not the raw OS error", c.message)
+	}
+}
+
+// Two providers reach the same exit class through *waxtap.ProviderError, but a
+// SponsorBlock failure is not fixed by starting a sidecar, so the remedy has to
+// follow the endpoint rather than being fixed to the sidecar text.
+func TestClassifyError_ProviderHintPerEndpoint(t *testing.T) {
+	sb := classifyError(&waxtap.ProviderError{Endpoint: "SponsorBlock", Cause: errFake("invalid character 'o'")})
+	if sb.exitCode != 9 || sb.code != "network" {
+		t.Errorf("SponsorBlock provider error = %+v, want network/9", sb)
+	}
+	if !strings.Contains(sb.hint, "SponsorBlock") || strings.Contains(sb.hint, "--player-context-url") {
+		t.Errorf("SponsorBlock hint = %q, want a SponsorBlock-specific remedy", sb.hint)
+	}
+	pc := classifyError(&waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("connection refused")})
+	if !strings.Contains(pc.hint, "--player-context-url") {
+		t.Errorf("player-context hint = %q, want the sidecar remedy", pc.hint)
+	}
+}
+
+// Renumber exhaustion reaches the same ErrExist classification but must not
+// advise --collision auto-number: it is the only mode that can produce it.
+func TestClassifyError_RenumberExhausted(t *testing.T) {
+	exhausted := tempfile.WrapOutput("publish", &fs.PathError{
+		Op: "publish", Path: "/out/t.flac",
+		Err: fmt.Errorf("%w: %w", tempfile.ErrRenumberExhausted, fs.ErrExist),
+	})
+	c := classifyError(exhausted)
+	if c.exitCode != 2 || c.code != "usage" {
+		t.Errorf("exhausted renumber = %+v, want usage/2", c)
+	}
+	if !strings.Contains(c.message, "every numbered variant") {
+		t.Errorf("message = %q, want the exhaustion named", c.message)
+	}
+	if strings.Contains(c.message, "auto-number") {
+		t.Errorf("message = %q, must not advise the mode that just failed", c.message)
 	}
 }

@@ -14,7 +14,10 @@ waxtap doctor --video <id-or-url>     # check a specific video
 ```
 
 `doctor` tries several known-good videos so one removed video does not determine
-the result.
+the result. `--full` reorders that list to lead with a ~10-minute track, since a
+short clip proves the pipeline runs but not that a full-length delivery works;
+it warns when the track it did deliver came in under 2 MiB, and `--json` records
+every candidate that failed before one passed.
 
 | Exit | Interpretation |
 |---|---|

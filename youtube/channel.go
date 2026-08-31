@@ -144,7 +144,7 @@ func (c *Client) resolveChannelIDViaInnerTube(ctx context.Context, channelURL st
 	}
 	body, err := c.innertubePost(ctx, profile, sess, resolveEndpoint, c.newResolveRequest(profile, sess, channelURL))
 	if err != nil {
-		return "", err
+		return "", explainBareDeadline(err, sess)
 	}
 	var r struct {
 		Endpoint struct {
@@ -179,7 +179,7 @@ func (c *Client) resolveChannelIDViaScrape(ctx context.Context, channelURL strin
 		if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok && hse.StatusCode == http.StatusNotFound {
 			return "", channelNotFoundError(channelURL)
 		}
-		return "", err
+		return "", explainBareDeadline(err, sess)
 	}
 	if id := channelIDFromHTML(body); id != "" {
 		return id, nil

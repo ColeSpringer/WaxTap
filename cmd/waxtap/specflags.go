@@ -2,11 +2,13 @@ package main
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/format"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -170,6 +172,16 @@ func parseSourcePolicy(s string) (waxtap.SourcePolicy, error) {
 		codec := strings.TrimPrefix(s, "prefer:")
 		if codec == "" {
 			return waxtap.SourcePolicy{}, usagef("--source-policy prefer: needs a codec, e.g. prefer:opus")
+		}
+		// Restricting to the known families is deliberate typo protection, not a
+		// statement that nothing else could ever bind: the selector matches
+		// unknown ids verbatim, so an exotic exact id (say a Dolby codec) could
+		// in principle be preferred. That exact-id selection stays first-class
+		// through --codec; here, an unrecognized name is far more likely a typo,
+		// and a silently inert policy is worse than a rejected one.
+		known := format.KnownCodecFamilies()
+		if !slices.Contains(known, format.CodecFamily(codec)) {
+			return waxtap.SourcePolicy{}, usagef("invalid --source-policy prefer:%s (known codecs: %s)", codec, strings.Join(known, ", "))
 		}
 		return waxtap.PreferCodec(codec), nil
 	default:

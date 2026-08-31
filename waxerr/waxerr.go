@@ -162,12 +162,13 @@ func (e *ExtractionError) Unwrap() []error {
 	return []error{ErrExtractionFailed}
 }
 
-// ProviderError reports a failed call to a player-context or session provider.
-// It unwraps to the underlying cause, allowing transport and HTTP errors to keep
-// their own classification.
+// ProviderError reports a failed call to a provider WaxTap talks to over HTTP:
+// player-context, session, or SponsorBlock. It unwraps to the underlying cause,
+// allowing transport, HTTP, and response-parse errors to keep their own
+// classification.
 type ProviderError struct {
-	Endpoint string // provider that failed, e.g. "player-context", "session"
-	Cause    error  // underlying transport or HTTP failure
+	Endpoint string // provider that failed, e.g. "player-context", "session", "SponsorBlock"
+	Cause    error  // underlying transport, HTTP, or response failure
 }
 
 func (e *ProviderError) Error() string {

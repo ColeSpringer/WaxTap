@@ -107,7 +107,10 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   gives `Song.opus`. It takes only one, so a placeholder padded on both sides
   (`{index} - {title}.{ext}`) leaves the other separator behind as `- Song.opus`.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
-  fallbacks. Results report the client that actually delivered.
+  fallbacks. Results report the client that actually delivered. A delivery that
+  came from the watch-page scrape rather than the player endpoint is labeled
+  `via watch page` beside the client (`viaWatchPage: true` in `--json`), since
+  the client name alone reads as a player delivery.
 - Normalization applies one scalar gain. `--peak-mode cap` (the default) caps it
   so the true peak stays under -1.0 dBTP: transparent, but a source already
   peaking at 0 dBTP takes at most -1.0 dB whatever the target, so the miss can be
@@ -171,8 +174,11 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   policies, and yt-dlp-compatible `--download-archive` files.
 - `--collision fail` (the default) and `auto-number` claim the output path with
   the publish itself, so two single-file runs writing the same path cannot both
-  report success: the loser exits 2 with the existing-file message and the
-  winner's file is intact. `overwrite` opts into last-writer-wins. `skip` leaves
+  report success. Under `fail` the loser exits 2 with the existing-file message
+  and the winner's file is intact. Under `auto-number` the loser renumbers
+  instead, so N runs of one basename produce N distinct files; the numbering is
+  not deterministic under concurrency, and racing runs can land `(2)` and `(3)`
+  with `(1)` belonging to neither. `overwrite` opts into last-writer-wins. `skip` leaves
   the existing file alone and exits 0. On a single-file `transcode`, `normalize`,
   or `cut` it reports `{"skipped":"exists"}` with the path under `--json`, and
   prints that path under `--quiet` as a write does; `download` emits the same

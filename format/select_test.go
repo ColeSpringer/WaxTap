@@ -1019,3 +1019,93 @@ func itagsOf(fs []Format) []int {
 	}
 	return out
 }
+
+// A prefer:<codec> naming a family the selector cannot match is a typo, not a
+// preference, so the list callers validate against has to stay exactly the set
+// codecFamily recognizes.
+func TestKnownCodecFamilies(t *testing.T) {
+	got := KnownCodecFamilies()
+	want := []string{"aac", "flac", "mp3", "opus", "vorbis"}
+	if len(got) != len(want) {
+		t.Fatalf("KnownCodecFamilies() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("KnownCodecFamilies() = %v, want %v (sorted)", got, want)
+		}
+	}
+	// Every listed family must normalize to itself, or a caller checking a
+	// preference against this list would reject names the selector accepts.
+	for _, f := range got {
+		if CodecFamily(f) != f {
+			t.Errorf("CodecFamily(%q) = %q, want %q", f, CodecFamily(f), f)
+		}
+	}
+	// The returned slice is the caller's; mutating it must not corrupt the next
+	// call.
+	got[0] = "mutated"
+	if KnownCodecFamilies()[0] != want[0] {
+		t.Error("KnownCodecFamilies() shares its backing array between calls")
+	}
+}
+
+func TestSourcePolicyPreferred(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy SourcePolicy
+		want   string
+	}{
+		{"zero", SourcePolicy{}, ""},
+		{"minimize-loss", MinimizeLoss(), ""},
+		{"best-native", BestNative(), ""},
+		{"prefer", PreferCodec("flac"), "flac"},
+		{"prefer normalizes", PreferCodec("MP4A.40.2"), "aac"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.policy.Preferred(); got != tc.want {
+				t.Errorf("Preferred() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// AvailableFamilies must apply the selector's own eligibility rule: a family
+// carried only by a format selection would never pick (a video track, or an
+// unlabeled format crowded out by explicit audio) is not "available", and
+// callers reporting an unmatched preference would wrongly stay silent about it.
+func TestAvailableFamilies(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		candidates []Format
+		want       []string
+	}{
+		{"sorted and deduplicated",
+			[]Format{aud(140, "mp4a.40.2", 128000), aud(251, "opus", 160000), aud(139, "mp4a.40.5", 48000)},
+			[]string{"aac", "opus"}},
+		{"video tracks excluded",
+			[]Format{aud(251, "opus", 160000), {Itag: 137, MIMEType: "video/mp4", Codec: "avc1.640028"}},
+			[]string{"opus"}},
+		// With explicit audio present, an unlabeled format is not eligible, so
+		// its family must not be reported as available.
+		{"unlabeled excluded when audio is explicit",
+			[]Format{aud(251, "opus", 160000), {Itag: 999, Codec: "flac", AverageBitrate: 900000}},
+			[]string{"opus"}},
+		// With no explicit audio, unlabeled formats are the eligible set.
+		{"unlabeled eligible when nothing is labeled",
+			[]Format{{Itag: 999, Codec: "flac", AverageBitrate: 900000}},
+			[]string{"flac"}},
+		{"empty", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AvailableFamilies(tc.candidates)
+			if len(got) != len(tc.want) {
+				t.Fatalf("AvailableFamilies = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("AvailableFamilies = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

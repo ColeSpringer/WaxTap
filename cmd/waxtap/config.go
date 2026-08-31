@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -250,8 +252,61 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	if dec.More() {
 		return fc, usagef("parse config %s: unexpected trailing data after the JSON object", path)
 	}
+	if err := validateConfigNumbers(&fc, jsonKeyLabel); err != nil {
+		return fc, usagef("parse config %s: %v", path, err)
+	}
 	return fc, nil
 }
+
+// validateConfigNumbers rejects negative (and non-finite) values for the numeric
+// settings the consumers otherwise silently default. A run configured with -1
+// looks configured and behaves as if it were not, which is the worst of both.
+// Zero stays allowed: it is how a caller asks for the built-in default.
+//
+// label names the setting in the caller's vocabulary: the JSON key for the file
+// layer, the environment variable for the env layer. The env layer passes the
+// variable it actually read, so the deprecated procs alias names itself.
+func validateConfigNumbers(fc *fileConfig, label func(jsonKey, envVar string) string) error {
+	var errs []error
+	checkInt := func(v *int, jsonKey, envVar string) {
+		if v != nil && *v < 0 {
+			errs = append(errs, fmt.Errorf("%q must be >= 0 (got %d)", label(jsonKey, envVar), *v))
+		}
+	}
+	checkFloat := func(v *float64, jsonKey, envVar string) {
+		if v == nil {
+			return
+		}
+		if math.IsNaN(*v) || math.IsInf(*v, 0) {
+			errs = append(errs, fmt.Errorf("%q must be a finite value >= 0 (got %v)", label(jsonKey, envVar), *v))
+			return
+		}
+		if *v < 0 {
+			errs = append(errs, fmt.Errorf("%q must be >= 0 (got %v)", label(jsonKey, envVar), *v))
+		}
+	}
+	// procs is deliberately absent: a negative value there is documented API
+	// ("disables the limit", Options.Concurrency.Procs), and config/env is its
+	// only route.
+	checkInt(fc.Chunks, "chunkParallelism", "WAXTAP_CHUNKS")
+	checkInt(fc.Downloads, "downloadConcurrency", "WAXTAP_DOWNLOAD_CONCURRENCY")
+	// Cooldown's negative case is re-checked by waxtap.New, but its non-finite
+	// case is not: +Inf seconds converts to a huge positive Duration the
+	// negative check accepts, and NaN converts to a garbage negative that gets
+	// an unreadable message. Both layers reject it here with the setting named.
+	checkFloat(fc.CooldownSec, "cooldownSeconds", "WAXTAP_COOLDOWN")
+	checkFloat(fc.ExtractionTimeoutSec, "extractionTimeoutSeconds", "WAXTAP_EXTRACTION_TIMEOUT")
+	checkFloat(fc.ResolveTimeoutSec, "resolveTimeoutSeconds", "WAXTAP_RESOLVE_TIMEOUT")
+	checkFloat(fc.WebContextTimeoutSec, "webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT")
+	checkFloat(fc.SponsorBlockTimeoutSec, "sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT")
+	checkFloat(fc.ChunkTimeoutSec, "chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT")
+	return errors.Join(errs...)
+}
+
+// jsonKeyLabel and envVarLabel are the two vocabularies validateConfigNumbers
+// reports in.
+func jsonKeyLabel(jsonKey, _ string) string { return jsonKey }
+func envVarLabel(_, envVar string) string   { return envVar }
 
 // envOverlay reads WAXTAP_* environment variables into a fileConfig-shaped
 // overlay. Malformed numeric/boolean values are reported rather than silently
@@ -336,6 +391,9 @@ func envOverlay() (fileConfig, error) {
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
 	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT")
 
+	if verr := validateConfigNumbers(&ec, envVarLabel); verr != nil {
+		errs = append(errs, verr)
+	}
 	if len(errs) > 0 {
 		return ec, usagef("invalid environment configuration: %v", errors.Join(errs...))
 	}
@@ -513,6 +571,50 @@ func envProxySet() bool {
 	return false
 }
 
+// proxySchemes are the proxy schemes net/http's transport can use. It is wider
+// than the sidecar's http/https rule on purpose: a proxy is a transport, and
+// SOCKS is an ordinary way to run one.
+var proxySchemes = []string{"http", "https", "socks5", "socks5h"}
+
+// proxyPassword matches the password half of a URL's userinfo, so a rejected
+// proxy value can be echoed without echoing a credential.
+var proxyPassword = regexp.MustCompile(`(://[^/@:]*):[^@/]*@`)
+
+// redactProxyValue masks the password in a proxy setting. The username stays,
+// so the echoed value remains recognizable to whoever configured it.
+func redactProxyValue(raw string) string {
+	return proxyPassword.ReplaceAllString(raw, "${1}:xxxxx@")
+}
+
+// validateProxyURL parses a proxy setting and rejects what the transport could
+// not use, so a typo fails at startup with the setting named rather than as an
+// opaque per-request failure. An empty value means no proxy and is not an error.
+// Every message echoes the value through redactProxyValue: a rejected proxy can
+// still carry credentials, and the rejection lands on stderr and in --json.
+func validateProxyURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	shown := redactProxyValue(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		// A bare "host:port" lands here when the host starts with a digit and in
+		// the scheme check below when it starts with a letter, so both messages
+		// carry the form. The parse error's own text embeds the raw value, so it
+		// is redacted the same way.
+		msg := strings.ReplaceAll(err.Error(), raw, shown)
+		return nil, usagef("invalid --proxy %q: %s (e.g. http://host:port)", shown, msg)
+	}
+	if !slices.Contains(proxySchemes, u.Scheme) {
+		return nil, usagef("invalid --proxy %q: scheme %q is not supported (use %s, or %s, e.g. http://host:port)",
+			shown, u.Scheme, strings.Join(proxySchemes[:len(proxySchemes)-1], ", "), proxySchemes[len(proxySchemes)-1])
+	}
+	if u.Host == "" {
+		return nil, usagef("invalid --proxy %q: missing host (e.g. http://host:port)", shown)
+	}
+	return u, nil
+}
+
 // httpClient builds a custom base client only when transport settings require
 // one. Returning nil lets the facade install its default jar-backed client.
 //
@@ -535,9 +637,9 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 		ExpectContinueTimeout: time.Second,
 	}
 	if a.proxy != "" {
-		u, err := url.Parse(a.proxy)
+		u, err := validateProxyURL(a.proxy)
 		if err != nil {
-			return nil, usagef("invalid --proxy %q: %v", a.proxy, err)
+			return nil, err
 		}
 		tr.Proxy = http.ProxyURL(u)
 	}

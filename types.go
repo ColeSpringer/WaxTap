@@ -527,6 +527,7 @@ type Output struct {
 	path      string
 	writer    io.Writer
 	exclusive bool
+	renumber  bool
 }
 
 // ToFile delivers to an exact file path (written atomically via a temp + rename),
@@ -543,6 +544,19 @@ func ToFile(path string) Output { return Output{kind: outputFile, path: path} }
 // and a rename, where a concurrent writer can still be lost.
 func ToNewFile(path string) Output {
 	return Output{kind: outputFile, path: path, exclusive: true}
+}
+
+// ToNewNumberedFile delivers to path or, when the publish finds it taken, to the
+// first free "name (n)" sibling, claimed with the same exclusive publish
+// ToNewFile uses. The delivered path is Result.OutputPath.
+//
+// It exists for auto-number collision policies, whose pre-flight pick is a stat
+// and so cannot see a writer that claims the name in between. N runs racing for
+// one basename therefore produce N files. The numbering is not deterministic
+// under concurrency: racing runs can land (2) and (3) with (1) belonging to
+// neither.
+func ToNewNumberedFile(path string) Output {
+	return Output{kind: outputFile, path: path, exclusive: true, renumber: true}
 }
 
 // ToWriter delivers to a caller-provided writer (bounded memory, no atomicity
@@ -576,6 +590,11 @@ type Result struct {
 	InputPath  string     // set for local files
 	OutputPath string     // empty for ToWriter delivery
 	Client     string     // YouTube client used, such as "ANDROID_VR"; empty for local files
+	// ViaWatchPage reports that the delivery came from the watch-page scrape
+	// rather than the player endpoint. The client name is the same either way,
+	// so this is the only thing that separates the two, and the two differ in
+	// what metadata they carry and what they need to work.
+	ViaWatchPage bool
 
 	SourceFormat Format // input/source format
 	OutputFormat Format // after transcode (== source when copy/keep)
@@ -785,6 +804,13 @@ const (
 	// removed entirely. The measurement itself is still reported as null, which
 	// is honest but says nothing; this says what happened.
 	WarnLoudnessUnmeasurable
+	// WarnSourcePolicyUnmatched reports that --source-policy prefer:<codec>
+	// named a codec family this video does not offer, so the preference had no
+	// effect and selection ran as if none had been given. Detail names the
+	// preference, the families that were available, and what was delivered.
+	// A preference that was available but outranked by a better source stays
+	// silent: that is the soft bias working as documented.
+	WarnSourcePolicyUnmatched
 )
 
 func (w WarningCode) String() string {
@@ -829,6 +855,8 @@ func (w WarningCode) String() string {
 		return "input-damage"
 	case WarnLoudnessUnmeasurable:
 		return "loudness-unmeasurable"
+	case WarnSourcePolicyUnmatched:
+		return "source-policy-unmatched"
 	default:
 		return "unknown"
 	}

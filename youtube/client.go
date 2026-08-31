@@ -416,7 +416,25 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 			return ext, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			// The same policy httpx.Do applies to its own retry loop: a
+			// cancellation is the caller giving up and outranks the cause, while
+			// an expired budget is the case the cause exists to explain. A dead
+			// proxy reads exactly this way, and "context deadline exceeded" names
+			// nothing the user can act on.
+			if !errors.Is(ctxErr, context.DeadlineExceeded) {
+				return nil, ctxErr
+			}
+			// The interrupted attempt's own error is the report. An earlier
+			// profile's error steps in only when this attempt says nothing beyond
+			// the deadline and the earlier one named a transport cause: a domain
+			// verdict ("video unavailable") from a profile the chain would have
+			// moved past must not become the story of a run the budget killed.
+			cause := perr
+			if !httpx.NamesTransportCause(cause) && errors.Is(cause, context.DeadlineExceeded) &&
+				bestErr != nil && httpx.NamesTransportCause(bestErr) {
+				cause = bestErr
+			}
+			return nil, explainBareDeadline(cause, sess)
 		}
 		if errors.Is(perr, waxerr.ErrRateLimited) {
 			return nil, perr // throttling won't differ across clients; surface it
@@ -473,7 +491,30 @@ func (c *Client) ExtractAttempt(ctx context.Context, videoID string, a AttemptID
 		return nil, err
 	}
 	sess.resetPOBinding()
-	return c.extractProfile(ctx, sess, c.profiles[i], videoID, i)
+	ext, perr := c.extractProfile(ctx, sess, c.profiles[i], videoID, i)
+	if perr != nil {
+		return nil, explainBareDeadline(perr, sess)
+	}
+	return ext, nil
+}
+
+// explainBareDeadline folds the session's swallowed bootstrap failure into an
+// error that is nothing but an expired deadline. net/http reports the context
+// error verbatim when the deadline fires mid-request, so when an earlier
+// request consumed the budget and was worked around, the failure that finally
+// surfaces can name no cause at all; the swallowed one is the explanation.
+//
+// An error that names its own transport cause, or that is not a deadline at
+// all (a parse failure, a playability error), is returned unchanged: it tells
+// its own story, and the bootstrap's would only muddy it.
+func explainBareDeadline(err error, sess *session) error {
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || httpx.NamesTransportCause(err) {
+		return err
+	}
+	if berr := sess.bootstrapErr; berr != nil && httpx.NamesTransportCause(berr) {
+		return fmt.Errorf("%w; an earlier request in this session failed first: %w", err, berr)
+	}
+	return err
 }
 
 // extractProfile performs one profile's /player extraction. The caller resets the
@@ -609,7 +650,7 @@ func (c *Client) fetchWatchPage(ctx context.Context, videoID string) ([]byte, *s
 	}
 	body, err := c.httpGet(ctx, c.webFallback, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, explainBareDeadline(err, sess)
 	}
 	return body, sess, nil
 }
@@ -758,7 +799,7 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 				return nil, fmt.Errorf("%w: %v", waxerr.ErrPlaylistUnavailable, err)
 			}
 		}
-		return nil, err
+		return nil, explainBareDeadline(err, sess)
 	}
 	sess.learnVisitorData(meta.visitorData)
 	pl.Title = meta.title

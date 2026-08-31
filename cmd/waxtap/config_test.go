@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -386,4 +387,195 @@ func newConfigTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().String("config", "", "")
 	return cmd
+}
+
+// A --proxy Go cannot use is a settings error the run should refuse at parse,
+// not one every request rediscovers. The scheme set is wider than the sidecar's
+// http/https rule because proxies legitimately speak SOCKS.
+func TestValidateProxyURL(t *testing.T) {
+	for _, ok := range []string{
+		"http://127.0.0.1:8080",
+		"https://proxy.example:3128",
+		"socks5://127.0.0.1:1080",
+		"socks5h://127.0.0.1:1080",
+		"http://user:pass@proxy.example:8080",
+		"http://proxy.example",
+	} {
+		if _, err := validateProxyURL(ok); err != nil {
+			t.Errorf("validateProxyURL(%q): %v", ok, err)
+		}
+	}
+	for _, tc := range []struct {
+		in   string
+		want []string // substrings the message must carry
+	}{
+		{"ftp://p:1", []string{"ftp", "socks5"}},
+		// url.Parse reads this as scheme "127.0.0.1", so the message has to show
+		// the form rather than only naming the scheme it found.
+		{"127.0.0.1:9", []string{"http://host:port"}},
+		{"http://", []string{"missing host"}},
+		{"://nope", []string{"invalid --proxy"}},
+	} {
+		_, err := validateProxyURL(tc.in)
+		if err == nil {
+			t.Errorf("validateProxyURL(%q) = nil error, want a usage error", tc.in)
+			continue
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("validateProxyURL(%q) = %q, want it to contain %q", tc.in, err, w)
+			}
+		}
+	}
+	// An empty proxy means "no proxy", not a bad one.
+	if _, err := validateProxyURL(""); err != nil {
+		t.Errorf("validateProxyURL(\"\"): %v", err)
+	}
+}
+
+// negativeNumericKeys pairs each unvalidated numeric setting's JSON key with its
+// environment variable, so both layers are covered by one list. procs is absent
+// on purpose: a negative value there is documented API ("disables the limit",
+// Options.Concurrency.Procs), not a typo.
+var negativeNumericKeys = []struct{ jsonKey, envVar string }{
+	{"chunkParallelism", "WAXTAP_CHUNKS"},
+	{"downloadConcurrency", "WAXTAP_DOWNLOAD_CONCURRENCY"},
+	{"cooldownSeconds", "WAXTAP_COOLDOWN"},
+	{"extractionTimeoutSeconds", "WAXTAP_EXTRACTION_TIMEOUT"},
+	{"resolveTimeoutSeconds", "WAXTAP_RESOLVE_TIMEOUT"},
+	{"webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT"},
+	{"sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT"},
+	{"chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT"},
+}
+
+// A negative procs is the documented way to disable the concurrency limit, and
+// config/env is its only route (there is no --procs flag), so validation must
+// let it through.
+func TestConfigAllowsNegativeProcs(t *testing.T) {
+	if err := readConfigJSON(t, `{"procs":-1}`); err != nil {
+		t.Errorf("readConfigFile(procs:-1) = %v, want nil (negative disables the limit)", err)
+	}
+	t.Setenv("WAXTAP_PROCS", "-1")
+	if _, err := envOverlay(); err != nil {
+		t.Errorf("envOverlay(WAXTAP_PROCS=-1) = %v, want nil (negative disables the limit)", err)
+	}
+}
+
+// readConfigJSON runs readConfigFile over a one-key config file.
+func readConfigJSON(t *testing.T, body string) error {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newConfigTestCmd()
+	if err := cmd.Flags().Set("config", path); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readConfigFile(cmd)
+	return err
+}
+
+// A negative count or timeout is silently discarded by the consumers, which
+// then use their built-in defaults. The run looks configured and behaves as if
+// it were not, so the value is refused where it is read.
+func TestReadConfigFileRejectsNegativeNumbers(t *testing.T) {
+	for _, k := range negativeNumericKeys {
+		t.Run(k.jsonKey, func(t *testing.T) {
+			err := readConfigJSON(t, `{"`+k.jsonKey+`":-1}`)
+			if err == nil || !isUsageError(err) {
+				t.Fatalf("readConfigFile(-1) = %v, want a usage error", err)
+			}
+			if !strings.Contains(err.Error(), k.jsonKey) {
+				t.Errorf("err = %q, want the JSON key named", err)
+			}
+			if strings.Contains(err.Error(), k.envVar) {
+				t.Errorf("err = %q, want the file layer's vocabulary, not the env var", err)
+			}
+			// Zero stays legal: it is how a caller asks for the default.
+			for _, ok := range []string{"0", "2"} {
+				if err := readConfigJSON(t, `{"`+k.jsonKey+`":`+ok+`}`); err != nil {
+					t.Errorf("readConfigFile(%s) = %v, want nil", ok, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEnvOverlayRejectsNegativeNumbers(t *testing.T) {
+	for _, k := range negativeNumericKeys {
+		t.Run(k.envVar, func(t *testing.T) {
+			t.Setenv(k.envVar, "-1")
+			_, err := envOverlay()
+			if err == nil || !isUsageError(err) {
+				t.Fatalf("envOverlay(%s=-1) = %v, want a usage error", k.envVar, err)
+			}
+			if !strings.Contains(err.Error(), k.envVar) {
+				t.Errorf("err = %q, want the environment variable named", err)
+			}
+			if strings.Contains(err.Error(), k.jsonKey) {
+				t.Errorf("err = %q, want the env layer's vocabulary, not the JSON key", err)
+			}
+			t.Setenv(k.envVar, "0")
+			if _, err := envOverlay(); err != nil {
+				t.Errorf("envOverlay(%s=0) = %v, want nil", k.envVar, err)
+			}
+		})
+	}
+
+	// Timeouts are floats, so the non-finite shapes are reachable too. Cooldown
+	// especially: +Inf seconds converts to a huge positive Duration that
+	// waxtap.New's negative check would silently accept.
+	t.Run("non-finite", func(t *testing.T) {
+		for _, key := range []string{"WAXTAP_RESOLVE_TIMEOUT", "WAXTAP_COOLDOWN"} {
+			for _, v := range []string{"NaN", "Inf", "-Inf"} {
+				t.Setenv(key, v)
+				if _, err := envOverlay(); err == nil {
+					t.Errorf("envOverlay(%s=%s) = nil, want a usage error", key, v)
+				}
+			}
+			t.Setenv(key, "0")
+		}
+	})
+
+	// The already-validated settings keep failing in waxtap.New, not here.
+	t.Run("qps still guarded downstream", func(t *testing.T) {
+		t.Setenv("WAXTAP_QPS", "-5")
+		if _, err := envOverlay(); err != nil {
+			t.Fatalf("envOverlay(WAXTAP_QPS=-5) = %v, want it left to waxtap.New", err)
+		}
+		if _, err := waxtap.New(waxtap.Options{Politeness: waxtap.Politeness{PerHostQPS: -5}}); err == nil {
+			t.Error("waxtap.New(PerHostQPS: -5) = nil error, want the downstream guard")
+		}
+	})
+}
+
+// A proxy URL with credentials can be rejected for an unrelated reason (a bad
+// scheme, a missing host); the rejection must not print the password back into
+// stderr or a --json document.
+func TestValidateProxyURLRedactsUserinfo(t *testing.T) {
+	for _, in := range []string{
+		"ftp://alice:hunter2@proxy.example:3128",
+		"http://alice:hunter2@",
+	} {
+		_, err := validateProxyURL(in)
+		if err == nil {
+			t.Fatalf("validateProxyURL(%q) = nil error, want a usage error", in)
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("validateProxyURL(%q) leaks the password: %q", in, err)
+		}
+		if !strings.Contains(err.Error(), "alice") {
+			t.Errorf("validateProxyURL(%q) = %q, want the username kept so the value stays recognizable", in, err)
+		}
+	}
+	// A value that fails url.Parse outright cannot be redacted through the URL
+	// type; the credential shape is stripped textually.
+	_, err := validateProxyURL("http://alice:hunter2@[bad")
+	if err == nil {
+		t.Fatal("want a usage error for the unparseable proxy")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("parse-failure message leaks the password: %q", err)
+	}
 }

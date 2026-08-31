@@ -285,6 +285,16 @@ func BestNative() SourcePolicy { return SourcePolicy{kind: polBestNative} }
 // PreferCodec prefers a source in the named codec family when policy is active.
 func PreferCodec(codec string) SourcePolicy { return SourcePolicy{kind: polPreferCodec, codec: codec} }
 
+// Preferred returns the normalized codec family this policy prefers, or "" for
+// any other policy. It reports the preference itself, not whether a source
+// satisfied it, so a caller can say which preference went unmatched.
+func (p SourcePolicy) Preferred() string {
+	if p.kind != polPreferCodec {
+		return ""
+	}
+	return codecFamily(p.codec)
+}
+
 func (p SourcePolicy) String() string {
 	switch p.kind {
 	case polBestNative:

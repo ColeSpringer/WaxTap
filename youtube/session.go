@@ -45,6 +45,12 @@ type session struct {
 	// generation, which would let its 403s retire the innocent replacement
 	// (see Client.RotateIdentity).
 	identityGen uint64
+	// bootstrapErr is the failure the visitor bootstrap worked around, nil when
+	// it succeeded or never ran. The workaround (synthetic visitorData) is the
+	// right call for the bootstrap itself, but its request may be the only one
+	// in the session that named a transport cause before the budget ran out; a
+	// later bare-deadline failure folds it back in (see explainBareDeadline).
+	bootstrapErr error
 }
 
 // newSession starts a per-attempt session for the given content region. It

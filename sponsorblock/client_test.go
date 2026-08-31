@@ -270,3 +270,25 @@ func TestBestPerOverlap(t *testing.T) {
 		}
 	})
 }
+
+// A 200 carrying a body that is not the documented JSON is a server failure,
+// the same class as its 500, but an untyped parse error classifies as an
+// unknown local fault. Typing it puts it in the class it belongs to and lets
+// the CLI name which server misbehaved.
+func TestFetchSegmentsMalformedBodyTyped(t *testing.T) {
+	c, _ := serveJSON(t, http.StatusOK, "not json")
+	_, err := c.FetchSegments(context.Background(), testVideoID, nil)
+	pe, ok := errors.AsType[*waxerr.ProviderError](err)
+	if !ok {
+		t.Fatalf("err = %v (%T), want *waxerr.ProviderError", err, err)
+	}
+	if pe.Endpoint != "SponsorBlock" {
+		t.Errorf("Endpoint = %q, want %q", pe.Endpoint, "SponsorBlock")
+	}
+	if pe.Cause == nil {
+		t.Fatal("Cause = nil, want the parse failure preserved")
+	}
+	if !strings.Contains(err.Error(), "SponsorBlock") {
+		t.Errorf("Error() = %q, want the provider named", err)
+	}
+}

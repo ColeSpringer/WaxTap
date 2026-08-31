@@ -8,9 +8,12 @@ package tempfile
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -70,6 +73,92 @@ func PublishNew(src, dst string) error {
 		return WrapOutput("publish", retargetPathError(dst, err))
 	}
 	return nil
+}
+
+// maxPublishRenumber bounds the renumbering retry. A destination whose first
+// thousand siblings are all taken is a runaway loop, not a busy directory.
+const maxPublishRenumber = 1000
+
+// numberedSuffix matches a trailing " (n)" on a file stem.
+var numberedSuffix = regexp.MustCompile(`^(.*) \((\d+)\)$`)
+
+// NumberedVariant returns the "stem (n).ext" sibling of path: the one statement
+// of the auto-number naming convention, shared by the CLI pre-flight and the
+// publish retry. It always appends: a parenthesized number already in the name
+// may be title content, which numbering must not delete. Continuing an existing
+// " (n)" sequence is the publish retry's job, via splitNumbered.
+func NumberedVariant(path string, n int) string {
+	dir := filepath.Dir(path)
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(filepath.Base(path), ext)
+	return filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, n, ext))
+}
+
+// splitNumbered separates an existing " (n)" stem suffix from path, returning
+// the un-numbered path and the number it carried. A path with no such suffix
+// comes back unchanged with n == 0.
+func splitNumbered(path string) (base string, n int) {
+	dir := filepath.Dir(path)
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(filepath.Base(path), ext)
+	m := numberedSuffix.FindStringSubmatch(stem)
+	if m == nil {
+		return path, 0
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil {
+		return path, 0 // a number too large to be one
+	}
+	return filepath.Join(dir, m[1]+ext), n
+}
+
+// PublishNewNumbered is PublishNew for a destination that may renumber: when the
+// publish finds the path taken it retries the next " (n)" sibling, and reports
+// the path it actually published. Any other failure returns immediately, so a
+// missing directory fails once rather than a thousand times.
+//
+// A destination already carrying a " (n)" suffix continues that sequence
+// ("t (3).flac" retries as "t (4).flac"): the suffix is normally the CLI
+// pre-flight's own pick, and nesting a second one would grow the name on every
+// race. A literal parenthesized number in a requested name is indistinguishable
+// here and is treated the same; the pre-flight, which does know the requested
+// name, appends instead (see NumberedVariant).
+//
+// It exists for auto-number collision policies, whose pre-flight pick is a stat
+// and therefore cannot see a writer that claims the name in between. Under
+// concurrency the numbering is not deterministic: racing runs can land (2) and
+// (3) with (1) belonging to neither.
+func PublishNewNumbered(src, dst string) (string, error) {
+	return publishNewNumbered(src, dst, maxPublishRenumber)
+}
+
+// ErrRenumberExhausted reports that PublishNewNumbered gave up: the destination
+// and every numbered sibling it tried were taken. It rides alongside
+// fs.ErrExist so collision classification is unchanged, while messaging can
+// stop advising auto-number to the mode that just ran out of numbers.
+var ErrRenumberExhausted = errors.New("every numbered variant was taken")
+
+// publishNewNumbered is PublishNewNumbered with an explicit bound, so tests can
+// reach the exhausted case without creating a thousand files.
+func publishNewNumbered(src, dst string, cap int) (string, error) {
+	base, start := splitNumbered(dst)
+	candidate := dst
+	for n := start; ; n++ {
+		err := PublishNew(src, candidate)
+		if err == nil {
+			return candidate, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		if n-start >= cap {
+			return "", WrapOutput("publish", &os.PathError{
+				Op: "publish", Path: dst,
+				Err: fmt.Errorf("%w: %w", ErrRenumberExhausted, fs.ErrExist),
+			})
+		}
+		candidate = NumberedVariant(base, n+1)
+	}
 }
 
 // existsError reports an occupied destination. It unwraps to fs.ErrExist so
@@ -136,14 +225,24 @@ func chmodUmask(path string) error {
 // Commit flushes and closes the temp, then atomically renames it to the final
 // path, replacing an existing file. After a successful Commit, Discard is a
 // no-op.
-func (f *File) Commit() error { return f.commit(false) }
+func (f *File) Commit() error { return f.commit(false, false) }
 
 // CommitNew is Commit for a destination that must not already exist. It
 // publishes through PublishNew, so an occupied path fails with an OutputError
 // wrapping fs.ErrExist instead of overwriting.
-func (f *File) CommitNew() error { return f.commit(true) }
+func (f *File) CommitNew() error { return f.commit(true, false) }
 
-func (f *File) commit(exclusive bool) error {
+// CommitNewNumbered is CommitNew for a destination that may renumber: an
+// occupied path publishes onto the first free " (n)" sibling instead of
+// failing. It updates the final path and returns it.
+func (f *File) CommitNewNumbered() (string, error) {
+	if err := f.commit(true, true); err != nil {
+		return "", err
+	}
+	return f.finalPath, nil
+}
+
+func (f *File) commit(exclusive, numbered bool) error {
 	if f.committed {
 		return nil
 	}
@@ -154,12 +253,22 @@ func (f *File) commit(exclusive bool) error {
 	if err := f.close(); err != nil {
 		return WrapOutput("close", retargetPathError(f.finalPath, err))
 	}
-	if exclusive {
+	switch {
+	case numbered:
+		published, err := PublishNewNumbered(f.tmpPath, f.finalPath)
+		if err != nil {
+			return err
+		}
+		f.finalPath = published
+	case exclusive:
 		if err := PublishNew(f.tmpPath, f.finalPath); err != nil {
 			return err
 		}
-	} else if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
-		return WrapOutput("rename", retargetPathError(f.finalPath, err))
+	default:
+		PreserveReplacedMode(f.tmpPath, f.finalPath)
+		if err := os.Rename(f.tmpPath, f.finalPath); err != nil {
+			return WrapOutput("rename", retargetPathError(f.finalPath, err))
+		}
 	}
 	f.committed = true
 	return nil
@@ -237,23 +346,43 @@ func (e *External) Path() string { return e.tmpPath }
 
 // Commit atomically renames the temp path to the final path, replacing an
 // existing file. After a successful Commit, Discard is a no-op.
-func (e *External) Commit() error { return e.commit(false) }
+func (e *External) Commit() error { return e.commit(false, false) }
 
 // CommitNew is Commit for a destination that must not already exist. It
 // publishes through PublishNew, so an occupied path fails with an OutputError
 // wrapping fs.ErrExist instead of overwriting.
-func (e *External) CommitNew() error { return e.commit(true) }
+func (e *External) CommitNew() error { return e.commit(true, false) }
 
-func (e *External) commit(exclusive bool) error {
+// CommitNewNumbered is CommitNew for a destination that may renumber: an
+// occupied path publishes onto the first free " (n)" sibling instead of
+// failing. It updates the final path and returns it.
+func (e *External) CommitNewNumbered() (string, error) {
+	if err := e.commit(true, true); err != nil {
+		return "", err
+	}
+	return e.finalPath, nil
+}
+
+func (e *External) commit(exclusive, numbered bool) error {
 	if e.committed {
 		return nil
 	}
-	if exclusive {
+	switch {
+	case numbered:
+		published, err := PublishNewNumbered(e.tmpPath, e.finalPath)
+		if err != nil {
+			return err
+		}
+		e.finalPath = published
+	case exclusive:
 		if err := PublishNew(e.tmpPath, e.finalPath); err != nil {
 			return err
 		}
-	} else if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
-		return WrapOutput("rename", retargetPathError(e.finalPath, err))
+	default:
+		PreserveReplacedMode(e.tmpPath, e.finalPath)
+		if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
+			return WrapOutput("rename", retargetPathError(e.finalPath, err))
+		}
 	}
 	e.committed = true
 	return nil

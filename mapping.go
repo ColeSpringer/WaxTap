@@ -531,6 +531,45 @@ func warnLoudnessUnmeasurable(em *emitter, pres pipeline.Result) {
 	}
 }
 
+// warnUnboundSourcePolicy reports a prefer:<codec> that named a codec family
+// this video does not carry. Such a policy is inert rather than wrong, and an
+// inert one is invisible: the delivery is byte-for-byte the run the user would
+// have got with no policy at all, so nothing distinguishes "the preference was
+// honored" from "the preference never applied".
+//
+// A preference that was present but outranked stays silent. Ranking a better
+// source above a preferred codec is what the soft bias documents itself as
+// doing, so warning there would fire on correct behavior.
+func warnUnboundSourcePolicy(em *emitter, policy SourcePolicy, formats []Format, chosen Format) {
+	want := policy.Preferred()
+	if want == "" {
+		return
+	}
+	// The selector's own eligibility rule decides what counts as available, so
+	// a family carried only by a format selection would never pick cannot
+	// silence the warning.
+	available := format.AvailableFamilies(formats)
+	if slices.Contains(available, want) {
+		return
+	}
+	have := strings.Join(available, ", ")
+	if have == "" {
+		have = "none reported"
+	}
+	em.warn(WarnSourcePolicyUnmatched, fmt.Sprintf(
+		"--source-policy prefer:%s matched no available source (available codecs: %s); delivering %s",
+		want, have, codecOrUnknown(chosen.Codec)))
+}
+
+// codecOrUnknown names a delivered codec for a warning, standing in when the
+// player response omitted it.
+func codecOrUnknown(codec string) string {
+	if fam := format.CodecFamily(codec); fam != "" {
+		return fam
+	}
+	return "an unnamed codec"
+}
+
 // warnInputDamage reports a local input the decoder had to work around, so a
 // short output is explained rather than merely delivered. The run succeeds:
 // the audio that read is real audio, and the only alternative is refusing a
@@ -959,36 +998,55 @@ func streamFileTo(w io.Writer, path string) (int64, error) {
 	return io.Copy(w, f)
 }
 
-// copyFile copies src to dst atomically (temp + rename in dst's directory).
-// exclusive publishes onto a free path only, failing with fs.ErrExist when
-// something is already there.
-func copyFile(src, dst string, exclusive bool) error {
+// copyFile copies src to dst atomically (temp + rename in dst's directory) and
+// returns the path it published. out's exclusivity decides whether an occupied
+// destination fails with fs.ErrExist, renumbers, or is replaced.
+func copyFile(src, dst string, out Output) (string, error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer in.Close()
 	tf, err := tempfile.New(dst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer tf.Discard()
 	if _, err := io.Copy(tf, in); err != nil {
-		return err
+		return "", err
 	}
-	if exclusive {
-		return tf.CommitNew()
+	switch {
+	case out.renumber:
+		return tf.CommitNewNumbered()
+	case out.exclusive:
+		return dst, tf.CommitNew()
+	default:
+		return dst, tf.Commit()
 	}
-	return tf.Commit()
 }
 
 // moveFile renames src to dst, falling back to a copy when they live on different
 // filesystems (a temp dir versus the destination).
 func moveFile(src, dst string) error {
+	// A replacing publish keeps the destination's permission bits: overwriting a
+	// file replaces its content, which is what was asked for, not the mode its
+	// owner chose. tempfile does the same on the paths that go through it.
+	srcMode := fs.FileMode(0)
+	if fi, err := os.Stat(src); err == nil {
+		srcMode = fi.Mode().Perm()
+	}
+	tempfile.PreserveReplacedMode(src, dst)
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
-	if err := copyFile(src, dst, false); err != nil {
+	// The rename failed (typically EXDEV), so src still exists and now carries
+	// dst's mode, which may lack owner read (a 0200 destination). Restore its
+	// own mode so the copy fallback can open it; that path preserves dst's mode
+	// itself, inside tempfile's commit.
+	if srcMode != 0 {
+		_ = os.Chmod(src, srcMode)
+	}
+	if _, err := copyFile(src, dst, Output{kind: outputFile, path: dst}); err != nil {
 		return err
 	}
 	_ = os.Remove(src)
@@ -998,27 +1056,39 @@ func moveFile(src, dst string) error {
 // moveFileNew is moveFile for a destination that must not already exist. A src
 // on the destination's filesystem publishes with a hard link; anything else
 // (a job temp dir on another device) is copied into the destination directory
-// first, so the final step is exclusive either way.
-func moveFileNew(src, dst string) error {
-	err := tempfile.PublishNew(src, dst)
+// first, so the final step is exclusive either way. It returns the published
+// path, which differs from out.path only when out renumbers.
+func moveFileNew(src string, out Output) (string, error) {
+	published, err := publishNewMaybeNumbered(src, out)
 	if err == nil || errors.Is(err, fs.ErrExist) {
-		return err
+		return published, err
 	}
-	if cerr := copyFile(src, dst, true); cerr != nil {
-		return cerr
+	published, cerr := copyFile(src, out.path, out)
+	if cerr != nil {
+		return "", cerr
 	}
 	_ = os.Remove(src)
-	return nil
+	return published, nil
+}
+
+// publishNewMaybeNumbered claims out's destination for src, renumbering when out
+// asks for it. It is the one place the two exclusive publishes are chosen
+// between.
+func publishNewMaybeNumbered(src string, out Output) (string, error) {
+	if out.renumber {
+		return tempfile.PublishNewNumbered(src, out.path)
+	}
+	return out.path, tempfile.PublishNew(src, out.path)
 }
 
 // deliverFile publishes the produced file src as out's path, honoring out's
-// exclusivity. Callers that let a producer write the destination directly do not
-// reach it.
-func deliverFile(src string, out Output) error {
+// exclusivity, and returns the path it delivered to. Callers that let a producer
+// write the destination directly do not reach it.
+func deliverFile(src string, out Output) (string, error) {
 	if out.exclusive {
-		return moveFileNew(src, out.path)
+		return moveFileNew(src, out)
 	}
-	return moveFile(src, out.path)
+	return out.path, moveFile(src, out.path)
 }
 
 // warnName is the file name to use in a warning about a written output. A
@@ -1040,13 +1110,18 @@ func warnName(dest, written string) string {
 // deliver must be the path the producer actually wrote. A caller whose producer
 // may deliver something it must not move (Client.Process hands back the
 // untouched input for a measure-only pass) handles that case before calling.
-func publishProduced(deliver string, staging *tempfile.External, out Output) error {
+// It returns the path actually published, which differs from out.path only for
+// a renumbering output that found its destination taken.
+func publishProduced(deliver string, staging *tempfile.External, out Output) (string, error) {
 	switch {
 	case staging != nil && deliver == staging.Path():
 		// Exclusive: publish the staged output onto a path nothing else holds.
-		return staging.CommitNew()
+		if out.renumber {
+			return staging.CommitNewNumbered()
+		}
+		return out.path, staging.CommitNew()
 	case deliver == out.path:
-		return nil // the producer wrote the destination directly
+		return out.path, nil // the producer wrote the destination directly
 	default:
 		return deliverFile(deliver, out)
 	}

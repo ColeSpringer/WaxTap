@@ -28,7 +28,7 @@ func runMain(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	root.SetOut(&outBuf)
 	root.SetErr(&errBuf)
 	if err := root.Execute(); err != nil {
-		code = report(&outBuf, &errBuf, args, normalizeExecuteError(err))
+		code = report(&outBuf, &errBuf, args, normalizeExecuteError(err, args))
 	}
 	return outBuf.String(), errBuf.String(), code
 }
@@ -273,7 +273,7 @@ func TestReportIgnoresJSONAsAFlagValue(t *testing.T) {
 	// An unknown command never reaches flag parsing either, so it keeps the probe.
 	stdout.Reset()
 	stderr.Reset()
-	report(&stdout, &stderr, []string{"bogus", "--json"}, normalizeExecuteError(errors.New(`unknown command "bogus" for "waxtap"`)))
+	report(&stdout, &stderr, []string{"bogus", "--json"}, normalizeExecuteError(errors.New(`unknown command "bogus" for "waxtap"`), []string{"bogus", "--json"}))
 	if stdout.Len() == 0 {
 		t.Error("an unknown command with --json wrote no document; its flags were never parsed either")
 	}

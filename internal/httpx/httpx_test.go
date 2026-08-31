@@ -3,8 +3,10 @@ package httpx
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -505,5 +507,93 @@ func TestDo_ThrottleHookNoRetryStartedOnCancelDuringSleep(t *testing.T) {
 	}
 	if n := countPhase(got, ThrottleRetryStarted); n != 0 {
 		t.Fatalf("ThrottleRetryStarted fired %d times, want 0 (sleep was canceled)", n)
+	}
+}
+
+// A deadline that expires while the transport is failing must not erase what
+// failed. The shape this exists for is a proxy: a CONNECT that hangs until the
+// per-operation deadline runs out reports "context deadline exceeded" to the
+// caller, and nothing downstream can then say the proxy was involved.
+func TestDoDeadlineKeepsTransportCause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	proxyFail := &url.Error{
+		Op:  "Get",
+		URL: "http://example.invalid/audio",
+		Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("connection refused")},
+	}
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done() // hang until the deadline expires, as a dead proxy does
+		return nil, proxyFail
+	})
+	c := New(Config{HTTPClient: &http.Client{Transport: tr}, MaxRetries: 2})
+
+	_, err := c.Do(newReq(t, ctx, "http://example.invalid/audio"))
+	ue, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		t.Fatalf("err = %v (%T), want the transport's *url.Error", err, err)
+	}
+	if op, ok := errors.AsType[*net.OpError](ue); !ok || op.Op != "proxyconnect" {
+		t.Fatalf("err = %v, want a proxyconnect cause", err)
+	}
+}
+
+// The counterpart, and the policy pauseBlocked already states: a caller that
+// gave up is reported as a cancellation, never as the failure it interrupted.
+func TestDoCancellationStaysBare(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		cancel()
+		<-r.Context().Done()
+		return nil, &url.Error{Op: "Get", URL: "http://example.invalid/audio", Err: errors.New("some transport failure")}
+	})
+	c := New(Config{HTTPClient: &http.Client{Transport: tr}, MaxRetries: 2})
+
+	_, err := c.Do(newReq(t, ctx, "http://example.invalid/audio"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if _, ok := errors.AsType[*url.Error](err); ok {
+		t.Fatalf("err = %v, want the cancellation to outrank the transport error", err)
+	}
+}
+
+// The shape a dead proxy actually produces: the first attempt names the proxy,
+// and by the retry the deadline has expired, so net/http returns the context
+// error verbatim with no transport cause of its own. Reporting that attempt
+// alone loses the only sentence that says what broke.
+func TestDoDeadlineFallsBackToEarlierCause(t *testing.T) {
+	// Long enough that the backoff clears retryHeadroom and the retry actually
+	// runs; the second attempt then blocks until the deadline fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	var n atomic.Int32
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if n.Add(1) == 1 {
+			return nil, &url.Error{
+				Op:  "Get",
+				URL: "http://example.invalid/audio",
+				Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("i/o timeout")},
+			}
+		}
+		<-r.Context().Done()
+		// net/http reports the context error itself once the deadline fires.
+		return nil, &url.Error{Op: "Get", URL: "http://example.invalid/audio", Err: r.Context().Err()}
+	})
+	c := New(Config{
+		HTTPClient:  &http.Client{Transport: tr},
+		MaxRetries:  3,
+		BaseBackoff: time.Millisecond,
+		MaxBackoff:  time.Millisecond,
+	})
+
+	_, err := c.Do(newReq(t, ctx, "http://example.invalid/audio"))
+	if n.Load() < 2 {
+		t.Fatalf("only %d attempt(s) ran; the test never reached the second-attempt shape", n.Load())
+	}
+	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "proxyconnect" {
+		t.Fatalf("err = %v, want the earlier attempt's proxyconnect cause", err)
 	}
 }

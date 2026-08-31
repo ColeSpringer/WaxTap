@@ -25,7 +25,7 @@ func main() {
 	// Cobra does not type unknown-command errors, so classify them first: it
 	// matches on the message prefix, which a cancellation join would push out of
 	// place.
-	err = normalizeExecuteError(err)
+	err = normalizeExecuteError(err, os.Args[1:])
 	// A failure that followed the signal is a cancellation, whatever it reports.
 	// stop() is deferred and cannot have run, so ctx.Err() is set only by a signal.
 	err = finalError(ctx, err)

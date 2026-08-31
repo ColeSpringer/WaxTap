@@ -3,6 +3,7 @@ package format
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -324,6 +325,37 @@ func codecMatches(want, have string) bool {
 // CodecFamily normalizes a codec ID, container name, or alias to a coarse family.
 // For example, it maps "mp4a.40.2" to "aac".
 func CodecFamily(codec string) string { return codecFamily(codec) }
+
+// knownCodecFamilies is every family codecFamily can return for a real codec
+// id. Unknown ids pass through codecFamily unchanged, so membership here is
+// what separates a preference the selector can act on from a typo.
+var knownCodecFamilies = [...]string{"aac", "flac", "mp3", "opus", "vorbis"}
+
+// KnownCodecFamilies lists the codec families the selector can match a
+// preference against, sorted. A prefer:<codec> naming anything else can never
+// bind, so callers validating a preference reject what is not in this list.
+// The result is a fresh slice callers may sort or filter.
+func KnownCodecFamilies() []string { return slices.Clone(knownCodecFamilies[:]) }
+
+// AvailableFamilies lists the codec families of the candidates selection could
+// actually choose from, sorted and deduplicated. It applies eligibleAudio, the
+// selector's own rule, so a family carried only by an ineligible format (a
+// video track, or an unlabeled entry crowded out by explicit audio) is not
+// reported as available.
+func AvailableFamilies(candidates []Format) []string {
+	eligible := eligibleAudio(candidates)
+	var out []string
+	for i := range candidates {
+		if !eligible(candidates[i]) {
+			continue
+		}
+		if fam := codecFamily(candidates[i].Codec); fam != "" && !slices.Contains(out, fam) {
+			out = append(out, fam)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // codecFamily normalizes a codec id, container name, or user-facing alias to a
 // coarse family. Unknown codecs pass through unchanged so exact ids still match.

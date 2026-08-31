@@ -48,7 +48,6 @@ func newInfoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			emitWatchPageBreadcrumb(env, info)
 			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
 			video := info.Video
 
@@ -117,7 +116,7 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	env.printf("Author:    %s\n", v.Author)
 	env.printf("Video ID:  %s\n", v.ID)
 	if info.Client != "" {
-		env.printf("Client:    %s\n", info.Client)
+		env.printf("Client:    %s%s\n", info.Client, watchPageSuffix(info.ViaWatchPage))
 	}
 	if info.SubstitutedFrom != "" {
 		env.printf("  (requested %s; fell back to %s)\n", info.SubstitutedFrom, info.Client)
@@ -201,6 +200,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		Title           string        `json:"title"`
 		Author          string        `json:"author"`
 		Client          string        `json:"client,omitempty"`
+		ViaWatchPage    bool          `json:"viaWatchPage,omitempty"`
 		SubstitutedFrom string        `json:"substitutedFrom,omitempty"`
 		ChannelID       string        `json:"channelId,omitempty"`
 		DurationSecs    float64       `json:"durationSeconds"`
@@ -220,6 +220,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		Title:           v.Title,
 		Author:          v.Author,
 		Client:          info.Client,
+		ViaWatchPage:    info.ViaWatchPage,
 		SubstitutedFrom: info.SubstitutedFrom,
 		ChannelID:       v.ChannelID,
 		DurationSecs:    v.Duration.Seconds(),

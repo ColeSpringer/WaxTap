@@ -55,6 +55,10 @@ type acquired struct {
 	stats *refreshStats
 }
 
+// viaWatchPage reports that this acquisition came from the watch-page scrape
+// rather than the player endpoint.
+func (a *acquired) viaWatchPage() bool { return a.attempt == youtube.AttemptWatchPage }
+
 // refreshStats counts what one attempt's signed-URL refresh callback did, so a
 // failed download can say how close it came and a successful one can say how much
 // it needed. The two counts separate the failure shapes a single terminal error
@@ -676,6 +680,10 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			lastIdentityGen = gen
 		}
 		if derr == nil {
+			// Once per job, on the acquisition that actually delivered: selection
+			// itself has no emitter and re-runs on every refresh, so warning there
+			// would duplicate.
+			warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
 			// Use the more specific web-context fallback warning below.
 			if a.client != firstClient && !firstFromWebContext {
 				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
@@ -1121,7 +1129,8 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 		if err != nil {
 			return nil, err
 		}
-		if err := publishProduced(dst, staging, req.Output); err != nil {
+		published, err := publishProduced(dst, staging, req.Output)
+		if err != nil {
 			return nil, err
 		}
 		em.stage(StageFinalizing)
@@ -1132,9 +1141,10 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			VideoID:      id,
 			Title:        a.video.Title,
 			Client:       a.client,
+			ViaWatchPage: a.viaWatchPage(),
 			SourceFormat: a.fmtSel,
 			OutputFormat: out,
-			OutputPath:   req.Output.path,
+			OutputPath:   published,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
 			Metadata:     videoMetadataFor(req, a.video),
@@ -1154,6 +1164,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, derr
 		}
 		em.stage(StageFinalizing)
+		warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
 		out := a.fmtSel
 		out.ContentLength = r.BytesWritten
 		return &Result{
@@ -1161,6 +1172,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			VideoID:      id,
 			Title:        a.video.Title,
 			Client:       a.client,
+			ViaWatchPage: a.viaWatchPage(),
 			SourceFormat: a.fmtSel,
 			OutputFormat: out,
 			SourceBytes:  r.BytesWritten,
@@ -1206,11 +1218,14 @@ func (c *Client) downloadAndProcess(ctx context.Context, req Request, id string,
 	case outputFile:
 		// A measure-only or no-op pass wrote nothing, so deliver is the staged
 		// source in jobDir and publishProduced moves it into place.
-		if err := publishProduced(deliver, staging, req.Output); err != nil {
+		published, err := publishProduced(deliver, staging, req.Output)
+		if err != nil {
 			return nil, err
 		}
-		res.OutputPath = req.Output.path
-		res.OutputBytes = fileSize(req.Output.path)
+		// A renumbering output lands beside the requested path, so the truthful
+		// path is the publish's, not the request's.
+		res.OutputPath = published
+		res.OutputBytes = fileSize(published)
 	case outputWriter:
 		n, err := streamFileTo(req.Output.writer, deliver)
 		if err != nil {
@@ -1286,6 +1301,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 			VideoID:      a.video.ID,
 			Title:        a.video.Title,
 			Client:       a.client,
+			ViaWatchPage: a.viaWatchPage(),
 			SourceFormat: a.fmtSel,
 			OutputFormat: a.fmtSel,
 			SourceBytes:  dlRes.BytesWritten,
@@ -1333,6 +1349,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	res.VideoID = a.video.ID
 	res.Title = a.video.Title
 	res.Client = a.client
+	res.ViaWatchPage = a.viaWatchPage()
 	res.SourceBytes = dlRes.BytesWritten
 	res.SponsorBlockApplied = sponsorBlockContributed(explicit, sbRanges, pres)
 	res.Metadata = videoMetadataFor(req, a.video)
@@ -1430,6 +1447,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	if derr != nil {
 		return nil, StreamInfo{}, derr
 	}
+	warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
 	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength, Client: a.client}
 	return &doneReader{ReadCloser: body, ctx: ctx, em: em}, info, nil
 }

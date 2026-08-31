@@ -465,3 +465,88 @@ func TestBatchConcurrency(t *testing.T) {
 		}
 	})
 }
+
+// copyThrough is the one batch write that bypassed outputFor, so --collision
+// fail could be silently last-writer-wins on a copied file and auto-number
+// could not renumber a publish race.
+func TestCopyThroughHonorsCollisionMode(t *testing.T) {
+	stage := func(t *testing.T) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		src := filepath.Join(dir, "src.mp3")
+		if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(dir, "out.mp3")
+		if err := os.WriteFile(dst, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return src, dst
+	}
+
+	t.Run("fail refuses an occupied path", func(t *testing.T) {
+		src, dst := stage(t)
+		if _, err := copyThrough(src, dst, collisionFail); !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("err = %v, want fs.ErrExist", err)
+		}
+		if b, _ := os.ReadFile(dst); string(b) != "old" {
+			t.Errorf("dst = %q; the occupying file must be intact", b)
+		}
+	})
+
+	t.Run("auto-number renumbers", func(t *testing.T) {
+		src, dst := stage(t)
+		got, err := copyThrough(src, dst, collisionAutoNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Base(got) != "out (1).mp3" {
+			t.Errorf("published %q, want %q", filepath.Base(got), "out (1).mp3")
+		}
+		if b, _ := os.ReadFile(dst); string(b) != "old" {
+			t.Errorf("dst = %q; the occupying file must be intact", b)
+		}
+	})
+
+	t.Run("overwrite replaces", func(t *testing.T) {
+		src, dst := stage(t)
+		got, err := copyThrough(src, dst, collisionOverwrite)
+		if err != nil || got != dst {
+			t.Fatalf("copyThrough = %q, %v; want the destination replaced", got, err)
+		}
+		if b, _ := os.ReadFile(dst); string(b) != "new" {
+			t.Errorf("dst = %q, want the copy delivered", b)
+		}
+	})
+}
+
+// The rendered outcome must name the file the run actually wrote: under
+// auto-number a publish can renumber past the pre-flight pick, for processed
+// and copied items both.
+func TestRunBatchJobsReportsPublishedPath(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.mp3")
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	occupied := filepath.Join(dir, "copy.mp3")
+	if err := os.WriteFile(occupied, []byte("taken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := []batchJob{
+		{index: 0, input: src, output: filepath.Join(dir, "a.mp3"), action: actProcess},
+		{index: 1, input: src, output: occupied, action: actCopy, mode: collisionAutoNumber},
+	}
+	renumbered := filepath.Join(dir, "a (1).mp3")
+	processFn := func(_ context.Context, _, _ string) (*waxtap.Result, error) {
+		return &waxtap.Result{OutputPath: renumbered}, nil
+	}
+	outcomes := runBatchJobs(context.Background(), jobs, 1, processFn, nil)
+	if outcomes[0].output != renumbered {
+		t.Errorf("processed outcome path = %q, want the result's %q", outcomes[0].output, renumbered)
+	}
+	if want := filepath.Join(dir, "copy (1).mp3"); outcomes[1].output != want {
+		t.Errorf("copied outcome path = %q, want %q", outcomes[1].output, want)
+	}
+}

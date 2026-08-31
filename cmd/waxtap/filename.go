@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
 
 // defaultTemplate includes the video ID to avoid collisions between repeated
@@ -284,7 +285,11 @@ func parseCollisionMode(s string) (collisionMode, error) {
 // the correctness mechanism.
 func outputFor(path string, mode collisionMode) waxtap.Output {
 	switch mode {
-	case collisionFail, collisionAutoNumber:
+	case collisionAutoNumber:
+		// The pre-flight already picked a free name; this renumbers again if a
+		// concurrent writer took it in between, which is what auto-number means.
+		return waxtap.ToNewNumberedFile(path)
+	case collisionFail:
 		return waxtap.ToNewFile(path)
 	default:
 		return waxtap.ToFile(path)
@@ -323,13 +328,12 @@ func nextAvailable(path string) string {
 
 // nextAvailableFunc returns the first "name (n).ext" variant of path for which
 // taken reports false. The predicate can account for paths already claimed in
-// memory as well as paths on disk.
+// memory as well as paths on disk. The naming convention itself lives in
+// tempfile.NumberedVariant, shared with the publish-time retry so the pre-flight
+// and the publish cannot name files differently.
 func nextAvailableFunc(path string, taken func(string) bool) string {
-	dir := filepath.Dir(path)
-	ext := filepath.Ext(path)
-	stem := strings.TrimSuffix(filepath.Base(path), ext)
 	for n := 1; ; n++ {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, n, ext))
+		candidate := tempfile.NumberedVariant(path, n)
 		if !taken(candidate) {
 			return candidate
 		}

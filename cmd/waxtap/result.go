@@ -136,7 +136,7 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 
 	env.printf("Source:   %s\n", formatLabel(res.SourceFormat))
 	if res.Client != "" {
-		env.printf("Client:   %s\n", res.Client)
+		env.printf("Client:   %s%s\n", res.Client, watchPageSuffix(res.ViaWatchPage))
 	}
 	if res.Transcoded {
 		env.printf("Encoded:  %s\n", formatLabel(res.OutputFormat))
@@ -251,6 +251,7 @@ type resultJSON struct {
 	InputPath     string `json:"inputPath,omitempty"`
 	OutputPath    string `json:"outputPath,omitempty"`
 	Client        string `json:"client,omitempty"`
+	ViaWatchPage  bool   `json:"viaWatchPage,omitempty"`
 
 	// SourceFormat is always present. OutputFormat is omitted for unchanged local
 	// sources, matching the human summary's "Encoded:" line. Interfaces allow
@@ -280,6 +281,7 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		InputPath:           displayPath(res.InputPath),
 		OutputPath:          displayPath(res.OutputPath),
 		Client:              res.Client,
+		ViaWatchPage:        res.ViaWatchPage,
 		SourceBytes:         res.SourceBytes,
 		OutputBytes:         res.OutputBytes,
 		Transcoded:          res.Transcoded,

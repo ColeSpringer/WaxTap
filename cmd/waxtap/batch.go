@@ -125,6 +125,9 @@ type batchJob struct {
 	input  string
 	output string // destination; the input path for actUnchanged
 	action batchAction
+	// mode is the run's collision policy, consumed by actCopy: processed items
+	// carry theirs inside the Output the process function builds.
+	mode collisionMode
 }
 
 // batchStatus identifies a completed job's outcome.
@@ -428,9 +431,9 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 		case skip:
 			jobs = append(jobs, batchJob{index: i, input: in, output: resolved, action: actSkip})
 		case noop:
-			jobs = append(jobs, batchJob{index: i, input: in, output: resolved, action: actCopy})
+			jobs = append(jobs, batchJob{index: i, input: in, output: resolved, action: actCopy, mode: mode})
 		default:
-			jobs = append(jobs, batchJob{index: i, input: in, output: resolved, action: actProcess})
+			jobs = append(jobs, batchJob{index: i, input: in, output: resolved, action: actProcess, mode: mode})
 		}
 	}
 	return jobs, nil
@@ -456,27 +459,37 @@ func measureJobs(inputs []string) []batchJob {
 	return jobs
 }
 
-// copyThrough copies src to dst using the same staged-output path as other writes.
-func copyThrough(src, dst string) error {
+// copyThrough copies src to dst using the same staged-output path as other
+// writes, honoring the run's collision policy at publish exactly as a processed
+// item's Output does: fail claims exclusively, auto-number renumbers, the rest
+// replace. It returns the path it published.
+func copyThrough(src, dst string, mode collisionMode) (string, error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer in.Close()
 	if err := os.MkdirAll(filepath.Dir(dst), 0o777); err != nil {
-		return tempfile.WrapOutput("mkdir", err)
+		return "", tempfile.WrapOutput("mkdir", err)
 	}
 	tf, err := tempfile.New(dst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer tf.Discard()
 	// Treat copy failures as output failures so the CLI can provide destination
 	// directory guidance.
 	if _, err := io.Copy(tf, in); err != nil {
-		return tempfile.WrapOutput("copy", err)
+		return "", tempfile.WrapOutput("copy", err)
 	}
-	return tf.Commit()
+	switch mode {
+	case collisionAutoNumber:
+		return tf.CommitNewNumbered()
+	case collisionFail:
+		return dst, tf.CommitNew()
+	default:
+		return dst, tf.Commit()
+	}
 }
 
 // runBatchJobs executes jobs with bounded concurrency and continues after item
@@ -525,10 +538,10 @@ func runBatchJobs(ctx context.Context, jobs []batchJob, concurrency int, process
 			defer wg.Done()
 			defer func() { <-sem }()
 			if job.action == actCopy {
-				if err := copyThrough(job.input, job.output); err != nil {
+				if published, err := copyThrough(job.input, job.output, job.mode); err != nil {
 					outcomes[idx].status, outcomes[idx].err = statusError, err
 				} else {
-					outcomes[idx].status = statusCopied
+					outcomes[idx].status, outcomes[idx].output = statusCopied, published
 				}
 			} else {
 				res, err := processFn(ctx, job.input, job.output)
@@ -536,6 +549,11 @@ func runBatchJobs(ctx context.Context, jobs []batchJob, concurrency int, process
 					outcomes[idx].status, outcomes[idx].err = statusError, err
 				} else {
 					outcomes[idx].status, outcomes[idx].result = statusOK, res
+					// The pre-flight pick can be renumbered at publish; the
+					// result carries the path actually written.
+					if res != nil && res.OutputPath != "" {
+						outcomes[idx].output = res.OutputPath
+					}
 				}
 			}
 			report(outcomes[idx])

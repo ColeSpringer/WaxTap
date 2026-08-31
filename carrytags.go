@@ -29,6 +29,11 @@ import (
 // dest is the path warnings name. It differs from outPath when the output is
 // staged for an exclusive publish, where outPath is a temp name the user never
 // asked for and will never see; "" falls back to outPath.
+//
+// The carry runs before the publish, so under a renumbering output dest is the
+// requested base name and a warning can name it where the file landed one
+// number over. Cosmetic, and the alternative is deferring the whole carry until
+// after the path is known, which would mean publishing an untagged file first.
 func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) {
 	src, err := waxlabel.ParseFile(ctx, srcPath)
 	if err != nil {

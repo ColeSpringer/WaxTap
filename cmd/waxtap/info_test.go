@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +134,11 @@ func TestInfoSubstitutionBreadcrumb(t *testing.T) {
 // TestWatchPageBreadcrumb covers forced WEB metadata served from the watch-page
 // fallback. The note belongs only on a forced WEB read; on the default chain it
 // would imply a token issue when the client fallback simply settled on WEB.
+//
+// info replaced this with the Client line's "(via watch page)" suffix, but
+// formats prints no Client line, so the breadcrumb is its only watch-page
+// signal and has to stay. TestFormatsKeepsWatchPageBreadcrumb pins the call
+// site; this covers the gating.
 func TestWatchPageBreadcrumb(t *testing.T) {
 	webViaWatch := &waxtap.InfoResult{
 		Video:        &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A"},
@@ -252,5 +259,69 @@ func TestNoteInfoChannelLayout(t *testing.T) {
 				t.Errorf("note = %q, want substring %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A watch-page delivery is not a player delivery: the Client line names WEB (or
+// whatever client scraped it), and nothing else says the formats came from a
+// scrape. The suffix is the only thing that separates the two.
+func TestInfoHumanClientViaWatchPage(t *testing.T) {
+	via := &waxtap.InfoResult{
+		Video:        &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A"},
+		Client:       "WEB",
+		ViaWatchPage: true,
+	}
+	var out bytes.Buffer
+	renderInfoHuman(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, via, 0, errNoBestAudio, nil, false)
+	if !strings.Contains(out.String(), "Client:    WEB (via watch page)") {
+		t.Errorf("want the watch-page suffix on the Client line, got:\n%s", out.String())
+	}
+
+	direct := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB"}
+	out.Reset()
+	renderInfoHuman(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, direct, 0, errNoBestAudio, nil, false)
+	if strings.Contains(out.String(), "watch page") {
+		t.Errorf("a player delivery must carry no suffix, got:\n%s", out.String())
+	}
+}
+
+func TestInfoJSONViaWatchPageAdditive(t *testing.T) {
+	decode := func(info *waxtap.InfoResult) map[string]any {
+		t.Helper()
+		var out bytes.Buffer
+		if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, info, 0, errNoBestAudio, nil); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+			t.Fatalf("decode %q: %v", out.String(), err)
+		}
+		return m
+	}
+
+	via := decode(&waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB", ViaWatchPage: true})
+	if via["viaWatchPage"] != true {
+		t.Errorf("viaWatchPage = %v, want true", via["viaWatchPage"])
+	}
+	direct := decode(&waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB"})
+	if _, ok := direct["viaWatchPage"]; ok {
+		t.Error("viaWatchPage must be omitted for a player delivery, keeping the key additive")
+	}
+}
+
+// errNoBestAudio stands in for the selector's "nothing eligible" error in
+// rendering tests, which never exercise format selection.
+var errNoBestAudio = errors.New("no best audio")
+
+// formats has no Client line to carry the "(via watch page)" suffix, so
+// removing its breadcrumb would leave a watch-page listing with no signal at
+// all. This pins the call site the way the info suffix pins its own.
+func TestFormatsKeepsWatchPageBreadcrumb(t *testing.T) {
+	src, err := os.ReadFile("formats.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "emitWatchPageBreadcrumb(env, info)") {
+		t.Error("formats.go no longer emits the watch-page breadcrumb; it has no Client line to carry the suffix instead")
 	}
 }

@@ -176,7 +176,14 @@ func (c *Client) fetchPrefix(ctx context.Context, videoID string, categories []C
 		}
 		switch status {
 		case http.StatusOK:
-			return parseResponse(body, wanted)
+			segs, perr := parseResponse(body, wanted)
+			if perr != nil {
+				// A 200 that is not the documented JSON is the server failing, the
+				// same class as its 500. Typing it keeps that class instead of
+				// reporting a remote fault as an unclassified local one.
+				return nil, &waxerr.ProviderError{Endpoint: "SponsorBlock", Cause: perr}
+			}
+			return segs, nil
 		case http.StatusNotFound:
 			return map[string][]Segment{}, nil // no segments for this prefix
 		default:

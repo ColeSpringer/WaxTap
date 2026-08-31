@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/spf13/cobra"
 )
@@ -406,5 +407,30 @@ func TestIsLosslessFormatEnginePinned(t *testing.T) {
 	// Copy is WaxTap's own pseudo-format: a remux re-encodes nothing.
 	if !isLosslessFormat(waxtap.FormatCopy) {
 		t.Error("isLosslessFormat(FormatCopy) = false, want true")
+	}
+}
+
+// A prefer:<codec> naming a codec no source can ever be is a typo. Accepting it
+// silently means the run delivers whatever it would have delivered anyway,
+// with nothing to say the preference never applied, so it is rejected at parse
+// the same way --codec bogus already is.
+func TestParseSourcePolicyRejectsUnknownCodec(t *testing.T) {
+	for _, ok := range []string{"prefer:flac", "prefer:opus", "prefer:mp4a.40.2", "prefer:AAC"} {
+		if _, err := parseSourcePolicy(ok); err != nil {
+			t.Errorf("parseSourcePolicy(%q): %v", ok, err)
+		}
+	}
+	_, err := parseSourcePolicy("prefer:bogus")
+	if err == nil {
+		t.Fatal("parseSourcePolicy(\"prefer:bogus\") = nil error, want a usage error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "bogus") {
+		t.Errorf("error does not name the bad codec: %q", msg)
+	}
+	for _, codec := range format.KnownCodecFamilies() {
+		if !strings.Contains(msg, codec) {
+			t.Errorf("error does not list %q: %q", codec, msg)
+		}
 	}
 }

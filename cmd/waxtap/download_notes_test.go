@@ -437,3 +437,18 @@ func TestWarnChannelLayoutItagNoteOnce(t *testing.T) {
 		t.Errorf("per-item note printed %d times, want 3 (it varies with the video)", got)
 	}
 }
+
+// The WEB-sources nudge exists for delivery problems a PO token or web context
+// would change. A SponsorBlock failure is neither: it now arrives as a typed
+// *waxtap.ProviderError like the sidecar failures do, but pointing the user at
+// WEB sources for it would be advice about the wrong server.
+func TestWebOutcomeActionableExcludesSponsorBlock(t *testing.T) {
+	sb := &waxtap.ProviderError{Endpoint: "SponsorBlock", Cause: errFake("invalid character 'o'")}
+	if webOutcomeActionable(nil, sb) {
+		t.Error("a SponsorBlock provider failure must not trigger the WEB-sources nudge")
+	}
+	pc := &waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("connection refused")}
+	if !webOutcomeActionable(nil, pc) {
+		t.Error("a player-context provider failure should still trigger the nudge")
+	}
+}

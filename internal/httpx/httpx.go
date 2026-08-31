@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	rand "math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,6 +77,49 @@ func pauseBlocked(ctx context.Context, d time.Duration, pending error) error {
 		return pending
 	}
 	return nil
+}
+
+// preferNamedCause returns err, unless err says nothing beyond "the deadline
+// expired" and an earlier attempt recorded something that does.
+//
+// It is the second half of the deadline policy. net/http hands back the context
+// error verbatim when the deadline fires mid-request, so the attempt that
+// finally times out often carries no cause at all, while the attempt before it
+// recorded one. A dead proxy reads exactly that way: the first dial reports
+// proxyconnect, and by the retry there is no time left to reach the proxy.
+//
+// earlier is preferred whatever its type, not only for transport causes: a 429
+// or 5xx from the previous attempt explains the run the way pauseBlocked's
+// pending does when the deadline cannot fit the pause, and both of those paths
+// deliberately outrank a bare timeout. earlier can never itself be a bare
+// deadline, because the attempt that hit one returned instead of recording it.
+func preferNamedCause(err, earlier error) error {
+	if earlier == nil || NamesTransportCause(err) {
+		return err
+	}
+	return earlier
+}
+
+// NamesTransportCause reports whether err identifies a failing network step (a
+// dial, a proxy CONNECT, a read) rather than only reporting that time ran out.
+// Callers layered above this package use it for the same policy Do applies to
+// its own retries: an expired deadline must not erase a named cause.
+func NamesTransportCause(err error) bool {
+	_, ok := errors.AsType[*net.OpError](err)
+	return ok
+}
+
+// keepCause chooses between a backoff interrupted by the context and the error
+// that provoked the backoff, applying pauseBlocked's policy to the pause that
+// started before the context ended: a cancellation is the caller giving up and
+// outranks pending, while an expired deadline is the case pending exists to
+// explain. pauseBlocked has already run at every call site, so reaching here
+// with a deadline error means the deadline moved or the clock did.
+func keepCause(interrupted, pending error) error {
+	if pending == nil || !errors.Is(interrupted, context.DeadlineExceeded) {
+		return interrupted
+	}
+	return pending
 }
 
 // Limiter gates outbound requests. Wait blocks until a request may proceed or
@@ -247,8 +291,15 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 		resp, err := c.http.Do(req)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+			// Same policy as pauseBlocked: a cancellation outranks the pending
+			// error, an expired deadline does not. A transport failure the deadline
+			// happened to interrupt is the one thing that can name a cause (a dead
+			// proxy, a refused dial), and ctx.Err() names none.
+			if cerr := ctx.Err(); cerr != nil {
+				if !errors.Is(cerr, context.DeadlineExceeded) {
+					return nil, cerr
+				}
+				return nil, preferNamedCause(err, lastErr)
 			}
 			lastErr = err
 			if attempt < attempts-1 {
@@ -259,7 +310,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				}
 				c.log.DebugContext(ctx, "httpx: transport error, retrying", "host", host, "attempt", attempt, "err", err)
 				if werr := Sleep(ctx, wait); werr != nil {
-					return nil, werr
+					return nil, keepCause(werr, err)
 				}
 				continue
 			}
@@ -308,7 +359,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				rlRetryStatus = status
 				c.log.DebugContext(ctx, "httpx: rate limited, backing off", "host", host, "wait", sleepFor)
 				if werr := Sleep(ctx, sleepFor); werr != nil {
-					return nil, werr
+					return nil, keepCause(werr, rlErr)
 				}
 				continue
 			}
@@ -327,7 +378,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			}
 			c.log.DebugContext(ctx, "httpx: server error, retrying", "host", host, "status", resp.StatusCode, "attempt", attempt)
 			if werr := Sleep(ctx, wait); werr != nil {
-				return nil, werr
+				return nil, keepCause(werr, lastErr)
 			}
 			continue
 		}
