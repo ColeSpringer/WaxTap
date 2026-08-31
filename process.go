@@ -79,18 +79,6 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	ranges := cutRanges(processRanges(req.Cut))
 
 	pspec := pipelineSpec(req.ProcessSpec, ranges)
-	// A WavPack/APE target embeds its tags at encode time (WaxLabel cannot
-	// post-pass its finished file), so read the source's metadata up front. The
-	// extension check covers the copy specs the pipeline may promote into such
-	// an encode; over-supplying is safe, since the pipeline clears tags for
-	// every other target. Local processing carries the input's own metadata by
-	// contract, so the pipeline may fall back to the probe's source tags when
-	// this pass supplied none (a WaxLabel-unreadable source).
-	pspec.CarrySourceTags = true
-	var muxTagsLost []string
-	if muxEmbedLikely(req.ProcessSpec) {
-		pspec.Tags, muxTagsLost = c.sourceMuxTags(ctx, req.Input)
-	}
 	pres, err := pipeline.Run(ctx, runner, req.Input, pipeOut, pspec, em.pipelineStage)
 	if err != nil {
 		return nil, err
@@ -114,11 +102,6 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	measureOnly := deliver == ""
 	if measureOnly {
 		deliver = req.Input
-	} else if pres.OutputCodec.MuxEmbedsTags() {
-		// The muxer already embedded the tags with the audio; the WaxLabel
-		// post-pass cannot read the file back and must not run. What had no
-		// mux-time form is reported instead.
-		warnMuxEmbedLosses(em, warnName(req.Output.path, deliver), pres.OutputCodec, muxTagsLost, len(pspec.Tags))
 	} else {
 		// A WaxFlow rewrite carries no tags, so restore the input's own embedded
 		// metadata onto the output before delivery (both sinks read deliver).
@@ -409,7 +392,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	em := newEmitter(nil, "")
 	var fold albumFold
 	var levels albumLevels
-	var carryLoss albumCarryLoss
+	var carry albumCarryWarns
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -418,14 +401,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
 		srcCh, srcCodec := probeAudio(ctx, runner, t.Input)
-		trackSpec := tspec
-		var muxTagsLost []string
-		if codec.MuxEmbedsTags() {
-			// A WavPack/APE track takes its tags at encode time; the WaxLabel
-			// carry pass below cannot read the finished file.
-			trackSpec.Tags, muxTagsLost = c.sourceMuxTags(ctx, t.Input)
-		}
-		tres, err := runner.Transcode(ctx, t.Input, t.Output, trackSpec)
+		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
@@ -436,17 +412,16 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
 		// gain just changed the loudness it describes.
 		// Album tracks are written straight to their destinations, so the file
-		// warnings name is the file that was written.
-		if codec.MuxEmbedsTags() {
-			carryLoss.observe(t.Output, muxTagsLost, len(trackSpec.Tags))
-		} else {
-			c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, em)
-		}
+		// warnings name is the file that was written. The carry warnings run
+		// through a per-track emitter so the album can fold them into one.
+		tem := newEmitter(nil, "")
+		c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, tem)
+		carry.observe(em, tem.collected())
 		res.Outputs[i] = t.Output
 	}
 	fold.warn(em, codec)
 	levels.warn(em, ao.peakMode)
-	carryLoss.warn(em, codec)
+	carry.warn(em)
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
 	res.Warnings = em.collected()
@@ -475,38 +450,40 @@ func (f *albumFold) warn(em *emitter, c media.Codec) {
 		c, f.src, f.out))
 }
 
-// albumCarryLoss aggregates per-track mux-embed carry losses into one album
-// warning, the albumFold rule: an album of tagged sources into WavPack loses
-// the same pictures on every track, and one warning per track would print the
-// identical sentence N times.
-type albumCarryLoss struct {
-	firstPath string
-	lost      []string
-	carried   int
-	n         int
+// albumCarryWarns folds the per-track tag-carry warnings into one album
+// warning, the albumFold rule: an album into WavPack drops the same chapters
+// on every track, and one warning per track would print the near-identical
+// sentence N times. The first track's detail speaks for the album, with a
+// count of the others; any other warning code a track emits passes through
+// unfolded.
+type albumCarryWarns struct {
+	first string
+	n     int
 }
 
-func (a *albumCarryLoss) observe(path string, lost []string, carried int) {
-	if len(lost) == 0 {
-		return
-	}
-	a.n++
-	if a.n == 1 {
-		a.firstPath, a.lost, a.carried = path, lost, carried
+func (a *albumCarryWarns) observe(em *emitter, ws []Warning) {
+	for _, w := range ws {
+		if w.Code != WarnTagCarry {
+			em.warn(w.Code, w.Detail)
+			continue
+		}
+		a.n++
+		if a.n == 1 {
+			a.first = w.Detail
+		}
 	}
 }
 
-func (a *albumCarryLoss) warn(em *emitter, codec media.Codec) {
-	if a.n == 0 {
+func (a *albumCarryWarns) warn(em *emitter) {
+	switch {
+	case a.n == 0:
 		return
+	case a.n == 2:
+		a.first += " (and 1 more track)"
+	case a.n > 2:
+		a.first += fmt.Sprintf(" (and %d more tracks)", a.n-1)
 	}
-	detail := muxEmbedLossDetail(warnName(a.firstPath, a.firstPath), codec, a.lost, a.carried)
-	if a.n == 2 {
-		detail += " (and 1 more track)"
-	} else if a.n > 2 {
-		detail += fmt.Sprintf(" (and %d more tracks)", a.n-1)
-	}
-	em.warn(WarnTagCarry, detail)
+	em.warn(WarnTagCarry, a.first)
 }
 
 // albumLevels aggregates per-track level measurements into one album warning,

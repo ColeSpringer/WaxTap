@@ -1,9 +1,9 @@
 github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/colespringer/waxflow v0.0.0-20260821144713-192e0e1f6706 h1:xjY0CHv8Wodg5HF0tvvzWB4FFQ0rkaMWOF60JenSIgA=
-github.com/colespringer/waxflow v0.0.0-20260821144713-192e0e1f6706/go.mod h1:8mAo9F494kAckHAdJRd6xQa3xJsjOYhy+6C096s1ans=
-github.com/colespringer/waxlabel v1.5.0 h1:bF7nXAtqA5jGoRpTwZ8Z6jQJPpxS0a8O1EWO3xhPVwU=
-github.com/colespringer/waxlabel v1.5.0/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
+github.com/colespringer/waxflow v0.0.0-20260830231110-e1958fc54287 h1:stVrfUe0wP0vqr8R9l8qjfnmR7nYw50NlfPpo3VJyDo=
+github.com/colespringer/waxflow v0.0.0-20260830231110-e1958fc54287/go.mod h1:8mAo9F494kAckHAdJRd6xQa3xJsjOYhy+6C096s1ans=
+github.com/colespringer/waxlabel v1.6.0 h1:g6Anlv/9p4fGNdDWkQL8IaPh0jVm1qXP8HzbD//ZAmo=
+github.com/colespringer/waxlabel v1.6.0/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/dlclark/regexp2/v2 v2.5.2 h1:HAsucWRhsqcDzl6Ua9aR8JwYOTzrZyPrF0/FNxJVAI0=
 github.com/dlclark/regexp2/v2 v2.5.2/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=

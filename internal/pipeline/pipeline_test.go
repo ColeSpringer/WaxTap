@@ -1102,22 +1102,24 @@ func TestStageStringsAreDistinct(t *testing.T) {
 	}
 }
 
-// taggedWV encodes a stereo sine to WavPack with mux-time tags (one own-audio
-// value included) and returns its path.
+// taggedWV encodes a stereo sine to WavPack and tags it through WaxLabel (one
+// own-audio value included), returning its path.
 func taggedWV(t *testing.T, dir, name string) string {
 	t.Helper()
+	ctx := context.Background()
 	src := filepath.Join(t.TempDir(), "src.wav")
 	if err := os.WriteFile(src, mediatest.SineWAV(2, 2), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, name)
 	r := newTestRunner(t)
-	spec := media.Spec{Codec: media.CodecWavPack, Tags: []media.Tag{
-		{Key: "TITLE", Value: "Pipeline Tagged"},
-		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-2.00 dB"},
-	}}
-	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
-		t.Fatalf("synth tagged wv: %v", err)
+	if _, err := r.Transcode(ctx, src, out, media.Spec{Codec: media.CodecWavPack}); err != nil {
+		t.Fatalf("synth wv: %v", err)
+	}
+	if err := mediatest.TagFile(ctx, out,
+		"TITLE", "Pipeline Tagged",
+		"REPLAYGAIN_TRACK_GAIN", "-2.00 dB"); err != nil {
+		t.Fatalf("tag fixture: %v", err)
 	}
 	return out
 }
@@ -1134,34 +1136,31 @@ func probeTag(t *testing.T, r *media.Runner, path, key string) string {
 	return ""
 }
 
-// A downmix with no transcode target promotes into the source's own family;
-// for a WavPack source that family embeds tags at mux time, and the pipeline's
-// probe fallback carries the source's text tags onto the re-encode with the
-// own-audio values dropped. CarrySourceTags gates the fallback: local
-// processing sets it, downloads do not.
-func TestRunDownmixPromotionCarriesProbedTags(t *testing.T) {
+// A downmix with no transcode target promotes into the source's own family.
+// The pipeline writes no tags anywhere: metadata is the facade's WaxLabel
+// post-pass, so the re-encode of a tagged source comes out bare and a download
+// that did not ask for metadata cannot inherit the stream's own container tags.
+func TestRunDownmixPromotionWritesNoTags(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()
 	in := taggedWV(t, dir, "in.wv")
 	out := filepath.Join(dir, "mono.wv")
-	res, err := Run(context.Background(), r, in, out, Spec{Downmix: 1, CarrySourceTags: true}, nil)
+	res, err := Run(context.Background(), r, in, out, Spec{Downmix: 1}, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if res.OutputCodec != media.CodecWavPack || !res.Transcoded {
 		t.Fatalf("result = codec %v transcoded %v, want a wavpack re-encode", res.OutputCodec, res.Transcoded)
 	}
-	if got := probeTag(t, r, out, "TITLE"); got != "Pipeline Tagged" {
-		t.Errorf("TITLE = %q, want the probed source tag carried", got)
-	}
-	if got := probeTag(t, r, out, "REPLAYGAIN_TRACK_GAIN"); got != "" {
-		t.Errorf("ReplayGain = %q, want dropped on a re-encode", got)
+	if got := probeTag(t, r, out, "TITLE"); got != "" {
+		t.Errorf("TITLE = %q, want none (the facade's carry pass owns metadata)", got)
 	}
 }
 
-// An explicit remux of a WavPack source (--format copy) keeps every tag,
-// own-audio values included: the audio bytes are unchanged.
-func TestRunRemuxWavPackKeepsAllTags(t *testing.T) {
+// An explicit remux of a WavPack source (--format copy) also comes out bare at
+// this layer: the facade's carry pass restores the metadata, own-audio values
+// included, onto the finished file.
+func TestRunRemuxWavPackStripsTags(t *testing.T) {
 	r := newTestRunner(t)
 	dir := t.TempDir()
 	in := taggedWV(t, dir, "in.wv")
@@ -1173,51 +1172,8 @@ func TestRunRemuxWavPackKeepsAllTags(t *testing.T) {
 	if res.Transcoded {
 		t.Error("remux reported Transcoded")
 	}
-	if got := probeTag(t, r, out, "TITLE"); got != "Pipeline Tagged" {
-		t.Errorf("TITLE = %q, want carried", got)
-	}
-	if got := probeTag(t, r, out, "REPLAYGAIN_TRACK_GAIN"); got != "-2.00 dB" {
-		t.Errorf("ReplayGain = %q, want kept on a whole-file copy", got)
-	}
-}
-
-// Caller-supplied tags win over the probe fallback and reach the muxer: the
-// source is a tagged WavPack whose own TITLE must not appear when the caller
-// supplied a different set, even with the fallback armed.
-func TestRunSpecTagsReachMuxEmbedTarget(t *testing.T) {
-	r := newTestRunner(t)
-	dir := t.TempDir()
-	in := taggedWV(t, dir, "in.wv")
-	out := filepath.Join(dir, "out.wv")
-	spec := Spec{
-		Codec:           media.CodecWavPack,
-		Tags:            []media.Tag{{Key: "ARTIST", Value: "Caller"}},
-		CarrySourceTags: true,
-	}
-	if _, err := Run(context.Background(), r, in, out, spec, nil); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if got := probeTag(t, r, out, "ARTIST"); got != "Caller" {
-		t.Errorf("ARTIST = %q, want the caller's tag", got)
-	}
 	if got := probeTag(t, r, out, "TITLE"); got != "" {
-		t.Errorf("TITLE = %q, want the probe fallback suppressed by the caller's set", got)
-	}
-}
-
-// Without CarrySourceTags a mux-tagged encode that got no Tags stays untagged:
-// a download that did not ask for metadata must not inherit the stream's own
-// container tags.
-func TestRunNoCarrySourceTagsStaysUntagged(t *testing.T) {
-	r := newTestRunner(t)
-	dir := t.TempDir()
-	in := taggedWV(t, dir, "in.wv")
-	out := filepath.Join(dir, "out.wv")
-	if _, err := Run(context.Background(), r, in, out, Spec{Codec: media.CodecWavPack}, nil); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if got := probeTag(t, r, out, "TITLE"); got != "" {
-		t.Errorf("TITLE = %q, want no tags without CarrySourceTags", got)
+		t.Errorf("TITLE = %q, want none at the pipeline layer", got)
 	}
 }
 

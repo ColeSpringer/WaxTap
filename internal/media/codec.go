@@ -147,6 +147,8 @@ func (c Codec) IsLossless() bool {
 
 // encodeOptions builds the WaxFlow TranscodeOptions for an encoding spec. The
 // transcode path routes CodecCopy to Engine.Remux, so a copy never reaches here.
+// Tags is never set: every output's metadata comes from the WaxLabel
+// post-pass on the finished file, which also carries pictures.
 func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 	format, _ := codecFormat(spec.Codec)
 	opts := waxflow.TranscodeOptions{
@@ -157,14 +159,6 @@ func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 		// WaxFlow dithers a narrowing conversion (TPDF) rather than truncating; the
 		// lossy rows zero it in their adjust hooks, so it reaches wav/aiff/flac/alac.
 		BitDepth: spec.BitDepth,
-	}
-	// Tags reach only the muxers that are their output's sole tag path (WavPack,
-	// APE). Gated here, at the one encode funnel, rather than trusted to every
-	// caller: any other format's muxer would also embed them (FLAC's
-	// VORBIS_COMMENT, MP3's ID3) and its finished file then gets the WaxLabel
-	// post-pass too, two conflicting tag sets.
-	if spec.Codec.MuxEmbedsTags() {
-		opts.Tags = spec.Tags
 	}
 	switch spec.Codec {
 	case CodecMP3:

@@ -167,14 +167,18 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 			ed.Set(tag.RecordingDate, v.PublishDate.Format("2006-01-02"))
 			changed = true
 		}
-		if len(v.Chapters) > 0 && caps.Chapters.Write != waxlabel.AccessNone {
-			chs := toWaxlabelChapters(v.Chapters)
-			if o.cut != nil {
-				chs = remapChapters(chs, o.cut)
-			}
-			if len(chs) > 0 {
-				ed.SetChapters(chs...)
-				changed = true
+		if len(v.Chapters) > 0 {
+			if caps.Chapters.Write == waxlabel.AccessNone {
+				skipReason = joinSkip(skipReason, fmt.Sprintf("chapters cannot be embedded in a %s file", caps.Format))
+			} else {
+				chs := toWaxlabelChapters(v.Chapters)
+				if o.cut != nil {
+					chs = remapChapters(chs, o.cut)
+				}
+				if len(chs) > 0 {
+					ed.SetChapters(chs...)
+					changed = true
+				}
 			}
 		}
 	}
@@ -189,12 +193,7 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 			return "", perr
 		}
 		if note != "" {
-			note = "metadata written, but " + note
-			if skipReason != "" {
-				skipReason += "; " + note
-			} else {
-				skipReason = note
-			}
+			skipReason = joinSkip(skipReason, "metadata written, but "+note)
 		}
 	}
 
@@ -214,17 +213,47 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 // WaxLabel's committed-write contract: an error with SaveResult.Committed true
 // means the bytes landed and only a step after the commit failed (e.g. the
 // directory fsync); the plan is spent and retrying is refused, so that is a
-// success carrying a warning note, not a failure. The returned document is the
+// success carrying a warning note, not a failure. The note also relays the
+// plan's discard warnings, WaxLabel's record of edit content the write threw
+// away rather than stored, so a write-time drop no caps gate or transfer
+// report anticipated still reaches the user. The returned document is the
 // post-write one, nil only when nothing was written (err non-nil).
 func executeSaveBack(ctx context.Context, plan *waxlabel.Plan) (doc *waxlabel.Document, note string, err error) {
 	doc, sr, err := plan.Execute(ctx, waxlabel.SaveBack())
-	if err == nil {
-		return doc, "", nil
-	}
-	if !sr.Committed {
+	switch {
+	case err == nil:
+		return doc, discardNotes(plan.Report().Warnings), nil
+	case !sr.Committed:
 		return nil, "", err
+	default:
+		return doc, joinSkip(discardNotes(plan.Report().Warnings), "a post-write step failed: "+err.Error()), nil
 	}
-	return doc, "a post-write step failed: " + err.Error(), nil
+}
+
+// discardNotes renders the discard warnings in ws as one note, or "" when
+// there are none. Coercion and advisory warnings stay silent: the caps gates
+// and the transfer report already tell the per-item story, and this is the
+// backstop for content thrown away at write time.
+func discardNotes(ws []waxlabel.Warning) string {
+	var msgs []string
+	for _, w := range ws {
+		if waxlabel.IsDiscardWarning(w.Code) {
+			msgs = append(msgs, w.Message)
+		}
+	}
+	const maxMsgs = 3
+	if len(msgs) > maxMsgs {
+		msgs = append(msgs[:maxMsgs], fmt.Sprintf("and %d more", len(msgs)-maxMsgs))
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// joinSkip appends a report to a possibly empty predecessor.
+func joinSkip(prev, next string) string {
+	if prev == "" {
+		return next
+	}
+	return prev + "; " + next
 }
 
 // toWaxlabelChapters maps youtube chapters to waxlabel chapters. Both use
@@ -290,10 +319,13 @@ func pictureCapableExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case "webm", "aac", "wav", "aiff", "aif", "aifc", "afc":
 		return false
-	case "wv", "ape", "wma":
-		// APEv2 as WaxTap writes it holds no pictures, and WMA is decode-only.
-		// Without these a cover-art request on a source delivered under one of
-		// these names would "helpfully" remux Opus into Ogg bytes misnamed .wv.
+	case "wv", "ape", "wma", "mka", "mkv":
+		// This switch is keyed on the DELIVERED extension, not the work file's
+		// format: a keep-source download can put Opus-in-WebM bytes under any
+		// of these names, and the remux would leave Ogg bytes misnamed. A
+		// genuine WavPack, APE, or Matroska file never consults this function
+		// (its Pictures.Write is not AccessNone), so these entries exist for
+		// the mismatched keep-source deliveries only; WMA is read-only besides.
 		return false
 	}
 	return true

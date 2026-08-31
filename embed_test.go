@@ -3,6 +3,7 @@ package waxtap
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image/color"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +14,11 @@ import (
 	"time"
 
 	"github.com/colespringer/waxlabel"
+	"github.com/colespringer/waxlabel/tag"
 
 	"github.com/colespringer/waxtap/v3/internal/coverart"
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/youtube"
 )
@@ -123,6 +126,84 @@ func TestDoEmbedSquaresWithoutWarning(t *testing.T) {
 	}
 	if w != h || w < 716 || w > 724 {
 		t.Errorf("embedded cover = %dx%d, want a square within 4px of the 720px art", w, h)
+	}
+}
+
+// TestDoEmbedWritesCoverArtIntoWavPack pins the APEv2 arm of the embed pass:
+// cover art and tags land in a .wv file's APEv2 block (a Cover Art item), the
+// post-pass that a mux-time special case used to bypass, and the chapters
+// APEv2 cannot hold are reported rather than skipped silently.
+func TestDoEmbedWritesCoverArtIntoWavPack(t *testing.T) {
+	ctx := context.Background()
+	sent := mediatest.JPEGBytes(mediatest.ArtTrackCover(1280, 720, 720, color.RGBA{A: 255}), 90)
+	c, v := coverServer(t, sent)
+	v.Chapters = []youtube.Chapter{{Title: "One"}, {Start: time.Second, Title: "Two"}}
+
+	wav := writeWAVFixture(t)
+	path := filepath.Join(t.TempDir(), "track.wv")
+	if _, err := c.engine().Transcode(ctx, wav, path, media.Spec{Codec: media.CodecWavPack}); err != nil {
+		t.Fatalf("synth wv: %v", err)
+	}
+
+	skip, err := c.doEmbed(ctx, path, "wv", v, embedOptions{thumbnail: true, metadata: true})
+	if err != nil {
+		t.Fatalf("doEmbed: %v", err)
+	}
+	if !strings.Contains(skip, "chapters cannot be embedded in a WavPack file") {
+		t.Errorf("skipReason = %q, want the chapter skip reported", skip)
+	}
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatalf("parse tagged wv: %v", err)
+	}
+	if vs, _ := doc.Get(tag.Title); len(vs) == 0 || vs[0] != "Fixture Track" {
+		t.Errorf("TITLE = %v, want the video title", vs)
+	}
+	pics := doc.Pictures()
+	if len(pics) != 1 {
+		t.Fatalf("pictures = %d, want the embedded cover", len(pics))
+	}
+	if !bytes.Equal(pics[0].Data, sent) {
+		t.Error("cover bytes differ from the delivered thumbnail (frame mode embeds verbatim)")
+	}
+}
+
+// TestPictureCapableExt pins the delivered-extension gate. The false rows are
+// the names a keep-source download can put mismatched bytes under, where the
+// cover-art remux to the codec's native container would misname the result.
+func TestPictureCapableExt(t *testing.T) {
+	for _, ext := range []string{"webm", "aac", "wav", "aiff", "wv", "ape", "wma", "mka", "mkv"} {
+		if pictureCapableExt(ext) {
+			t.Errorf("pictureCapableExt(%q) = true, want false", ext)
+		}
+	}
+	for _, ext := range []string{"", "opus", "ogg", "flac", "mp3", "m4a"} {
+		if !pictureCapableExt(ext) {
+			t.Errorf("pictureCapableExt(%q) = false, want true", ext)
+		}
+	}
+}
+
+// TestDiscardNotes pins the write-warning relay: discard warnings surface,
+// advisory ones stay silent, and a long list is capped.
+func TestDiscardNotes(t *testing.T) {
+	if got := discardNotes(nil); got != "" {
+		t.Errorf("no warnings = %q, want empty", got)
+	}
+	ws := []waxlabel.Warning{
+		{Code: waxlabel.WarnValueDropped, Message: "d1"},
+		{Code: waxlabel.WarnFragmented, Message: "advisory"},
+		{Code: waxlabel.WarnLegacyStripDropped, Message: "d2"},
+	}
+	if got := discardNotes(ws); got != "d1; d2" {
+		t.Errorf("discardNotes = %q, want %q", got, "d1; d2")
+	}
+	var many []waxlabel.Warning
+	for i := range 5 {
+		many = append(many, waxlabel.Warning{Code: waxlabel.WarnValueDropped, Message: fmt.Sprintf("m%d", i)})
+	}
+	if got := discardNotes(many); got != "m0; m1; m2; and 2 more" {
+		t.Errorf("capped = %q, want %q", got, "m0; m1; m2; and 2 more")
 	}
 }
 

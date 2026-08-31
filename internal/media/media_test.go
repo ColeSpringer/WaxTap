@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxlabel"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
@@ -182,11 +183,6 @@ func TestEncodeOptionsBitrateDefaults(t *testing.T) {
 	}
 	if o := encodeOptions(Spec{Codec: CodecAPE}); o.Format != "ape" || o.APELevel != 0 {
 		t.Errorf("APE = %+v, want format ape at the default level", o)
-	}
-	// Spec.Tags ride onto the engine options for the mux-tagged outputs.
-	tags := []Tag{{Key: "TITLE", Value: "t"}}
-	if o := encodeOptions(Spec{Codec: CodecWavPack, Tags: tags}); len(o.Tags) != 1 || o.Tags[0].Key != "TITLE" {
-		t.Errorf("WavPack tags = %+v, want the spec's tags", o.Tags)
 	}
 }
 
@@ -880,20 +876,16 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// wvTagFixture encodes a stereo sine to WavPack with a mux-time tag set that
-// includes an own-audio value, and returns its path. The APEv2 block the muxer
-// writes is the file's only tag form.
+// wvTagFixture encodes a stereo sine to WavPack and tags it through WaxLabel
+// (an APEv2 block, the file's only tag form), including an own-audio value.
 func wvTagFixture(t *testing.T, r *Runner, dir string) string {
 	t.Helper()
-	src := wavFixture(t, 3, 2)
-	out := filepath.Join(dir, "tagged.wv")
-	spec := Spec{Codec: CodecWavPack, Tags: []Tag{
-		{Key: "TITLE", Value: "Tagged Sine"},
-		{Key: "ARTIST", Value: "WaxTap Test"},
-		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-3.00 dB"},
-	}}
-	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
-		t.Fatalf("encode wv: %v", err)
+	out := encodeFixture(t, r, dir, "tagged.wv", CodecWavPack)
+	if err := mediatest.TagFile(context.Background(), out,
+		"TITLE", "Tagged Sine",
+		"ARTIST", "WaxTap Test",
+		"REPLAYGAIN_TRACK_GAIN", "-3.00 dB"); err != nil {
+		t.Fatalf("tag fixture: %v", err)
 	}
 	return out
 }
@@ -905,10 +897,11 @@ func tagValue(pr ProbeResult, key string) string {
 	return ""
 }
 
-// The WavPack muxer embeds Spec.Tags as APEv2, the demuxer reads them back
-// through the probe, and a whole-file remux carries them, own-audio values
-// included (the audio bytes are unchanged, so ReplayGain still holds).
-func TestWavPackTagsEmbedAndRemuxCarry(t *testing.T) {
+// WaxLabel writes the APEv2 block on a finished .wv and the probe's demuxer
+// reads it back, the read parity the client's post-pass tagging rests on. A
+// whole-file remux does not carry it: WaxFlow rewrites carry no tags, which is
+// what lets the client's carry pass own every output without a double write.
+func TestWavPackWaxLabelTagsProbeReadAndRemuxStrips(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
 	in := wvTagFixture(t, r, dir)
@@ -926,19 +919,15 @@ func TestWavPackTagsEmbedAndRemuxCarry(t *testing.T) {
 	if a, _ := pr.AudioStream(); a.CodecName != "wavpack" {
 		t.Errorf("remux codec = %q, want wavpack", a.CodecName)
 	}
-	if got := tagValue(pr, "TITLE"); got != "Tagged Sine" {
-		t.Errorf("remuxed TITLE = %q, want %q", got, "Tagged Sine")
-	}
-	if got := tagValue(pr, "REPLAYGAIN_TRACK_GAIN"); got != "-3.00 dB" {
-		t.Errorf("remuxed ReplayGain = %q, want kept on a whole-file copy", got)
+	if got := tagValue(pr, "TITLE"); got != "" {
+		t.Errorf("remuxed TITLE = %q, want stripped (the client's carry pass restores metadata)", got)
 	}
 }
 
 // A copy cut of a WavPack source falls back to a re-encode: WavPack is not on
 // WaxFlow's cut allowlist (lossless, so the re-encode costs CPU and zero
-// generation loss, the ALAC rule). The fallback honors CutSpec.Encode.Tags,
-// which is how the pipeline's probed-tag carry reaches a cut .wv output.
-func TestCutWavPackFallsBackToReencodeWithTags(t *testing.T) {
+// generation loss, the ALAC rule).
+func TestCutWavPackFallsBackToReencode(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
 	in := wvTagFixture(t, r, dir)
@@ -947,7 +936,7 @@ func TestCutWavPackFallsBackToReencodeWithTags(t *testing.T) {
 		Keeps:   []cutrange.Range{{Start: 0, End: time.Second}},
 		Total:   3 * time.Second,
 		CopyCut: true,
-		Encode:  Spec{Codec: CodecWavPack, Tags: []Tag{{Key: "TITLE", Value: "Tagged Sine"}}},
+		Encode:  Spec{Codec: CodecWavPack},
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -959,20 +948,35 @@ func TestCutWavPackFallsBackToReencodeWithTags(t *testing.T) {
 	if a, _ := pr.AudioStream(); a.CodecName != "wavpack" {
 		t.Errorf("cut codec = %q, want wavpack (fallback keeps the family)", a.CodecName)
 	}
-	if got := tagValue(pr, "TITLE"); got != "Tagged Sine" {
-		t.Errorf("cut TITLE = %q, want the Encode spec's tags embedded", got)
+}
+
+// The facade's tag carry parses sources with WaxLabel alone (no probe
+// fallback), resting on the cross-library invariant that WaxLabel identifies
+// every format the engine handles. This pins it for every format the engine
+// can write; WMA, the one decode-only input, cannot be synthesized here and
+// keeps its read side pinned upstream.
+func TestWaxLabelReadsEveryEngineOutput(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	for _, c := range []Codec{
+		CodecFLAC, CodecALAC, CodecWAV, CodecMP3, CodecAAC, CodecOpus,
+		CodecVorbis, CodecAIFF, CodecHEAAC, CodecWavPack, CodecAPE,
+	} {
+		out := encodeFixture(t, r, dir, "out_"+c.String()+"."+c.Extension(), c)
+		if _, err := waxlabel.ParseFile(context.Background(), out); err != nil {
+			t.Errorf("%s: WaxLabel cannot parse the engine's own output: %v", c, err)
+		}
 	}
 }
 
-// The APE muxer takes the same mux-time tags.
-func TestAPETagsEmbed(t *testing.T) {
+// The APE container takes the same WaxLabel-written APEv2 block, and the
+// probe's demuxer reads it back.
+func TestAPEWaxLabelTagsProbeRead(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
-	src := wavFixture(t, 2, 2)
-	out := filepath.Join(dir, "tagged.ape")
-	spec := Spec{Codec: CodecAPE, Tags: []Tag{{Key: "ALBUM", Value: "Test Album"}}}
-	if _, err := r.Transcode(context.Background(), src, out, spec); err != nil {
-		t.Fatalf("encode ape: %v", err)
+	out := encodeFixture(t, r, dir, "tagged.ape", CodecAPE)
+	if err := mediatest.TagFile(context.Background(), out, "ALBUM", "Test Album"); err != nil {
+		t.Fatalf("tag fixture: %v", err)
 	}
 	pr := mustProbe(t, r, out)
 	if a, _ := pr.AudioStream(); a.CodecName != "ape" {
@@ -1001,40 +1005,6 @@ func TestHEAACRemuxKeepsIdentity(t *testing.T) {
 	pr = mustProbe(t, r, out)
 	if a, _ := pr.AudioStream(); a.CodecName != "he-aac" {
 		t.Errorf("remuxed codec = %q, want he-aac (identity preserved)", a.CodecName)
-	}
-}
-
-func TestTagsFromMapDeterministic(t *testing.T) {
-	m := map[string][]string{
-		"TITLE":  {"a"},
-		"ARTIST": {"x", "y"},
-	}
-	want := []Tag{{Key: "ARTIST", Value: "x"}, {Key: "ARTIST", Value: "y"}, {Key: "TITLE", Value: "a"}}
-	for range 8 { // map order is random; the output must not be
-		got := TagsFromMap(m)
-		if len(got) != len(want) {
-			t.Fatalf("TagsFromMap = %v, want %v", got, want)
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("TagsFromMap[%d] = %v, want %v", i, got[i], want[i])
-			}
-		}
-	}
-	if TagsFromMap(nil) != nil {
-		t.Error("TagsFromMap(nil) should be nil")
-	}
-}
-
-func TestDropOwnAudioTags(t *testing.T) {
-	in := []Tag{
-		{Key: "TITLE", Value: "t"},
-		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-1.0 dB"},
-		{Key: "ARTIST", Value: "a"},
-	}
-	got := DropOwnAudioTags(in)
-	if len(got) != 2 || got[0].Key != "TITLE" || got[1].Key != "ARTIST" {
-		t.Errorf("DropOwnAudioTags = %v, want TITLE and ARTIST only", got)
 	}
 }
 
@@ -1121,16 +1091,13 @@ func TestRenderCutCopyFallbackNeedsEncoder(t *testing.T) {
 	}
 }
 
-// encodeOptions is the one funnel every encode passes through, so it, not each
-// caller, enforces that only the mux-tagged formats get mux-time tags: any
-// other muxer would embed them too and its finished file then gets the
-// WaxLabel post-pass as well, two conflicting tag sets.
-func TestEncodeOptionsGatesTagsOnMuxEmbed(t *testing.T) {
-	tags := []Tag{{Key: "TITLE", Value: "t"}}
-	if o := encodeOptions(Spec{Codec: CodecFLAC, Tags: tags}); len(o.Tags) != 0 {
-		t.Errorf("FLAC opts.Tags = %v, want none (post-pass owns FLAC tagging)", o.Tags)
-	}
-	if o := encodeOptions(Spec{Codec: CodecAPE, Tags: tags}); len(o.Tags) != 1 {
-		t.Errorf("APE opts.Tags = %v, want the spec's tags", o.Tags)
+// encodeOptions is the one funnel every encode passes through, and it hands
+// the muxer no tags for any codec: the finished file gets the WaxLabel
+// post-pass, and a mux-time set beside it would be two conflicting writers.
+func TestEncodeOptionsNeverPassesTags(t *testing.T) {
+	for _, c := range []Codec{CodecFLAC, CodecAPE, CodecWavPack, CodecMP3} {
+		if o := encodeOptions(Spec{Codec: c}); len(o.Tags) != 0 {
+			t.Errorf("%v opts.Tags = %v, want none (the post-pass owns metadata)", c, o.Tags)
+		}
 	}
 }

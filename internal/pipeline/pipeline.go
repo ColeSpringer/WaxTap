@@ -91,18 +91,6 @@ type Spec struct {
 	Codec    media.Codec
 	Bitrate  int // target bits per second for lossy codecs
 	BitDepth int // forced integer output depth; 0 follows the decoded stream
-	// Tags are embedded by the muxer at encode time, for the targets whose only
-	// tag form is written with the audio (Codec.MuxEmbedsTags). The caller
-	// builds them; the pipeline only threads them onto the encode spec.
-	Tags []media.Tag
-	// CarrySourceTags lets a mux-tagged encode that got no Tags fall back to
-	// the probe's demuxer-read source tags. Local processing sets it: carrying
-	// the input's metadata is its default contract, and the fallback covers
-	// the specs that only resolve to a mux-tagged target inside the pipeline
-	// (a promoted copy) and the sources WaxLabel cannot parse. Downloads leave
-	// it false: they embed metadata only on request, so an empty Tags there
-	// means "none", not "read the stream's own".
-	CarrySourceTags bool
 
 	// Downmix reduces sources with more channels to this count. Supported values
 	// are 1 and 2. A downmix requires encoding; CodecCopy uses the source codec
@@ -290,26 +278,6 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		remux = false
 	}
 
-	// A target whose muxer is its only tag path (WavPack, APE) gets its tags at
-	// encode time. The caller supplies them where it can read the source richer
-	// (WaxLabel); this fallback covers the specs that only resolve to such a
-	// target here (a copy promoted by the container or the downmix fold) and the
-	// sources WaxLabel cannot parse, using the probe's demuxer-read tags. The
-	// encode re-derives the samples, so tags describing the source's own audio
-	// are dropped, the same rule every re-encode carry applies; the pure-remux
-	// path never reads these and carries its own tags with own-audio kept.
-	//
-	// Every other target's tags are cleared, structurally: their muxers also
-	// embed mux-time tags (FLAC's VORBIS_COMMENT, MP3's ID3) and their finished
-	// files then get the metadata post-pass too, so a caller over-supplying
-	// tags (it cannot always predict the promotions above) must not produce a
-	// double write.
-	if !spec.Codec.MuxEmbedsTags() {
-		spec.Tags = nil
-	} else if len(spec.Tags) == 0 && spec.CarrySourceTags {
-		spec.Tags = media.DropOwnAudioTags(media.TagsFromMap(probe.Tags))
-	}
-
 	// An explicit copy cut cannot ride along with an encode. The facade rejects the
 	// --format form before any download, but this also catches the route it cannot
 	// see: the downmix branch above sets spec.Codec without consulting CutMode, so
@@ -353,7 +321,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		return res, nil
 	}
 
-	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth, Channels: fold, Tags: spec.Tags}
+	enc := media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth, Channels: fold}
 	if apply {
 		// The two peak policies differ only here: RawGain aims straight at the target
 		// and hands the peaks to WaxFlow's limiter, GainFor holds the peak under the
@@ -379,11 +347,6 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				// keeps the source family, staying lossless for a lossless source.
 				if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
 					fallback.Codec = c
-					// A copy spec carried no tags (the guard above cleared them), so a
-					// fallback into a mux-tagged family re-reads the probe's.
-					if c.MuxEmbedsTags() && len(fallback.Tags) == 0 && spec.CarrySourceTags {
-						fallback.Tags = media.DropOwnAudioTags(media.TagsFromMap(probe.Tags))
-					}
 				}
 			}
 			cres, err := r.Render(ctx, input, output, media.CutSpec{

@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"slices"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
-	"github.com/colespringer/waxlabel/tag"
 
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
 	"github.com/colespringer/waxtap/v3/waxerr"
@@ -28,67 +26,6 @@ type Spec struct {
 	BitDepth int     // forced output depth (16 or 24); 0 follows the decoded stream
 	Channels int     // output channel count (downmix); 0 keeps the source layout
 	GainDB   float64 // scalar normalization gain in dB; 0 is a no-op
-	// Tags are embedded by the muxer at encode time, for the outputs whose only
-	// tag form is written with the audio (WavPack and APE take their APEv2 block
-	// there; WaxLabel cannot identify either format, so the usual post-pass fails
-	// rather than adding anything). Callers leave it nil for every other codec,
-	// whose finished files the WaxLabel post-pass tags. A remux ignores it: the
-	// remux paths carry the source's own demuxer-read tags instead.
-	Tags []Tag
-}
-
-// Tag is one canonical metadata field for mux-time embedding, re-exported so
-// callers outside this package can build tag lists without importing WaxFlow.
-type Tag = container.Tag
-
-// muxEmbedsFormat is the one statement of which WaxFlow output formats take
-// their tags at mux time in WaxTap's flows: the two whose finished files
-// WaxLabel cannot read back. It narrows WaxFlow's OutputEmbedsTags; the MP4
-// and Ogg families also accept mux-time tags upstream, but their finished
-// files post-pass fine, which WaxTap prefers since that path also carries
-// pictures and chapters. MuxEmbedsTags, MuxEmbedsExt, and remuxTags all
-// resolve through here so the three vocabularies (codec enum, format string,
-// output extension) cannot drift.
-func muxEmbedsFormat(format string) bool {
-	return format == "wavpack" || format == "ape"
-}
-
-// MuxEmbedsTags reports whether c's muxer writes its tags with the audio, so
-// metadata must be supplied via Spec.Tags rather than a WaxLabel post-pass on
-// the finished file.
-func (c Codec) MuxEmbedsTags() bool {
-	f, ok := codecFormat(c)
-	return ok && muxEmbedsFormat(f)
-}
-
-// MuxEmbedsExt reports whether the output extension (lowercased, no dot) names
-// a container whose format embeds tags at mux time, for callers that must
-// predict a mux-tagged target before the pipeline resolves one from the
-// extension.
-func MuxEmbedsExt(ext string) bool {
-	return muxEmbedsFormat(waxflow.OutputFormatForExt(ext))
-}
-
-// TagsFromMap flattens probe-shaped tags (canonical uppercase keys, values in
-// order) into a deterministic Tag list: keys sorted, each key's values kept in
-// stored order. Muxers write tags in list order, so a map iteration here would
-// shuffle the output's tag block between runs.
-func TagsFromMap(m map[string][]string) []Tag {
-	if len(m) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	var tags []Tag
-	for _, k := range keys {
-		for _, v := range m[k] {
-			tags = append(tags, Tag{Key: k, Value: v})
-		}
-	}
-	return tags
 }
 
 // Result reports a completed transcode.
@@ -232,7 +169,7 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 	if !ok {
 		return remuxDeclined(track.Codec)
 	}
-	opts := waxflow.TranscodeOptions{Format: outFormat, Container: container, Tags: remuxTags(outFormat, info)}
+	opts := waxflow.TranscodeOptions{Format: outFormat, Container: container}
 	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, staged, opts); err != nil {
 		return classifyEngineError(err, input, output)
 	}
@@ -262,43 +199,11 @@ func (r *Runner) remux(ctx context.Context, src container.Source, input, output 
 	opts := waxflow.TranscodeOptions{
 		Format:    outFormat,
 		Container: containerFor(outFormat, hintFor(output)),
-		Tags:      remuxTags(outFormat, info),
 	}
 	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts); err != nil {
 		return classifyEngineError(err, input, output)
 	}
 	return nil
-}
-
-// remuxTags returns the mux-time tags a remux to outFormat must carry: the
-// source's own demuxer-read tags, and only for the formats whose muxer is the
-// sole tag path (WavPack, APE). A WaxFlow remux never forwards tags on its own,
-// so without this a .wv-to-.wv copy would silently strip the APEv2 block; with
-// any other output the post-pass restores metadata from the source file and
-// mux-time tags would be written twice. A remux copies the audio bytes
-// unchanged, so tags describing the source's own audio (ReplayGain and kin)
-// still hold and are carried too.
-func remuxTags(outFormat string, info *format.Info) []Tag {
-	if !muxEmbedsFormat(outFormat) {
-		return nil
-	}
-	return TagsFromMap(info.Tags)
-}
-
-// DropOwnAudioTags returns tags without the keys that describe the audio they
-// were read from (ReplayGain, encoder stamps, an AcoustID fingerprint), which a
-// re-encode, cut, or gain change invalidates. The predicate is WaxLabel's own,
-// so this cannot drift from what its transfer excludes. A whole-file remux
-// keeps them instead: the audio bytes are unchanged, so the values still hold.
-func DropOwnAudioTags(tags []Tag) []Tag {
-	kept := tags[:0:0]
-	for _, t := range tags {
-		if tag.Key(t.Key).DescribesOwnAudio() {
-			continue
-		}
-		kept = append(kept, t)
-	}
-	return kept
 }
 
 // remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own

@@ -1302,17 +1302,6 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	}
 
 	pspec := pipelineSpec(req.ProcessSpec, ranges)
-	// A WavPack/APE target embeds its tags at encode time, so the requested
-	// video metadata rides the encode instead of the WaxLabel post-pass (which
-	// cannot read the finished file back). muxEmbedLikely also covers the spec
-	// the pipeline promotes into such an encode (a cut or downmix with no
-	// --format, resolved by a .wv/.ape output extension); over-supplying is
-	// safe, the pipeline clears tags for every other target. CarrySourceTags
-	// stays false: a download embeds metadata only on request, so the pipeline
-	// must not fall back to the stream's own container tags.
-	if muxEmbedLikely(req.ProcessSpec) && eo.metadata {
-		pspec.Tags = videoMuxTags(a.video)
-	}
 	pres, err := pipeline.Run(ctx, runner, srcPath, out, pspec, em.pipelineStage)
 	if err != nil {
 		return "", nil, err
@@ -1330,15 +1319,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// A rendered cut moved every later chapter mark; the embed pass remaps them
 	// onto the delivered timeline.
 	eo.cut = appliedCutFrom(pres)
-	if pres.OutputCodec.MuxEmbedsTags() {
-		// The tags (when requested) already rode the encode; report what the
-		// APEv2 block cannot hold instead of running a post-pass that cannot
-		// read the file back. Keyed on the codec the pipeline actually wrote,
-		// like the local path, so a promoted encode takes this branch too.
-		warnMuxEmbedRequests(em, warnName(req.Output.path, deliver), pres.OutputCodec, a.video, eo)
-	} else {
-		c.embedMetadata(ctx, deliver, req.Output.path, embedExt, a.video, eo, em)
-	}
+	c.embedMetadata(ctx, deliver, req.Output.path, embedExt, a.video, eo, em)
 
 	var explicit []cutrange.Range
 	if req.Cut != nil {

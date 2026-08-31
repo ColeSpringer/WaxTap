@@ -162,11 +162,6 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 		return false, nil // unknown codec: let the re-encode path handle it
 	}
 	spans := toSpans(keeps, total, track.Fmt.Rate)
-	// No Tags here: WaxFlow's cut allowlist declines the mux-tagged codecs
-	// (WavPack, APE), so a cut of one always re-encodes and the fallback's
-	// Encode.Tags carry the metadata. TestCutWavPackFallsBackToReencodeWithTags
-	// pins the decline; if WaxFlow ever allowlists them, that test fails and
-	// this rung must start carrying DropOwnAudioTags(remuxTags(...)).
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
 
 	plan, err := r.engine.PlanCut(track, opts, spans, grid)

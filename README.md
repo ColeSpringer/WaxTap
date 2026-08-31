@@ -154,9 +154,10 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   Chapter marks follow a cut the same way the embed flags do. Tags describing
   the source audio itself (ReplayGain, encoder stamps) carry only on a pure
   `--format copy` remux; a re-encode or cut invalidates them, so they are left
-  off. WavPack and APE outputs take their tags as an APEv2 block written with
-  the audio: text tags carry (from WavPack/APE/WMA sources too), while cover
-  art and chapters have no form there and are reported as carry losses.
+  off. WavPack and APE outputs are tagged the same way as every other format:
+  their APEv2 block holds text tags and cover art (a Cover Art item), while
+  chapters and synced lyrics have no APEv2 form and are reported as carry
+  losses.
 - SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
   exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
   outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal

@@ -317,9 +317,10 @@ const (
 	FormatHEAAC
 	// FormatWavPack is WavPack lossless audio (.wv). It holds mono or stereo
 	// only; a wider source is refused rather than silently folded (set Downmix
-	// to choose the fold). Metadata is embedded by the muxer as an APEv2
-	// block: text tags carry, pictures and chapters have no APEv2 form here
-	// and are reported as carry losses.
+	// to choose the fold). Metadata lands in an APEv2 block through the same
+	// post-pass as every other format: text tags and cover art carry, while
+	// chapters and synced lyrics have no APEv2 form and are reported as carry
+	// losses.
 	FormatWavPack
 	// FormatAPE is Monkey's Audio lossless audio (.ape), with the same APEv2
 	// metadata behavior as FormatWavPack. It holds 8/16/24-bit integer PCM in
