@@ -19,8 +19,11 @@ builds:
       - -trimpath
     # main.version is the var the version subcommand reads; injecting it here
     # makes release binaries report their tag even without module build info.
+    # Keep the v: .Version strips it, but version.go documents -X main.version=v1.2.3
+    # and the build-info fallback yields v3.2.0, so a bare 3.2.0 would make the same
+    # command answer differently depending on how the binary was obtained.
     ldflags:
-      - -s -w -X main.version={{ .Version }}
+      - -s -w -X main.version=v{{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
