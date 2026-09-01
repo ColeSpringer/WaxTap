@@ -36,8 +36,23 @@ func validateLocalSourceFlags(cmd *cobra.Command, cfg *appConfig, local, downmix
 	// directory batch reaches here too. Only an explicit flag is rejected; a
 	// configured default exists to steer downloads and must not break local
 	// processing.
-	if cmd.Flags().Changed("channels") && !effectiveDownmix(cmd, cfg, downmix) {
-		return usagef("--channels selects among a video's source streams and has no effect on a local file or directory; use --downmix to fold to mono or stereo, or drop the flag")
+	if cmd.Flags().Changed("channels") {
+		// The value is checked before it is called inert. resolveChannels is the
+		// only other thing that parses it, and it runs later and only once a
+		// downmix is in force, so `--channels sterio` on a local file used to be
+		// answered "has no effect" and the typo never surfaced: the user reads
+		// that as a redundant flag, not a misspelled one.
+		//
+		// The value is read back off the flag set rather than taken as a
+		// parameter so all five call sites keep the same ordering without each
+		// having to pass it. Changed said yes, so the lookup cannot miss.
+		value, _ := cmd.Flags().GetString("channels")
+		if _, err := parseChannels(value); err != nil {
+			return err
+		}
+		if !effectiveDownmix(cmd, cfg, downmix) {
+			return usagef("--channels selects among a video's source streams and has no effect on a local file or directory; use --downmix to fold to mono or stereo, or drop the flag")
+		}
 	}
 	return nil
 }
@@ -155,7 +170,7 @@ func sameLocalPath(a, b string) bool {
 // the output path ending in ".alac".
 func warnALACToAlacExt(env *appEnv, outPath string, tf waxtap.TranscodeFormat) {
 	if tf == waxtap.FormatALAC && strings.EqualFold(filepath.Ext(outPath), ".alac") {
-		env.info("note: .alac output uses an MP4 container; use .m4a for the conventional filename\n")
+		env.note(noteALACContainer, ".alac output uses an MP4 container; use .m4a for the conventional filename")
 	}
 }
 
@@ -237,7 +252,7 @@ func warnKnob(env *appEnv, flag string, value int, n knobNote) {
 	if value <= 0 || n.effect == knobHonored {
 		return
 	}
-	env.info("note: %s %s\n", flag, n.why)
+	env.note(noteFlagInert, "%s %s", flag, n.why)
 }
 
 func warnBitrateIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitrate int) {
@@ -591,7 +606,7 @@ func newTranscodeCmd() *cobra.Command {
 				// The probed codec, not the requested family: an HE-AAC file
 				// satisfies --format aac by copying, and calling it "aac" here
 				// while the result line says he-aac would have the two disagree.
-				env.info("note: %s is already %s; copied without re-encoding (use --force to re-encode)\n", source, probedCodec)
+				env.note(noteSameFormatCopied, "%s is already %s; copied without re-encoding (use --force to re-encode)", source, probedCodec)
 			}
 			return emitResult(env, res)
 		},

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxtap/v3"
 )
 
 func TestDoctorIOSBestEffortNote(t *testing.T) {
@@ -116,15 +118,18 @@ func TestDoctorJSONAttempts(t *testing.T) {
 	}
 
 	rep := &doctorReport{Healthy: true, Full: true, VideoID: "jNQXAC9IVRw", Bytes: 1 << 20}
-	rep.Attempts = append(rep.Attempts, doctorAttempt{VideoID: "aqz-KE-bpKQ", Error: "incomplete stream"})
+	rep.Attempts = append(rep.Attempts, doctorAttempt{VideoID: "aqz-KE-bpKQ", Error: *errorObject(waxtap.ErrIncompleteStream)})
 	m := decode(rep)
 	attempts, ok := m["attempts"].([]any)
 	if !ok || len(attempts) != 1 {
 		t.Fatalf("attempts = %v, want one recorded failure", m["attempts"])
 	}
 	first, _ := attempts[0].(map[string]any)
-	if first["videoId"] != "aqz-KE-bpKQ" || first["error"] != "incomplete stream" {
-		t.Errorf("attempts[0] = %v, want the failed candidate and its error", first)
+	aerr, _ := first["error"].(map[string]any)
+	// The same {code, message} object every schemaVersion 3 document reports
+	// failures as; a bare string here was the one holdout.
+	if first["videoId"] != "aqz-KE-bpKQ" || aerr["code"] != "incomplete-stream" {
+		t.Errorf("attempts[0] = %v, want the failed candidate and a coded error object", first)
 	}
 
 	if _, ok := decode(&doctorReport{Healthy: true, VideoID: "jNQXAC9IVRw"})["attempts"]; ok {

@@ -48,7 +48,7 @@ type batchItemRecord struct {
 	Output         string        `json:"output,omitempty"`
 	Status         string        `json:"status"`
 	IntegratedLUFS *jsonFloat    `json:"integratedLufs,omitempty"`
-	Error          string        `json:"error,omitempty"`
+	Error          *errorJSON    `json:"error,omitempty"`
 	Warnings       []warningJSON `json:"warnings,omitempty"`
 }
 
@@ -57,14 +57,20 @@ type batchItemRecord struct {
 func itemRecord(o batchOutcome, measure bool) batchItemRecord {
 	rec := batchItemRecord{SchemaVersion: schemaVersion, Type: "item", Index: o.index + 1, Input: displayPath(o.input), Status: o.status.String()}
 	if o.err != nil {
-		rec.Error = friendlyError(o.err)
+		// friendlyError produced prose only; the code is what a consumer
+		// aggregating a run actually needs, and it is the same classification the
+		// process exit code comes from.
+		rec.Error = errorObject(o.err)
 	}
 	if measure {
 		if o.result != nil && o.result.Loudness != nil && o.result.Loudness.Input != nil {
 			lufs := jsonFloat(o.result.Loudness.Input.IntegratedLUFS)
 			rec.IntegratedLUFS = &lufs
 		}
-	} else if o.status != statusUnchanged {
+	} else if o.status != statusUnchanged && o.status != statusError && o.status != statusNotRun {
+		// An item that failed or never ran wrote nothing, so naming the path it
+		// would have written asserts a file that is not there. The human renderer
+		// has always left it out; this is the JSON catching up.
 		rec.Output = displayPath(o.output)
 	}
 	if o.result != nil {
@@ -212,18 +218,33 @@ func emitBatchSummaryHuman(env *appEnv, c batchCounts, verb string) {
 }
 
 // emitBatchSummaryJSON writes the final summary NDJSON record.
+//
+// Every count is unconditional. Omitting the zeros made a consumer read an
+// absent key as zero, which is the same thing an older schema or a renamed field
+// looks like, and it meant "failed" appeared only on runs that had failures: the
+// key you most want to test for was the one you could not rely on. total is
+// added for the same reason, so a summary can be checked without summing seven
+// fields and hoping the set is complete.
 func emitBatchSummaryJSON(env *appEnv, c batchCounts) {
 	writeBatchJSON(env, struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		Type          string `json:"type"`
+		Total         int    `json:"total"`
 		Processed     int    `json:"processed"`
-		Copied        int    `json:"copied,omitempty"`
-		Unchanged     int    `json:"unchanged,omitempty"`
-		Skipped       int    `json:"skipped,omitempty"`
-		Ignored       int    `json:"ignored,omitempty"`
-		Failed        int    `json:"failed,omitempty"`
-		NotRun        int    `json:"notRun,omitempty"`
-	}{schemaVersion, "summary", c.processed, c.copied, c.unchanged, c.skipped, c.ignored, c.failed, c.notRun})
+		Copied        int    `json:"copied"`
+		Unchanged     int    `json:"unchanged"`
+		Skipped       int    `json:"skipped"`
+		Ignored       int    `json:"ignored"`
+		Failed        int    `json:"failed"`
+		NotRun        int    `json:"notRun"`
+		// Notes hang off the summary alone. No note site fires inside a batch
+		// worker today, so per-item note fields would be dead weight on every
+		// record of every batch run.
+		Notes []noteJSON `json:"notes,omitempty"`
+	}{schemaVersion, "summary",
+		c.processed + c.copied + c.unchanged + c.skipped + c.ignored + c.failed + c.notRun,
+		c.processed, c.copied, c.unchanged, c.skipped, c.ignored, c.failed, c.notRun,
+		env.notesJSON()})
 }
 
 // writeBatchJSON writes one compact NDJSON record followed by a newline.

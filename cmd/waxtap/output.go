@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
@@ -24,10 +26,20 @@ import (
 )
 
 // schemaVersion tags JSON output so callers can handle shape changes. Version 1 is
-// the pre-1.0 baseline. Non-transcoded local results omit the redundant
-// outputFormat field, and local formats omit itag because they do not come from a
-// YouTube format.
-const schemaVersion = 2
+// the pre-1.0 baseline. Version 2 dropped the redundant outputFormat field from
+// non-transcoded local results, and itag from local formats, which do not come
+// from a YouTube format.
+//
+// Version 3 made every failure in every document the same object. A playlist
+// item's error was a raw string, a batch item's was a different raw string, and
+// only the top-level envelope carried a machine-readable code, so a consumer
+// aggregating a run had to grep prose to tell a missing PO token from a bad
+// path. All three are now {code, message} through the one classifier. In the
+// same pass: error and not-run batch items stopped carrying an output path they
+// never wrote, batch summary counts became unconditional (an absent key no
+// longer has to be read as zero) and gained a total, and chapterCount is omitted
+// rather than asserting 0 when chapters were never fetched.
+const schemaVersion = 3
 
 // appEnv carries the per-invocation client, resolved config, IO writers, and
 // logger. Commands obtain one with setup at the top of their RunE.
@@ -36,7 +48,10 @@ type appEnv struct {
 	cfg    *appConfig
 	out    io.Writer // stdout: command results (human or JSON)
 	errOut io.Writer // stderr: progress, logs, errors
-	log    *slog.Logger
+	// notes collects this document's note: diagnostics so --json carries them.
+	// Nil means nothing collects, which is what the pre-setup paths get.
+	notes *noteCollector
+	log   *slog.Logger
 	// audioStream is set when stdout carries streamed audio (download -o -). A
 	// measure-only run to a real writer sink leaves OutputPath empty just like a
 	// discarded measurement, so the renderer uses this to print "(streamed)" rather
@@ -62,13 +77,22 @@ func setup(cmd *cobra.Command) (*appEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &appEnv{
+	env := &appEnv{
 		client: client,
 		cfg:    cfg,
 		out:    cmd.OutOrStdout(),
 		errOut: cmd.ErrOrStderr(),
 		log:    log,
-	}, nil
+		notes:  &noteCollector{},
+	}
+	// An error envelope is rendered from main, which has no appEnv, so the run's
+	// collector is published for it. It is the same shape and lifetime as
+	// rootFlagsValue and exists for the same reason: a failure has to honor the
+	// document contract after the command that could describe it is gone. Notes
+	// from a failed run matter most of all, since some of them (the file kept but
+	// not recorded in the archive) only ever fire on a failure path.
+	setRunNotes(env.notes)
+	return env, nil
 }
 
 // newLogger builds a slog logger whose level follows --quiet/--verbose. Logs use
@@ -108,6 +132,119 @@ func (e *appEnv) info(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(e.errOut, format, args...)
+}
+
+// noteCode is the stable machine-readable identifier of a CLI note. Notes are
+// the class of diagnostic that says what WaxTap did on the user's behalf when
+// the request did not fully determine it: a container left alone, a concurrency
+// clamped, a file the archive did not record.
+//
+// They carry codes rather than prose because a note that lives only in a
+// stderr sentence is not a contract. A consumer matching container-ext-mismatch
+// keeps working when the sentence is reworded; one grepping the sentence does
+// not. The codes are CLI-side and deliberately separate from the library's
+// WarningCode: these describe decisions the command line made, not conditions
+// the library observed.
+type noteCode string
+
+const (
+	noteALACContainer        noteCode = "alac-mp4-container"
+	noteArchiveNotRecorded   noteCode = "archive-not-recorded"
+	noteChannelsIgnored      noteCode = "channels-ignored"
+	noteChannelsUnavailable  noteCode = "channels-unavailable"
+	noteConcurrencyClamped   noteCode = "concurrency-clamped"
+	noteContainerExtMismatch noteCode = "container-ext-mismatch"
+	noteFlagInert            noteCode = "flag-inert"
+	noteForcedClientRisky    noteCode = "forced-client-risky"
+	noteKeptOutput           noteCode = "kept-output"
+	notePlaylistIgnored      noteCode = "playlist-ignored"
+	noteEnumerationError     noteCode = "enumeration-error"
+	noteSameFormatCopied     noteCode = "same-format-copied"
+	noteSidecarWriteFailed   noteCode = "sidecar-write-failed"
+	noteSelectionUnmatched   noteCode = "selection-unmatched"
+	noteUnalteredCopy        noteCode = "unaltered-copy"
+	noteWatchPageFormats     noteCode = "watch-page-formats"
+	noteWatchPageMetadata    noteCode = "watch-page-metadata"
+	noteWebSources           noteCode = "web-sources"
+)
+
+// noteJSON is one note in a JSON document, the same {code, detail} shape
+// warnings use.
+type noteJSON struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+// noteCollector accumulates the notes one document will carry. It is shared by
+// value through appEnv copies, so a scope created with withScopedNotes collects
+// independently of its parent.
+//
+// The mutex is not decoration: playlist items run concurrently and out of order,
+// and BuildRequest for item N+1 overlaps item N, so notes from two items can be
+// added at the same moment.
+type noteCollector struct {
+	mu    sync.Mutex
+	notes []noteJSON
+}
+
+func (c *noteCollector) add(n noteJSON) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.notes = append(c.notes, n)
+}
+
+// drain returns the collected notes and empties the collector, so a scope reused
+// across items cannot leak one item's notes onto the next.
+func (c *noteCollector) drain() []noteJSON {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.notes
+	c.notes = nil
+	return out
+}
+
+// snapshot returns a copy of the collected notes without draining them, safe
+// against writers still appending.
+func (c *noteCollector) snapshot() []noteJSON {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.notes)
+}
+
+// note records a diagnostic and prints it to stderr as a "note: " line unless
+// --quiet is set.
+//
+// The recording is not gated by --quiet, which is the point: --json --quiet used
+// to discard notes entirely, so the mode most likely to be read by a program was
+// the one that lost the machine-readable half.
+func (e *appEnv) note(code noteCode, format string, args ...any) {
+	detail := fmt.Sprintf(format, args...)
+	if e.notes != nil {
+		e.notes.add(noteJSON{Code: string(code), Detail: detail})
+	}
+	if e.quiet() {
+		return
+	}
+	fmt.Fprintf(e.errOut, "note: %s\n", detail)
+}
+
+// notesJSON returns the notes collected so far, without draining them.
+func (e *appEnv) notesJSON() []noteJSON {
+	if e.notes == nil {
+		return nil
+	}
+	return e.notes.snapshot()
+}
+
+// withScopedNotes returns a copy of e collecting into a fresh scope, for work
+// whose notes belong to one item rather than to the run. Playlist items need it:
+// their handlers are concurrent and out of order, so a single shared collector
+// would attribute one item's notes to whichever record happened to be written
+// next.
+func (e *appEnv) withScopedNotes() *appEnv {
+	c := *e
+	c.notes = &noteCollector{}
+	return &c
 }
 
 // jsonFloat marshals non-finite loudness values as null because encoding/json
@@ -175,12 +312,19 @@ func humanLUFS(v float64) string {
 // parsing at all. Only those may re-read the command line for --json; after a
 // successful parse rootFlagsValue is the answer, and a second look would misread
 // `--format --json`, where --json is a flag's value rather than a request.
+//
+// cause is optional and never rendered: it lets a usage error carry the sentinel
+// that identifies the condition, such as tempfile.ErrRenumberExhausted from the
+// auto-number pre-flight, without giving up the exit code the user's own
+// mistake earns.
 type usageError struct {
 	msg           string
 	flagsUnparsed bool
+	cause         error
 }
 
 func (e *usageError) Error() string { return e.msg }
+func (e *usageError) Unwrap() error { return e.cause }
 
 func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
@@ -227,17 +371,34 @@ func finalError(ctx context.Context, err error) error {
 	return errors.Join(ce, err)
 }
 
+// errorJSON is how every WaxTap JSON document reports a failure: the classifier's
+// stable kebab code plus its human message. One shape everywhere, so a consumer
+// aggregating a run reads error.code in a playlist item, a batch item and the
+// top-level envelope alike instead of matching message prose in two of the three.
+type errorJSON struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// errorObject renders err as an errorJSON, or nil for no error, so the item
+// renderers cannot drift from the envelope's classification.
+func errorObject(err error) *errorJSON {
+	if err == nil {
+		return nil
+	}
+	c := classifyError(err)
+	return &errorJSON{Code: c.code, Message: c.message}
+}
+
 // jsonError is the --json error envelope. outputPath and outputBytes are set only
 // when a failed run nevertheless left a complete file behind, so their absence is
-// the norm and schemaVersion stays 2.
+// the norm.
 type jsonError struct {
-	SchemaVersion int `json:"schemaVersion"`
-	Error         struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-	OutputPath  string `json:"outputPath,omitempty"`
-	OutputBytes int64  `json:"outputBytes,omitempty"`
+	SchemaVersion int        `json:"schemaVersion"`
+	Error         *errorJSON `json:"error"`
+	OutputPath    string     `json:"outputPath,omitempty"`
+	OutputBytes   int64      `json:"outputBytes,omitempty"`
+	Notes         []noteJSON `json:"notes,omitempty"`
 }
 
 // keptOutput names a complete file a failed run left at its output path.
@@ -268,10 +429,11 @@ func renderErrorKept(w io.Writer, jsonMode bool, err error, args []string, kept 
 	}
 	c := classifyArgs(err, args)
 	if jsonMode {
-		var je jsonError
-		je.SchemaVersion = schemaVersion
-		je.Error.Code = c.code
-		je.Error.Message = c.message
+		je := jsonError{
+			SchemaVersion: schemaVersion,
+			Error:         &errorJSON{Code: c.code, Message: c.message},
+			Notes:         currentRunNotes(),
+		}
 		if kept != nil {
 			// Same key resultToJSON emits, so it gets the same normalization.
 			je.OutputPath, je.OutputBytes = displayPath(kept.path), kept.bytes
@@ -345,6 +507,15 @@ func classifyArgs(err error, args []string) classifiedError {
 		}
 	case errors.Is(err, waxtap.ErrRateLimited):
 		c.exitCode, c.code = 5, "rate-limited"
+	case errors.Is(err, waxtap.ErrTemporarilyUnavailable):
+		// Classed with the rate limiting (5), not the availability verdicts (3):
+		// the video is very likely fine and the answer is to come back. Today the
+		// sentinel only ever reaches documents as an error.code on enumeration
+		// errors (--list --json, playlist summaries); enumeration failures never
+		// set the process exit, so the 5 names the class it belongs to rather
+		// than an exit a run can currently produce. No hint for the same reason:
+		// hints render only on a terminal error envelope.
+		c.exitCode, c.code = 5, "temporarily-unavailable"
 	case errors.Is(err, waxtap.ErrIncompleteStream):
 		c.exitCode, c.code, c.hint = 7, "incomplete-stream", incompleteStreamHint
 	case errors.Is(err, waxtap.ErrURLExpired):
@@ -466,7 +637,7 @@ func watchPageSuffix(via bool) string {
 // line to carry either.
 func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
-		env.info("note: WEB metadata via the watch-page fallback (no PO token)\n")
+		env.note(noteWatchPageMetadata, "WEB metadata via the watch-page fallback (no PO token)")
 	}
 }
 
@@ -475,7 +646,7 @@ func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
 // playlist. The note stays on stderr, keeping JSON and -o - stdout parseable.
 func noteDroppedPlaylist(env *appEnv, input, hint string) {
 	if id, err := youtube.ExtractPlaylistID(input); err == nil {
-		env.info("note: ignoring playlist %s; %s\n", id, hint)
+		env.note(notePlaylistIgnored, "ignoring playlist %s; %s", id, hint)
 	}
 }
 
@@ -486,7 +657,7 @@ func noteDroppedPlaylist(env *appEnv, input, hint string) {
 // processing and SponsorBlock preview should stay quiet.
 func noteUseBothWebSources(env *appEnv) {
 	if msg, ok := webSourcesNote(env.cfg); ok {
-		env.info("%s\n", msg)
+		env.note(noteWebSources, "%s", msg)
 	}
 }
 
@@ -505,7 +676,7 @@ func webSourcesNote(c *appConfig) (string, bool) {
 	if !onWebPath || bothSources {
 		return "", false
 	}
-	msg := "note: for WEB extraction, supply both --player-context-url and --session-url (both also require --potoken-url)"
+	msg := "for WEB extraction, supply both --player-context-url and --session-url (both also require --potoken-url)"
 	if !strings.EqualFold(c.client, "web") {
 		msg += ", and set --client web"
 	}
@@ -517,7 +688,7 @@ func webSourcesNote(c *appConfig) (string, bool) {
 // a single error, avoiding a repeated note for playlist failures.
 func noteForcedIOSIncomplete(env *appEnv, err error) {
 	if errors.Is(err, waxtap.ErrIncompleteStream) && strings.EqualFold(env.cfg.client, "ios") {
-		env.info("note: iOS media delivery is unreliable in current testing, even on short clips; omit --client for reliable audio\n")
+		env.note(noteForcedClientRisky, "iOS media delivery is unreliable in current testing, even on short clips; omit --client for reliable audio")
 	}
 }
 
@@ -602,13 +773,14 @@ func friendlyError(err error) string {
 // this file would otherwise surface these as a bare OS sentence naming a step
 // the user never asked for.
 //
-// An occupied destination reached at publish time is its own case. Every CLI
-// path stats the destination first, so the file appeared while this run was
-// working: saying so is more accurate than the pre-flight's wording. Only
-// --collision fail reaches here now, since auto-number renumbers at publish
-// rather than failing, so auto-number is a real remedy to offer. The exit code
-// and machine code stay identical to the pre-flight collision, which is what
-// scripts read.
+// An occupied destination reached at publish time is its own case. A CLI run
+// stats the destination first, so the file most likely appeared while the run
+// was working, but a library caller reaches the same publish with no pre-flight
+// at all: the wording offers that reading rather than asserting a cause this
+// code cannot know. Only --collision fail reaches here now, since auto-number
+// renumbers at publish rather than failing, so auto-number is a real remedy to
+// offer. The exit code and machine code stay identical to the pre-flight
+// collision, which is what scripts read.
 //
 // The concurrency note rides only on the publish steps. Appending it to a
 // create, chmod, sync, or close failure would point away from the real cause;
@@ -621,10 +793,10 @@ func outputFailureMessage(oe *tempfile.OutputError) string {
 	// Renumbering ran out of numbers: only auto-number can produce this, so
 	// advising auto-number would name the mode that just failed.
 	if errors.Is(oe, tempfile.ErrRenumberExhausted) {
-		return fmt.Sprintf("output file already exists: %s, and so does every numbered variant tried; clean up the directory or choose a different output name", path)
+		return renumberExhaustedMessage(path)
 	}
 	if errors.Is(oe, fs.ErrExist) {
-		return fmt.Sprintf("output file already exists: %s (another process created it while this run was working; set --collision to auto-number, overwrite, or skip to allow that)", path)
+		return fmt.Sprintf("output file already exists: %s (it may have appeared while this run was working; set --collision to auto-number, overwrite, or skip)", path)
 	}
 	msg := fmt.Sprintf("could not %s the finished file at %s: %v", oe.Op, path, reason)
 	switch oe.Op {
@@ -632,6 +804,13 @@ func outputFailureMessage(oe *tempfile.OutputError) string {
 		msg += "; another process may be writing the same output path"
 	}
 	return msg
+}
+
+// renumberExhaustedMessage renders a give-up on the numbered sequence. The CLI
+// pre-flight's stat walk and the publish retry stop at the same bound and mean
+// the same thing to the user, so whichever of them gives up first says this.
+func renumberExhaustedMessage(path string) string {
+	return fmt.Sprintf("output file already exists: %s, and so does every numbered variant tried; clean up the directory or choose a different output name", path)
 }
 
 // incompleteStreamMessage renders an incomplete delivery: the fixed sentence,

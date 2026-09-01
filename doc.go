@@ -61,6 +61,12 @@
 //   - [ErrVideoUnavailable]: removed or generic-unavailable (maps a consumer's ErrRemoved)
 //   - [ErrNoAudioFormats]: no audio rendition exists
 //
+// One sentinel sits in neither group. [ErrTemporarilyUnavailable] means the
+// player refused to describe the video right now and expects to later, which is
+// what bulk enumeration draws once a session has asked about enough videos. It
+// is not a skip: the video is very likely fine, and a consumer that drops it
+// loses a real item. Retry it, in a later run or a fresh session.
+//
 // Everything else is a hard error the consumer should surface: extraction and
 // cipher maintenance signals ([ErrExtractionFailed], [ErrCipherSolve],
 // [ErrPlaylistParse]), rate limiting ([ErrRateLimited]), incomplete delivery

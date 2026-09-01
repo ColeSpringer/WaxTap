@@ -7,11 +7,14 @@ import (
 
 func newInfoCmd() *cobra.Command {
 	var (
-		showURLs   bool
-		probe      bool
-		full       bool
-		channels   string
-		noFallback bool
+		showURLs     bool
+		probe        bool
+		full         bool
+		channels     string
+		itag         int
+		codec        string
+		sourcePolicy string
+		noFallback   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "info <url>",
@@ -23,13 +26,25 @@ func newInfoCmd() *cobra.Command {
 				return err
 			}
 			noteUseBothWebSources(env)
-			// Use download's source preference so "Best audio" reports the format
-			// a default download would select.
+			// Build the selection from the same helpers download uses, so info
+			// answers "what would this request give me?" instead of only ever
+			// reporting the default pick. audioSelector also enforces the
+			// --itag/--codec exclusivity, so both commands reject the same input.
 			layout, err := parseChannels(resolveChannelsFlag(cmd, env.cfg, channels))
 			if err != nil {
 				return err
 			}
-			sel := waxtap.BestAudio().WithChannels(layout)
+			if err := validateItag(cmd, itag); err != nil {
+				return err
+			}
+			sel, err := audioSelector(itag, codec, layout)
+			if err != nil {
+				return err
+			}
+			policy, err := parseSourcePolicy(sourcePolicy)
+			if err != nil {
+				return err
+			}
 
 			depth := waxtap.InfoBasic
 			if probe {
@@ -37,7 +52,10 @@ func newInfoCmd() *cobra.Command {
 			}
 			// Resolve/probe the same row the human and JSON output display as "Best
 			// audio", so --probe refines the displayed row, not a surround track.
-			ropts := []waxtap.ReadOption{waxtap.WithChannels(layout)}
+			// The selector already carries --channels (audioSelector applies it to
+			// every selector kind that honors a layout), so WithChannels alongside
+			// it would say nothing new.
+			ropts := []waxtap.ReadOption{waxtap.WithSelector(sel), waxtap.WithSourcePolicy(policy)}
 			if noFallback {
 				ropts = append(ropts, waxtap.WithNoFallback())
 			}
@@ -66,13 +84,20 @@ func newInfoCmd() *cobra.Command {
 			var bestErr error
 			bestIdx := info.BestIndex
 			if info.BestIndex < 0 {
-				bestIdx, bestErr = sel.Select(video.Formats, waxtap.MinimizeLoss(), waxtap.Target{})
+				bestIdx, bestErr = sel.Select(video.Formats, policy, waxtap.Target{})
 			}
 
 			// Same rule download uses for channelsExplicit: a configured default is
 			// as deliberate as the flag, and the built-in stereo default stays quiet.
 			explicit := cmd.Flags().Changed("channels") || env.cfg.channels != ""
-			noteInfoChannelLayout(env, layout, explicit, video.Formats, bestIdx, bestErr)
+			noteInfoChannelLayout(env, layout, explicit, itag, video.Formats, bestIdx, bestErr)
+			// A selector that matched nothing would otherwise print full metadata
+			// with the "Best audio" line simply absent, which reads as a video with
+			// no audio rather than as a request that named a row this video does
+			// not carry. Only for an explicit selector: the default one cannot miss.
+			if bestErr != nil && (itag > 0 || codec != "") {
+				env.note(noteSelectionUnmatched, "no audio format matched the requested selection: %v", bestErr)
+			}
 
 			if env.jsonMode() {
 				return emitInfoJSON(env, info, bestIdx, bestErr, resolved)
@@ -81,10 +106,13 @@ func newInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed best-audio stream URL (sensitive, expires)")
+	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed URL of the selected stream (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "probe the selected stream for authoritative rate/channels/duration")
 	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters) via a token-free watch-page pass")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
+	cmd.Flags().IntVar(&itag, "itag", 0, "report an exact itag instead of the best audio")
+	cmd.Flags().StringVar(&codec, "codec", "", "report the best source matching a codec (hard filter)")
+	cmd.Flags().StringVar(&sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (info names no transcode target, so only prefer:<codec> shifts the pick)")
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
 	bindConfigFlags(cmd.Flags())
 	bindNetworkFlags(cmd.Flags())
@@ -96,7 +124,12 @@ func newInfoCmd() *cobra.Command {
 // satisfy an explicitly requested layout. Selection prefers the layout but falls
 // back to the best available stream, so the mismatch is a note rather than an
 // error, the same as download's warnChannelLayout.
-func noteInfoChannelLayout(env *appEnv, layout waxtap.ChannelLayout, explicit bool, formats []waxtap.Format, bestIdx int, bestErr error) {
+//
+// An exact --itag gets the reason instead of the bare mismatch, as it does in
+// download: format.Select's itag branch ignores the layout, so --channels never
+// entered the selection at all, and the plain note would read as a preference
+// that lost a ranking it never ran in.
+func noteInfoChannelLayout(env *appEnv, layout waxtap.ChannelLayout, explicit bool, itag int, formats []waxtap.Format, bestIdx int, bestErr error) {
 	if !explicit || layout == waxtap.LayoutAny || bestErr != nil {
 		return
 	}
@@ -107,7 +140,12 @@ func noteInfoChannelLayout(env *appEnv, layout waxtap.ChannelLayout, explicit bo
 	if delivered <= 0 || layout.Matches(delivered) {
 		return
 	}
-	env.info("note: requested %s; best audio is %s\n", layout, channelCountLabel(delivered))
+	if itag > 0 {
+		env.note(noteChannelsIgnored, "--itag names an exact encoding, so --channels did not affect selection; requested %s, best audio is %s",
+			layout, channelCountLabel(delivered))
+		return
+	}
+	env.note(noteChannelsUnavailable, "requested %s; best audio is %s", layout, channelCountLabel(delivered))
 }
 
 func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr error, rs *waxtap.ResolvedStream, showURLs bool) {
@@ -209,11 +247,13 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		IsUpcoming      bool          `json:"isUpcoming"`
 		LiveStatus      string        `json:"liveStatus,omitempty"`
 		Availability    string        `json:"availability,omitempty"`
-		ChapterCount    int           `json:"chapterCount"`
+		FullMetadata    bool          `json:"fullMetadata"`
+		ChapterCount    *int          `json:"chapterCount,omitempty"`
 		Chapters        []chapterJSON `json:"chapters,omitempty"`
 		Formats         []formatJSON  `json:"formats"`
 		BestAudioItag   *int          `json:"bestAudioItag,omitempty"`
 		Resolved        *resolvedJSON `json:"resolved,omitempty"`
+		Notes           []noteJSON    `json:"notes,omitempty"`
 	}{
 		SchemaVersion:   schemaVersion,
 		VideoID:         v.ID,
@@ -234,11 +274,21 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		// (with or without --full) stays byte-identical. See the helpers below.
 		LiveStatus:   infoLiveStatus(v.LiveStatus),
 		Availability: infoAvailability(v.Availability),
-		// chapterCount is unchanged; the chapters array is additive and only present
-		// when a watch-page pass (info --full) populated it, so the schema stays 1.
-		ChapterCount: len(v.Chapters),
+		// fullMetadata says whether the watch-page pass ran. It is the honest
+		// signal behind the three keys that depend on it: chapterCount below, and
+		// liveStatus/availability, which a consumer should not trust without it.
+		FullMetadata: info.FullMetadata,
 		Chapters:     chaptersToJSON(v.Chapters),
 		Formats:      formats,
+	}
+	// chapterCount is a pointer so it can be absent rather than 0. Without the
+	// full pass no chapters were ever fetched, and reporting 0 asserted a video
+	// has none when nothing had looked: a consumer building a chapter index read
+	// that as a negative answer. With the pass, 0 is a real answer and is emitted.
+	// bestAudioItag is the same pattern.
+	if info.FullMetadata {
+		n := len(v.Chapters)
+		out.ChapterCount = &n
 	}
 	if !v.PublishDate.IsZero() {
 		out.PublishDate = v.PublishDate.Format("2006-01-02")
@@ -257,6 +307,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 			out.Resolved.ExpiresAt = rs.ExpiresAt.Format("2006-01-02T15:04:05Z07:00")
 		}
 	}
+	out.Notes = env.notesJSON()
 	return env.emitJSON(out)
 }
 

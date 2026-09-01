@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -271,6 +273,140 @@ func TestCollectAudioInputs(t *testing.T) {
 		want := []string{filepath.Join(root, "a.mp3"), filepath.Join(root, "nested", "b.mp3")}
 		if !reflect.DeepEqual(inputs, want) {
 			t.Errorf("inputs = %v, want %v (a hidden root the user named still walks)", inputs, want)
+		}
+	})
+}
+
+// symlinkOrSkip links name to target, skipping the test where the platform will
+// not make one: Windows creates a symlink only in developer mode or with
+// elevation. The skip is a runtime check rather than a build-tagged file because
+// the behavior under test is not unix-only, only the fixture is.
+func symlinkOrSkip(t *testing.T, target, name string) {
+	t.Helper()
+	if err := os.Symlink(target, name); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+}
+
+// A symlinked file failed the regular-file test before any classifier ran, so it
+// was neither processed nor counted anywhere in the summary: it vanished. A
+// single named input has always been stat'd (isLocalFile), so directory mode was
+// the inconsistent one.
+func TestCollectAudioInputsSymlinks(t *testing.T) {
+	t.Run("link to an audio file is collected", func(t *testing.T) {
+		store := t.TempDir()
+		writeFiles(t, store, "album.flac", "notes.txt")
+		dir := t.TempDir()
+		writeFiles(t, dir, "real.mp3")
+		symlinkOrSkip(t, filepath.Join(store, "album.flac"), filepath.Join(dir, "link.flac"))
+		symlinkOrSkip(t, filepath.Join(store, "notes.txt"), filepath.Join(dir, "link.txt"))
+
+		inputs, ignored, err := collectAudioInputs(dir, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(dir, "link.flac"), filepath.Join(dir, "real.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (a link is classified by its own extension)", inputs, want)
+		}
+		if ignored != 1 { // link.txt
+			t.Errorf("ignored = %d, want 1 (the linked .txt)", ignored)
+		}
+	})
+
+	t.Run("broken link counts as ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, "real.mp3")
+		symlinkOrSkip(t, filepath.Join(dir, "gone.flac"), filepath.Join(dir, "dangling.flac"))
+
+		inputs, ignored, err := collectAudioInputs(dir, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(dir, "real.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (a broken link is not an input)", inputs, want)
+		}
+		if ignored != 1 {
+			t.Errorf("ignored = %d, want 1 (the broken link is counted, not dropped)", ignored)
+		}
+	})
+
+	// The link carries an audio extension, so treating it as a regular file would
+	// schedule a directory for encoding.
+	t.Run("link to a directory counts as ignored", func(t *testing.T) {
+		store := t.TempDir()
+		writeFiles(t, store, "inside.mp3")
+		dir := t.TempDir()
+		writeFiles(t, dir, "real.mp3")
+		symlinkOrSkip(t, store, filepath.Join(dir, "linked.mp3"))
+
+		for _, recursive := range []bool{false, true} {
+			inputs, ignored, err := collectAudioInputs(dir, recursive, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{filepath.Join(dir, "real.mp3")}
+			if !reflect.DeepEqual(inputs, want) {
+				t.Errorf("recursive=%v inputs = %v, want %v (a linked directory is neither an input nor descended)", recursive, inputs, want)
+			}
+			if ignored != 1 {
+				t.Errorf("recursive=%v ignored = %d, want 1 (the link itself)", recursive, ignored)
+			}
+		}
+	})
+}
+
+// The excluded output directory was compared by absolute spelling alone, so
+// --dir naming it through a link left the walk treating the run's own output as
+// input. Resolution has to stay additive: --dir usually names a directory the
+// run has not created yet, and EvalSymlinks fails on a path that does not exist.
+func TestCollectAudioInputsExcludeDir(t *testing.T) {
+	t.Run("matches through a link", func(t *testing.T) {
+		root := t.TempDir()
+		writeFiles(t, root, "keep.mp3", "out/old.mp3")
+		link := filepath.Join(t.TempDir(), "out-link")
+		symlinkOrSkip(t, filepath.Join(root, "out"), link)
+
+		inputs, _, err := collectAudioInputs(root, true, link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(root, "keep.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (the output directory was named through a link)", inputs, want)
+		}
+	})
+
+	t.Run("a directory that does not exist yet excludes nothing", func(t *testing.T) {
+		root := t.TempDir()
+		writeFiles(t, root, "keep.mp3", "sub/deep.mp3")
+
+		inputs, _, err := collectAudioInputs(root, true, filepath.Join(root, "out"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(root, "keep.mp3"), filepath.Join(root, "sub", "deep.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (an unresolvable --dir must not match every directory)", inputs, want)
+		}
+	})
+
+	// --dir equal to the root is not an exclusion, or the run would skip
+	// everything. That still has to hold when the two are spelled differently.
+	t.Run("the root itself is never the exclusion", func(t *testing.T) {
+		target := t.TempDir()
+		writeFiles(t, target, "keep.mp3")
+		link := filepath.Join(t.TempDir(), "root-link")
+		symlinkOrSkip(t, target, link)
+
+		inputs, _, err := collectAudioInputs(link, false, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(link, "keep.mp3")}
+		if !reflect.DeepEqual(inputs, want) {
+			t.Errorf("inputs = %v, want %v (--dir naming the root through a link is not an exclusion)", inputs, want)
 		}
 	})
 }
@@ -549,4 +685,146 @@ func TestRunBatchJobsReportsPublishedPath(t *testing.T) {
 	if want := filepath.Join(dir, "copy (1).mp3"); outcomes[1].output != want {
 		t.Errorf("copied outcome path = %q, want %q", outcomes[1].output, want)
 	}
+}
+
+// A recursive walk of a root that is itself a symlink to a directory used to
+// find nothing at all: filepath.WalkDir Lstats the final component of its root
+// and does not follow a link there, so the walk visited exactly one entry (the
+// link) and counted it ignored. The shallow path reads the same root through
+// os.ReadDir, which follows the link, so `transcode <link>` worked and
+// `transcode <link> -r` reported "no recognized audio files found" over a
+// library of thousands.
+func TestCollectAudioInputsSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	writeFiles(t, real, "a.flac", "album/b.flac", "album/notes.txt")
+	link := filepath.Join(base, "link")
+	symlinkOrSkip(t, real, link)
+
+	t.Run("recursive walk follows the root link", func(t *testing.T) {
+		inputs, ignored, err := collectAudioInputs(link, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Spelled under the argument, exactly as the shallow path spells them:
+		// downstream planning mirrors --dir layouts with literal prefix math
+		// (relUnder), and the summary should name paths the way the user did.
+		want := []string{filepath.Join(link, "a.flac"), filepath.Join(link, "album", "b.flac")}
+		if !slices.Equal(inputs, want) {
+			t.Errorf("inputs = %v, want %v", inputs, want)
+		}
+		if ignored != 1 {
+			t.Errorf("ignored = %d, want 1 (notes.txt)", ignored)
+		}
+	})
+
+	t.Run("matches a walk of the real root", func(t *testing.T) {
+		viaLink, _, err := collectAudioInputs(link, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		viaReal, _, err := collectAudioInputs(real, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(viaLink) != len(viaReal) {
+			t.Fatalf("link walk found %d files, real walk %d; the two roots name one directory", len(viaLink), len(viaReal))
+		}
+	})
+
+	t.Run("dir exclusion still holds under a linked root", func(t *testing.T) {
+		out := filepath.Join(real, "out")
+		writeFiles(t, out, "done.flac")
+		inputs, _, err := collectAudioInputs(link, true, filepath.Join(link, "out"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, in := range inputs {
+			if strings.Contains(in, "done.flac") {
+				t.Errorf("the excluded output dir was walked: %v", inputs)
+			}
+		}
+	})
+}
+
+// The planner's guards compare filepath.Abs spellings, so a --dir that reaches
+// an input's directory through a symlink used to evade all three: the
+// overwrite-an-input rejection fell through to a misleading collision error,
+// the unchanged-in-place detection planned a self-copy that rewrote the input
+// under --collision overwrite, and two spellings of one output were never seen
+// as a duplicate.
+func TestPlanBatchOutputsSeesThroughLinks(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("overwrite-an-input guard", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "src")
+		writeFiles(t, root, "song.mp3")
+		link := filepath.Join(base, "dirlink")
+		symlinkOrSkip(t, root, link)
+
+		// force makes the mp3->mp3 mapping a real re-encode, so the planned
+		// output is the input file itself, reached through the link.
+		_, err := planBatchOutputs(ctx, []string{filepath.Join(root, "song.mp3")}, root, link, false,
+			waxtap.FormatMP3, waxtap.ProcessSpec{}, collisionFail, true, "transcoded",
+			stubProbe(map[string]string{"song.mp3": "mp3"}))
+		if err == nil {
+			t.Fatal("a re-encode onto its own input through a link was planned")
+		}
+		if !strings.Contains(err.Error(), "overwrite an input") {
+			t.Errorf("err = %v, want the overwrite-an-input rejection, not a collision message", err)
+		}
+	})
+
+	t.Run("unchanged in place through a link", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "src")
+		writeFiles(t, root, "song.mp3")
+		link := filepath.Join(base, "dirlink")
+		symlinkOrSkip(t, root, link)
+
+		jobs, err := planBatchOutputs(ctx, []string{filepath.Join(root, "song.mp3")}, root, link, false,
+			waxtap.FormatMP3, waxtap.ProcessSpec{}, collisionFail, false, "transcoded",
+			stubProbe(map[string]string{"song.mp3": "mp3"}))
+		if err != nil {
+			t.Fatalf("planBatchOutputs = %v; a no-op mapped onto itself is unchanged, not a collision", err)
+		}
+		if len(jobs) != 1 || jobs[0].action != actUnchanged {
+			t.Fatalf("jobs = %+v, want one actUnchanged; a self-copy rewrites the input it reads", jobs)
+		}
+	})
+
+	t.Run("duplicate outputs across two spellings", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "src")
+		writeFiles(t, root, "song.wav", "song.flac")
+		link := filepath.Join(base, "dirlink")
+		symlinkOrSkip(t, root, link)
+
+		// In place (no --dir), both re-encode to song.mp3 beside themselves: one
+		// physical destination spelled two ways.
+		inputs := []string{filepath.Join(root, "song.wav"), filepath.Join(link, "song.flac")}
+		_, err := planBatchOutputs(ctx, inputs, root, "", false,
+			waxtap.FormatMP3, waxtap.ProcessSpec{}, collisionFail, false, "transcoded", stubProbe(nil))
+		if err == nil {
+			t.Fatal("two inputs mapping to one physical output were both planned")
+		}
+		if !strings.Contains(err.Error(), "both map to output") {
+			t.Errorf("err = %v, want the duplicate-output rejection", err)
+		}
+	})
+
+	t.Run("a --dir that does not exist yet still plans", func(t *testing.T) {
+		root := t.TempDir()
+		writeFiles(t, root, "song.wav")
+		jobs, err := planBatchOutputs(ctx, []string{filepath.Join(root, "song.wav")}, root,
+			filepath.Join(root, "not-yet"), false, waxtap.FormatMP3, waxtap.ProcessSpec{}, collisionFail, false,
+			"transcoded", stubProbe(nil))
+		if err != nil {
+			t.Fatalf("planBatchOutputs = %v; resolution must fall back for a directory the run will create", err)
+		}
+		if len(jobs) != 1 || jobs[0].action != actProcess {
+			t.Fatalf("jobs = %+v, want one actProcess", jobs)
+		}
+	})
 }

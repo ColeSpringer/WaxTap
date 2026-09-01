@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -315,11 +316,27 @@ func parseRanges(specs []string) ([]waxtap.TimeRange, error) {
 	return ranges, nil
 }
 
-// parseTimestamp parses [HH:]MM:SS[.frac], a Go duration, or bare seconds.
+// plainSeconds is the bare-seconds grammar: a decimal number written with
+// digits and at most one point, and nothing else. ".5" and "5." stay accepted
+// because they parsed before the gate existed and rejecting them would be a
+// narrowing nobody asked for; what the gate exists to refuse is ParseFloat's
+// exotica (exponents, underscores, hex floats, inf), which either lies about
+// being a timestamp or does not survive the trip to a Duration.
+var plainSeconds = regexp.MustCompile(`^(\d+(\.\d*)?|\.\d+)$`)
+
+// parseTimestamp parses [HH:]MM:SS[.frac], a Go duration, or bare seconds. Every
+// form is unsigned.
 func parseTimestamp(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, usagef("empty timestamp")
+	}
+	// A leading sign is grammar tidying, not a fix: parseRanges cuts on the first
+	// "-", so a negative timestamp cannot reach here at all, and "+1" was only
+	// ever a second spelling of "1" that time.ParseDuration and ParseFloat happened
+	// to take. The grammar is stated here, so it is enforced here.
+	if s[0] == '+' || s[0] == '-' {
+		return 0, usagef("invalid timestamp %q", s)
 	}
 	if strings.Contains(s, ":") {
 		return parseClock(s)
@@ -327,10 +344,42 @@ func parseTimestamp(s string) (time.Duration, error) {
 	if d, err := time.ParseDuration(s); err == nil {
 		return d, nil
 	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil && f >= 0 {
-		return time.Duration(f * float64(time.Second)), nil
+	// Gating on plainSeconds instead of handing the string straight to ParseFloat
+	// drops exponents ("1e3"), digit separators ("1_000") and hex floats ("0x1p3"),
+	// none of which this CLI ever documented, and, importantly, "inf": a Duration
+	// built from +Inf is MinInt64, so `--cut-range inf-2` used to succeed and cut
+	// from 292 years before the file. "nan" was already rejected by the old f >= 0
+	// test, which NaN fails.
+	if !plainSeconds.MatchString(s) {
+		return 0, usagef("invalid timestamp %q", s)
 	}
-	return 0, usagef("invalid timestamp %q", s)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, usagef("invalid timestamp %q", s)
+	}
+	d, ok := secondsToDuration(f)
+	if !ok {
+		return 0, usagef("invalid timestamp %q: too large", s)
+	}
+	return d, nil
+}
+
+// secondsToDuration converts seconds to a Duration, reporting false when the
+// value does not fit. Callers pass a non-negative, non-NaN value.
+//
+// Converting an out-of-range float to an integer type is undefined in Go, and in
+// practice lands on MinInt64, so an unchecked value does not saturate at the top
+// of the range: it flips sign, which is how "inf" produced a cut starting before
+// the file. A digits-only grammar alone does not close that, since a long enough
+// literal overflows the multiply just as well.
+func secondsToDuration(sec float64) (time.Duration, bool) {
+	ns := sec * float64(time.Second)
+	// float64(math.MaxInt64) rounds up to 1<<63, which is itself out of range, so
+	// the bound has to be exclusive.
+	if ns >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	return time.Duration(ns), true
 }
 
 // parseClock parses a colon-separated [HH:]MM:SS[.frac] timestamp. Only the
@@ -344,8 +393,16 @@ func parseClock(s string) (time.Duration, error) {
 	var total float64
 	last := len(parts) - 1
 	for i, p := range parts {
-		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
-		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		p = strings.TrimSpace(p)
+		// Each field takes the same grammar as bare seconds. It replaces the
+		// per-field sign, NaN and Inf guards this loop used to carry: those were
+		// only ever needed because ParseFloat accepted those spellings first.
+		// ParseFloat can still fail on a field this shape, with ErrRange.
+		if !plainSeconds.MatchString(p) {
+			return 0, usagef("invalid timestamp %q", s)
+		}
+		v, err := strconv.ParseFloat(p, 64)
+		if err != nil {
 			return 0, usagef("invalid timestamp %q", s)
 		}
 		if i != last && v != math.Trunc(v) {
@@ -356,5 +413,9 @@ func parseClock(s string) (time.Duration, error) {
 		}
 		total = total*60 + v
 	}
-	return time.Duration(total * float64(time.Second)), nil
+	d, ok := secondsToDuration(total)
+	if !ok {
+		return 0, usagef("invalid timestamp %q: too large", s)
+	}
+	return d, nil
 }

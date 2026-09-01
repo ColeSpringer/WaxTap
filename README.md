@@ -50,10 +50,26 @@ and run `waxtap --help`. Unsigned macOS binaries may need
 Media commands accept a YouTube URL or bare video or playlist ID. `download`
 also accepts a channel URL or bare `UC` ID, resolving to the channel's uploads
 feed. `cut`, `transcode`, and `normalize` also take local files. Every command
-has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 2).
+has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 3).
+
+`--quiet` and `--verbose` are mutually exclusive; passing both is exit 2.
+
+In `schemaVersion` 3 every failure, in every document, is an object:
+`{"code": "needs-po-token", "message": "..."}`. Playlist and batch item errors
+used to be bare strings, so only the top-level envelope could be switched on.
+Documents also carry a `notes` array in the same `{code, detail}` shape as
+`warnings`, holding the diagnostics that previously appeared only as `note:`
+lines on stderr and vanished under `--quiet`. Batch items that failed or never
+ran no longer name an output path they did not write, batch summary counts are
+always present and include `total`, and `chapterCount` is omitted rather than
+reported as 0 when chapters were never fetched.
+
+A playlist run's exit code is the worst single item's classified code, so a
+one-item playlist whose video needs a PO token exits 8 rather than a generic 1.
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
+waxtap info <video-url> --itag 251 --probe       # preview what a selection picks
 waxtap formats <video-url>                      # all audio formats
 waxtap download <video-url> -o track            # keep source
 waxtap download <video-url> --format flac -o track.flac
@@ -124,8 +140,11 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   pass and defaults to `limit`; correcting per track would undo the spacing album
   mode exists to keep. Its `cap` clamps the one gain by the album's least
   true-peak headroom rather than per track, so the loudest track sets the
-  headroom for all of them and the miss can be large. Both modes report a miss
-  over 1 LU.
+  headroom for all of them and the miss can be large. The reporting threshold
+  follows the mode's own promise: `limit` iterates onto the target, so it reports
+  any miss past the 0.3 LU it converges to, while the single-pass policies
+  (`cap`, and `--album` in either mode) report a miss over 1 LU, below which the
+  clamp they can name is inside the noise of the encode.
 - Decoding runs in float, so output depth follows the decoded stream: a lossy
   source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
   AIFF. That is lossless but larger, and some older DAWs and hardware players
@@ -248,9 +267,20 @@ func main() {
 A default `Download` (nil `ProcessSpec`) delivers the source stream
 byte-for-byte: no processing, `SourceBytes == OutputBytes`, `Transcoded` false.
 Library selection starts from `LayoutAny` and can rank a surround track highest;
-pass `WithChannels(LayoutStereo)` to match the CLI. `Client.Enumerate` expands a
-playlist or channel URL with `Skip`/`Stop` predicates for an archive cursor, and
+pass `WithChannels(LayoutStereo)` to match the CLI. `WithSelector` and
+`WithSourcePolicy` give `Info` and `InfoResult` the same selection `Download`
+takes, so a caller can see what a given `--itag` or codec would pick without
+fetching it; a selector that names its own layout beats `WithChannels`, which
+only fills in one that named none. `Resolve` takes its selector as a parameter,
+so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist or
+channel URL with `Skip`/`Stop` predicates for an archive cursor, and
 `WithFullMetadata()` adds publish date and chapters.
+
+Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
+throttle starts refusing entries, because the refusal is worded exactly like a
+removed video and only a fresh identity tells them apart. Entries left over
+after the rotation budget report `ErrTemporarilyUnavailable`, which means retry
+rather than skip.
 
 Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
 `ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and
@@ -303,6 +333,10 @@ config/environment only.
 | `webContextTimeoutSeconds` | `WAXTAP_WEB_CONTEXT_TIMEOUT` | - |
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
 | `chunkTimeoutSeconds` | `WAXTAP_CHUNK_TIMEOUT` | - |
+
+`procs` bounds the concurrent audio-processing operations. Zero, the default,
+follows `GOMAXPROCS`; a negative value disables the limit entirely. Both are
+deliberate, so neither is rejected.
 
 ## PO tokens and WEB
 

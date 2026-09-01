@@ -121,6 +121,23 @@ type fileConfig struct {
 // a WAXTAP_* environment variable, then the JSON config file, then a built-in
 // default.
 func loadConfig(cmd *cobra.Command) (*appConfig, error) {
+	flags := cmd.Flags()
+	// --quiet and --verbose ask for opposite things and the consumers do not agree
+	// on which one wins: newLogger lets verbose raise the level, the progress
+	// reporter looks only at quiet, and download's list heartbeat wants neither
+	// set. Picking a winner here would only move the disagreement, so the pair is
+	// a usage error. This is the Changed question rejectChangedFlags asks, not the
+	// resolved value: neither flag has a config or environment layer, so an
+	// explicit pair on one command line is the only way to reach it.
+	//
+	// version and exit-codes never reach loadConfig at all, so the pair stays inert
+	// there. That is not a hole: each prints one fixed document that neither flag
+	// shapes (they read only --json), so there is nothing to contradict. cache
+	// calls loadConfig directly for its directory, so it is covered like the
+	// commands that go through setup.
+	if flags.Changed("quiet") && flags.Changed("verbose") {
+		return nil, usagef("--quiet and --verbose are mutually exclusive")
+	}
 	fc, err := readConfigFile(cmd)
 	if err != nil {
 		return nil, err
@@ -130,7 +147,6 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		return nil, err
 	}
 
-	flags := cmd.Flags()
 	str := func(name string, file, env *string, def string) string {
 		return coalesceString(def, file, env, flagPtr(flags, name))
 	}
@@ -612,6 +628,17 @@ func validateProxyURL(raw string) (*url.URL, error) {
 	if u.Host == "" {
 		return nil, usagef("invalid --proxy %q: missing host (e.g. http://host:port)", shown)
 	}
+	// url.Parse rejects a port that is not a plain number, so what reaches here is
+	// digits and the only mistake left is a number no TCP port can hold. Left
+	// unchecked, the transport accepts the setting and every request fails as a
+	// proxyconnect error, which classifies as a network failure (exit 9) and buries
+	// a typo in a report about the network. Atoi's only possible error on a digit
+	// string is an overflow, which is out of range too, so it joins the same branch.
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return nil, usagef("invalid --proxy %q: port %q is out of range (want 1-65535)", shown, port)
+		}
+	}
 	return u, nil
 }
 
@@ -707,10 +734,29 @@ func coalesceDuration(def time.Duration, layers ...*float64) time.Duration {
 	v := def
 	for _, l := range layers {
 		if l != nil {
-			v = time.Duration(*l * float64(time.Second))
+			v = clampedSeconds(*l)
 		}
 	}
 	return v
+}
+
+// clampedSeconds converts a config seconds value to a Duration without the
+// overflow the naive multiply hides: past ~292 years of seconds the product
+// exceeds int64 and the conversion wraps NEGATIVE, so an absurdly large timeout
+// silently became a sub-zero one. Config has no per-key error path here
+// (validation runs elsewhere and these are float layers), so the value
+// saturates at the type's bounds instead: a 10^15-second timeout behaves as
+// "practically none", which is what it meant. Flag-side timestamps reject
+// instead (secondsToDuration); a config file is not an interactive surface.
+func clampedSeconds(sec float64) time.Duration {
+	const maxSec = float64(math.MaxInt64) / float64(time.Second)
+	if sec >= maxSec {
+		return math.MaxInt64
+	}
+	if sec <= -maxSec {
+		return math.MinInt64
+	}
+	return time.Duration(sec * float64(time.Second))
 }
 
 // flagPtr returns the current flag value only when the user set the flag.

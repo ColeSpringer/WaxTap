@@ -75,9 +75,14 @@ func PublishNew(src, dst string) error {
 	return nil
 }
 
-// maxPublishRenumber bounds the renumbering retry. A destination whose first
+// MaxPublishRenumber bounds the renumbering retry. A destination whose first
 // thousand siblings are all taken is a runaway loop, not a busy directory.
-const maxPublishRenumber = 1000
+//
+// It is exported for the CLI's auto-number pre-flight, which walks the same
+// sequence with a stat before anything is staged. A pre-flight that searched
+// further than the publish would hand the publish a name the publish then
+// refuses; one constant keeps both ends giving up at the same place.
+const MaxPublishRenumber = 1000
 
 // numberedSuffix matches a trailing " (n)" on a file stem.
 var numberedSuffix = regexp.MustCompile(`^(.*) \((\d+)\)$`)
@@ -129,7 +134,7 @@ func splitNumbered(path string) (base string, n int) {
 // concurrency the numbering is not deterministic: racing runs can land (2) and
 // (3) with (1) belonging to neither.
 func PublishNewNumbered(src, dst string) (string, error) {
-	return publishNewNumbered(src, dst, maxPublishRenumber)
+	return publishNewNumbered(src, dst, MaxPublishRenumber)
 }
 
 // ErrRenumberExhausted reports that PublishNewNumbered gave up: the destination

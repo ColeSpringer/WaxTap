@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -18,6 +19,32 @@ type rootFlags struct {
 }
 
 var rootFlagsValue rootFlags
+
+// runNotes holds the current run's note collector so report can attach notes to
+// an error envelope, which is rendered from main after the appEnv is gone. It is
+// the rootFlagsValue pattern, with a mutex because playlist items collect
+// concurrently; newRootCmd resets it so one test cannot color the next.
+var (
+	runNotesMu sync.Mutex
+	runNotes   *noteCollector
+)
+
+func setRunNotes(c *noteCollector) {
+	runNotesMu.Lock()
+	defer runNotesMu.Unlock()
+	runNotes = c
+}
+
+// currentRunNotes returns the notes collected by this run, or nil.
+func currentRunNotes() []noteJSON {
+	runNotesMu.Lock()
+	c := runNotes
+	runNotesMu.Unlock()
+	if c == nil {
+		return nil
+	}
+	return c.snapshot()
+}
 
 // jsonRequested reports whether --json survives a parse of args. Flag parsing
 // aborts at the first bad flag, so a --json after one never reaches
@@ -39,6 +66,10 @@ func jsonRequested(args []string) bool {
 // newRootCmd builds the root command, its persistent flags, and the full
 // subcommand set. cobra adds the `help` and `completion` commands on its own.
 func newRootCmd() *cobra.Command {
+	// A fresh command is a fresh run: drop any collector left by an earlier one so
+	// its notes cannot end up on this run's error envelope. Tests build root
+	// commands in the same process, which is where that would show.
+	setRunNotes(nil)
 	root := &cobra.Command{
 		Use:   "waxtap",
 		Short: "Audio-focused YouTube downloader and local-audio processor",

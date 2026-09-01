@@ -27,6 +27,9 @@ func TestInfoChaptersDetail(t *testing.T) {
 			},
 		},
 		Client: "ANDROID_VR",
+		// Chapters only ever come from the watch-page pass, so a fixture carrying
+		// them is a --full result.
+		FullMetadata: true,
 	}
 
 	t.Run("human list", func(t *testing.T) {
@@ -67,13 +70,37 @@ func TestInfoChaptersDetail(t *testing.T) {
 	})
 
 	t.Run("absent when no chapters", func(t *testing.T) {
-		plain := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "ANDROID_VR"}
+		plain := &waxtap.InfoResult{
+			Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "ANDROID_VR", FullMetadata: true,
+		}
 		var out bytes.Buffer
 		if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, plain, 0, noBest, nil); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(out.String(), `"chapters"`) {
 			t.Errorf("JSON should omit the chapters array when empty, got:\n%s", out.String())
+		}
+		// The pass ran and found none, so 0 is a real answer and is reported.
+		if !strings.Contains(out.String(), `"chapterCount": 0`) {
+			t.Errorf("a completed full pass must report 0 chapters, got:\n%s", out.String())
+		}
+	})
+
+	// Without the full pass nothing ever looked for chapters, so reporting 0
+	// asserts an answer that was never sought: a consumer building a chapter
+	// index read it as "this video has none".
+	t.Run("omitted without full metadata", func(t *testing.T) {
+		basic := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "ANDROID_VR"}
+		var out bytes.Buffer
+		if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, basic, 0, noBest, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := out.String()
+		if strings.Contains(got, `"chapterCount"`) {
+			t.Errorf("chapterCount asserted without a full pass, got:\n%s", got)
+		}
+		if !strings.Contains(got, `"fullMetadata": false`) {
+			t.Errorf("want fullMetadata false so a consumer knows why, got:\n%s", got)
 		}
 	})
 }
@@ -233,24 +260,29 @@ func TestNoteInfoChannelLayout(t *testing.T) {
 		name     string
 		layout   waxtap.ChannelLayout
 		explicit bool
+		itag     int
 		formats  []waxtap.Format
 		bestIdx  int
 		bestErr  error
 		want     string // substring expected in the note; "" means no note
 	}{
-		{"mono request on a stereo best", waxtap.LayoutMono, true, formats, 0, nil, "requested mono; best audio is stereo (2ch)"},
-		{"stereo request on a surround best", waxtap.LayoutStereo, true, formats, 1, nil, "requested stereo; best audio is 6ch"},
-		{"satisfied request stays quiet", waxtap.LayoutStereo, true, formats, 0, nil, ""},
-		{"default (not explicit) stays quiet", waxtap.LayoutStereo, false, formats, 1, nil, ""},
-		{"any never notes", waxtap.LayoutAny, true, formats, 1, nil, ""},
-		{"selection failure stays quiet", waxtap.LayoutMono, true, formats, -1, selErr, ""},
-		{"index out of range stays quiet", waxtap.LayoutMono, true, formats, 9, nil, ""},
-		{"unknown channel count stays quiet", waxtap.LayoutMono, true, []waxtap.Format{{Itag: 140}}, 0, nil, ""},
+		{"mono request on a stereo best", waxtap.LayoutMono, true, 0, formats, 0, nil, "requested mono; best audio is stereo (2ch)"},
+		{"stereo request on a surround best", waxtap.LayoutStereo, true, 0, formats, 1, nil, "requested stereo; best audio is 6ch"},
+		{"satisfied request stays quiet", waxtap.LayoutStereo, true, 0, formats, 0, nil, ""},
+		{"default (not explicit) stays quiet", waxtap.LayoutStereo, false, 0, formats, 1, nil, ""},
+		{"any never notes", waxtap.LayoutAny, true, 0, formats, 1, nil, ""},
+		{"selection failure stays quiet", waxtap.LayoutMono, true, 0, formats, -1, selErr, ""},
+		{"index out of range stays quiet", waxtap.LayoutMono, true, 0, formats, 9, nil, ""},
+		{"unknown channel count stays quiet", waxtap.LayoutMono, true, 0, []waxtap.Format{{Itag: 140}}, 0, nil, ""},
+		// An itag picks the row on its own, so the mismatch note has to say that
+		// --channels never ran rather than implying it lost.
+		{"itag names the reason", waxtap.LayoutStereo, true, 258, formats, 1, nil, "--itag names an exact encoding, so --channels did not affect selection; requested stereo, best audio is 6ch"},
+		{"itag satisfying the layout stays quiet", waxtap.LayoutStereo, true, 251, formats, 0, nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			noteInfoChannelLayout(noteEnv(&buf), tc.layout, tc.explicit, tc.formats, tc.bestIdx, tc.bestErr)
+			noteInfoChannelLayout(noteEnv(&buf), tc.layout, tc.explicit, tc.itag, tc.formats, tc.bestIdx, tc.bestErr)
 			got := buf.String()
 			switch {
 			case tc.want == "" && got != "":
@@ -323,5 +355,119 @@ func TestFormatsKeepsWatchPageBreadcrumb(t *testing.T) {
 	}
 	if !strings.Contains(string(src), "emitWatchPageBreadcrumb(env, info)") {
 		t.Error("formats.go no longer emits the watch-page breadcrumb; it has no Client line to carry the suffix instead")
+	}
+}
+
+// TestInfoSelectionFlags covers F15's CLI half: info can be asked what a
+// specific request would pick, and it validates that request through the helpers
+// download uses, so the two commands cannot drift into different verdicts on the
+// same flags.
+func TestInfoSelectionFlags(t *testing.T) {
+	t.Run("flags registered", func(t *testing.T) {
+		f := newInfoCmd().Flags()
+		for _, name := range []string{"itag", "codec", "source-policy"} {
+			if f.Lookup(name) == nil {
+				t.Errorf("info should expose --%s; without it a preview needs an actual download", name)
+			}
+		}
+	})
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"itag and codec are mutually exclusive", []string{"dummyVideo0", "--itag", "251", "--codec", "opus"}},
+		{"a zero itag is rejected", []string{"dummyVideo0", "--itag", "0"}},
+		{"a negative itag is rejected", []string{"dummyVideo0", "--itag=-5"}},
+		{"an unknown source policy is rejected", []string{"dummyVideo0", "--source-policy", "bogus"}},
+		{"prefer: needs a known codec", []string{"dummyVideo0", "--source-policy", "prefer:bogus"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every one of these is rejected before the extraction call, so the test
+			// never touches the network.
+			cmd := newInfoCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if _, ok := errors.AsType[*usageError](err); !ok {
+				t.Errorf("info %v: err = %v (%T), want *usageError", tc.args, err, err)
+			}
+		})
+	}
+}
+
+// TestInfoSelectorDrivesThePreview is the substance of F15: the selector and
+// policy the flags build decide the row info reports, so `info --itag 338`
+// answers "what would that give me?" instead of describing the default pick.
+func TestInfoSelectorDrivesThePreview(t *testing.T) {
+	// The 6ch track outranks stereo on bitrate but loses the layout comparison, so
+	// a default run never shows it; itag 140 is the aac row a codec preference
+	// reaches. Tier fields are left unset, so bitrate decides the rest.
+	formats := []waxtap.Format{
+		{Itag: 251, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, AverageBitrate: 160000, IsOriginal: waxtap.Yes},
+		{Itag: 338, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 6, AverageBitrate: 256000, IsOriginal: waxtap.Yes},
+		{Itag: 140, Codec: "mp4a.40.2", Extension: "m4a", MIMEType: "audio/mp4", Channels: 2, AverageBitrate: 128000, IsOriginal: waxtap.Yes},
+	}
+	// The same three steps info's RunE takes, in the same order.
+	pick := func(t *testing.T, itag int, codec, sourcePolicy string) int {
+		t.Helper()
+		sel, err := audioSelector(itag, codec, waxtap.LayoutStereo)
+		if err != nil {
+			t.Fatalf("audioSelector(%d, %q): %v", itag, codec, err)
+		}
+		policy, err := parseSourcePolicy(sourcePolicy)
+		if err != nil {
+			t.Fatalf("parseSourcePolicy(%q): %v", sourcePolicy, err)
+		}
+		idx, err := sel.Select(formats, policy, waxtap.Target{})
+		if err != nil {
+			t.Fatalf("select (itag=%d codec=%q policy=%q): %v", itag, codec, sourcePolicy, err)
+		}
+		return formats[idx].Itag
+	}
+
+	cases := []struct {
+		name         string
+		itag         int
+		codec        string
+		sourcePolicy string
+		want         int
+	}{
+		{"default previews the stereo best", 0, "", "minimize-loss", 251},
+		{"itag previews the exact row", 338, "", "minimize-loss", 338},
+		{"codec filters to its family", 0, "aac", "minimize-loss", 140},
+		{"prefer: biases without filtering", 0, "", "prefer:aac", 140},
+		{"prefer: on the winner changes nothing", 0, "", "prefer:opus", 251},
+		// info names no transcode target, so minimize-loss and best-native both fall
+		// through to plain best-audio ranking. Only prefer:<codec> moves the pick.
+		{"best-native matches minimize-loss with no target", 0, "", "best-native", 251},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pick(t, tc.itag, tc.codec, tc.sourcePolicy); got != tc.want {
+				t.Errorf("selection = itag %d, want itag %d", got, tc.want)
+			}
+		})
+	}
+
+	// The rows above only prove the selection; this pins that info hands that same
+	// selection to the library rather than resolving and probing the default row.
+	// ReadOption closes over an unexported type, so package main cannot apply one
+	// to inspect it, and the probe itself is behind a network call.
+	src, err := os.ReadFile("info.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"waxtap.WithSelector(sel)",                                  // --probe probes the requested row
+		"waxtap.WithSourcePolicy(policy)",                           // and ranks it under the requested policy
+		"env.client.Resolve(cmd.Context(), args[0], sel, ropts...)", // --show-url signs that row's URL
+		"sel.Select(video.Formats, policy,",                         // and the displayed row agrees
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("info.go no longer contains %q; the preview would report a row the flags did not ask for", want)
+		}
 	}
 }

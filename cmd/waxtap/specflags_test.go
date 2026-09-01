@@ -65,6 +65,23 @@ func TestParseTimestamp(t *testing.T) {
 		{"", 0, false},
 		{"abc", 0, false},
 		{"1:2:3:4", 0, false},
+		// The bare-seconds form is digits with an optional fraction, not
+		// everything strconv.ParseFloat happens to read.
+		{"1e3", 0, false},
+		{"1_000", 0, false},
+		{"0x1p3", 0, false},
+		// "inf" converts to MinInt64 as a Duration, so accepting it built a cut
+		// range starting 292 years before the file. "nan" was already rejected;
+		// the row is here so it stays that way.
+		{"inf", 0, false},
+		{"Inf", 0, false},
+		{"nan", 0, false},
+		// Timestamps are unsigned in every form, including the Go duration one.
+		{"+1", 0, false},
+		{"+1s", 0, false},
+		// Digits that overflow the multiply into nanoseconds flip sign the same
+		// way "inf" did.
+		{"99999999999999999999999", 0, false},
 	}
 	for _, tt := range tests {
 		got, err := parseTimestamp(tt.in)
@@ -94,6 +111,9 @@ func TestParseClockStrict(t *testing.T) {
 		{"1.5:00", 0, false},                 // only the seconds field may be fractional
 		{"nan:00", 0, false},
 		{"1:inf", 0, false},
+		{"1e1:00", 0, false},                  // fields take digits, not exponents
+		{"+1:00", 0, false},                   // no sign, in any field
+		{"99999999999999999999:00", 0, false}, // too large to hold as a Duration
 	}
 	for _, tt := range tests {
 		got, err := parseClock(tt.in)
@@ -127,10 +147,24 @@ func TestParseRanges(t *testing.T) {
 }
 
 func TestParseRangesRejectsBad(t *testing.T) {
-	for _, in := range [][]string{{"nodash"}, {"5-5"}, {"10-5"}, {"a-b"}} {
+	for _, in := range [][]string{{"nodash"}, {"5-5"}, {"10-5"}, {"a-b"}, {"+1-+2"}} {
 		if _, err := parseRanges(in); err == nil {
 			t.Errorf("parseRanges(%v) expected error", in)
 		}
+	}
+}
+
+// TestParseRangesRejectsInfinity pins the "inf" fix at the range level, where the
+// damage showed: time.Duration(math.Inf(1)*1e9) is MinInt64, so `--cut-range
+// inf-2` used to pass the end-after-start check and hand the pipeline a range
+// starting at -2562047h.
+func TestParseRangesRejectsInfinity(t *testing.T) {
+	got, err := parseRanges([]string{"inf-2"})
+	if err == nil {
+		t.Fatalf("parseRanges(inf-2) = %v, want a usage error", got)
+	}
+	if !isUsageError(err) {
+		t.Errorf("parseRanges(inf-2) err is %T, want usageError", err)
 	}
 }
 
@@ -358,6 +392,59 @@ func TestChannelsAndDownmix_RejectsSurroundAndAny(t *testing.T) {
 	}
 }
 
+// TestValidateLocalSourceFlagsChecksChannelsValue pins the order inside
+// validateLocalSourceFlags: an unparseable --channels is a typo report before it
+// is an inert-flag report. resolveChannels is the only other caller of
+// parseChannels, and it runs later and only once a downmix is in force, so a
+// misspelled layout on a local input used to come back as "has no effect".
+func TestValidateLocalSourceFlagsChecksChannelsValue(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"typo alone", []string{"--channels", "sterio"}, "invalid --channels"},
+		{"typo with downmix", []string{"--channels", "sterio", "--downmix"}, "invalid --channels"},
+		{"valid layout is still inert", []string{"--channels", "mono"}, "has no effect on a local file"},
+		{"valid layout with downmix passes", []string{"--channels", "mono", "--downmix"}, ""},
+		{"unset passes", nil, ""},
+	}
+	// Every process command shares the helper, so running the same table against
+	// each one is what shows the five call sites cannot drift apart.
+	commands := map[string]func() *cobra.Command{
+		"cut":       newCutCmd,
+		"transcode": newTranscodeCmd,
+		"normalize": newNormalizeCmd,
+	}
+	for name, newCmd := range commands {
+		for _, tc := range cases {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				cmd := newCmd()
+				if err := cmd.ParseFlags(tc.args); err != nil {
+					t.Fatalf("ParseFlags(%v): %v", tc.args, err)
+				}
+				downmix, _ := cmd.Flags().GetBool("downmix")
+				err := validateLocalSourceFlags(cmd, &appConfig{}, true, downmix)
+				if tc.want == "" {
+					if err != nil {
+						t.Fatalf("validateLocalSourceFlags(%v) = %v, want nil", tc.args, err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("validateLocalSourceFlags(%v) = nil, want %q", tc.args, tc.want)
+				}
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("validateLocalSourceFlags(%v) = %q, want it to mention %q", tc.args, err, tc.want)
+				}
+				if !isUsageError(err) {
+					t.Errorf("validateLocalSourceFlags(%v) err is %T, want usageError", tc.args, err)
+				}
+			})
+		}
+	}
+}
+
 func TestParseSourcePolicy(t *testing.T) {
 	for _, in := range []string{"", "minimize-loss", "best-native", "prefer:opus"} {
 		if _, err := parseSourcePolicy(in); err != nil {
@@ -432,5 +519,32 @@ func TestParseSourcePolicyRejectsUnknownCodec(t *testing.T) {
 		if !strings.Contains(msg, codec) {
 			t.Errorf("error does not list %q: %q", codec, msg)
 		}
+	}
+}
+
+// Leading- and trailing-dot decimals parsed before the strict gate existed, so
+// the gate must keep them: ".5-1.5" was in use and rejecting it is a narrowing
+// nobody asked for.
+func TestParseTimestampDotDecimals(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{".5", 500 * time.Millisecond},
+		{"5.", 5 * time.Second},
+		{"1:.5", time.Minute + 500*time.Millisecond},
+	} {
+		got, err := parseTimestamp(tc.in)
+		if err != nil {
+			t.Errorf("parseTimestamp(%q) = %v, want %v", tc.in, err, tc.want)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseTimestamp(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	// A bare dot is not a number in any grammar.
+	if _, err := parseTimestamp("."); err == nil {
+		t.Error(`parseTimestamp(".") accepted a bare dot`)
 	}
 }

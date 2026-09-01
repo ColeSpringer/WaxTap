@@ -51,6 +51,18 @@ type ProbeStream struct {
 	Channels   int           // channel count
 	BitRate    int           // always 0 (WaxFlow reports none)
 	Duration   time.Duration // track duration, or 0 when unknown
+	// Samples is WaxFlow's raw frame count after gapless trimming (its
+	// Track.Samples): -1 when the container does not state one (raw ADTS), 0
+	// for a track that decodes to no audio at all, and positive otherwise. The
+	// trimming matters for the zero case's precise meaning: a file whose every
+	// stored sample is declared encoder delay or padding also reports 0, which
+	// is still the honest answer, since decoding it delivers nothing.
+	//
+	// It exists because Duration collapses -1 and 0 into 0 and a caller then
+	// cannot tell "unknown length" from "no frames at all" - which are opposite
+	// facts, and the difference between guessing at a cut and knowing there is
+	// nothing to cut.
+	Samples int64
 }
 
 // AudioStream returns the first audio track and true, or a zero stream and false
@@ -114,6 +126,7 @@ func mapProbe(info *format.Info, size int64) ProbeResult {
 			SampleRate: t.Fmt.Rate,
 			Channels:   t.Fmt.Channels,
 			Duration:   trackDuration(t.Samples, t.Fmt.Rate),
+			Samples:    t.Samples,
 		}
 	}
 	if len(info.Tracks) == 0 {

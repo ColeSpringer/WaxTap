@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
 
 func TestSanitizeStem(t *testing.T) {
@@ -335,6 +339,99 @@ func TestResolveCollisionRejectsDirectory(t *testing.T) {
 	if _, _, err := r.reserveOr(dir, collisionOverwrite); !isUsageError(err) || !strings.Contains(err.Error(), "existing directory") {
 		t.Errorf("reserveOr(dir) = %v, want existing directory usage error", err)
 	}
+}
+
+// A trailing separator names a directory that does not exist yet, so the stat
+// every collision path starts with sees nothing wrong and the run goes on to
+// create a directory named after the file the user asked for. Each entry point
+// has to refuse it lexically instead.
+func TestRejectsTrailingSeparatorOutput(t *testing.T) {
+	dir := t.TempDir()
+	// Not filepath.Join, which cleans away the trailing separator that is the
+	// input under test.
+	target := filepath.Join(dir, "song.wav") + string(filepath.Separator)
+	const want = "ends in a path separator"
+
+	for _, mode := range []collisionMode{collisionFail, collisionOverwrite, collisionSkip, collisionAutoNumber} {
+		if _, _, err := resolveCollision(target, mode); !isUsageError(err) || !strings.Contains(err.Error(), want) {
+			t.Errorf("resolveCollision(trailing sep, %v) = %v, want a trailing-separator usage error", mode, err)
+		}
+		// The playlist reserver resolves its own collisions and needs the same guard.
+		r := newPathReserver()
+		if _, _, err := r.reserveOr(target, mode); !isUsageError(err) || !strings.Contains(err.Error(), want) {
+			t.Errorf("reserveOr(trailing sep, %v) = %v, want a trailing-separator usage error", mode, err)
+		}
+	}
+	// The process commands check the path before format inference rather than
+	// through resolveCollision.
+	if err := rejectDirOutput(target); !isUsageError(err) || !strings.Contains(err.Error(), want) {
+		t.Errorf("rejectDirOutput(trailing sep) = %v, want a trailing-separator usage error", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("output directory holds %d entries, want the refusal to have created nothing", len(entries))
+	}
+}
+
+func TestRejectTrailingSeparator(t *testing.T) {
+	for _, tt := range []struct {
+		name, in string
+		reject   bool
+	}{
+		{"plain name", "song.wav", false},
+		{"inside a directory", "out/song.wav", false},
+		{"trailing slash", "out/song.wav/", true},
+		{"only a slash", "/", true},
+		{"dot slash", "./", true},
+		{"empty", "", false},
+		// A backslash is a separator on Windows and the same mistake there. On
+		// unix it is an ordinary character in the filename, so this path is fine.
+		{"trailing backslash", `out/song.wav\`, runtime.GOOS == "windows"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := rejectTrailingSeparator(tt.in)
+			if tt.reject && !isUsageError(err) {
+				t.Errorf("rejectTrailingSeparator(%q) = %v, want a usage error", tt.in, err)
+			}
+			if !tt.reject && err != nil {
+				t.Errorf("rejectTrailingSeparator(%q) = %v, want nil", tt.in, err)
+			}
+		})
+	}
+}
+
+// The auto-number pre-flight probes with stats, so an unbounded search hangs the
+// CLI before it prints anything. It stops where the publish retry stops, and
+// reports the publish retry's sentinel so the two give-ups are one condition.
+func TestNextAvailableFuncBounded(t *testing.T) {
+	const path = "song.mp3"
+	last := tempfile.NumberedVariant(path, tempfile.MaxPublishRenumber)
+
+	t.Run("last variant inside the bound is found", func(t *testing.T) {
+		got, err := nextAvailableFunc(path, func(p string) bool { return p != last })
+		if err != nil || got != last {
+			t.Errorf("nextAvailableFunc = %q, %v; want %q, nil", got, err, last)
+		}
+	})
+	t.Run("everything taken gives up", func(t *testing.T) {
+		got, err := nextAvailableFunc(path, func(string) bool { return true })
+		if got != "" {
+			t.Errorf("path = %q, want no path alongside the error", got)
+		}
+		if !errors.Is(err, tempfile.ErrRenumberExhausted) {
+			t.Fatalf("err = %v, want it to unwrap to tempfile.ErrRenumberExhausted", err)
+		}
+		// Exit 2, like every other collision failure.
+		if !isUsageError(err) {
+			t.Errorf("err = %v, want a usage error", err)
+		}
+		if !strings.Contains(err.Error(), "every numbered variant") {
+			t.Errorf("message = %q, want the exhaustion named", err)
+		}
+	})
 }
 
 func TestRejectDirIsFile(t *testing.T) {

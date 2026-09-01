@@ -18,8 +18,11 @@ type syncWriter struct {
 	mu  sync.Mutex
 }
 
-// emitItem reports one playlist item's outcome: a human line or one NDJSON record.
-func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, skipped string, err error) {
+// emitItem reports one playlist item's outcome: a human line or one NDJSON
+// record. notes are the diagnostics collected for this item alone, drained from
+// a scope the caller made for it, because these records are written from
+// concurrent out-of-order handlers.
+func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, skipped string, err error, notes []noteJSON) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -34,12 +37,15 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 			Status        string        `json:"status"`
 			OutputPath    string        `json:"outputPath,omitempty"`
 			Client        string        `json:"client,omitempty"`
-			Error         string        `json:"error,omitempty"`
+			Error         *errorJSON    `json:"error,omitempty"`
 			Warnings      []warningJSON `json:"warnings,omitempty"`
-		}{SchemaVersion: schemaVersion, Type: "item", Index: num, VideoID: entry.VideoID, Title: entry.Title}
+			Notes         []noteJSON    `json:"notes,omitempty"`
+		}{SchemaVersion: schemaVersion, Type: "item", Index: num, VideoID: entry.VideoID, Title: entry.Title, Notes: notes}
 		switch {
 		case err != nil:
-			rec.Status, rec.Error = "error", err.Error()
+			// The classifier, not err.Error(): a raw string here was the one
+			// failure in a WaxTap document a consumer could not switch on.
+			rec.Status, rec.Error = "error", errorObject(err)
 		case skipped != "":
 			rec.Status = "skipped"
 		default:
@@ -86,10 +92,55 @@ type playlistSummary struct {
 	remaining          int // never attempted (cap reached or canceled mid-run)
 	enumErrors         int
 	capReached         bool
+	// outcomes are the reached entries, carried so the run's exit code can come
+	// from the item errors themselves rather than from a generic "some failed".
+	// Nil is allowed: a summary with no outcomes falls back to exit 1.
+	outcomes []waxtap.PlaylistItemOutcome
+}
+
+// playlistRepresentativeError returns the item error with the highest CLI exit
+// code, the same rule local batch runs use (representativeError in batch.go);
+// both delegate to worstClassifiedError so the rule cannot drift.
+//
+// Enumeration errors are deliberately not eligible. They are not item failures:
+// a run where every requested item downloaded but three entries failed to enrich
+// would otherwise exit with the enrichment's code instead of succeeding-with-a-
+// warning, which is what it is.
+func playlistRepresentativeError(outcomes []waxtap.PlaylistItemOutcome) error {
+	errs := make([]error, len(outcomes))
+	for i, o := range outcomes {
+		errs[i] = o.Err
+	}
+	return worstClassifiedError(errs)
+}
+
+// worstClassifiedError returns the error with the highest CLI exit code, or nil
+// when every entry is nil. It is the shared core of the batch and playlist
+// representative-error picks: a run's exit is its worst item's classified code.
+func worstClassifiedError(errs []error) error {
+	var rep error
+	best := -1
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if code := exitCodeFor(err); code > best {
+			best, rep = code, err
+		}
+	}
+	return rep
 }
 
 // emitSummary writes the aggregate result. Item failures and incomplete
 // enumeration fail the command; reaching --max-downloads does not.
+//
+// An item failure exits with that item's own classified code, not the generic 1
+// a "N of M failed" message used to produce: the per-item errors were classified
+// all along and simply never read, so a one-item playlist whose single video
+// needs a PO token exited 1 while the same video downloaded directly exited 8.
+// Local batch runs have always worked this way; this is the playlist path
+// catching up to them, down to returning alreadyRendered so main does not print
+// a second summary line over the one already written.
 func (s *syncWriter) emitSummary(sum playlistSummary) error {
 	failed := sum.buildRequestFailed + sum.downloadFailed
 	if s.env.jsonMode() {
@@ -107,11 +158,15 @@ func (s *syncWriter) emitSummary(sum playlistSummary) error {
 			Remaining          int    `json:"remaining,omitempty"`
 			CapReached         bool   `json:"capReached,omitempty"`
 			EnumerationErrors  int    `json:"enumerationErrors,omitempty"`
+			// Notes are the run-level ones: those raised before any item and those
+			// raised after an item's record was already written.
+			Notes []noteJSON `json:"notes,omitempty"`
 		}{
 			SchemaVersion: schemaVersion, Type: "summary",
 			Total: sum.total, OK: sum.ok, Skipped: sum.skipped, Failed: failed,
 			BuildRequestFailed: sum.buildRequestFailed, DownloadFailed: sum.downloadFailed,
 			Remaining: sum.remaining, CapReached: sum.capReached, EnumerationErrors: sum.enumErrors,
+			Notes: s.env.notesJSON(),
 		}
 		if b, err := json.Marshal(rec); err == nil {
 			fmt.Fprintf(s.env.out, "%s\n", b)
@@ -130,9 +185,12 @@ func (s *syncWriter) emitSummary(sum playlistSummary) error {
 		}
 	}
 	switch {
-	case failed > 0 && sum.enumErrors > 0:
-		return fmt.Errorf("%d of %d items failed and enumeration was incomplete (%s)", failed, sum.total, countOf(sum.enumErrors, "error"))
 	case failed > 0:
+		if rep := playlistRepresentativeError(sum.outcomes); rep != nil {
+			return alreadyRendered(rep)
+		}
+		// No outcome carried the error (a caller that did not pass them). The
+		// count is still real, so the run still fails, at the generic code.
 		return fmt.Errorf("%d of %d playlist items failed", failed, sum.total)
 	case sum.enumErrors > 0:
 		return fmt.Errorf("playlist enumeration incomplete: %s; some entries may be missing", countOf(sum.enumErrors, "error"))
@@ -165,13 +223,26 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 		for i, e := range pl.Entries {
 			entries[i] = entryJSON{e.Index + 1, e.VideoID, e.Title, e.Author, e.Duration.Seconds()}
 		}
+		// Enumeration errors reach the human listing as warning lines and used to
+		// reach the JSON one not at all, so a --json consumer could not tell a
+		// complete listing from one missing entries it was never told about.
+		errs := make([]errorJSON, 0, len(pl.Errors))
+		for _, perr := range pl.Errors {
+			// Playlist.Errors never holds a nil, but errorObject documents nil
+			// for nil, and a guard is cheaper than a dereference resting on a
+			// slice invariant defined two packages away.
+			if o := errorObject(perr); o != nil {
+				errs = append(errs, *o)
+			}
+		}
 		return env.emitJSON(struct {
 			SchemaVersion int         `json:"schemaVersion"`
 			PlaylistID    string      `json:"playlistId"`
 			Title         string      `json:"title,omitempty"`
 			Count         int         `json:"count"`
 			Entries       []entryJSON `json:"entries"`
-		}{schemaVersion, pl.ID, pl.Title, len(pl.Entries), entries})
+			Errors        []errorJSON `json:"errors,omitempty"`
+		}{schemaVersion, pl.ID, pl.Title, len(pl.Entries), entries, errs})
 	}
 
 	if pl.Title != "" {

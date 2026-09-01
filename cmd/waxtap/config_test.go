@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"math"
 )
 
 func TestCoalescePrecedence(t *testing.T) {
@@ -399,6 +400,9 @@ func TestValidateProxyURL(t *testing.T) {
 		"socks5://127.0.0.1:1080",
 		"socks5h://127.0.0.1:1080",
 		"http://user:pass@proxy.example:8080",
+		"http://proxy.example:65535",
+		// No port at all is the common form: the transport applies the scheme's
+		// default, so there is nothing to range-check.
 		"http://proxy.example",
 	} {
 		if _, err := validateProxyURL(ok); err != nil {
@@ -415,6 +419,18 @@ func TestValidateProxyURL(t *testing.T) {
 		{"127.0.0.1:9", []string{"http://host:port"}},
 		{"http://", []string{"missing host"}},
 		{"://nope", []string{"invalid --proxy"}},
+		// An out-of-range port used to be accepted here and rediscovered by every
+		// request as a proxyconnect failure, which reports a typo as a network
+		// problem (exit 9).
+		{"http://proxy.example:0", []string{"port", "1-65535"}},
+		{"http://proxy.example:65536", []string{"port", "1-65535"}},
+		{"http://proxy.example:99999", []string{"port", "1-65535"}},
+		// TestValidateProxyURLRedactsUserinfo covers the older rejections; the port
+		// branch echoes the same redacted value.
+		{"http://user:pass@proxy.example:99999", []string{"xxxxx", "1-65535"}},
+		// url.Parse rejects a non-numeric port itself, so that form never reaches
+		// the range check and carries the parse error's wording instead.
+		{"http://proxy.example:http", []string{"invalid --proxy", "http://host:port"}},
 	} {
 		_, err := validateProxyURL(tc.in)
 		if err == nil {
@@ -577,5 +593,30 @@ func TestValidateProxyURLRedactsUserinfo(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") {
 		t.Errorf("parse-failure message leaks the password: %q", err)
+	}
+}
+
+// A config timeout is a float64 of seconds, and the naive multiply into a
+// Duration wraps negative past ~292 years: a 1e15-second timeout silently
+// became sub-zero. Config has no per-key error seam, so the conversion
+// saturates instead; the flag-side grammar rejects, but a config file is not an
+// interactive surface.
+func TestClampedSecondsSaturates(t *testing.T) {
+	for _, tc := range []struct {
+		sec  float64
+		want time.Duration
+	}{
+		{30, 30 * time.Second},
+		{0.5, 500 * time.Millisecond},
+		{1e15, math.MaxInt64},
+		{-1e15, math.MinInt64},
+		{0, 0},
+	} {
+		if got := clampedSeconds(tc.sec); got != tc.want {
+			t.Errorf("clampedSeconds(%g) = %d, want %d", tc.sec, got, tc.want)
+		}
+	}
+	if d := clampedSeconds(1e15); d < 0 {
+		t.Error("a huge timeout wrapped negative")
 	}
 }

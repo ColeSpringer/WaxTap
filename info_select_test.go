@@ -139,3 +139,56 @@ func TestProbeMutationShiftsSelection(t *testing.T) {
 		t.Errorf("re-selected row (idx %d) should not carry the probed bitrate", reIdx)
 	}
 }
+
+// WithSelector and WithChannels can both speak for the channel layout, so the
+// precedence has to be pinned rather than left to whichever is applied last: a
+// selector carries the whole intent (which encoding, in which layout), while
+// WithChannels is a preference for one field of it.
+//
+// The layout is unexported, so this asserts through selection itself, which is
+// what the precedence actually decides.
+func TestReadOptionSelectorBeatsChannels(t *testing.T) {
+	// One surround row and one stereo row, otherwise identical, so the chosen
+	// index names the layout that won.
+	formats := []Format{
+		{Itag: 1, Codec: "opus", Channels: 6, Bitrate: 128000},
+		{Itag: 2, Codec: "opus", Channels: 2, Bitrate: 128000},
+	}
+	pick := func(t *testing.T, opts ...ReadOption) int {
+		t.Helper()
+		ro := newReadOptions(opts)
+		idx, err := ro.sel.WithDefaultChannels(ro.layout).Select(formats, ro.policy, Target{})
+		if err != nil {
+			t.Fatalf("Select: %v", err)
+		}
+		return formats[idx].Itag
+	}
+
+	t.Run("the selector's layout wins", func(t *testing.T) {
+		if got := pick(t, WithChannels(LayoutStereo), WithSelector(BestAudio().WithChannels(LayoutSurround))); got != 1 {
+			t.Errorf("chose itag %d, want the selector's surround row", got)
+		}
+	})
+
+	// Order must not decide it: the same pair the other way round is the same
+	// request.
+	t.Run("order does not matter", func(t *testing.T) {
+		if got := pick(t, WithSelector(BestAudio().WithChannels(LayoutSurround)), WithChannels(LayoutStereo)); got != 1 {
+			t.Errorf("chose itag %d, want the selector's surround row", got)
+		}
+	})
+
+	// A selector that expressed no layout is exactly what WithChannels is for.
+	t.Run("channels fill in a selector that named none", func(t *testing.T) {
+		if got := pick(t, WithChannels(LayoutSurround), WithSelector(BestAudio())); got != 1 {
+			t.Errorf("chose itag %d, want surround to fill in", got)
+		}
+	})
+
+	t.Run("source policy is carried", func(t *testing.T) {
+		ro := newReadOptions([]ReadOption{WithSourcePolicy(PreferCodec("opus"))})
+		if got := ro.policy.Preferred(); got != "opus" {
+			t.Errorf("preferred = %q, want opus", got)
+		}
+	})
+}

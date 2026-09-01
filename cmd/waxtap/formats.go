@@ -30,7 +30,7 @@ func newFormatsCmd() *cobra.Command {
 			}
 			// A watch-page fallback returns formats from WEB.
 			if info.SubstitutedFrom != "" {
-				env.info("note: requested %s; listing %s formats from the watch-page fallback\n", info.SubstitutedFrom, info.Client)
+				env.note(noteWatchPageFormats, "requested %s; listing %s formats from the watch-page fallback", info.SubstitutedFrom, info.Client)
 			}
 			emitWatchPageBreadcrumb(env, info)
 			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
@@ -46,7 +46,8 @@ func newFormatsCmd() *cobra.Command {
 					VideoID       string       `json:"videoId"`
 					Title         string       `json:"title"`
 					Formats       []formatJSON `json:"formats"`
-				}{schemaVersion, video.ID, video.Title, out})
+					Notes         []noteJSON   `json:"notes,omitempty"`
+				}{schemaVersion, video.ID, video.Title, out, env.notesJSON()})
 			}
 			if len(formats) == 0 {
 				env.printf("no audio formats found\n")

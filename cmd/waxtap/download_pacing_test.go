@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/colespringer/waxtap/v3"
 )
 
 func newSummaryEnv(jsonMode bool) (*syncWriter, *bytes.Buffer) {
@@ -204,5 +207,61 @@ func TestOptionsCarriesCooldown(t *testing.T) {
 	}
 	if opts.Politeness.Cooldown != 8*time.Second {
 		t.Errorf("Politeness.Cooldown = %v, want 8s", opts.Politeness.Cooldown)
+	}
+}
+
+// A playlist run exits with its worst item's own classified code. Every item
+// error was already classified; the summary simply never read them, so a
+// one-item playlist whose video needs a PO token exited 1 while the same video
+// downloaded directly exited 8.
+func TestPlaylistSummaryExitsWithTheWorstItemCode(t *testing.T) {
+	entry := func(id string) waxtap.PlaylistEntry { return waxtap.PlaylistEntry{VideoID: id} }
+	for _, tc := range []struct {
+		name     string
+		outcomes []waxtap.PlaylistItemOutcome
+		want     int
+	}{
+		{"po-token beats a generic failure", []waxtap.PlaylistItemOutcome{
+			{Entry: entry("a"), Err: errors.New("boom")},
+			{Entry: entry("b"), Err: waxtap.ErrNeedsPOToken},
+		}, 8},
+		{"the worst of several", []waxtap.PlaylistItemOutcome{
+			{Entry: entry("a"), Err: waxtap.ErrVideoUnavailable},
+			{Entry: entry("b"), Err: waxtap.ErrTemporarilyUnavailable},
+		}, 5},
+		{"a single classified item", []waxtap.PlaylistItemOutcome{
+			{Entry: entry("a"), Err: waxtap.ErrIncompleteStream},
+		}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sw, _ := newSummaryEnv(false)
+			err := sw.emitSummary(playlistSummary{
+				total: len(tc.outcomes), downloadFailed: len(tc.outcomes), outcomes: tc.outcomes,
+			})
+			if err == nil {
+				t.Fatal("failed items produced no error")
+			}
+			if got := exitCodeFor(err); got != tc.want {
+				t.Errorf("exit = %d, want %d (err %v)", got, tc.want, err)
+			}
+			// main must not print a second summary line over the one just written.
+			if _, ok := errors.AsType[*alreadyRenderedError](err); !ok {
+				t.Errorf("err = %T, want an alreadyRenderedError so main stays quiet", err)
+			}
+		})
+	}
+}
+
+// Enumeration errors are not item failures. A run where everything requested
+// downloaded, but some entries could not be enriched, must not inherit the
+// enrichment's exit code; it stays the generic incomplete-enumeration failure.
+func TestPlaylistSummaryEnumErrorsKeepTheGenericExit(t *testing.T) {
+	sw, _ := newSummaryEnv(false)
+	err := sw.emitSummary(playlistSummary{total: 3, ok: 3, enumErrors: 2})
+	if err == nil {
+		t.Fatal("incomplete enumeration produced no error")
+	}
+	if got := exitCodeFor(err); got != 1 {
+		t.Errorf("exit = %d, want the generic 1", got)
 	}
 }

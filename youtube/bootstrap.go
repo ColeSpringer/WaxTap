@@ -121,6 +121,12 @@ func jsonUnescape(s string) string {
 	return s
 }
 
+// IdentityGeneration reports the identity generation currently in force, for a
+// caller that needs to pass one to [RotateIdentity] without holding an
+// [Extraction]. Bulk metadata enrichment is the case: it calls [Info], which
+// keeps no extraction, and still has to name the identity it wants retired.
+func (c *Client) IdentityGeneration() uint64 { return c.resetSeq.Load() }
+
 // RotateIdentity discards the identity that minted a set of failing stream URLs
 // so the next extraction runs under a different one.
 //

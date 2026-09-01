@@ -1115,3 +1115,13 @@ func TestClassifyError_RenumberExhausted(t *testing.T) {
 		t.Errorf("message = %q, must not advise the mode that just failed", c.message)
 	}
 }
+
+// A throttled enumeration entry classifies with the rate limiting (its
+// error.code in --list and summary documents), not with the availability
+// verdicts: the video is very likely fine and the answer is to come back.
+func TestClassifyTemporarilyUnavailable(t *testing.T) {
+	c := classifyError(fmt.Errorf("enrich abc: %w", waxtap.ErrTemporarilyUnavailable))
+	if c.exitCode != 5 || c.code != "temporarily-unavailable" {
+		t.Errorf("classify = %+v, want the rate-limit class and code temporarily-unavailable", c)
+	}
+}

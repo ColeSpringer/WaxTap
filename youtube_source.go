@@ -1086,6 +1086,10 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 		return nil, fmt.Errorf("waxtap.Download: an Output is required (use Stream for reader delivery)")
 	}
 	if req.Output.kind == outputFile {
+		// Ahead of the skip check, for rejectSeparatorPath's reason.
+		if err := rejectSeparatorPath(req.Output.path); err != nil {
+			return nil, err
+		}
 		if req.SkipIfExists && fileExists(req.Output.path) {
 			em.stage(StageSkipped)
 			return &Result{SourceKind: SourceYouTube, VideoID: id, OutputPath: req.Output.path}, nil
@@ -1327,9 +1331,11 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
-	// Input damage is deliberately not reported here: a YouTube container either
-	// probes exactly or fails outright, so the only thing this could describe is
-	// a delivery of ours that came up short, which is not the user's input.
+	// Input damage and an empty input are deliberately not reported here: a
+	// YouTube container either probes exactly or fails outright, so the only
+	// thing either could describe is a delivery of ours that came up short or
+	// arrived with nothing in it, which is our failure to raise as one and not
+	// the user's input to warn about.
 	warnLoudnessUnmeasurable(em, pres)
 
 	deliver := pres.OutputPath

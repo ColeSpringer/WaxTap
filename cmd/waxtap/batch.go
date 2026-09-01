@@ -31,10 +31,26 @@ var audioExts = map[string]bool{
 }
 
 // collectAudioInputs returns recognized audio files under root in sorted order.
-// Recursive walks do not follow directory symlinks. excludeDir is omitted from a
-// recursive walk so an output directory beneath root is not processed as input.
-// Unrecognized regular files contribute to ignored; directories and other file
-// types do not.
+// excludeDir is omitted from a recursive walk so an output directory beneath
+// root is not processed as input. Unrecognized regular files contribute to
+// ignored; directories and other file types do not.
+//
+// A symlink is resolved to what it points at, as a single named input already is
+// (isLocalFile stats its argument). A link to a regular file is collected, or
+// counted, by its own extension, exactly like the file it names: dropping it
+// before the extension check left a linked-in album absent from the run and from
+// the summary both. A link to a directory is counted rather than entered, in a
+// recursive walk as much as a shallow one, so a walk still descends only real
+// subdirectories and a link pointing at an ancestor is not a cycle anyone has to
+// detect. A broken link is counted for the reason an unrecognized file is: it
+// was there and it was not processed.
+//
+// The root is the one exception to counting a directory link: naming a link AS
+// the directory to process is asking for what it points at, so the walk follows
+// it, and every returned path is spelled under the name the caller used. That
+// matches the shallow branch, which has always followed a linked root because
+// os.ReadDir stats its argument. Links below the root stay counted; only the
+// argument itself is an instruction.
 //
 // A walk skips hidden entries: macOS writes AppleDouble stubs (._Track.wav) that
 // carry an audio extension but no audio, and metadata directories (.Trashes,
@@ -48,13 +64,21 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 	absRoot, _ := filepath.Abs(root)
 	absExclude := ""
 	if excludeDir != "" {
-		if a, e := filepath.Abs(excludeDir); e == nil && a != absRoot {
+		if a, e := filepath.Abs(excludeDir); e == nil && !sameDirThroughLinks(a, absRoot) {
 			absExclude = a
 		}
 	}
 	consider := func(path string, d fs.DirEntry) {
-		if !d.Type().IsRegular() {
-			return // skip symlinks, devices, and directories
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Stat the target instead of dropping the entry: a link to an audio file
+			// is an audio file. A link to a directory, and a broken one, are counted
+			// here rather than dropped, so neither leaves the run without a number.
+			if fi, serr := os.Stat(path); serr != nil || !fi.Mode().IsRegular() {
+				ignored++
+				return
+			}
+		} else if !d.Type().IsRegular() {
+			return // skip devices, sockets, and directories
 		}
 		// A dotfile is counted, not silently dropped: it was present and not
 		// processed, the same as a file with an unrecognized extension.
@@ -78,7 +102,24 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 			consider(filepath.Join(root, e.Name()), e)
 		}
 	} else {
-		werr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		// WalkDir Lstats the final component of its root and does not follow a
+		// symlink there, so a root that is itself a link to a directory used to
+		// yield exactly one entry: the link, counted ignored. The shallow branch
+		// above reads the same root through os.ReadDir, which follows the link,
+		// so `transcode <link>` worked while `transcode <link> -r` found nothing.
+		// The walk therefore runs over the resolved target, and every produced
+		// path is re-spelled under the root the caller named, so the contract is
+		// unchanged: inputs come back spelled the way the user typed them, which
+		// is also what planBatchOutputs' literal relUnder mirroring needs. Only
+		// the final component matters (Lstat follows intermediate links), and a
+		// root that fails to resolve falls back to the literal walk it always got.
+		wroot := root
+		if fi, lerr := os.Lstat(root); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			if r := resolveDirPath(root); r != "" {
+				wroot = r
+			}
+		}
+		werr := filepath.WalkDir(wroot, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
@@ -86,19 +127,25 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 				// A hidden directory is skipped whole, but only below the root: the
 				// user may have named a hidden directory (or "." itself, whose
 				// d.Name() is "."). The comparison is exact because WalkDir passes
-				// root verbatim for the root entry and filepath.Join, which cleans,
-				// for every child.
-				if path != root && strings.HasPrefix(d.Name(), ".") {
+				// its root verbatim for the root entry and filepath.Join, which
+				// cleans, for every child.
+				if path != wroot && strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
 				}
 				if absExclude != "" {
-					if a, _ := filepath.Abs(path); a == absExclude {
+					if a, e := filepath.Abs(path); e == nil && sameDirThroughLinks(a, absExclude) {
 						return filepath.SkipDir
 					}
 				}
 				return nil
 			}
-			consider(path, d)
+			spelled := path
+			if wroot != root {
+				if rel, rerr := filepath.Rel(wroot, path); rerr == nil {
+					spelled = filepath.Join(root, rel)
+				}
+			}
+			consider(spelled, d)
 			return nil
 		})
 		if werr != nil {
@@ -107,6 +154,97 @@ func collectAudioInputs(root string, recursive bool, excludeDir string) (inputs 
 	}
 	sort.Strings(inputs)
 	return inputs, ignored, nil
+}
+
+// sameDirThroughLinks reports whether two absolute paths name one directory. It
+// compares the literal spellings first and the symlink-resolved spellings
+// second, so --dir and the walk naming one directory two ways still match.
+//
+// The order is the whole design. EvalSymlinks fails on a path that does not
+// exist, and --dir most often names an output directory this run has yet to
+// create, so resolution can only add matches: whenever either side fails to
+// resolve, the answer is the plain absolute comparison this replaced. A rule
+// that trusted resolution alone would treat two unresolvable paths as equal and
+// skip the root of every run whose --dir does not exist yet.
+func sameDirThroughLinks(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, rb := resolveDirPath(a), resolveDirPath(b)
+	return ra != "" && ra == rb
+}
+
+// resolveDirPath returns path as an absolute path with symlinks resolved, or ""
+// when it cannot be resolved, which for a --dir value usually means it does not
+// exist yet. Nothing in it is directory-specific; pathKeyer uses it on files
+// too.
+func resolveDirPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(resolved) // EvalSymlinks keeps a relative path relative.
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// pathKeyer computes the identity the planner's guards compare a path under:
+// the symlink-resolved absolute path when the path is itself a link, else the
+// resolved parent joined with the base name, else the plain absolute spelling.
+//
+// The tiering exists because the guards compare files that do not all exist
+// yet. A planned output usually does not, but its directory often does (--dir
+// naming an input directory through a link is exactly the case that used to
+// slip past), so the parent resolves and the base rides along. A directory the
+// run has yet to create resolves to nothing, and the plain absolute spelling is
+// then the same comparison these guards have always made, so nothing that used
+// to plan stops planning.
+//
+// Keying on identity rather than spelling is what makes the three guards mean
+// what they say: "output would overwrite an input" is about the file, not about
+// how the path was typed, and before this a --dir reaching the input's own
+// directory through a link produced a misleading collision error under the
+// default policy and a self-copy that rewrote the input in place under
+// --collision overwrite.
+//
+// The parent resolution is memoized because a plan visits every input and every
+// output and a library's files share a handful of directories: without the
+// cache each key was a full symlink walk per path, tens of thousands of lstats
+// before the first encode of a large batch. Each path itself costs one Lstat,
+// which decides whether the full walk is needed at all (only for a path that is
+// its own link).
+type pathKeyer struct{ dirs map[string]string }
+
+func newPathKeyer() *pathKeyer { return &pathKeyer{dirs: map[string]string{}} }
+
+func (k *pathKeyer) key(path string) string {
+	// Only a path that is itself a symlink needs the full resolution; for
+	// everything else the identity is its (resolved) directory plus its name.
+	// A broken link falls through to the parent tier like a missing file.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if r := resolveDirPath(path); r != "" {
+			return r
+		}
+	}
+	return filepath.Join(k.dirKey(filepath.Dir(path)), filepath.Base(path))
+}
+
+func (k *pathKeyer) dirKey(dir string) string {
+	if v, ok := k.dirs[dir]; ok {
+		return v
+	}
+	v := resolveDirPath(dir)
+	if v == "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			v = abs
+		} else {
+			v = dir
+		}
+	}
+	k.dirs[dir] = v
+	return v
 }
 
 // batchAction identifies how runBatchJobs handles an input.
@@ -367,13 +505,15 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 		return nil, usagef("directory processing does not support --format copy; choose an encoded output format")
 	}
 	reserver := newPathReserver()
+	// Guard keys are identities (pathKeyer), not spellings: the walk and --dir
+	// can name one file two ways, and every rejection below is about the file.
+	keyer := newPathKeyer()
 	inputAbs := make(map[string]bool, len(inputs))
 	absByInput := make(map[string]string, len(inputs))
 	for _, in := range inputs {
-		if a, e := filepath.Abs(in); e == nil {
-			inputAbs[a] = true
-			absByInput[in] = a
-		}
+		a := keyer.key(in)
+		inputAbs[a] = true
+		absByInput[in] = a
 	}
 	seenOut := map[string]string{}
 	fam := targetCodecFamily(tf)
@@ -409,7 +549,7 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 			out = mirrorInto(dir, root, in, recursive, stem+"."+transcodeExt(tf))
 		}
 
-		absOut, _ := filepath.Abs(out)
+		absOut := keyer.key(out)
 		// A matching file mapped to itself remains unchanged.
 		if noop && absOut == absByInput[in] {
 			jobs = append(jobs, batchJob{index: i, input: in, output: in, action: actUnchanged})
@@ -565,15 +705,9 @@ func runBatchJobs(ctx context.Context, jobs []batchJob, concurrency int, process
 
 // representativeError returns the item error with the highest CLI exit code.
 func representativeError(outcomes []batchOutcome) error {
-	var rep error
-	best := -1
-	for _, o := range outcomes {
-		if o.err == nil {
-			continue
-		}
-		if code := exitCodeFor(o.err); code > best {
-			best, rep = code, o.err
-		}
+	errs := make([]error, len(outcomes))
+	for i, o := range outcomes {
+		errs[i] = o.err
 	}
-	return rep
+	return worstClassifiedError(errs)
 }

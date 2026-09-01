@@ -360,11 +360,10 @@ func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments 
 // detail into something the user needs told. Below it the miss is within the noise
 // of a lossy encode.
 //
-// It is deliberately well above [loudness.ConvergeToleranceDB] (0.3 LU), which
-// leaves a band where a limit-mode miss neither converges further nor warns: a
-// 0.8 LU miss is silent. That is intended, for the reason above, but it is the
-// same shape as the finding this warning exists to close, so it is written down
-// here rather than left for the next end-to-end pass to rediscover.
+// It applies to the two single-pass policies (cap, and album mode in either
+// peak mode), whose miss is a clamp computed up front rather than the residue of
+// a search. Limit mode uses [loudness.ConvergeToleranceDB] instead; see
+// warnLimiterTargetMissed for why the two thresholds differ.
 const loudnessMissWarnDB = 1.0
 
 // warnLoudnessTargetMissed reports that normalization did not reach the requested
@@ -418,30 +417,46 @@ func warnLoudnessTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Resul
 // warnLimiterTargetMissed reports a limit-mode normalization the true-peak limiter
 // held away from the target, in either direction: an overshoot is as much a
 // silently wrong delivery as a shortfall, and the gain search can produce one.
+//
+// Its threshold is [loudness.ConvergeToleranceDB], not loudnessMissWarnDB, and
+// the difference is the whole point of the mode. Limit is documented as
+// iterating onto the target, and the search stops the moment it is inside that
+// tolerance, so anything outside it is the search having given up rather than a
+// miss too small to matter: a stop at 0.74 LU is precisely the case the mode
+// promises to have converged and did not. The single-pass policies keep the
+// wider threshold because their miss is a clamp they can name up front.
 func warnLimiterTargetMissed(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
 	out := pres.OutputLoudness
 	if out == nil || !out.Finite() {
 		return // no measurement, nothing honest to report
 	}
 	miss := ls.Target - out.IntegratedLUFS
-	if math.Abs(miss) <= loudnessMissWarnDB {
+	if math.Abs(miss) <= loudness.ConvergeToleranceDB {
 		return
 	}
 	// Two wordings, because an overshoot is not something the limiter "held": a
 	// shortfall is the limiter giving gain back, an overshoot is the gain search
 	// stepping past the target.
 	//
-	// Plural is safe: reaching this line needs a miss above loudnessMissWarnDB,
-	// which is far above the correction floor, so the search always ran at least one
-	// correction and the count is at least 2. Do not add singular handling for a
-	// case that cannot occur. The count comes from the result rather than from
-	// maxLoudnessWrites, since tolerance or saturation can end the search early.
-	tmpl := "the true-peak limiter held the output %.1f LU short of the %g LUFS target after %d encode passes; delivered %.1f LUFS"
+	// The count comes from the result rather than from maxLoudnessWrites, since
+	// tolerance or saturation can end the search early. At this threshold a single
+	// pass is reachable two ways - the corrected gain pinned at WaxFlow's clamp, so
+	// the next write would encode the same file, and a correction write that failed
+	// - so the plural is not safe and the noun agrees with the number.
+	tmpl := "the true-peak limiter held the output %.1f LU short of the %g LUFS target after %s; delivered %.1f LUFS"
 	if miss < 0 {
-		tmpl = "normalization landed %.1f LU above the %g LUFS target after %d encode passes; delivered %.1f LUFS"
+		tmpl = "normalization landed %.1f LU above the %g LUFS target after %s; delivered %.1f LUFS"
 	}
 	em.warn(WarnLoudnessTargetMissed, fmt.Sprintf(tmpl,
-		math.Abs(miss), ls.Target, pres.LoudnessPasses, out.IntegratedLUFS))
+		math.Abs(miss), ls.Target, encodePasses(pres.LoudnessPasses), out.IntegratedLUFS))
+}
+
+// encodePasses renders a completed-pass count with a noun that agrees with it.
+func encodePasses(n int) string {
+	if n == 1 {
+		return "1 encode pass"
+	}
+	return fmt.Sprintf("%d encode passes", n)
 }
 
 // warnOutputClipping surfaces the pipeline's level measurement: WaxFlow read
@@ -477,14 +492,22 @@ const minGateableDuration = 400 * time.Millisecond
 // when l is nil or its integrated loudness is finite.
 //
 // d is the duration of the audio measured; d <= 0 means it is unknown, and the
-// too-short cause is then not claimed rather than guessed at. The order matters:
-// a 200 ms silence is both too short and silent, and the length is the more
-// useful thing to be told, because it is the one the user can change.
-func unmeasurableLoudnessCause(d time.Duration, l *loudness.Loudness) string {
+// too-short cause is then not claimed rather than guessed at. empty says the
+// track holds no frames, which the duration alone cannot distinguish from an
+// unstated length. The order matters: a 200 ms silence is both too short and
+// silent, and the length is the more useful thing to be told, because it is the
+// one the user can change. Emptiness outranks both, being the only one of the
+// three that is about the file rather than the signal in it.
+func unmeasurableLoudnessCause(d time.Duration, empty bool, l *loudness.Loudness) string {
 	if l == nil || !nonFiniteFloat(l.IntegratedLUFS) {
 		return ""
 	}
 	switch {
+	case empty:
+		// Without this the zero duration skips the too-short branch and a
+		// -Inf sample peak wins, calling a file with no frames "digital
+		// silence" - which describes samples, of which there are none.
+		return "the track contains no audio frames"
 	case d > 0 && d < minGateableDuration:
 		// Truncated, not rounded: a 399.7 ms clip must not render as "400ms,
 		// shorter than the 400 ms block".
@@ -516,16 +539,22 @@ func warnLoudnessUnmeasurable(em *emitter, pres pipeline.Result) {
 		if d == 0 {
 			d = pres.SourceDuration - pres.Removed
 		}
-		if cause := unmeasurableLoudnessCause(d, pres.InputLoudness); cause != "" {
+		if cause := unmeasurableLoudnessCause(d, pres.SourceEmpty, pres.InputLoudness); cause != "" {
 			em.warn(WarnLoudnessUnmeasurable, "input integrated loudness could not be measured: "+cause)
 		}
 	}
-	if pres.LoudnessApplied && pres.OutputLoudness != nil {
+	// Gated on the measurement, not on LoudnessApplied: an unmeasurable input
+	// leaves LoudnessApplied false (no gain could apply) on exactly the runs whose
+	// output is also unmeasurable, which is the pair this warning exists to
+	// explain. OutputLoudness is only ever set when normalization was requested.
+	if pres.OutputLoudness != nil {
 		d := pres.OutputLoudness.Duration
 		if d == 0 && pres.OutputProbe != nil {
 			d = pres.OutputProbe.Format.Duration
 		}
-		if cause := unmeasurableLoudnessCause(d, pres.OutputLoudness); cause != "" {
+		// An empty input yields an empty output, so the same fact explains both
+		// sides; nothing else here can observe the output's frame count.
+		if cause := unmeasurableLoudnessCause(d, pres.SourceEmpty, pres.OutputLoudness); cause != "" {
 			em.warn(WarnLoudnessUnmeasurable, "output integrated loudness could not be measured: "+cause)
 		}
 	}
@@ -581,6 +610,24 @@ func codecOrUnknown(codec string) string {
 func warnInputDamage(em *emitter, pres pipeline.Result) {
 	if note := inputDamageNote(pres.SourceWarnings); note != "" {
 		em.warn(WarnInputDamage, note)
+	}
+}
+
+// warnEmptyInput reports a local input carrying no audio frames at all. The run
+// succeeds: an empty input converts faithfully to an empty output, and failing
+// would take a batch down over one file the user can see for themselves.
+//
+// It fires alongside the loudness warning rather than instead of it. That one
+// explains why a number is null; this one says the file had nothing in it,
+// which is the fact a caller with no loudness request would otherwise never be
+// told.
+//
+// Only local processing calls this, for warnInputDamage's reason: a delivery of
+// ours coming back empty is our failure to report as one, not the user's input
+// to warn about.
+func warnEmptyInput(em *emitter, pres pipeline.Result) {
+	if pres.SourceEmpty {
+		em.warn(WarnEmptyInput, "the input contains no audio frames; the output holds no audio")
 	}
 }
 
@@ -748,6 +795,15 @@ func warnAlbumTargetMissed(em *emitter, target float64, mode PeakMode, album lou
 		return // no measurement, nothing honest to report
 	}
 	miss := target - lufs
+	// Album mode keeps loudnessMissWarnDB where the single-file limit branch
+	// dropped to the converge tolerance, and so leaves a band where a miss
+	// neither converges further nor warns: a 0.7 LU album miss is silent. That
+	// is the same shape as the finding this warning exists to close, so it is
+	// written down rather than left for the next end-to-end pass to rediscover.
+	// It stands because album mode has no gain search: one uniform pass is the
+	// design, nothing here ever aimed at 0.3 LU, and a sub-LU miss is inside the
+	// noise of the encode. The single-file limit path warns tighter precisely
+	// because it does iterate and stopping short means it gave up.
 	if math.Abs(miss) <= loudnessMissWarnDB {
 		return
 	}
@@ -968,10 +1024,36 @@ func fileSize(p string) int64 {
 	return fi.Size()
 }
 
+// rejectSeparatorPath rejects an output path ending in a path separator, which
+// names a directory rather than a file. filepath.Dir("d/a.wav/") is "d/a.wav",
+// so letting one through to MkdirAll created a DIRECTORY named after the file
+// the caller asked for and left it there forever, with every collision and
+// overwrite check downstream reasoning about a directory.
+//
+// It rejects rather than trimming: silently retargeting an output path is worse
+// than refusing one, since the caller then cannot tell where the file went. The
+// error wraps ErrIncompatibleSpec, never WrapOutput, so it classifies as the
+// bad request it is rather than as a filesystem failure.
+//
+// Process and Download call it ahead of their SkipIfExists checks, because a
+// directory already sitting at the bad path stats as existing and the skip
+// would otherwise answer "already done" to a request that never named a file.
+// ensureParentDir repeats it as the backstop for every path that reaches a
+// mkdir without passing those seams (ProcessAlbum's tracks funnel through it).
+func rejectSeparatorPath(path string) error {
+	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
+		return fmt.Errorf("%w: output path %q ends in a path separator, which names a directory rather than a file", waxerr.ErrIncompatibleSpec, path)
+	}
+	return nil
+}
+
 // ensureParentDir creates the parent directory for an output path. The caller's
 // umask controls permissions; private internal directories use stricter modes.
 // For a bare filename, filepath.Dir returns "." and MkdirAll is a no-op.
 func ensureParentDir(path string) error {
+	if err := rejectSeparatorPath(path); err != nil {
+		return err
+	}
 	return tempfile.WrapOutput("mkdir", os.MkdirAll(filepath.Dir(path), 0o777))
 }
 

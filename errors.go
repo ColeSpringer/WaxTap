@@ -37,6 +37,11 @@ var (
 
 	// Throttling.
 	ErrRateLimited = waxerr.ErrRateLimited
+	// ErrTemporarilyUnavailable marks a playlist entry the metadata throttle
+	// refused and the rotation-and-retry escape could not settle before its
+	// budget ran out. It is not an availability verdict: skipping on it
+	// permanently drops videos that are very likely fine; retry in a later run.
+	ErrTemporarilyUnavailable = waxerr.ErrTemporarilyUnavailable
 
 	// Input / routing.
 	ErrIsPlaylist = waxerr.ErrIsPlaylist

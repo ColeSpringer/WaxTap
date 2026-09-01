@@ -132,8 +132,10 @@ func TestConvergeRestoresBestPassWhenMeasurementFails(t *testing.T) {
 }
 
 // TestConvergeSilenceStopsImmediately: a non-finite measurement is silence, which
-// no amount of gain moves. Reporting nothing is correct, and so is not writing
-// again.
+// no amount of gain moves, so the search stops without writing again. It still
+// reports the measurement: a non-finite result is something the caller can
+// explain to the user, and withholding it left limit mode as the one path where
+// an unmeasurable output produced no output line and no warning at all.
 func TestConvergeSilenceStopsImmediately(t *testing.T) {
 	s := &searchFake{lufs: []float64{math.Inf(-1)}}
 	out, passes := s.run(t, -14)
@@ -141,8 +143,11 @@ func TestConvergeSilenceStopsImmediately(t *testing.T) {
 	if len(s.gains) != 0 {
 		t.Errorf("writes = %d (gains %v), want 0", len(s.gains), s.gains)
 	}
-	if out != nil {
-		t.Errorf("reported %+v, want no measurement", out)
+	if out == nil {
+		t.Fatal("reported no measurement, want the non-finite one the caller explains")
+	}
+	if !math.IsInf(out.IntegratedLUFS, -1) {
+		t.Errorf("reported %+v, want the -Inf measurement", out)
 	}
 	if passes != 1 {
 		t.Errorf("LoudnessPasses = %d, want 1", passes)

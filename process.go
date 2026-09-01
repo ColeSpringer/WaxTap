@@ -40,6 +40,11 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		return nil, err
 	}
 	if req.Output.kind == outputFile {
+		// Ahead of the skip check: a directory at "d/a.wav/" stats as existing,
+		// and skip would answer "already done" to a path that never named a file.
+		if err := rejectSeparatorPath(req.Output.path); err != nil {
+			return nil, err
+		}
 		if sameFile(req.Output.path, req.Input) {
 			return nil, fmt.Errorf("%w: output path equals input path", waxerr.ErrIncompatibleSpec)
 		}
@@ -93,6 +98,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	warnImplicitLossy(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
 	warnInputDamage(em, pres)
+	warnEmptyInput(em, pres)
 	warnLoudnessUnmeasurable(em, pres)
 
 	srcFmt := Format{
@@ -261,9 +267,14 @@ type AlbumProcessResult struct {
 	// GainDB is the gain applied to every track: Target - album integrated LUFS,
 	// held under the album-wide true-peak clamp in PeakCap mode, and 0 for a silent
 	// album.
-	GainDB   float64
-	PerTrack []LoudnessInfo // input measurements in track order
-	Outputs  []string       // completed output paths in track order
+	GainDB float64
+	// LoudnessApplied says the album gain actually reached the encodes. It is
+	// false when the album's integrated loudness could not be measured: no gain
+	// can be derived from one, so every track is a plain re-encode and GainDB's
+	// 0 is the absence of a gain rather than a gain of nothing.
+	LoudnessApplied bool
+	PerTrack        []LoudnessInfo // input measurements in track order
+	Outputs         []string       // completed output paths in track order
 	// Delivered is the loudness of the normalized album. It is measured, over the
 	// written outputs, only where a measurement is the sole way to know it: a
 	// boosting gain in PeakLimit mode, where the true-peak limiter gives back an
@@ -390,10 +401,13 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 
 	res := &AlbumProcessResult{
-		Album:    loudnessInfo(album),
-		GainDB:   tspec.GainDB,
-		PerTrack: make([]LoudnessInfo, len(perTrack)),
-		Outputs:  make([]string, len(tracks)),
+		Album:  loudnessInfo(album),
+		GainDB: tspec.GainDB,
+		// Same predicate AlbumGain guarded on: below it the gain is 0 because
+		// none could be derived, not because the album was already on target.
+		LoudnessApplied: loudness.Gainable(album.IntegratedLUFS),
+		PerTrack:        make([]LoudnessInfo, len(perTrack)),
+		Outputs:         make([]string, len(tracks)),
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
@@ -403,6 +417,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	var levels albumLevels
 	var carry albumCarryWarns
 	var damaged albumDamageWarns
+	var empty albumEmptyWarns
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -410,14 +425,15 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album mode writes through runner.Transcode rather than the pipeline, so
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
-		srcCh, srcCodec, damage := probeAudio(ctx, runner, t.Input)
+		srcCh, srcCodec, damage, srcEmpty := probeAudio(ctx, runner, t.Input)
 		damaged.observe(t.Input, damage)
+		empty.observe(t.Input, srcEmpty)
 		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
 		levels.observe(t.Output, srcCodec, tres.Levels)
-		outCh, _, _ := probeAudio(ctx, runner, t.Output)
+		outCh, _, _, _ := probeAudio(ctx, runner, t.Output)
 		fold.observe(srcCh, outCh)
 		// Album tracks are always re-encoded, so no cut remap and no own-audio
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
@@ -434,11 +450,14 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	levels.warn(em, ao.peakMode)
 	carry.warn(em)
 	damaged.warn(em)
+	empty.warn(em)
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
 	// The album figure is one measurement over the whole timeline, and the
 	// meter reports how much of it it read.
-	if cause := unmeasurableLoudnessCause(album.Duration, &album); cause != "" {
+	// The album measurement has no frames behind it only when every track was
+	// empty; one empty track among full ones leaves a measurable album.
+	if cause := unmeasurableLoudnessCause(album.Duration, empty.all(len(tracks)), &album); cause != "" {
 		em.warn(WarnLoudnessUnmeasurable, "album integrated loudness could not be measured: "+cause)
 	}
 	res.Warnings = em.collected()
@@ -505,6 +524,42 @@ func (a *albumDamageWarns) warn(em *emitter) {
 		a.first += fmt.Sprintf(" (and %d more tracks)", a.n-1)
 	}
 	em.warn(WarnInputDamage, a.first)
+}
+
+// albumEmptyWarns folds per-track empty inputs into one album warning, the same
+// shape as albumDamageWarns: the first empty track is named and the rest are
+// counted, so the listener has a place to start without one warning per file.
+type albumEmptyWarns struct {
+	first string
+	n     int
+}
+
+func (a *albumEmptyWarns) observe(track string, empty bool) {
+	if !empty {
+		return
+	}
+	a.n++
+	if a.n == 1 {
+		a.first = filepath.Base(track)
+	}
+}
+
+// all reports whether every one of n tracks came back empty, which is the only
+// case where the album measurement itself has no frames behind it.
+func (a *albumEmptyWarns) all(tracks int) bool { return tracks > 0 && a.n == tracks }
+
+func (a *albumEmptyWarns) warn(em *emitter) {
+	if a.n == 0 {
+		return
+	}
+	detail := a.first + " contains no audio frames; its output holds no audio"
+	switch {
+	case a.n == 2:
+		detail += " (and 1 more track)"
+	case a.n > 2:
+		detail += fmt.Sprintf(" (and %d more tracks)", a.n-1)
+	}
+	em.warn(WarnEmptyInput, detail)
 }
 
 type albumCarryWarns struct {
@@ -608,15 +663,17 @@ func albumTrackError(err error, inputs []string) error {
 	return fmt.Errorf("track %s: %w", filepath.Base(inputs[idx]), err)
 }
 
-func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string, damage []string) {
+func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string, damage []string, empty bool) {
 	pr, err := r.Probe(ctx, path)
 	if err != nil {
-		return 0, "", nil
+		return 0, "", nil, false
 	}
 	if a, ok := pr.AudioStream(); ok {
-		return a.Channels, a.CodecName, pr.Warnings
+		// Exactly 0 frames. -1 means the container states no length, which is
+		// not a claim that there is nothing there.
+		return a.Channels, a.CodecName, pr.Warnings, a.Samples == 0
 	}
-	return 0, "", pr.Warnings
+	return 0, "", pr.Warnings, false
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only

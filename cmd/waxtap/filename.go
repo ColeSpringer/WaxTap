@@ -297,10 +297,16 @@ func outputFor(path string, mode collisionMode) waxtap.Output {
 }
 
 // resolveCollision applies the collision mode to a candidate path. It returns the
-// path to write, whether to skip, and an error (only for collisionFail on an
-// existing file). For collisionAutoNumber it returns the first free " (n)"
-// variant.
+// path to write, whether to skip, and an error: for a path that names a
+// directory in any mode, for collisionFail on an existing file, and for
+// collisionAutoNumber when the bounded search finds no free name. For
+// collisionAutoNumber it otherwise returns the first free " (n)" variant.
 func resolveCollision(path string, mode collisionMode) (out string, skip bool, err error) {
+	// Ahead of the stat, because the path a trailing separator names usually does
+	// not exist yet and the stat would report nothing wrong with it.
+	if err := rejectTrailingSeparator(path); err != nil {
+		return "", false, err
+	}
 	// One stat handles both the directory check and collision detection.
 	fi, statErr := os.Stat(path)
 	switch {
@@ -315,14 +321,19 @@ func resolveCollision(path string, mode collisionMode) (out string, skip bool, e
 	case collisionSkip:
 		return path, true, nil
 	case collisionAutoNumber:
-		return nextAvailable(path), false, nil
+		next, err := nextAvailable(path)
+		if err != nil {
+			return "", false, err
+		}
+		return next, false, nil
 	default: // collisionFail
 		return "", false, usagef("output file already exists: %s (set --collision to auto-number, overwrite, or skip)", path)
 	}
 }
 
-// nextAvailable returns the first non-existing "name (n).ext" variant of path.
-func nextAvailable(path string) string {
+// nextAvailable returns the first non-existing "name (n).ext" variant of path,
+// or an error when every variant within the bound is taken.
+func nextAvailable(path string) (string, error) {
 	return nextAvailableFunc(path, pathExists)
 }
 
@@ -331,13 +342,31 @@ func nextAvailable(path string) string {
 // memory as well as paths on disk. The naming convention itself lives in
 // tempfile.NumberedVariant, shared with the publish-time retry so the pre-flight
 // and the publish cannot name files differently.
-func nextAvailableFunc(path string, taken func(string) bool) string {
-	for n := 1; ; n++ {
+//
+// The search stops at tempfile.MaxPublishRenumber, the publish retry's own
+// bound, for the same reason it has one: a directory whose first thousand
+// variants are all taken is a runaway loop, not a busy directory, and an
+// unbounded probe would stat forever without printing anything. Searching past
+// the publish's bound would also be wasted, since the publish refuses the name
+// the pre-flight came back with.
+func nextAvailableFunc(path string, taken func(string) bool) (string, error) {
+	for n := 1; n <= tempfile.MaxPublishRenumber; n++ {
 		candidate := tempfile.NumberedVariant(path, n)
 		if !taken(candidate) {
-			return candidate
+			return candidate, nil
 		}
 	}
+	return "", renumberExhaustedError(path)
+}
+
+// renumberExhaustedError reports an auto-number pre-flight that ran out of
+// numbers. It carries tempfile.ErrRenumberExhausted, the sentinel the publish
+// retry reports on giving up at the same bound, so whichever end quits first is
+// the same condition to a caller matching on it. It is a usage error so the
+// exit code matches every other collision failure, the pre-flight's and the
+// publish's alike; the remedy is the user's either way.
+func renumberExhaustedError(path string) error {
+	return &usageError{msg: renumberExhaustedMessage(path), cause: tempfile.ErrRenumberExhausted}
 }
 
 func pathExists(path string) bool {
@@ -411,13 +440,38 @@ func changedOutput(path string, before outputStamp) *keptOutput {
 	return &keptOutput{path: path, bytes: fi.Size()}
 }
 
-// rejectDirOutput rejects an existing directory before collision handling can
+// rejectDirOutput rejects an output path that names a directory, whether by
+// existing as one or by ending in a separator, before collision handling can
 // attempt to replace it with a staged file.
 func rejectDirOutput(path string) error {
+	if err := rejectTrailingSeparator(path); err != nil {
+		return err
+	}
 	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
 		return dirOutputError(path)
 	}
 	return nil
+}
+
+// rejectTrailingSeparator rejects an output path ending in a separator, which
+// names a directory rather than a file. Left alone it creates a directory named
+// after the file the user asked for, since the parent of "d/a.wav/" is
+// "d/a.wav", and every collision, skip, and auto-number decision downstream then
+// reasons about that directory. The library refuses it too, but only once the
+// spec is built and, for a process, once the encode has already run, so the
+// lexical check here is what keeps the work from being wasted.
+//
+// It rejects rather than trimming, matching the library: silently retargeting an
+// output path leaves the user unable to say where the file went.
+//
+// os.IsPathSeparator, not a comparison against "/": it also catches a trailing
+// backslash on Windows, where that is a separator, while leaving it alone on
+// unix, where a backslash is an ordinary filename character.
+func rejectTrailingSeparator(path string) error {
+	if path == "" || !os.IsPathSeparator(path[len(path)-1]) {
+		return nil
+	}
+	return usagef("output path ends in a path separator: %s (give a file path)", path)
 }
 
 // rejectDirIsFile rejects a --dir value that names an existing non-directory.

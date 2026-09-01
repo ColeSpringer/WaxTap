@@ -50,7 +50,8 @@ func newNormalizeCmd() *cobra.Command {
 			"at the cost of transparency. Because the limiter gives back part of the\n" +
 			"gain it is handed, limit measures its own output and corrects, re-encoding\n" +
 			"up to 4 times to land within 0.3 LU of the target; it reports\n" +
-			"loudness-target-missed if the limiter saturates before getting there.\n\n" +
+			"loudness-target-missed for any miss past that 0.3 LU, since a search that\n" +
+			"stopped outside its own tolerance is one that gave up.\n\n" +
 			"--album applies one uniform gain in a single pass and defaults to limit,\n" +
 			"whichever way --peak-mode is set for single files. Under limit the gain\n" +
 			"aims at the target and the per-track limiter gives part of it back on the\n" +
@@ -369,22 +370,30 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 			delivered = &d
 		}
 		return env.emitJSON(struct {
-			SchemaVersion int               `json:"schemaVersion"`
-			Album         loudnessInfoJSON  `json:"album"`
-			GainDB        jsonFloat         `json:"gainDb"`
-			Delivered     *loudnessInfoJSON `json:"delivered,omitempty"`
-			Tracks        []albumTrackJSON  `json:"tracks"`
-			Warnings      []warningJSON     `json:"warnings,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns})
+			SchemaVersion   int               `json:"schemaVersion"`
+			Album           loudnessInfoJSON  `json:"album"`
+			GainDB          jsonFloat         `json:"gainDb"`
+			LoudnessApplied bool              `json:"loudnessApplied"`
+			Delivered       *loudnessInfoJSON `json:"delivered,omitempty"`
+			Tracks          []albumTrackJSON  `json:"tracks"`
+			Warnings        []warningJSON     `json:"warnings,omitempty"`
+			Notes           []noteJSON        `json:"notes,omitempty"`
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns, env.notesJSON()})
 	}
 	// Album processing runs without an event stream, so carry warnings surface
 	// here rather than through the progress renderer.
 	for _, w := range res.Warnings {
 		env.info("warning: [%s] %s\n", w.Code, w.Detail)
 	}
-	env.printf("Album:  %s LUFS; applied %+.1f dB to each track", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
-	if res.Delivered != nil {
-		env.printf("; delivered %s LUFS", humanLUFS(res.Delivered.IntegratedLUFS))
+	if res.LoudnessApplied {
+		env.printf("Album:  %s LUFS; applied %+.1f dB to each track", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
+		if res.Delivered != nil {
+			env.printf("; delivered %s LUFS", humanLUFS(res.Delivered.IntegratedLUFS))
+		}
+	} else {
+		// No album loudness to derive a gain from, so the tracks were re-encoded
+		// untouched. The unmeasurable warning above carries the cause.
+		env.printf("Album:  %s LUFS; no gain applied, tracks re-encoded unchanged", humanLUFS(res.Album.IntegratedLUFS))
 	}
 	env.printf("\n\n")
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)

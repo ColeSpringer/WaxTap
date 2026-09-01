@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -300,15 +301,18 @@ type InfoResult struct {
 	BestIndex int
 }
 
-// ReadOption configures Info, InfoResult, and Resolve. WithNoFallback applies to
-// all three; WithChannels only affects the best-audio row Info and InfoResult
-// pick (Resolve takes an explicit AudioSelector and ignores it).
+// ReadOption configures Info, InfoResult, and Resolve. WithNoFallback and
+// WithSourcePolicy apply to all three; WithSelector and WithChannels shape the
+// row Info and InfoResult resolve and probe, and Resolve ignores both because it
+// takes the selector as a parameter.
 type ReadOption func(*readOptions)
 
 type readOptions struct {
 	noFallback   bool
 	fullMetadata bool
+	sel          AudioSelector
 	layout       ChannelLayout
+	policy       SourcePolicy
 }
 
 // WithNoFallback prevents Info, InfoResult, and Resolve from falling back to
@@ -319,13 +323,49 @@ func WithNoFallback() ReadOption {
 }
 
 // WithChannels sets the channel preference Info and InfoResult use to pick the
-// best-audio row they resolve and probe, matching the row a default download
-// would select. The facade defaults to stereo; pass WithChannels(LayoutSurround)
-// for surround or WithChannels(LayoutAny) to rank purely by fidelity with no
-// channel preference (a surround track may then rank highest). Resolve takes an
-// explicit AudioSelector and ignores this option.
+// row they resolve and probe, matching the row a default download would select.
+// The facade defaults to stereo; pass WithChannels(LayoutSurround) for surround
+// or WithChannels(LayoutAny) to rank purely by fidelity with no channel
+// preference (a surround track may then rank highest). Resolve takes an explicit
+// AudioSelector and ignores this option.
+//
+// A selector passed to WithSelector wins: this layout fills in only a selector
+// that expressed none. See WithSelector for why that direction, not the other.
 func WithChannels(layout ChannelLayout) ReadOption {
 	return func(o *readOptions) { o.layout = layout }
+}
+
+// WithSelector sets the audio selector Info and InfoResult use to pick the row
+// they resolve and probe. It answers "what would this request give me?" without
+// downloading: WithSelector(Itag(251)) reports and probes itag 251, the row
+// Download would deliver for the same selector. The default is best audio.
+//
+// The selector wins over WithChannels when both name a layout, because a
+// selector carries the caller's whole intent (which encoding, in which layout)
+// while WithChannels is only a preference for the one field. Concretely, the
+// layout is applied with AudioSelector.WithDefaultChannels: Codec("opus") alone
+// takes the layout from WithChannels (or the stereo default), whereas
+// Codec("opus").WithChannels(LayoutSurround) stays surround. Itag selectors name
+// an exact encoding and ignore layout entirely, from either source. Doing it the
+// other way would let a stray WithChannels silently rewrite a fully specified
+// selector, and there would be no way to express "this exact selector" at all.
+//
+// Resolve takes an explicit AudioSelector parameter and ignores this option.
+func WithSelector(sel AudioSelector) ReadOption {
+	return func(o *readOptions) { o.sel = sel }
+}
+
+// WithSourcePolicy sets the source policy Info, InfoResult, and Resolve rank
+// candidates under, mirroring Request.SourcePolicy for a download. The default
+// is MinimizeLoss.
+//
+// Only PreferCodec changes what these three pick. They report or resolve the
+// source stream as it is, so they select against a zero Target, and with no
+// target codec to match MinimizeLoss and BestNative both fall through to normal
+// best-audio ranking. Pass PreferCodec to preview the source bias a PreferCodec
+// download would apply.
+func WithSourcePolicy(policy SourcePolicy) ReadOption {
+	return func(o *readOptions) { o.policy = policy }
 }
 
 // WithFullMetadata makes Info and InfoResult run a token-free watch-page pass
@@ -352,8 +392,10 @@ const defaultFacadeLayout = LayoutStereo
 func newReadOptions(opts []ReadOption) readOptions {
 	// Info/InfoResult default the resolved+probed best-audio row to the facade layout,
 	// matching Download; WithChannels(LayoutAny) overrides it. Resolve also calls this
-	// but ignores ro.layout (it selects from its explicit AudioSelector).
-	ro := readOptions{layout: defaultFacadeLayout}
+	// but ignores ro.sel and ro.layout (it selects from its explicit AudioSelector).
+	// The selector and policy defaults are their zero values; they are written out so
+	// the default read is legible here rather than in package format.
+	ro := readOptions{sel: BestAudio(), layout: defaultFacadeLayout, policy: MinimizeLoss()}
 	for _, opt := range opts {
 		opt(&ro)
 	}
@@ -413,11 +455,12 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		return res, nil
 	}
 
-	// Resolve and probe the row the CLI displays as "Best audio" (the same selector,
-	// with the caller's channel preference), so the content length and probed
-	// numbers land on the displayed row rather than a surround track that outranks
-	// it under MinimizeLoss with no preference.
-	idx, serr := selectIndex(BestAudio().WithChannels(ro.layout), MinimizeLoss(), format.Target{}, video.Formats)
+	// Resolve and probe the row the caller asked about (best audio by default, or
+	// the WithSelector row), with the caller's channel preference, so the content
+	// length and probed numbers land on the displayed row rather than a surround
+	// track that outranks it under no preference. The layout is applied as a
+	// default so a selector that named its own layout keeps it.
+	idx, serr := selectIndex(ro.sel.WithDefaultChannels(ro.layout), ro.policy, format.Target{}, video.Formats)
 	if serr != nil {
 		return res, nil // nothing resolvable; return the basic metadata
 	}
@@ -534,67 +577,234 @@ func (c *Client) resolveEnumerateTarget(ctx context.Context, url string) (playli
 	return "", "", plErr
 }
 
+// maxEnrichRotations bounds how many times one enrichment may retire its guest
+// identity to get past the metadata throttle. Each identity answers about a
+// thousand entries before it starts refusing, so four rotations carry roughly
+// five thousand, and the loop stops earlier on its own the moment a pass
+// recovers nothing. The bound exists so a broken session cannot turn one
+// Enumerate into an unbounded series of fresh-identity bootstraps.
+//
+// A playlist longer than that is not dropped: whatever is left over is reported
+// as [ErrTemporarilyUnavailable], which says come back rather than skip.
+const maxEnrichRotations = 4
+
 // enrichEntries refreshes playlist entries with InfoBasic. Each worker owns one
-// entry; only pl.Errors is shared. Ordinary item failures stay on the playlist,
-// but context cancellation is returned to the caller.
+// entry; only the failure list is shared. Ordinary item failures stay on the
+// playlist, but context cancellation is returned to the caller.
 //
 // onProgress reports each completed entry, successful or failed. Calls are
 // serialized under a dedicated progress lock and arrive in increasing done-count
 // order. The final call reaches (total, total) unless context cancellation stops
-// enrichment early.
+// enrichment early. Retried entries do not report progress twice; the count is
+// of entries settled, not of requests made.
+//
+// # The metadata throttle
+//
+// A guest session that asks about enough videos stops being told about any of
+// them. Measured over two full runs of a 1488-entry channel: every request
+// succeeds through roughly the 960th, and from there about 93% answer status
+// UNPLAYABLE with the reason "Video unavailable". On that channel it was a
+// third of the catalogue, and it classified as ErrVideoUnavailable, which this
+// package documents as the skip-rather-than-fail signal, so an archiving caller
+// dropped 485 perfectly good videos for good.
+//
+// The reason text cannot separate the throttle from a dead video, but two
+// signals can, and both are used. The playability status does half the work:
+// a deleted, nonexistent, or private video answers status ERROR (measured),
+// while the throttle answers UNPLAYABLE, so only UNPLAYABLE-shaped failures
+// are worth a rotation at all and a playlist holding one removed video keeps
+// its warm identity (see throttleShaped). Asking again under a fresh identity
+// does the rest: 25 of 25 sampled throttle failures came back with their
+// titles immediately, so a retry that succeeds proves the video was fine, and
+// a whole retry pass that recovers nothing proves the failures were real and
+// ends the loop.
+//
+// Retrying without rotating first is deliberately not done: the window is
+// session-scoped and positional, so an immediate retry re-enters the same closed
+// window, fails identically, and triples the load on the failing share.
 func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress func(done, total int)) error {
 	limit := c.opts.Concurrency.Downloads
 	if limit <= 0 {
 		limit = 4
 	}
 	total := len(pl.Entries)
-	sem := make(chan struct{}, limit)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+
 	var progressMu sync.Mutex
 	progressDone := 0
-	for i := range pl.Entries {
-		if ctx.Err() != nil {
-			break
+	settled := func() {
+		if onProgress == nil {
+			return
 		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int) {
-			defer wg.Done()
-			// The semaphore release is registered after this defer, so it runs first.
-			// A slow progress callback cannot occupy a worker slot, and progressMu
-			// stays separate from the playlist error lock.
-			defer func() {
-				if onProgress != nil {
-					progressMu.Lock()
-					progressDone++
-					onProgress(progressDone, total)
-					progressMu.Unlock()
-				}
-			}()
-			defer func() { <-sem }()
-			v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
-			if err != nil {
-				// Return cancellation through ctx.Err(), not as an item error.
-				if ctx.Err() == nil {
-					mu.Lock()
-					pl.Errors = append(pl.Errors, fmt.Errorf("enrich %s: %w", pl.Entries[i].VideoID, err))
-					mu.Unlock()
-				}
-				return
-			}
-			pl.Entries[i].Title = v.Title
-			pl.Entries[i].Author = v.Author
-			pl.Entries[i].Duration = v.Duration
-			// Fill the channel ID when enumerate time did not carry a byline browseId
-			// (a mixed-channel playlist), leaving a channel-feed stamp intact.
-			if pl.Entries[i].ChannelID == "" {
-				pl.Entries[i].ChannelID = v.ChannelID
-			}
-		}(i)
+		progressMu.Lock()
+		progressDone++
+		onProgress(progressDone, total)
+		progressMu.Unlock()
 	}
-	wg.Wait()
+
+	// passGen names the identity generation the most recent pass ran under, so a
+	// rotation retires the identity whose refusals provoked it rather than
+	// whatever is current by then. Passing the current generation instead would
+	// defeat RotateIdentity's dedup: when a concurrent user of this client has
+	// already rotated, the failing identity is gone and rotating again only burns
+	// a fresh one. pass and rotate alternate on one goroutine, so a plain
+	// variable is safe.
+	var passGen uint64
+
+	// pass enriches the named entries and returns the ones that failed, paired
+	// with why. report says whether this pass settles its entries for progress:
+	// only the first pass does, on success and failure alike, so every entry
+	// counts exactly once and a retried entry cannot push done past total.
+	pass := func(idxs []int, report bool) ([]int, []error) {
+		passGen = c.yt.IdentityGeneration()
+		sem := make(chan struct{}, limit)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var failed []int
+		var causes []error
+		for _, i := range idxs {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int) {
+				defer wg.Done()
+				// The semaphore release is registered after this defer, so it runs
+				// first. A slow progress callback cannot occupy a worker slot, and
+				// progressMu stays separate from the failure lock.
+				defer func() { <-sem }()
+				v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
+				if err != nil {
+					// Return cancellation through ctx.Err(), not as an item error.
+					if ctx.Err() == nil {
+						mu.Lock()
+						failed = append(failed, i)
+						causes = append(causes, err)
+						mu.Unlock()
+						if report {
+							settled()
+						}
+					}
+					return
+				}
+				pl.Entries[i].Title = v.Title
+				pl.Entries[i].Author = v.Author
+				pl.Entries[i].Duration = v.Duration
+				// Fill the channel ID when enumerate time did not carry a byline
+				// browseId (a mixed-channel playlist), leaving a channel-feed stamp
+				// intact.
+				if pl.Entries[i].ChannelID == "" {
+					pl.Entries[i].ChannelID = v.ChannelID
+				}
+				if report {
+					settled()
+				}
+			}(i)
+		}
+		wg.Wait()
+		return failed, causes
+	}
+
+	all := make([]int, len(pl.Entries))
+	for i := range all {
+		all[i] = i
+	}
+	rotate := func(seed int) bool {
+		return c.yt.RotateIdentity(ctx, passGen, pl.Entries[seed].VideoID)
+	}
+	failed, causes, unproven := enrichRotationLoop(ctx, all, pass, rotate, throttleShaped)
+
+	for n, i := range failed {
+		cause := causes[n]
+		// Wrapped with %w on both sides: the sentinel is the classification, and
+		// the original chain is what errors.Is callers were matching before the
+		// relabel. Only throttle-shaped leftovers are relabeled; an ERROR-status
+		// failure is a verdict wherever it occurred.
+		if unproven && throttleShaped(cause) {
+			cause = fmt.Errorf("%w: %w", ErrTemporarilyUnavailable, cause)
+		}
+		pl.Errors = append(pl.Errors, fmt.Errorf("enrich %s: %w", pl.Entries[i].VideoID, cause))
+	}
 	return ctx.Err()
+}
+
+// throttleShaped reports whether an enrichment failure has the metadata
+// throttle's signature: playability status UNPLAYABLE classified as
+// ErrVideoUnavailable. Measured both ways: the throttle answers UNPLAYABLE with
+// "Video unavailable", while deleted, nonexistent, and private videos all
+// answer status ERROR. The shape is a gate, not a verdict - other UNPLAYABLE
+// reasons fall through classifyUnplayableReason to the same sentinel - so a
+// shaped failure earns a rotation and a retry, and the retry decides.
+func throttleShaped(err error) bool {
+	pe, ok := errors.AsType[*waxerr.PlayabilityError](err)
+	return ok && pe.Status == "UNPLAYABLE" && errors.Is(err, ErrVideoUnavailable)
+}
+
+// enrichRotationLoop drives enrichment's pass/rotate/re-ask sequence and returns
+// the entries still failing, their causes, and whether those causes are trusted.
+//
+// pass enriches the given entries and returns the ones that failed; its report
+// argument says whether the pass settles its entries for progress reporting,
+// which only the first pass does, so an entry revisited three times still
+// advances the count once. rotate retires the identity the last pass ran under,
+// seeded with one failing entry index for provider diagnostics, and reports
+// whether anything was actually retired. shaped says whether a failure carries
+// the throttle's signature; only shaped failures justify a rotation, so an
+// enriched playlist holding one removed video does not wipe a warm guest
+// identity on every run just to re-hear the same verdict.
+//
+// unproven is true only when the budget ran out while shaped failures remained
+// and passes were still recovering entries: those causes were never tested
+// under a working identity, and presenting them as availability verdicts would
+// repeat the mistake this loop exists to fix. When the loop stops because a
+// whole pass recovered nothing, or because only unshaped verdicts are left, the
+// causes are as trustworthy as any single call's and the caller reports them
+// unchanged.
+//
+// It is a free function taking closures so the policy can be tested without a
+// live session; the sequencing decisions here are the substance of the fix.
+func enrichRotationLoop(
+	ctx context.Context,
+	all []int,
+	pass func(idxs []int, report bool) ([]int, []error),
+	rotate func(seed int) bool,
+	shaped func(error) bool,
+) (failed []int, causes []error, unproven bool) {
+	// The first pass reports its own entries as settled: every entry is
+	// accounted for once, whether or not a later pass revisits it.
+	failed, causes = pass(all, true)
+
+	anyShaped := func() bool {
+		for _, c := range causes {
+			if shaped(c) {
+				return true
+			}
+		}
+		return false
+	}
+
+	rotations := 0
+	for len(failed) > 0 && anyShaped() && ctx.Err() == nil && rotations < maxEnrichRotations {
+		// Rotation is refused by a client with no durable guest identity to
+		// retire: jarless, a static Session, or a SessionProvider that cannot
+		// invalidate what it handed out. Re-asking under the identity that just
+		// refused would only repeat the answer, so such a client keeps the
+		// pre-rotation behavior and its throttled entries stay indistinguishable
+		// from removed ones. Nothing here can fix that; the identity is the
+		// caller's to replace.
+		if !rotate(failed[0]) {
+			return failed, causes, false
+		}
+		rotations++
+		retryFailed, retryCauses := pass(failed, false)
+		recovered := len(failed) - len(retryFailed)
+		failed, causes = retryFailed, retryCauses
+		if recovered == 0 {
+			// A fresh identity changed nothing, so these are real verdicts.
+			return failed, causes, false
+		}
+	}
+	return failed, causes, len(failed) > 0 && rotations >= maxEnrichRotations && anyShaped()
 }
 
 // Resolve selects and resolves an audio stream without downloading it. The zero
@@ -602,6 +812,10 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 // BestAudio().WithChannels(LayoutSurround) for surround or WithChannels(LayoutAny)
 // for any-fidelity. Direct streams include a temporary googlevideo URL and its
 // request metadata. SABR streams set IsSABR and leave URL empty.
+//
+// WithSourcePolicy applies here too, so a caller previewing a stream with Info
+// and then resolving it lands on the same row. The selector is a parameter, so
+// WithSelector and WithChannels do not apply.
 //
 // It is exposed for diagnostics: the CLI's info --show-url and doctor. Most
 // callers use Download or Stream, which never expose the raw URL.
@@ -617,7 +831,7 @@ func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector, opt
 	if err != nil {
 		return ResolvedStream{}, err
 	}
-	idx, err := selectIndex(sel.WithDefaultChannels(defaultFacadeLayout), MinimizeLoss(), format.Target{}, ext.Video().Formats)
+	idx, err := selectIndex(sel.WithDefaultChannels(defaultFacadeLayout), ro.policy, format.Target{}, ext.Video().Formats)
 	if err != nil {
 		return ResolvedStream{}, err
 	}

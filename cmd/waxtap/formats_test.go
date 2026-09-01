@@ -8,10 +8,13 @@ import (
 )
 
 func TestSchemaVersion(t *testing.T) {
-	// Bumped to 2 for the WaxFlow migration: the doctor --json reshaped and exit
-	// code 6 was retired.
-	if schemaVersion != 2 {
-		t.Errorf("schemaVersion = %d, want 2", schemaVersion)
+	// Bumped to 3 for the error-object pass: playlist and batch item errors became
+	// {code, message}, failed items stopped naming an output they never wrote,
+	// batch summary counts became unconditional and gained a total, and
+	// chapterCount is omitted rather than asserting 0 when chapters were not
+	// fetched. See the constant's own comment for the full list.
+	if schemaVersion != 3 {
+		t.Errorf("schemaVersion = %d, want 3", schemaVersion)
 	}
 }
 

@@ -70,6 +70,22 @@ var (
 // extraction breakage. See [RateLimitError] for the retry-after context.
 var ErrRateLimited = errors.New("waxtap: rate limited")
 
+// ErrTemporarilyUnavailable indicates a video the player refused to describe
+// right now under a throttled session and would very likely describe under a
+// fresh one. Bulk metadata enrichment draws the refusal once a session has
+// asked about enough videos; it arrives worded exactly like a removed video
+// ("Video unavailable", status UNPLAYABLE), and enrichment retires the identity
+// and re-asks to tell the two apart. This sentinel marks the entries left when
+// that retry budget ran out before a working identity could answer.
+//
+// It is deliberately NOT an availability verdict. [ErrVideoUnavailable] is
+// documented as the skip-rather-than-fail signal, so an archiving caller that
+// treats it as final permanently skips whatever it happened to ask about while
+// throttled, which on a large channel is a third of the catalogue. This says the
+// opposite: nothing is known about the video yet, and asking again later is the
+// correct response.
+var ErrTemporarilyUnavailable = errors.New("waxtap: video is temporarily unavailable; try again later")
+
 // Input / routing.
 var (
 	ErrIsPlaylist = errors.New("waxtap: URL is a playlist; use Enumerate")
@@ -270,6 +286,7 @@ func hostOr(host string) string {
 // lowest precedence:
 //
 //   - availability verdicts
+//   - a temporary refusal to describe the video (ErrTemporarilyUnavailable)
 //   - extraction, cipher, or parse failures
 //   - incomplete delivery (ErrIncompleteStream or ErrURLExpired)
 //   - generic or network failures
@@ -305,6 +322,12 @@ func errRank(err error) int {
 		// A requested-format miss proves that extraction succeeded, so it outranks
 		// availability errors from other clients.
 		errors.Is(err, ErrRequestedFormatUnavailable):
+		return 6
+	case errors.Is(err, ErrTemporarilyUnavailable):
+		// Above extraction because it is a verdict about the video (the player
+		// answered, and said "not now"), below the availability verdicts because
+		// it is explicitly not final. The ranks are adjacent integers, so
+		// slotting it here renumbers everything above it.
 		return 5
 	case errors.Is(err, ErrExtractionFailed),
 		errors.Is(err, ErrCipherSolve),

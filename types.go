@@ -811,6 +811,17 @@ const (
 	// A preference that was available but outranked by a better source stays
 	// silent: that is the soft bias working as documented.
 	WarnSourcePolicyUnmatched
+	// WarnEmptyInput reports a local input whose audio track holds no frames: a
+	// container that parses and declares a codec, carrying nothing. The run
+	// still succeeds, and the output is a valid file of no audio, because that
+	// is a faithful conversion of what was handed in and a batch that stops on
+	// one empty file helps nobody.
+	//
+	// It is distinct from [WarnInputDamage], which is about audio that partly
+	// read, and from [WarnLoudnessUnmeasurable], which explains a measurement
+	// this condition also causes. A cut is the one request that refuses instead,
+	// since there is nothing to cut.
+	WarnEmptyInput
 )
 
 func (w WarningCode) String() string {
@@ -857,6 +868,8 @@ func (w WarningCode) String() string {
 		return "loudness-unmeasurable"
 	case WarnSourcePolicyUnmatched:
 		return "source-policy-unmatched"
+	case WarnEmptyInput:
+		return "empty-input"
 	default:
 		return "unknown"
 	}

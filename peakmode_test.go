@@ -70,15 +70,12 @@ func TestPeakModeCapMissesAndWarns(t *testing.T) {
 		t.Errorf("cap mode missed the target without WarnLoudnessTargetMissed: %+v", capped.Warnings)
 	}
 
-	// The invariant, on the fixture most likely to defeat the gain search: limit mode
-	// never misses by more than the reporting threshold in silence, in either
-	// direction, and never warns about a run that reached the target.
-	//
-	// Between the two thresholds nothing is asserted, because mapping.go documents
-	// that band as deliberately silent: a miss under loudnessMissWarnDB is inside the
-	// noise of a lossy encode and not worth telling the user about. Requiring
-	// "converged or warned" would fail this test for a limiter improvement that lands
-	// 0.6 LU short, which is behaving exactly as designed.
+	// The invariant, on the fixture most likely to defeat the gain search: limit
+	// mode either converged or said so. There is no band left in between. The
+	// search stops the moment it is inside ConvergeToleranceDB, so every stop
+	// outside it is the search giving up, and the mode's whole documented promise
+	// is that it iterates onto the target - a silent 0.74 LU miss is exactly the
+	// finding this asserts against.
 	//
 	// This deliberately does not assert a fixed LU figure. QuietWithTransientWAV is
 	// about -41 LUFS peaking near 0 dBTP, roughly 41 dB of crest, so it is the
@@ -89,9 +86,9 @@ func TestPeakModeCapMissesAndWarns(t *testing.T) {
 	got := limited.Loudness.Output.IntegratedLUFS
 	miss := math.Abs(got - target)
 	warned := hasWarning(limited, WarnLoudnessTargetMissed)
-	if miss > loudnessMissWarnDB && !warned {
-		t.Errorf("limit output = %.3f LUFS misses %g by %.3f LU, past the %g LU reporting threshold, and said nothing: %+v",
-			got, target, miss, loudnessMissWarnDB, limited.Warnings)
+	if miss > loudness.ConvergeToleranceDB && !warned {
+		t.Errorf("limit output = %.3f LUFS misses %g by %.3f LU, past the %g LU converge tolerance, and said nothing: %+v",
+			got, target, miss, loudness.ConvergeToleranceDB, limited.Warnings)
 	}
 	if miss <= loudness.ConvergeToleranceDB && warned {
 		t.Errorf("limit output = %.3f LUFS converged but still warned: %+v", got, limited.Warnings)
@@ -200,11 +197,29 @@ func TestWarnLimiterTargetMissed(t *testing.T) {
 	if d := detail(out(-12.0)); !strings.Contains(d, "2.0 LU above") {
 		t.Errorf("overshoot detail = %q, want it to report an overshoot", d)
 	}
-	// Inside the reporting threshold: silent on both sides.
-	for _, lufs := range []float64{-14.5, -13.5, -14} {
-		if d := detail(out(lufs)); d != "" {
-			t.Errorf("%.1f LUFS is within %g LU of the target but warned: %q", lufs, loudnessMissWarnDB, d)
+	// The band between the converge tolerance and the old 1 LU threshold is the
+	// finding: limit mode promises to iterate onto the target, so stopping 0.74 LU
+	// short is the search having given up and must be said out loud.
+	for _, lufs := range []float64{-14.74, -13.4} {
+		if d := detail(out(lufs)); d == "" {
+			t.Errorf("%.2f LUFS misses by more than the %g LU converge tolerance but said nothing", lufs, loudness.ConvergeToleranceDB)
 		}
+	}
+	// Inside the converge tolerance the search stopped because it arrived: silent
+	// on both sides.
+	for _, lufs := range []float64{-14.2, -13.8, -14} {
+		if d := detail(out(lufs)); d != "" {
+			t.Errorf("%.1f LUFS is within %g LU of the target but warned: %q", lufs, loudness.ConvergeToleranceDB, d)
+		}
+	}
+	// A single completed pass is now reachable (a corrected gain pinned at
+	// WaxFlow's clamp, or a failed correction write), so the noun has to agree.
+	single := pipeline.Result{
+		OutputLoudness: &loudness.Loudness{IntegratedLUFS: -15.4, TruePeakDBTP: -1, LRA: 4},
+		LoudnessPasses: 1,
+	}
+	if d := detail(single); !strings.Contains(d, "after 1 encode pass;") {
+		t.Errorf("single-pass detail = %q, want a singular pass count", d)
 	}
 	// No usable measurement: nothing honest to report.
 	if d := detail(pipeline.Result{}); d != "" {

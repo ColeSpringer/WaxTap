@@ -47,7 +47,7 @@ func TestWarnChannelLayout(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			warnChannelLayout(noteEnv(&buf), tc.df, tc.res)
+			warnChannelLayout(noteEnv(&buf), noteEnv(&buf), tc.df, tc.res)
 			got := buf.String()
 			switch {
 			case tc.want == "" && got != "":
@@ -421,7 +421,7 @@ func TestWarnChannelLayoutItagNoteOnce(t *testing.T) {
 	df := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo, itag: 258}
 	env := noteEnv(&buf)
 	for range 5 {
-		warnChannelLayout(env, df, res)
+		warnChannelLayout(env, env, df, res)
 	}
 	if got := strings.Count(buf.String(), "--itag names an exact encoding"); got != 1 {
 		t.Errorf("itag note printed %d times, want 1:\n%s", got, buf.String())
@@ -431,7 +431,7 @@ func TestWarnChannelLayoutItagNoteOnce(t *testing.T) {
 	noItag := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo}
 	env2 := noteEnv(&buf2)
 	for range 3 {
-		warnChannelLayout(env2, noItag, res)
+		warnChannelLayout(env2, env2, noItag, res)
 	}
 	if got := strings.Count(buf2.String(), "requested stereo; delivered"); got != 3 {
 		t.Errorf("per-item note printed %d times, want 3 (it varies with the video)", got)
@@ -450,5 +450,35 @@ func TestWebOutcomeActionableExcludesSponsorBlock(t *testing.T) {
 	pc := &waxtap.ProviderError{Endpoint: "player-context", Cause: errFake("connection refused")}
 	if !webOutcomeActionable(nil, pc) {
 		t.Error("a player-context provider failure should still trigger the nudge")
+	}
+}
+
+// The itag note is one fact about the run, so under a playlist's per-item note
+// scopes it must land on the run collector, not on whichever item's scope
+// happened to trip the sync.Once; the per-item mismatch note stays with its
+// item.
+func TestWarnChannelLayoutScopesRunAndItem(t *testing.T) {
+	res := &waxtap.Result{OutputFormat: waxtap.Format{Channels: 6}, SourceFormat: waxtap.Format{Channels: 6}}
+	run := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{quiet: true}, notes: &noteCollector{}}
+
+	df := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo, itag: 258}
+	item := run.withScopedNotes()
+	warnChannelLayout(run, item, df, res)
+	if got := item.notes.drain(); len(got) != 0 {
+		t.Errorf("the itag note landed on an item scope: %+v", got)
+	}
+	if got := run.notesJSON(); len(got) != 1 || got[0].Code != string(noteChannelsIgnored) {
+		t.Errorf("run notes = %+v, want the one itag note", got)
+	}
+
+	noItag := &downloadFlags{channelsExplicit: true, layout: waxtap.LayoutStereo}
+	run2 := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{quiet: true}, notes: &noteCollector{}}
+	item2 := run2.withScopedNotes()
+	warnChannelLayout(run2, item2, noItag, res)
+	if got := item2.notes.drain(); len(got) != 1 || got[0].Code != string(noteChannelsUnavailable) {
+		t.Errorf("item notes = %+v, want the one mismatch note", got)
+	}
+	if got := run2.notesJSON(); len(got) != 0 {
+		t.Errorf("the per-item note landed on the run scope: %+v", got)
 	}
 }

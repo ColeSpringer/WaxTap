@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -331,5 +332,55 @@ func TestSponsorBlockURLOnCapableCommandsOnly(t *testing.T) {
 				t.Errorf("%s should still expose the shared network flags", tc.name)
 			}
 		})
+	}
+}
+
+// TestQuietAndVerboseConflict pins F14. The two flags ask for opposite things
+// and the consumers disagreed about the winner: the logger let verbose raise the
+// level, the progress reporter looked only at quiet, and download's list
+// heartbeat wanted neither. loadConfig now refuses the pair, so every command
+// that calls setup rejects it before doing any work.
+func TestQuietAndVerboseConflict(t *testing.T) {
+	// newRootCmd rebinds the persistent flags to the package-level rootFlagsValue.
+	saved := rootFlagsValue
+	t.Cleanup(func() { rootFlagsValue = saved })
+	// Point the optional config file at a path that does not exist, so a real one
+	// in the user's config dir cannot color the result. A missing WAXTAP_CONFIG is
+	// not an error; only an explicit --config demands the file.
+	t.Setenv("WAXTAP_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
+
+	// The flags are persistent on the root, so loadConfig only sees them through a
+	// subcommand's merged flag set. Drive one rather than the root itself.
+	load := func(t *testing.T, args ...string) error {
+		t.Helper()
+		sub, _, err := newRootCmd().Find([]string{"info"})
+		if err != nil {
+			t.Fatalf("find info: %v", err)
+		}
+		if err := sub.ParseFlags(args); err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		_, cerr := loadConfig(sub)
+		return cerr
+	}
+
+	err := load(t, "--quiet", "--verbose")
+	if _, ok := errors.AsType[*usageError](err); !ok {
+		t.Fatalf("--quiet --verbose: err = %v (%T), want *usageError", err, err)
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("--quiet --verbose: err = %q, want it to name the conflict", err)
+	}
+	// The shorthands are the same flags, combined form included.
+	for _, args := range [][]string{{"-q", "-v"}, {"-qv"}} {
+		if _, ok := errors.AsType[*usageError](load(t, args...)); !ok {
+			t.Errorf("%v: want a usage error", args)
+		}
+	}
+	// Either flag alone is the ordinary case and must still load.
+	for _, arg := range []string{"--quiet", "--verbose", "-q", "-v"} {
+		if err := load(t, arg); err != nil {
+			t.Errorf("%s alone: %v", arg, err)
+		}
 	}
 }

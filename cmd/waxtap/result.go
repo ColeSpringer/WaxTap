@@ -22,6 +22,7 @@ func emitResult(env *appEnv, res *waxtap.Result) error {
 			// this is also what makes the two source kinds agree.
 			doc.OutputBytes, doc.OutputFormat = 0, nil
 		}
+		doc.Notes = env.notesJSON()
 		return env.emitJSON(doc)
 	}
 	renderResultHuman(env, res)
@@ -32,9 +33,10 @@ func emitResult(env *appEnv, res *waxtap.Result) error {
 // already existed. It is a terminal outcome like any other, so it owes stdout a
 // document; download has emitted this shape since before the other commands did.
 type skipJSON struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Skipped       string `json:"skipped"`
-	OutputPath    string `json:"outputPath,omitempty"`
+	SchemaVersion int        `json:"schemaVersion"`
+	Skipped       string     `json:"skipped"`
+	OutputPath    string     `json:"outputPath,omitempty"`
+	Notes         []noteJSON `json:"notes,omitempty"`
 }
 
 // emitSkip reports a run that wrote nothing because the output already existed:
@@ -44,7 +46,7 @@ type skipJSON struct {
 // download's archive skip. JSON wins over quiet, matching emitResult.
 func emitSkip(env *appEnv, reason, path string) error {
 	if env.jsonMode() {
-		return env.emitJSON(skipJSON{schemaVersion, reason, displayPath(path)})
+		return env.emitJSON(skipJSON{schemaVersion, reason, displayPath(path), env.notesJSON()})
 	}
 	if path == "" {
 		env.info("skipped (%s)\n", reason)
@@ -270,6 +272,10 @@ type resultJSON struct {
 
 	Loudness *loudnessJSON `json:"loudness,omitempty"`
 	Warnings []warningJSON `json:"warnings,omitempty"`
+	// Notes are the run's note: diagnostics, in the same {code, detail} shape as
+	// Warnings. They were stderr-only and --quiet-gated, so --json --quiet, the
+	// combination a script is most likely to use, saw none of them.
+	Notes []noteJSON `json:"notes,omitempty"`
 }
 
 func resultToJSON(res *waxtap.Result) resultJSON {

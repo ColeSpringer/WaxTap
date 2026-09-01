@@ -72,8 +72,11 @@ type downloadFlags struct {
 	// itagLayoutNote keeps the --itag-overrides---channels note to one per run:
 	// it is the same sentence for every item, and OnItem may run concurrently.
 	itagLayoutNote sync.Once
-	archive        *downloadArchive
-	streamW        io.Writer // stdout sink when --out is "-"; nil for a file sink
+	// alacExtNote does the same for the .alac-container note, which fires from
+	// the per-item BuildRequest seam where only the run scope exists.
+	alacExtNote sync.Once
+	archive     *downloadArchive
+	streamW     io.Writer // stdout sink when --out is "-"; nil for a file sink
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -205,7 +208,7 @@ func clampConcurrency(n int) (clamped int, wasClamped bool, err error) {
 // noteConcurrencyClamp prints the clamp note. Call it where the clamped value is
 // actually used.
 func noteConcurrencyClamp(env *appEnv, requested int) {
-	env.info("note: --concurrency %d exceeds the maximum of %d; clamping to %d\n", requested, maxConcurrency, maxConcurrency)
+	env.note(noteConcurrencyClamped, "--concurrency %d exceeds the maximum of %d; clamping to %d", requested, maxConcurrency, maxConcurrency)
 }
 
 // resolve validates download flags and computes values used by every item. It
@@ -420,17 +423,24 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 			return req, skip, err
 		},
 		OnItem: func(o waxtap.PlaylistItemOutcome) {
+			// Notes are collected per item, not per run. These handlers are
+			// concurrent and arrive out of order, and BuildRequest for the next
+			// item overlaps this one, so a shared collector would hand item 7's
+			// note to whichever record happened to be written next.
+			item := env.withScopedNotes()
 			// Write sidecars and the archive before the result line.
 			if o.Attempted && o.Err == nil && o.Result != nil {
-				finishItem(env, df, o.Entry.VideoID, o.Result)
-				warnChannelLayout(env, df, o.Result)
-				warnContainerExtMismatch(env, df, o.Result)
-				measureNote(env, o.Result)
+				finishItem(item, df, o.Entry.VideoID, o.Result)
+				warnChannelLayout(env, item, df, o.Result)
+				warnContainerExtMismatch(item, df, o.Result)
+				measureNote(item, o.Result)
 			}
 			if webOutcomeActionable(o.Result, o.Err) {
 				actionableWeb.Store(true)
 			}
-			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err)
+			out.emitItem(o.Entry, o.Result, o.SkipReason, o.Err, item.notes.drain())
+			// noteKeptItem fires after the record is written, so its note belongs
+			// to the run rather than to an item document already gone.
 			noteKeptItem(ctx, env, df, stamps, o)
 		},
 	})
@@ -438,9 +448,17 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		return runErr
 	}
 
-	// Enumeration may return a partial listing with item errors.
+	// Enumeration may return a partial listing with item errors. Recorded as
+	// notes so the summary document carries the messages and not just its count:
+	// the count says entries are missing, the notes say which and why.
 	for _, perr := range res.EnumErrors {
-		env.info("warning: playlist enumeration: %v\n", perr)
+		env.note(noteEnumerationError, "playlist enumeration: %v", perr)
+	}
+	// The WEB-sources nudge fires once if any item capped, fell back, or failed
+	// on a WEB path, and it must land before the summary serializes the run's
+	// notes; every OnItem has returned by the time DownloadPlaylist did.
+	if actionableWeb.Load() {
+		noteUseBothWebSources(env)
 	}
 	sumErr := out.emitSummary(playlistSummary{
 		total:              res.Enumerated,
@@ -451,12 +469,8 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		remaining:          res.Remaining,
 		enumErrors:         len(res.EnumErrors),
 		capReached:         res.CapReached,
+		outcomes:           res.Outcomes,
 	})
-	// Emit the WEB-sources nudge once if any item capped, fell back, or failed on a
-	// WEB path. It goes to stderr, so it is safe in JSON mode too.
-	if actionableWeb.Load() {
-		noteUseBothWebSources(env)
-	}
 	// JSON mode has already written the item records and summary. Preserve the
 	// failure exit code without appending another JSON document.
 	err := sumErr
@@ -528,14 +542,17 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 
 	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
 	finishItem(env, df, id, res)
-	if err := emitResult(rep, res); err != nil {
-		return err
-	}
-	warnChannelLayout(env, df, res)
+	// The note helpers run before the result is emitted, because the document
+	// carries the notes now: emitting first left every one of them out of it,
+	// which is how a container mismatch could be told to a human on stderr and to
+	// a script not at all. They only read res, so the order is free to change.
+	// The visible consequence is that the human notes print above the result
+	// block rather than below it.
+	warnChannelLayout(env, env, df, res)
 	warnContainerExtMismatch(env, df, res)
 	measureNote(env, res)
 	noteUseBothWebSourcesIfActionable(env, res, nil)
-	return nil
+	return emitResult(rep, res)
 }
 
 // resolveItem builds a request for one item, or returns a skip reason. Playlist
@@ -583,7 +600,11 @@ func resolveItem(ctx context.Context, env *appEnv, df *downloadFlags, reserve *p
 		return waxtap.Request{}, "exists", "", nil
 	}
 	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
-		warnALACToAlacExt(env, resolved, tf)
+		// Once per run, like the itag layout note: this seam runs per item with
+		// the run scope (item scopes exist only inside OnItem), the sentence is
+		// the same for every item, and repeating it N times on the summary said
+		// nothing N-1 of the times.
+		df.alacExtNote.Do(func() { warnALACToAlacExt(env, resolved, tf) })
 	}
 
 	req, err := df.buildRequest(idOrURL, resolved)
@@ -629,6 +650,15 @@ func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outP
 	// Reclassify first, or the document names the download failure while main exits
 	// 130 next to it.
 	err = finalError(ctx, err)
+	// The note is recorded before the envelope renders, because the envelope IS
+	// this failure's document (main sees alreadyRendered and writes nothing): a
+	// note recorded after it reaches no document at all, and this note only ever
+	// fires on this failure path.
+	if df.archive != nil {
+		// finishItem never ran, so the file is not recorded and a re-run refetches it.
+		// Say so rather than letting the archive look authoritative.
+		env.note(noteArchiveNotRecorded, "the run was canceled before post-processing, so %s was not added to the download archive; a re-run will fetch it again", kept.path)
+	}
 	// Match main's routing exactly, so taking over the rendering does not move the
 	// error between streams: JSON to stdout, human-readable to stderr.
 	w := env.errOut
@@ -637,11 +667,6 @@ func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outP
 	}
 	// nil command line, for the reason the stdout-stream seam gives.
 	renderErrorKept(w, env.jsonMode(), err, nil, kept)
-	if df.archive != nil {
-		// finishItem never ran, so the file is not recorded and a re-run refetches it.
-		// Say so rather than letting the archive look authoritative.
-		env.info("note: the run was canceled before post-processing, so %s was not added to the download archive; a re-run will fetch it again\n", kept.path)
-	}
 	return alreadyRendered(err)
 }
 
@@ -702,9 +727,9 @@ func noteKeptItem(ctx context.Context, env *appEnv, df *downloadFlags, stamps *i
 	if kept == nil {
 		return
 	}
-	env.info("note: the finished file was kept: %s (%d bytes)\n", displayPath(kept.path), kept.bytes)
+	env.note(noteKeptOutput, "the finished file was kept: %s (%d bytes)", displayPath(kept.path), kept.bytes)
 	if df.archive != nil {
-		env.info("note: %s was not added to the download archive; a re-run will fetch it again\n", displayPath(kept.path))
+		env.note(noteArchiveNotRecorded, "%s was not added to the download archive; a re-run will fetch it again", displayPath(kept.path))
 	}
 }
 
@@ -713,12 +738,15 @@ func noteKeptItem(ctx context.Context, env *appEnv, df *downloadFlags, stamps *i
 func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 	if df.writeInfoJSON && res.OutputPath != "" {
 		if werr := writeInfoSidecar(res.OutputPath, res); werr != nil {
-			env.info("warning: could not write info sidecar: %v\n", werr)
+			env.note(noteSidecarWriteFailed, "could not write info sidecar: %v", werr)
 		}
 	}
 	if df.archive != nil {
 		if aerr := df.archive.Add(id); aerr != nil {
-			env.info("warning: could not update download archive: %v\n", aerr)
+			// The same code the kept-output paths use: whatever the cause, the
+			// consumer's question is "is this file in the archive", and here it
+			// is not.
+			env.note(noteArchiveNotRecorded, "could not update download archive: %v; a re-run will fetch %s again", aerr, displayPath(res.OutputPath))
 		}
 	}
 }
@@ -731,7 +759,13 @@ func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 // branch deliberately ignores the layout, so --channels never affected the
 // selection. That is documented behavior rather than an error, so it is a note
 // and not an exit-2 rejection.
-func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
+// runEnv carries the run-level note scope and itemEnv the per-item one; a
+// single download passes the same env twice. The split exists because the two
+// notes have different owners: the itag note is one fact about the whole run
+// (its sync.Once would otherwise land it on whichever item's record happened to
+// fire first, and on no other), while the mismatch note describes the item at
+// hand.
+func warnChannelLayout(runEnv, itemEnv *appEnv, df *downloadFlags, res *waxtap.Result) {
 	if !df.channelsExplicit || df.layout == waxtap.LayoutAny {
 		return
 	}
@@ -751,12 +785,12 @@ func warnChannelLayout(env *appEnv, df *downloadFlags, res *waxtap.Result) {
 		// The itag fixes the encoding, so every item of a playlist run reports the
 		// same thing. Say it once, the way --bitrate and --bit-depth do.
 		df.itagLayoutNote.Do(func() {
-			env.info("note: --itag names an exact encoding, so --channels did not affect selection; requested %s, delivered %s\n",
+			runEnv.note(noteChannelsIgnored, "--itag names an exact encoding, so --channels did not affect selection; requested %s, delivered %s",
 				df.layout, channelCountLabel(delivered))
 		})
 		return
 	}
-	env.info("note: requested %s; delivered %s\n", df.layout, channelCountLabel(delivered))
+	itemEnv.note(noteChannelsUnavailable, "requested %s; delivered %s", df.layout, channelCountLabel(delivered))
 }
 
 // warnContainerExtMismatch reports when a keep-source download uses an output
@@ -784,7 +818,7 @@ func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result
 	if outExt == "" || sameContainer(outExt, srcExt) {
 		return
 	}
-	env.info("note: output path uses .%s, but the source container is .%s; bytes were not re-encoded (rename to .%s or pass --format to convert)\n", outExt, srcExt, srcExt)
+	env.note(noteContainerExtMismatch, "output path uses .%s, but the source container is .%s; bytes were not re-encoded (rename to .%s or pass --format to convert)", outExt, srcExt, srcExt)
 }
 
 // sameContainer reports whether two file extensions name the same media
@@ -814,7 +848,7 @@ func channelCountLabel(ch int) string {
 // operations suppress the note because the output is no longer an unaltered copy.
 func measureNote(env *appEnv, res *waxtap.Result) {
 	if measureOnly(res) && res.OutputPath != "" {
-		env.info("note: wrote unaltered copy to %s\n", displayPath(res.OutputPath))
+		env.note(noteUnalteredCopy, "wrote unaltered copy to %s", displayPath(res.OutputPath))
 	}
 }
 
@@ -823,7 +857,7 @@ func measureNote(env *appEnv, res *waxtap.Result) {
 // helped. A clean WEB context delivery stays silent.
 func noteUseBothWebSourcesIfActionable(env *appEnv, res *waxtap.Result, err error) {
 	if msg, ok := webSourcesNote(env.cfg); ok && webOutcomeActionable(res, err) {
-		env.info("%s\n", msg)
+		env.note(noteWebSources, "%s", msg)
 	}
 }
 
@@ -992,6 +1026,12 @@ func (r *pathReserver) reserveOr(path string, mode collisionMode) (string, bool,
 	if r == nil {
 		return resolveCollision(path, mode)
 	}
+	// resolveCollision's lexical guard, for the concurrent path: the directory a
+	// trailing separator names usually does not exist yet, so the stat below sees
+	// nothing wrong with it.
+	if err := rejectTrailingSeparator(path); err != nil {
+		return "", false, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1013,7 +1053,10 @@ func (r *pathReserver) reserveOr(path string, mode collisionMode) (string, bool,
 	case collisionSkip:
 		return path, true, nil
 	case collisionAutoNumber:
-		next := nextAvailableFunc(path, taken)
+		next, err := nextAvailableFunc(path, taken)
+		if err != nil {
+			return "", false, err
+		}
 		r.claimed[next] = true
 		return next, false, nil
 	default: // collisionFail

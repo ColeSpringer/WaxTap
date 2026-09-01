@@ -76,7 +76,7 @@ func newDoctorCmd() *cobra.Command {
 					// signal --full is looking for: the run reports healthy, but
 					// the long track did not deliver. Human mode prints the line
 					// below; the record keeps it for --json too.
-					rep.Attempts = append(rep.Attempts, doctorAttempt{VideoID: id, Error: friendlyError(err)})
+					rep.Attempts = append(rep.Attempts, doctorAttempt{VideoID: id, Error: *errorObject(err)})
 					env.info("  %s: %s\n", id, friendlyError(err))
 					continue
 				}
@@ -119,10 +119,11 @@ type doctorReport struct {
 	Attempts []doctorAttempt
 }
 
-// doctorAttempt is one candidate that failed during a check.
+// doctorAttempt is one candidate that failed during a check. Error is the
+// {code, message} object every schemaVersion 3 document reports failures as.
 type doctorAttempt struct {
-	VideoID string `json:"videoId"`
-	Error   string `json:"error"`
+	VideoID string    `json:"videoId"`
+	Error   errorJSON `json:"error"`
 }
 
 // runDoctorCheck performs one candidate's check, filling rep on success.
@@ -227,7 +228,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		FullDownload  bool            `json:"fullDownload"`
 		Note          string          `json:"note,omitempty"`
 		Attempts      []doctorAttempt `json:"attempts,omitempty"`
-		Error         string          `json:"error,omitempty"`
+		Error         *errorJSON      `json:"error,omitempty"`
 	}{
 		SchemaVersion: schemaVersion,
 		Healthy:       rep.Healthy,
@@ -241,7 +242,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		Attempts:      rep.Attempts,
 	}
 	if lastErr != nil {
-		out.Error = lastErr.Error()
+		out.Error = errorObject(lastErr)
 	}
 	return env.emitJSON(out)
 }

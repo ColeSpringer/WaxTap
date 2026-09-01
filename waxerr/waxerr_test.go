@@ -27,6 +27,12 @@ func TestPreferErr(t *testing.T) {
 		{"url-expired beats needs-po-token", ErrNeedsPOToken, ErrURLExpired, ErrURLExpired},
 		{"url-expired beats generic", generic, ErrURLExpired, ErrURLExpired},
 		{"extraction beats url-expired", ErrURLExpired, ErrExtractionFailed, ErrExtractionFailed},
+		// A temporary refusal is a verdict about the video, so it outranks a
+		// breakage in our own extraction, but it is explicitly not final, so a
+		// real availability verdict outranks it.
+		{"temporary beats extraction", ErrExtractionFailed, ErrTemporarilyUnavailable, ErrTemporarilyUnavailable},
+		{"unavailable beats temporary", ErrTemporarilyUnavailable, unavailable, unavailable},
+		{"temporary beats generic", generic, ErrTemporarilyUnavailable, ErrTemporarilyUnavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

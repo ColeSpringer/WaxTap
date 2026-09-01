@@ -133,6 +133,13 @@ type Result struct {
 	// this pipeline just wrote, where damage would be an encoder defect rather
 	// than something to warn the user about their input.
 	SourceWarnings []string
+	// SourceEmpty says the input's audio track decodes to no frames at all: a
+	// container that parses and declares a codec but delivers nothing, whether
+	// it stores nothing or stores only samples its gapless trims discard. It is
+	// distinct from an unknown length, which the probe also reports as a zero
+	// duration, and it is what lets a caller say "no audio frames" instead of
+	// guessing at "unknown duration".
+	SourceEmpty bool
 
 	Cut     bool          // an effective cut was rendered
 	Removed time.Duration // audio removed by the cut
@@ -144,12 +151,19 @@ type Result struct {
 	Transcoded       bool        // a re-encode ran (not a container copy)
 	OutputCodec      media.Codec // codec written to OutputPath
 	LoudnessMeasured bool        // input loudness was measured
-	LoudnessApplied  bool        // normalization was applied
+	// LoudnessApplied says a normalization gain actually reached the encode, not
+	// merely that one was requested: an input with no measurable integrated
+	// loudness yields a zero gain from both peak policies, and the file that
+	// leaves is a plain transcode.
+	LoudnessApplied bool
 
 	InputLoudness *loudness.Loudness // measured post-cut input loudness
 	// OutputLoudness is the measured loudness of the file left at OutputPath, set
-	// only on Apply. It is nil when the measurement failed, so a caller reporting it
-	// never has to wonder whether it matches the delivered file.
+	// whenever normalization was requested and the output could be measured -
+	// including a non-finite measurement, which is a result the caller can
+	// explain rather than a failure. It is nil when the measurement itself
+	// failed, so a caller reporting it never has to wonder whether it matches
+	// the delivered file.
 	OutputLoudness *loudness.Loudness
 	// LoudnessPasses counts the output writes normalization took: 1 for PeakCap and
 	// for a PeakLimit pass that landed inside tolerance, more when the limiter-backed
@@ -189,6 +203,14 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		return Result{}, err
 	}
 	total := probe.Format.Duration
+	// Whether the input holds no audio at all. Exactly 0 frames, not <= 0: -1 is
+	// WaxFlow's "the container does not state a length", which is the opposite
+	// claim, and both reach total == 0. Read here rather than off res because
+	// the cut guard below runs before res exists.
+	sourceEmpty := false
+	if audio, ok := probe.AudioStream(); ok {
+		sourceEmpty = audio.Samples == 0
+	}
 
 	apply := spec.Loudness != nil && spec.Loudness.Apply
 	measure := spec.Loudness != nil
@@ -210,6 +232,12 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	effectiveCut := false
 	if len(spec.Remove) > 0 {
 		if total <= 0 {
+			// Two different facts arrive here as the same zero duration, and
+			// telling a user their empty file has an "unknown duration" sends
+			// them looking for a header problem that is not there.
+			if sourceEmpty {
+				return Result{}, fmt.Errorf("%w: cannot cut input: it contains no audio frames", waxerr.ErrUnsupportedInput)
+			}
 			return Result{}, fmt.Errorf("%w: cannot cut input with unknown duration", waxerr.ErrUnsupportedInput)
 		}
 		keeps = cutrange.Keeps(spec.Remove, total)
@@ -251,6 +279,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	}
 	res.SourceChannels = srcChannels
 	res.SourceWarnings = probe.Warnings
+	res.SourceEmpty = sourceEmpty
 
 	// Reduce the channel count only when the source exceeds the requested target.
 	fold := 0
@@ -421,7 +450,11 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 
 	res.OutputPath = output
 	res.Transcoded = transcoding
-	res.LoudnessApplied = apply
+	// Requesting normalization is not applying it: on an unmeasurable input both
+	// gain functions return 0 by design, so the encode above was a plain
+	// transcode. Gainable is their own guard, so this flag cannot disagree with
+	// what the gain actually did.
+	res.LoudnessApplied = apply && loudness.Gainable(measured.IntegratedLUFS)
 	res.OutputCodec = spec.Codec
 
 	// The output is already at the target layout, so it is measured as-is (0).
@@ -553,11 +586,16 @@ func converge(
 			}
 			break
 		}
-		if !out.Finite() {
-			break // silence: no miss to correct, and no gain would change it
-		}
 		m := out
 		cur = &m
+		if !out.Finite() {
+			// Silence: no miss to correct, and no gain would change it. Recorded
+			// before the break so the caller still gets the measurement it can
+			// explain; leaving OutputLoudness nil here made limit-mode the one
+			// path where an unmeasurable output reported nothing at all, where
+			// cap's single post-measure has always recorded it.
+			break
+		}
 
 		// Symmetric on the absolute miss. The step can overshoot (a 0.93 slope
 		// assumed against a true 1.0 gives miss*0.075 of overshoot), and the -70 LUFS

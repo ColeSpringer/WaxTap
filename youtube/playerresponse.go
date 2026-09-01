@@ -214,6 +214,13 @@ func classifyUnplayableReason(reason string) error {
 		return waxerr.ErrMembersOnly
 	case strings.Contains(r, "country") || strings.Contains(r, "region"):
 		return waxerr.ErrGeoBlocked
+	// There is deliberately no row for the bulk-enrichment throttle. Measured
+	// over two full 1488-entry channel runs, a session that has asked about
+	// roughly 960 videos starts answering UNPLAYABLE with the reason "Video
+	// unavailable" for every later request, which is the same status and the
+	// same words a genuinely removed video answers. No text here can separate
+	// the two, so the throttle is identified where it can be: by asking again
+	// under a fresh identity (see Client.enrichEntries).
 	default:
 		return waxerr.ErrVideoUnavailable
 	}

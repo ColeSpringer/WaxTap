@@ -56,16 +56,27 @@ type Loudness struct {
 	Duration time.Duration
 }
 
+// Gainable reports whether an integrated loudness can drive a gain. It is the
+// guard [GainFor] and [RawGain] both apply, exported so a caller reporting that
+// normalization happened tests the same thing the gain functions did: below it
+// they return 0 and the encode is a plain transcode.
+//
+// It is narrower than [Finite] on purpose. Finite also tests the true peak and
+// the range, and GainFor returns a real gain when only the true peak is
+// non-finite (it just skips the head clamp), so gating on Finite would deny a
+// run that did apply gain.
+func Gainable(integrated float64) bool { return finite(integrated) }
+
+// finite reports whether v is a usable number: not NaN and not infinite. It is
+// the one spelling of the check this package makes everywhere a measurement or
+// target has to be trusted before arithmetic.
+func finite(v float64) bool { return !math.IsInf(v, 0) && !math.IsNaN(v) }
+
 // Finite reports whether the integrated loudness, true peak, and range are all
 // finite. Silence reports -Inf for the loudness and peaks, which cannot seed a
 // gain.
 func (l Loudness) Finite() bool {
-	for _, v := range []float64{l.IntegratedLUFS, l.TruePeakDBTP, l.LRA} {
-		if math.IsInf(v, 0) || math.IsNaN(v) {
-			return false
-		}
-	}
-	return true
+	return finite(l.IntegratedLUFS) && finite(l.TruePeakDBTP) && finite(l.LRA)
 }
 
 func fromResult(res *waxflow.AnalyzeResult) Loudness {
@@ -151,11 +162,11 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 // clamped under the ceiling. The cost is that a loud source can land well short
 // of the target; [RawGain] is the other policy.
 func GainFor(target float64, m Loudness) float64 {
-	if math.IsInf(m.IntegratedLUFS, 0) || math.IsNaN(m.IntegratedLUFS) {
+	if !Gainable(m.IntegratedLUFS) {
 		return 0
 	}
 	g := target - m.IntegratedLUFS
-	if !math.IsInf(m.TruePeakDBTP, 0) && !math.IsNaN(m.TruePeakDBTP) {
+	if finite(m.TruePeakDBTP) {
 		if head := TruePeakCeilingDB - m.TruePeakDBTP; g > head {
 			g = head
 		}
@@ -176,7 +187,7 @@ func GainFor(target float64, m Loudness) float64 {
 // but the caller states a cause in user-facing text and should not depend on
 // three constants staying where they are.
 func PeakShortfall(target float64, m Loudness) float64 {
-	if !m.Finite() || math.IsInf(target, 0) || math.IsNaN(target) {
+	if !m.Finite() || !finite(target) {
 		return 0
 	}
 	want := target - m.IntegratedLUFS
@@ -214,7 +225,7 @@ func AlbumGain(target float64, album Loudness, perTrack []Loudness, clampPeaks b
 	// not after RawGain alone: a gated-silent album whose tracks still carry a peak
 	// over the ceiling would otherwise be attenuated by a clamp with no loudness to
 	// protect, and the two modes would disagree on an album neither can move.
-	if math.IsInf(album.IntegratedLUFS, 0) || math.IsNaN(album.IntegratedLUFS) {
+	if !Gainable(album.IntegratedLUFS) {
 		return 0
 	}
 	g := RawGain(target, album.IntegratedLUFS)
@@ -232,7 +243,7 @@ func AlbumGain(target float64, album Loudness, perTrack []Loudness, clampPeaks b
 // album, and it is deliberately derived from the clamp rather than from the
 // achieved loudness, for the reason that function documents.
 func AlbumPeakShortfall(target float64, album Loudness, perTrack []Loudness) float64 {
-	if !album.Finite() || math.IsInf(target, 0) || math.IsNaN(target) {
+	if !album.Finite() || !finite(target) {
 		return 0
 	}
 	want := target - album.IntegratedLUFS
@@ -279,8 +290,7 @@ func albumHeadroom(perTrack []Loudness) (float64, bool) {
 // A non-finite integrated loudness (silence) yields zero gain, for the same
 // reason GainFor guards it: WaxFlow rejects a non-finite GainDB.
 func RawGain(target, integrated float64) float64 {
-	if math.IsInf(integrated, 0) || math.IsNaN(integrated) ||
-		math.IsInf(target, 0) || math.IsNaN(target) {
+	if !Gainable(integrated) || !Gainable(target) {
 		return 0
 	}
 	return clamp(target-integrated, -maxGainDB, maxGainDB)
