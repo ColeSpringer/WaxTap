@@ -115,8 +115,9 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   in `.m4a` at 64 kbps by default (a low-bitrate preset; `aac` stays the
   256 kbps AAC-LC one), and `--format aac` on a source that is already HE-AAC
   copies it under its own identity rather than re-encoding it to AAC-LC.
-  WavPack, Monkey's Audio (APE), and WMA files are also accepted as local
-  inputs; WMA is decode-only, so `--format copy` on one is refused.
+  WavPack, Monkey's Audio (APE), WMA, and Musepack (`.mpc`) files are also
+  accepted as local inputs; WMA and Musepack are decode-only, so
+  `--format copy` on one is refused.
 - `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
   and `{index}`. `{index}` numbers playlist items and expands empty for a single
   video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
@@ -383,4 +384,5 @@ complying with YouTube's Terms of Service and applicable law.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Release archives also carry `THIRD-PARTY-NOTICES.md`, the
+licenses of the modules compiled into the binary.

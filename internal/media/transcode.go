@@ -213,7 +213,12 @@ func remuxDeclined(id codec.ID) error {
 		return fmt.Errorf("%w: cannot container-copy PCM audio: its sample layout belongs to the container (RIFF is little-endian, AIFF big-endian), so the packets cannot move unchanged; drop --format copy to re-encode, which is bit-exact for PCM",
 			waxerr.ErrIncompatibleSpec)
 	}
-	return fmt.Errorf("%w: cannot remux %s audio", waxerr.ErrIncompatibleSpec, codecName(id))
+	name := codecName(id)
+	if display, decodeOnly := DecodeOnlyCodec(name); decodeOnly {
+		return fmt.Errorf("%w: cannot remux %s audio: WaxFlow decodes %s but does not write it, so no container can carry the packets unchanged; pass --format to re-encode",
+			waxerr.ErrIncompatibleSpec, name, display)
+	}
+	return fmt.Errorf("%w: cannot remux %s audio", waxerr.ErrIncompatibleSpec, name)
 }
 
 // containerFor returns the WaxFlow Container override for delivering format into
@@ -289,7 +294,9 @@ func codecToFormat(id codec.ID) (string, bool) {
 	case codec.APE:
 		return "ape", true
 	}
-	// WMA stays out: WaxFlow decodes it but registers no output row, so there is
-	// no format name a remux could run as; remuxDeclined says to transcode.
+	// The decode-only codecs (decodeOnlyCodecs: WMA, Musepack) stay out: WaxFlow
+	// registers no output row for them, so there is no format name a remux
+	// could run as; remuxDeclined names the escape. TestDecoderRegistryParity
+	// keeps both tables in step with the engine's decoder list.
 	return "", false
 }

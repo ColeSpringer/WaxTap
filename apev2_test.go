@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
 
@@ -330,7 +332,7 @@ func TestProcessWavPackCarryReportsUnprojectableKeys(t *testing.T) {
 // TestSourceCodecClassParity pins the probe-string classifiers (lossySource,
 // losslessSource) to media.Codec.IsLossless, so the three losslessness tables
 // cannot drift: every codec WaxTap writes classifies consistently under its
-// own probe name, and the decode-only WMA stays lossy.
+// own probe name, and every codec the engine only decodes lands on one side.
 func TestSourceCodecClassParity(t *testing.T) {
 	codecs := []media.Codec{
 		media.CodecFLAC, media.CodecALAC, media.CodecWAV, media.CodecAIFF,
@@ -354,11 +356,28 @@ func TestSourceCodecClassParity(t *testing.T) {
 	if !losslessSource("pcm") || !losslessSource("pcm_s16le") || lossySource("pcm") {
 		t.Error("pcm must classify lossless")
 	}
-	if !lossySource("wma") || losslessSource("wma") {
-		t.Error("wma must classify lossy")
+	for _, name := range []string{"wma", "musepack"} {
+		if !lossySource(name) || losslessSource(name) {
+			t.Errorf("%s must classify lossy", name)
+		}
 	}
 	if lossySource("mystery") || losslessSource("mystery") {
 		t.Error("an unknown codec must classify as neither")
+	}
+	// Every decoder the engine registers must land on one side under its probe
+	// name, so a decode-only codec added upstream (WMA, then Musepack) cannot
+	// arrive unclassified: warnOutputClipping would fire on its decode
+	// overshoot, and warnImplicitLossy would stay silent on a lossless one. The
+	// probe spells aac-lc as aac (media's TestCodecNameBoundary pins that
+	// mapping); every other ID is its own probe name.
+	for _, id := range format.Decoders() {
+		name := string(id)
+		if id == codec.AACLC {
+			name = "aac"
+		}
+		if lossySource(name) == losslessSource(name) {
+			t.Errorf("%s: the engine decodes it but it classifies as lossy=%v lossless=%v; add it to one table", name, lossySource(name), losslessSource(name))
+		}
 	}
 }
 

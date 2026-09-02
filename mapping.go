@@ -208,7 +208,7 @@ func validateCutEncodeNeed(s ProcessSpec) error {
 	case s.Cut.Crossfade > 0:
 		return fmt.Errorf("%w: crossfade re-encodes; pass --format <format> (e.g. flac)", waxerr.ErrIncompatibleSpec)
 	case s.Output.kind == outputFile && copyCutNeedsExtension(s.Output.path):
-		return fmt.Errorf("%w: cutting without re-encoding keeps the source codec, which needs a container extension on the output (e.g. .opus/.m4a/.webm/.ogg/.mka) or pass --format", waxerr.ErrIncompatibleSpec)
+		return fmt.Errorf("%w: cutting without re-encoding keeps the source codec, which needs a container extension on the output that can hold it (e.g. .opus/.m4a/.webm/.ogg/.mka), or pass --format to re-encode", waxerr.ErrIncompatibleSpec)
 	}
 	return nil
 }
@@ -652,7 +652,7 @@ func inputDamageNote(notes []string) string {
 // report.
 func lossySource(codec string) bool {
 	switch codec {
-	case "opus", "aac", "he-aac", "mp3", "vorbis", "wma":
+	case "opus", "aac", "he-aac", "mp3", "vorbis", "wma", "musepack":
 		return true
 	}
 	return false

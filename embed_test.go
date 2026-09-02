@@ -172,7 +172,8 @@ func TestDoEmbedWritesCoverArtIntoWavPack(t *testing.T) {
 // the names a keep-source download can put mismatched bytes under, where the
 // cover-art remux to the codec's native container would misname the result.
 func TestPictureCapableExt(t *testing.T) {
-	for _, ext := range []string{"webm", "aac", "wav", "aiff", "wv", "ape", "wma", "mka", "mkv"} {
+	exts := append([]string{"webm", "aac", "wav", "aiff", "wv", "ape", "mka", "mkv"}, media.DecodeOnlyExts()...)
+	for _, ext := range exts {
 		if pictureCapableExt(ext) {
 			t.Errorf("pictureCapableExt(%q) = true, want false", ext)
 		}

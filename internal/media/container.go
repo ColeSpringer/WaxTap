@@ -2,7 +2,9 @@ package media
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxtap/v3/waxerr"
@@ -14,10 +16,9 @@ import (
 // an unrelated name like ".out", or none at all) does not constrain the codec:
 // the container comes from the format instead, and the write is force-muxed.
 //
-// Almost all of these are containers WaxTap can produce. ".wma" is the one it
-// can only read (WaxFlow has no WMA muxer): it is listed so ContainerAccepts
-// rejects every codec under that name, instead of the force-mux path writing,
-// say, FLAC bytes into a file every player will read as Windows Media.
+// Every one of these is a container WaxTap can produce. The containers it can
+// only read are decodeOnlyContainers, consulted beside this table so an output
+// named for one is refused rather than force-muxed.
 //
 // Dropped versus the ffmpeg era: ".w64" and ".caf" have no WaxFlow muxer (".m4a"
 // covers ".caf"'s ALAC).
@@ -26,7 +27,38 @@ var inferableContainers = map[string]bool{
 	"mp4": true, "aac": true, "ogg": true, "oga": true, "opus": true,
 	"webm": true, "mka": true, "mkv": true,
 	"aiff": true, "aif": true, "aifc": true, "afc": true,
-	"wv": true, "ape": true, "wma": true,
+	"wv": true, "ape": true,
+}
+
+// decodeOnlyContainers maps every extension WaxFlow registers for a container
+// it demuxes but never muxes (WMA in ASF, Musepack) to the container's name.
+// Nothing WaxTap writes may carry these names: FLAC bytes under out.mpp would
+// be a file every player reads as Musepack. All the engine's spellings are
+// here, the legacy ones included, because the refusal is about what a name
+// promises rather than how common the spelling is; which spellings a directory
+// walk claims unasked is audioExts' separate choice.
+//
+// WaxFlow exports no per-driver extension list, so this is kept by hand against
+// its format/registry.go. The other extension-keyed tables (needsForcedMuxer,
+// ContainerAccepts, the batch planner's extPossiblyCodec, the facade's
+// pictureCapableExt) consult it rather than restating it, and their tests walk
+// DecodeOnlyExts.
+var decodeOnlyContainers = map[string]string{
+	"wma": "WMA", "asf": "WMA",
+	"mpc": "Musepack", "mp+": "Musepack", "mpp": "Musepack",
+}
+
+// DecodeOnlyContainer reports whether ext (with or without a leading dot, any
+// case) names a container WaxTap can only read, and that container's name.
+func DecodeOnlyContainer(ext string) (string, bool) {
+	name, ok := decodeOnlyContainers[strings.ToLower(strings.TrimPrefix(ext, "."))]
+	return name, ok
+}
+
+// DecodeOnlyExts lists the decode-only extensions, undotted and sorted, for the
+// tests that pin the other extension-keyed tables to this one.
+func DecodeOnlyExts() []string {
+	return slices.Sorted(maps.Keys(decodeOnlyContainers))
 }
 
 // IsAIFFExt reports whether ext names an AIFF container. WaxFlow's aiff row
@@ -51,6 +83,9 @@ func IsAIFFExt(ext string) bool {
 // filename.
 func needsForcedMuxer(output string) bool {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
+	if _, decodeOnly := decodeOnlyContainers[ext]; decodeOnly {
+		return false // the name constrains the output: refused, not muxed over
+	}
 	return !inferableContainers[ext]
 }
 
@@ -66,6 +101,9 @@ func needsForcedMuxer(output string) bool {
 // Matroska takes PCM through WaxFlow's wav row.
 func ContainerAccepts(ext, codecName string) bool {
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
+	if _, decodeOnly := decodeOnlyContainers[ext]; decodeOnly {
+		return false // nothing WaxTap writes may carry the name
+	}
 	c := strings.ToLower(codecName)
 	// HE-AAC lives in exactly the AAC family's containers (WaxFlow's he-aac row
 	// shares the aac row's container set by design), so one fold here answers
@@ -114,10 +152,6 @@ func ContainerAccepts(ext, codecName string) bool {
 		return c == "wavpack"
 	case "ape":
 		return c == "ape"
-	case "wma":
-		// Decode-only: WaxFlow has no WMA muxer, so nothing WaxTap writes may
-		// carry the name.
-		return false
 	}
 	return true
 }
@@ -168,6 +202,10 @@ func CheckOutputContainer(codec Codec, output string) error {
 		return nil
 	}
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(output), "."))
+	if name, decodeOnly := decodeOnlyContainers[ext]; decodeOnly {
+		return fmt.Errorf("%w: cannot write a .%s file: WaxTap reads %s but does not write it; use one of %s",
+			waxerr.ErrIncompatibleSpec, ext, name, strings.Join(ContainersFor(codec.String()), ", "))
+	}
 	if ContainerAccepts(ext, codec.String()) {
 		return nil
 	}

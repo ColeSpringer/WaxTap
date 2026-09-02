@@ -334,6 +334,12 @@ Commit only authored, minimized fixtures under `youtube/testdata/` and
 responses. `.gitignore` excludes `testdata/real/`, `*.real.js`, and
 `*.real.json`.
 
+Audio fixtures are synthesized by the engine at test time (`internal/mediatest`
+writes WAV, the tests encode from it). The exception is a format WaxFlow only
+decodes, which nothing here can write: `internal/mediatest/testdata/` holds
+WaxFlow's own synthetic fixture for it (`tagged.mpc`, a reference-encoder
+render of a generated seed). Nothing under `testdata/` is a real recording.
+
 ## Releasing
 
 ```sh
@@ -344,3 +350,20 @@ git push origin vX.Y.Z
 The release workflow runs GoReleaser and creates a draft GitHub release. Use
 `goreleaser release --snapshot --clean` for a local dry run or
 `goreleaser check` for configuration validation.
+
+Every archive carries `THIRD-PARTY-NOTICES.md` beside `LICENSE`: the license
+and notice files of each module compiled into the binary, at the module root
+and beside each linked package, WaxFlow's ported-code attributions included.
+It is generated from the module cache, so regenerate it after any dependency
+change:
+
+```sh
+go run ./internal/notices/gen
+```
+
+`TestCheckedInFileIsCurrent` in `internal/notices` fails while the file is
+stale. It reads `go.mod` and `go.sum`, so a bump invalidates its cached result,
+and the GoReleaser before-hook runs it, so a stale file fails the release
+instead of shipping under the tag. The generator runs `go list` with
+`GOWORK=off`: a local workspace over the Wax repos does not change what the
+release build links.

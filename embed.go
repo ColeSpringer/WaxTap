@@ -319,13 +319,18 @@ func pictureCapableExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case "webm", "aac", "wav", "aiff", "aif", "aifc", "afc":
 		return false
-	case "wv", "ape", "wma", "mka", "mkv":
+	case "wv", "ape", "mka", "mkv":
 		// This switch is keyed on the DELIVERED extension, not the work file's
 		// format: a keep-source download can put Opus-in-WebM bytes under any
 		// of these names, and the remux would leave Ogg bytes misnamed. A
 		// genuine WavPack, APE, or Matroska file never consults this function
 		// (its Pictures.Write is not AccessNone), so these entries exist for
-		// the mismatched keep-source deliveries only; WMA is read-only besides.
+		// the mismatched keep-source deliveries only.
+		return false
+	}
+	if _, decodeOnly := media.DecodeOnlyContainer(ext); decodeOnly {
+		// The same mismatch under a name WaxTap only reads, and nothing could be
+		// written under it in any case.
 		return false
 	}
 	return true

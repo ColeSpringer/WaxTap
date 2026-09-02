@@ -292,13 +292,29 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// requested container copy must fail on an incompatible extension.
 	if spec.Codec == media.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
+		copyOnly := remux || spec.CutMode == media.ModeCopy
+		noContainer := effectiveCut && fold == 0 && (ext == "" || ext == "copy")
+		// A source WaxFlow only decodes has no packets any container can carry
+		// unchanged, so every request to keep them fails for the one reason,
+		// ahead of the container checks that would otherwise suggest containers
+		// nothing could put it in.
+		if display, decodeOnly := media.DecodeOnlyCodec(res.SourceCodec); decodeOnly && (copyOnly || noContainer) {
+			return Result{}, fmt.Errorf("%w: cannot copy %s: WaxFlow decodes %s but does not write it, so no container can carry the packets unchanged; pass --format to re-encode",
+				waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), display)
+		}
 		// A copy cut writes into the container named by the output extension.
-		if effectiveCut && fold == 0 && (ext == "" || ext == "copy") {
+		if noContainer {
 			return Result{}, fmt.Errorf("%w: cannot copy %s without a container extension; choose one that fits the source (%s), or pass --format to re-encode",
 				waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), containerSuggestion(res.SourceCodec))
 		}
 		if !containerAccepts(ext, res.SourceCodec) {
-			if remux || spec.CutMode == media.ModeCopy {
+			// A name WaxTap only reads is refused whatever the source: there is
+			// no "transcode instead" into it, and no encoder to infer for it.
+			if name, unwritable := media.DecodeOnlyContainer(ext); unwritable {
+				return Result{}, fmt.Errorf("%w: cannot write a .%s file: WaxTap reads %s but does not write it; choose an output extension WaxTap writes, or pass --format to re-encode",
+					waxerr.ErrIncompatibleSpec, ext, name)
+			}
+			if copyOnly {
 				return Result{}, fmt.Errorf("%w: cannot copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)
 			}
 			c, ok := containerCodec(ext)

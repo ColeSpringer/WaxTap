@@ -13,6 +13,7 @@ import (
 
 	"github.com/colespringer/waxtap/v3"
 	"github.com/colespringer/waxtap/v3/format"
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
 
@@ -26,8 +27,9 @@ var audioExts = map[string]bool{
 	".aiff": true, ".aif": true, ".aifc": true, ".afc": true,
 	".oga": true, ".mp4": true, ".m4b": true, ".mkv": true,
 	// .wma is WMA's audio spelling; .asf, the same container, is left out like
-	// the other loose spellings above since it usually names video.
-	".wv": true, ".ape": true, ".wma": true,
+	// the other loose spellings above since it usually names video. .mpc is
+	// Musepack's; its legacy spellings .mp+ and .mpp are left out the same way.
+	".wv": true, ".ape": true, ".wma": true, ".mpc": true,
 }
 
 // collectAudioInputs returns recognized audio files under root in sorted order.
@@ -410,6 +412,9 @@ func extPossiblyCodec(ext, family string) bool {
 	if family == "he-aac" {
 		family = "aac" // one container family; see media.ContainerAccepts
 	}
+	if _, decodeOnly := media.DecodeOnlyContainer(ext); decodeOnly {
+		return false // no target family ever produces a container WaxTap only reads
+	}
 	switch ext {
 	case ".flac":
 		return family == "flac"
@@ -431,8 +436,6 @@ func extPossiblyCodec(ext, family string) bool {
 		return family == "wavpack"
 	case ".ape":
 		return family == "ape"
-	case ".wma":
-		return false // decode-only: no target family ever produces WMA.
 	case ".wav", ".aiff", ".aif", ".aifc", ".afc":
 		return false // PCM is not one of the comparable target families.
 	case ".mp4", ".mkv":

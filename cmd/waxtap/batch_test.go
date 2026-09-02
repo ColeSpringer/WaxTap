@@ -32,15 +32,22 @@ func TestExtPossiblyCodec(t *testing.T) {
 		// HE-AAC is an AAC-family resident of the same containers.
 		{".m4a", "he-aac", true}, {".m4b", "he-aac", true}, {".aac", "he-aac", true},
 		{".flac", "he-aac", false},
-		// WavPack and APE fit only their own extensions; WMA never matches a
-		// target family (decode-only).
+		// WavPack and APE fit only their own extensions.
 		{".wv", "wavpack", true}, {".wv", "flac", false},
 		{".ape", "ape", true}, {".ape", "wavpack", false},
-		{".wma", "aac", false}, {".wma", "wavpack", false},
 	}
 	for _, c := range cases {
 		if got := extPossiblyCodec(c.ext, c.family); got != c.want {
 			t.Errorf("extPossiblyCodec(%q,%q) = %v, want %v", c.ext, c.family, got, c.want)
+		}
+	}
+	// A container WaxTap only reads never matches a target family, under any
+	// of the engine's spellings for it (media.DecodeOnlyExts is the one table).
+	for _, ext := range media.DecodeOnlyExts() {
+		for _, family := range []string{"aac", "wavpack", "flac", "mp3"} {
+			if extPossiblyCodec("."+ext, family) {
+				t.Errorf("extPossiblyCodec(%q, %q) = true, want false (decode-only container)", "."+ext, family)
+			}
 		}
 	}
 }
@@ -63,6 +70,7 @@ func TestMatchesTargetFamilyHEAAC(t *testing.T) {
 		{"ape", waxtap.FormatAPE, true},
 		{"wavpack", waxtap.FormatAPE, false},
 		{"wma", waxtap.FormatAAC, false},
+		{"musepack", waxtap.FormatAAC, false},
 	}
 	for _, c := range cases {
 		if got := matchesTargetFamily(c.codec, c.tf); got != c.want {
@@ -827,4 +835,22 @@ func TestPlanBatchOutputsSeesThroughLinks(t *testing.T) {
 			t.Fatalf("jobs = %+v, want one actProcess", jobs)
 		}
 	})
+}
+
+// TestAudioExtsDecodeOnlyInputs: a directory walk claims the decode-only
+// formats by their conventional spelling, since a file it can transcode is a
+// file it should process, and leaves the loose spellings (.asf for WMA, .mp+
+// and .mpp for Musepack) to be named directly, like the other loose spellings
+// audioExts documents.
+func TestAudioExtsDecodeOnlyInputs(t *testing.T) {
+	for _, ext := range []string{".wma", ".mpc"} {
+		if !audioExts[ext] {
+			t.Errorf("audioExts[%q] = false; directory processing would ignore a decodable input", ext)
+		}
+	}
+	for _, ext := range []string{".asf", ".mp+", ".mpp"} {
+		if audioExts[ext] {
+			t.Errorf("audioExts[%q] = true; the loose spellings are named directly, not walked", ext)
+		}
+	}
 }

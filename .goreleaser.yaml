@@ -8,6 +8,9 @@ project_name: waxtap
 before:
   hooks:
     - go mod tidy
+    # A stale THIRD-PARTY-NOTICES.md fails the release rather than shipping
+    # under an immutable tag; regenerate with go run ./internal/notices/gen.
+    - go test ./internal/notices -run TestCheckedInFileIsCurrent -count=1
 
 builds:
   - id: waxtap
@@ -46,6 +49,9 @@ archives:
     files:
       - README.md
       - LICENSE
+      # The licenses of every module compiled into the binary; generated, see
+      # internal/notices.
+      - THIRD-PARTY-NOTICES.md
       - MAINTENANCE.md
 
 checksum:

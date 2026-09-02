@@ -136,8 +136,8 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (Opus and AAC support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, spec.copyFlags())
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless
-			// source. A copy spec whose source has no same-family encoder (WMA)
-			// has no fallback to fall to; failing here names the escape, where
+			// source. A copy spec whose source has no same-family encoder (WMA,
+			// Musepack) has no fallback to fall to; failing here names the escape, where
 			// the engine would only say "no output format requested".
 			if spec.Encode.Codec == CodecCopy {
 				return CutResult{}, fmt.Errorf("%w: this source codec cannot be packet-cut and has no same-family encoder; pass an explicit format (e.g. flac) to render the cut", waxerr.ErrIncompatibleSpec)

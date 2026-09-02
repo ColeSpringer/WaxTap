@@ -1238,7 +1238,8 @@ func TestSourceEncodeCodecNewFamilies(t *testing.T) {
 		{"he-aac", media.CodecHEAAC, true},
 		{"wavpack", media.CodecWavPack, true},
 		{"ape", media.CodecAPE, true},
-		{"wma", media.CodecCopy, false}, // decode-only: no encoder keeps the family
+		{"wma", media.CodecCopy, false},      // decode-only: no encoder keeps the family
+		{"musepack", media.CodecCopy, false}, // likewise
 	}
 	for _, c := range cases {
 		got, ok := sourceEncodeCodec(c.name, "")
@@ -1249,6 +1250,52 @@ func TestSourceEncodeCodecNewFamilies(t *testing.T) {
 	for ext, want := range map[string]media.Codec{"wv": media.CodecWavPack, "ape": media.CodecAPE} {
 		if got, ok := containerCodec(ext); !ok || got != want {
 			t.Errorf("containerCodec(%q) = %v,%v want %v,true", ext, got, ok, want)
+		}
+	}
+}
+
+// A Musepack input transcodes by extension like any other lossy source and
+// reports its codec; a request that would need a Musepack writer declines in
+// the pipeline's own words rather than reaching the engine with no format.
+func TestRunMusepackSource(t *testing.T) {
+	r := newTestRunner(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.mpc")
+	if err := os.WriteFile(in, mediatest.TaggedMPC(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(ctx, r, in, filepath.Join(dir, "out.flac"), Spec{Codec: media.CodecFLAC}, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.SourceCodec != "musepack" || res.OutputCodec != media.CodecFLAC || !res.Transcoded {
+		t.Errorf("result = source %q codec %v transcoded %v, want a musepack source encoded to flac", res.SourceCodec, res.OutputCodec, res.Transcoded)
+	}
+
+	// A cut into the source's own container is refused for the container's
+	// sake: nothing writes a .mpc file, so no encoder can be inferred for it.
+	cut := Spec{Remove: []cutrange.Range{{Start: 0, End: 50 * time.Millisecond}}}
+	_, err = Run(ctx, r, in, filepath.Join(dir, "cut.mpc"), cut, nil)
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not write it") || !strings.Contains(err.Error(), "--format") {
+		t.Errorf("cut into .mpc = %v, want ErrIncompatibleSpec naming the read-only container and the --format escape", err)
+	}
+
+	// Every request to keep the source packets fails for the source's sake,
+	// before any container is judged: a copy, a copy-mode cut, and a copy cut
+	// with no container all say the codec is decode-only and name the escape,
+	// instead of "cannot copy musepack audio into a .mpc container; transcode
+	// instead" for a container that would then refuse the transcode too.
+	for name, spec := range map[string]Spec{
+		"copy":          {Remux: true},
+		"copy-mode cut": {Remove: cut.Remove, CutMode: media.ModeCopy},
+	} {
+		for _, out := range []string{"out.mpc", "out.mka", "out"} {
+			_, err := Run(ctx, r, in, filepath.Join(dir, out), spec, nil)
+			if !errors.Is(err, waxerr.ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not write it") || !strings.Contains(err.Error(), "pass --format") {
+				t.Errorf("%s into %s = %v, want ErrIncompatibleSpec naming the decode-only source and the escape", name, out, err)
+			}
 		}
 	}
 }

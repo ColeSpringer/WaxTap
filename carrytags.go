@@ -39,8 +39,8 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	if err != nil {
 		// An unreadable source carried nothing before either, so there is no
 		// demonstrable loss to warn about. WaxLabel identifies every format the
-		// engine decodes (the APEv2 family and WMA included), so this is a
-		// damaged file, not a format gap.
+		// engine decodes (the APEv2 family, Musepack included, and WMA), so this
+		// is a damaged file, not a format gap.
 		c.log.Debug("tag carry: source not readable", "path", srcPath, "err", err)
 		return
 	}

@@ -2,6 +2,7 @@ package media
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/codec"
@@ -189,10 +190,24 @@ func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 	return opts
 }
 
+// decodeOnlyCodecs maps the probe name of every codec WaxFlow decodes but does
+// not encode to its display name. A copy of one has no output row to run as
+// and a cut has no same-family encoder to fall back to, so the refusals that
+// meet one name the reason and the escape. TestDecoderRegistryParity pins the
+// table to the engine's decoder list.
+var decodeOnlyCodecs = map[string]string{"wma": "WMA", "musepack": "Musepack"}
+
+// DecodeOnlyCodec reports whether name (a probe codec name) is one WaxFlow
+// only decodes, and its display name.
+func DecodeOnlyCodec(name string) (string, bool) {
+	display, ok := decodeOnlyCodecs[strings.ToLower(name)]
+	return display, ok
+}
+
 // codecName maps a WaxFlow codec ID to the ffprobe-style name WaxTap's
 // compatibility tables and public Format.Codec speak. Only AAC-LC needs
 // translation ("aac-lc" -> "aac"); every other ID already matches ("he-aac",
-// "wavpack", "ape", "wma" included), and an unknown ID passes through so a
+// "wavpack", "ape", "wma", "musepack" included), and an unknown ID passes through so a
 // container check fails cleanly rather than crashing.
 func codecName(id codec.ID) string {
 	if id == codec.AACLC {

@@ -192,6 +192,7 @@ func TestCodecNameBoundary(t *testing.T) {
 		codec.Opus: "opus", codec.AACLC: "aac", codec.FLAC: "flac",
 		codec.ALAC: "alac", codec.MP3: "mp3", codec.Vorbis: "vorbis", codec.PCM: "pcm",
 		codec.HEAAC: "he-aac", codec.WavPack: "wavpack", codec.APE: "ape", codec.WMA: "wma",
+		codec.Musepack: "musepack",
 	}
 	for id, want := range cases {
 		if got := codecName(id); got != want {
@@ -209,10 +210,17 @@ func TestCodecNameBoundary(t *testing.T) {
 	if _, ok := codecToFormat(codec.PCM); ok {
 		t.Error("codecToFormat(pcm) ok = true; PCM must decline so the caller gets ErrIncompatibleSpec, not an engine error")
 	}
-	// WMA is decode-only upstream: no output row exists, so a remux must decline
-	// with WaxTap's own wording rather than reach the engine.
-	if _, ok := codecToFormat(codec.WMA); ok {
-		t.Error("codecToFormat(wma) ok = true; WMA has no WaxFlow output row and must decline")
+	// The decode-only codecs (WMA, Musepack) have no output row, so a remux
+	// must decline with WaxTap's own wording rather than reach the engine. This
+	// walks the production table, so it cannot name a different set than
+	// TestDecoderRegistryParity checks against the engine.
+	for _, id := range format.Decoders() {
+		if _, decodeOnly := DecodeOnlyCodec(codecName(id)); !decodeOnly {
+			continue
+		}
+		if _, ok := codecToFormat(id); ok {
+			t.Errorf("codecToFormat(%s) ok = true; it has no WaxFlow output row and must decline", id)
+		}
 	}
 }
 
@@ -953,8 +961,9 @@ func TestCutWavPackFallsBackToReencode(t *testing.T) {
 // The facade's tag carry parses sources with WaxLabel alone (no probe
 // fallback), resting on the cross-library invariant that WaxLabel identifies
 // every format the engine handles. This pins it for every format the engine
-// can write; WMA, the one decode-only input, cannot be synthesized here and
-// keeps its read side pinned upstream.
+// can write; the decode-only inputs are TestWaxLabelReadsMusepackInput's
+// business (WMA cannot be synthesized here and keeps its read side pinned
+// upstream).
 func TestWaxLabelReadsEveryEngineOutput(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
