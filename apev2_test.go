@@ -251,6 +251,11 @@ func TestProcessChaptersOnlyToWavPackSaysNoCarry(t *testing.T) {
 	if !strings.HasPrefix(detail, "no metadata carried to") || !strings.Contains(detail, "chapters") {
 		t.Errorf("warnings = %v, want a no-carry warning naming the chapters", res.Warnings)
 	}
+	// The report grades the same loss: the chapter set dropped, with the
+	// destination's reason, standing for both chapters.
+	if it := carryItem(t, res.TagCarry, CarryChapters, ""); it.Disposition != DispositionDropped || it.Count != 2 || it.Reason == "" {
+		t.Errorf("TagCarry chapters = %+v, want 2 dropped with a reason", it)
+	}
 }
 
 // appendAPEv2 appends a minimal APEv2 tag (header, items, footer) to path. It

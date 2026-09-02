@@ -1,2 +1,2 @@
 * text=auto eol=lf
-*.mpc  binary
+internal/mediatest/testdata/* binary

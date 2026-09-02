@@ -346,7 +346,7 @@ func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessRes
 			SchemaVersion int              `json:"schemaVersion"`
 			Album         loudnessInfoJSON `json:"album"`
 			Tracks        []albumTrackJSON `json:"tracks"`
-		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil)})
+		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil, nil)})
 	}
 	env.printf("Album:  %s LUFS, LRA %s\n\n", humanLUFS(res.Album.IntegratedLUFS), humanLUFS(res.Album.LRA))
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
@@ -378,7 +378,7 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 			Tracks          []albumTrackJSON  `json:"tracks"`
 			Warnings        []warningJSON     `json:"warnings,omitempty"`
 			Notes           []noteJSON        `json:"notes,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs), warns, env.notesJSON()})
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs, res.TagCarry), warns, env.notesJSON()})
 	}
 	// Album processing runs without an event stream, so carry warnings surface
 	// here rather than through the progress renderer.
@@ -397,27 +397,43 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 	}
 	env.printf("\n\n")
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	// Per-track values are input measurements; processed output is not measured here.
-	fmt.Fprintln(tw, "#\tIN-LUFS\tOUTPUT")
+	// Per-track values are input measurements; processed output is not measured
+	// here. METADATA is the track's carry receipt, the single-file Metadata: line.
+	fmt.Fprintln(tw, "#\tIN-LUFS\tMETADATA\tOUTPUT")
 	for i := range res.Outputs {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), displayPath(res.Outputs[i]))
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
 	}
 	tw.Flush()
 	return nil
 }
 
-type albumTrackJSON struct {
-	Input          string    `json:"input"`
-	Output         string    `json:"output,omitempty"`
-	IntegratedLUFS jsonFloat `json:"integratedLufs"`
+// albumCarryCell is a track's metadata receipt for the album table, "-" for a
+// track that had nothing to carry.
+func albumCarryCell(carries []*waxtap.TagCarry, i int) string {
+	if i >= len(carries) || carries[i] == nil {
+		return "-"
+	}
+	return carrySummary(carries[i])
 }
 
-func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []string) []albumTrackJSON {
+type albumTrackJSON struct {
+	Input          string        `json:"input"`
+	Output         string        `json:"output,omitempty"`
+	IntegratedLUFS jsonFloat     `json:"integratedLufs"`
+	TagCarry       *tagCarryJSON `json:"tagCarry,omitempty"`
+}
+
+// albumTracksJSON renders the per-track rows. outputs and carries are nil for
+// a measurement, which writes nothing and carries nothing.
+func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []string, carries []*waxtap.TagCarry) []albumTrackJSON {
 	out := make([]albumTrackJSON, len(perTrack))
 	for i, l := range perTrack {
 		out[i] = albumTrackJSON{Input: displayPath(inputs[i]), IntegratedLUFS: jsonFloat(l.IntegratedLUFS)}
 		if outputs != nil {
 			out[i].Output = displayPath(outputs[i])
+		}
+		if carries != nil {
+			out[i].TagCarry = tagCarryToJSON(carries[i])
 		}
 	}
 	return out

@@ -34,7 +34,10 @@ import (
 // requested base name and a warning can name it where the file landed one
 // number over. Cosmetic, and the alternative is deferring the whole carry until
 // after the path is known, which would mean publishing an untagged file first.
-func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) {
+//
+// It returns the itemized report Result.TagCarry exposes, nil when no carry
+// ran: the same facts the warning tells, one item per field and per set.
+func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) *TagCarry {
 	src, err := waxlabel.ParseFile(ctx, srcPath)
 	if err != nil {
 		// An unreadable source carried nothing before either, so there is no
@@ -42,29 +45,33 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 		// engine decodes (the APEv2 family, Musepack included, and WMA), so this
 		// is a damaged file, not a format gap.
 		c.log.Debug("tag carry: source not readable", "path", srcPath, "err", err)
-		return
+		return nil
 	}
 	if src.Tags().Len() == 0 && len(src.Pictures()) == 0 && len(src.Chapters()) == 0 && len(src.SyncedLyrics()) == 0 {
-		return
+		return nil
 	}
 	out := warnName(dest, outPath)
 	warn := func(detail string) { em.warn(WarnTagCarry, detail) }
+	tc := &TagCarry{}
+	failed := func(err error) *TagCarry {
+		tc.Error = fmt.Sprintf("could not carry metadata into %s: %v", out, err)
+		warn(tc.Error)
+		return tc
+	}
 
 	dst, err := waxlabel.ParseFile(ctx, outPath)
 	if err != nil {
-		warn(fmt.Sprintf("could not carry metadata into %s: %v", out, err))
-		return
+		return failed(err)
 	}
 	plan, report, err := src.PrepareTransfer(dst)
 	if err != nil {
-		warn(fmt.Sprintf("could not carry metadata into %s: %v", out, err))
-		return
+		return failed(err)
 	}
 	postDoc, note, err := executeSaveBack(ctx, plan)
 	if err != nil {
-		warn(fmt.Sprintf("could not carry metadata into %s: %v", out, err))
-		return
+		return failed(err)
 	}
+	tc.Items = carryItems(report)
 	notes := transferLosses(report)
 	notes = append(notes, unprojectedSourceNotes(src)...)
 	if note != "" {
@@ -94,6 +101,7 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 			} else {
 				doc = saved
 				chaptersCleared = len(remapped) == 0
+				tc.remapped(CarryChapters, len(remapped), len(src.Chapters())-len(remapped))
 				if fixNote != "" {
 					notes = append(notes, fixNote)
 				}
@@ -114,6 +122,7 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 				notes = append(notes, fmt.Sprintf("synced lyrics describe the uncut input and could not be remapped: %v", ferr))
 			default:
 				lyricsCleared = len(remapped) == 0
+				tc.remapped(CarrySyncedLyrics, len(remapped), dropped)
 				if fixNote != "" {
 					notes = append(notes, fixNote)
 				}
@@ -123,11 +132,14 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 			}
 		}
 	case remuxed:
-		fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report)
+		restored, fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report)
 		if ferr != nil {
 			notes = append(notes, fmt.Sprintf("own-audio tags (ReplayGain and similar) could not be restored: %v", ferr))
-		} else if fixNote != "" {
-			notes = append(notes, fixNote)
+		} else {
+			tc.restored(restored)
+			if fixNote != "" {
+				notes = append(notes, fixNote)
+			}
 		}
 	}
 
@@ -141,9 +153,10 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 			lead = "no metadata carried to %s: %s"
 		}
 		warn(fmt.Sprintf(lead, out, strings.Join(capNotes(notes), "; ")))
-		return
+		return tc
 	}
 	c.log.Debug("tag carry: metadata carried", "from", srcPath, "to", outPath)
+	return tc
 }
 
 // landedRemains reports whether anything the transfer wrote (carried or
@@ -331,8 +344,9 @@ func rewriteSyncedLyrics(ctx context.Context, doc *waxlabel.Document, path strin
 
 // restoreOwnAudio writes back the own-audio tags the transfer excluded. It
 // exists for the whole-file remux case only, where the output's packets are
-// the input's and the excluded values still describe them exactly.
-func restoreOwnAudio(ctx context.Context, doc *waxlabel.Document, path string, src *waxlabel.Document, report waxlabel.TransferReport) (string, error) {
+// the input's and the excluded values still describe them exactly. It returns
+// the keys it put back.
+func restoreOwnAudio(ctx context.Context, doc *waxlabel.Document, path string, src *waxlabel.Document, report waxlabel.TransferReport) ([]string, string, error) {
 	var keys []tag.Key
 	for _, it := range report.Items {
 		if it.Kind == waxlabel.TransferField && it.Disposition == waxlabel.Excluded {
@@ -340,22 +354,27 @@ func restoreOwnAudio(ctx context.Context, doc *waxlabel.Document, path string, s
 		}
 	}
 	if len(keys) == 0 {
-		return "", nil
+		return nil, "", nil
 	}
 	d, err := docOrParse(ctx, doc, path)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	ed := d.Edit()
+	var restored []string
 	for _, k := range keys {
 		if vals, ok := src.Get(k); ok {
 			ed.Set(k, vals...)
+			restored = append(restored, string(k))
 		}
 	}
 	plan, err := ed.Prepare()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	_, note, err := executeSaveBack(ctx, plan)
-	return note, err
+	if err != nil {
+		return nil, "", err
+	}
+	return restored, note, nil
 }

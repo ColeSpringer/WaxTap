@@ -412,7 +412,7 @@ func render(pkg string, targets []Target, goVersion, goLicense string, mods []Mo
 		for _, f := range m.Files {
 			switch {
 			case f.Notice:
-				fmt.Fprintf(&b, "\n### %s\n\nAttributions the module carries for code ported into it, reproduced verbatim.\n\n", f.Path)
+				fmt.Fprintf(&b, "\n### %s\n\nThird-party attributions the module carries, reproduced verbatim.\n\n", f.Path)
 			case f.License != "":
 				fmt.Fprintf(&b, "\nLicense: %s (%s)\n\n", f.License, f.Path)
 			default:
@@ -481,7 +481,10 @@ func fence(b *strings.Builder, text string) {
 	for strings.Contains(text, f) {
 		f += "`"
 	}
-	b.WriteString(f + "text\n")
+	b.WriteString(f)
+	b.WriteString("text\n")
 	b.WriteString(strings.TrimRight(text, "\n"))
-	b.WriteString("\n" + f + "\n")
+	b.WriteString("\n")
+	b.WriteString(f)
+	b.WriteString("\n")
 }

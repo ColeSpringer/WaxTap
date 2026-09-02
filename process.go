@@ -119,7 +119,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		// re-encode and no cut means the output is a whole-file packet copy, the
 		// one case where own-audio tags still hold.
 		remuxed := !pres.Transcoded && !pres.Cut
-		c.carryTags(ctx, req.Input, deliver, req.Output.path, appliedCutFrom(pres), remuxed, em)
+		res.TagCarry = c.carryTags(ctx, req.Input, deliver, req.Output.path, appliedCutFrom(pres), remuxed, em)
 	}
 
 	em.stage(StageFinalizing)
@@ -241,7 +241,7 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 	runner := c.engine()
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths)
 	if err != nil {
-		return nil, albumTrackError(err, paths)
+		return nil, albumTrackError(ctx, runner, err, paths)
 	}
 	res := &AlbumLoudnessResult{
 		Album:    loudnessInfo(album),
@@ -275,6 +275,9 @@ type AlbumProcessResult struct {
 	LoudnessApplied bool
 	PerTrack        []LoudnessInfo // input measurements in track order
 	Outputs         []string       // completed output paths in track order
+	// TagCarry itemizes each track's metadata carry, in track order; a nil
+	// entry is a track whose carry did not run (nothing to carry). See TagCarry.
+	TagCarry []*TagCarry
 	// Delivered is the loudness of the normalized album. It is measured, over the
 	// written outputs, only where a measurement is the sole way to know it: a
 	// boosting gain in PeakLimit mode, where the true-peak limiter gives back an
@@ -381,7 +384,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs)
 	if err != nil {
-		return nil, albumTrackError(err, inputs)
+		return nil, albumTrackError(ctx, runner, err, inputs)
 	}
 
 	// One uniform gain for the whole album, capped or limited per the peak mode.
@@ -408,6 +411,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		LoudnessApplied: loudness.Gainable(album.IntegratedLUFS),
 		PerTrack:        make([]LoudnessInfo, len(perTrack)),
 		Outputs:         make([]string, len(tracks)),
+		TagCarry:        make([]*TagCarry, len(tracks)),
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
@@ -442,7 +446,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// warnings name is the file that was written. The carry warnings run
 		// through a per-track emitter so the album can fold them into one.
 		tem := newEmitter(nil, "")
-		c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, tem)
+		res.TagCarry[i] = c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, tem)
 		carry.observe(em, tem.collected())
 		res.Outputs[i] = t.Output
 	}
@@ -651,7 +655,16 @@ var timelineMemberRe = regexp.MustCompile(`timeline member (\d+)`)
 // reports members by index. An album error that says "member 1" makes the user
 // count their inputs; one that names the file does not. Anything the pattern
 // does not match passes through unchanged.
-func albumTrackError(err error, inputs []string) error {
+//
+// One refusal gets its own words: the timeline refusing a WMA track for
+// holding more audio than its headers declared. That is the engine's WMA
+// decoder doing what it must (WMA carries no padding count, so a decode runs
+// to the frame boundary past the declared end) meeting a timeline that holds
+// members to their headers, and in the engine's words it reads like a corrupt
+// file to a user holding a valid one. It is named here, after the refusal,
+// rather than refused up front, so an engine that stops refusing it is
+// noticed instead of masked.
+func albumTrackError(ctx context.Context, r *media.Runner, err error, inputs []string) error {
 	m := timelineMemberRe.FindStringSubmatch(err.Error())
 	if m == nil {
 		return err
@@ -660,7 +673,13 @@ func albumTrackError(err error, inputs []string) error {
 	if aerr != nil || idx < 0 || idx >= len(inputs) {
 		return err
 	}
-	return fmt.Errorf("track %s: %w", filepath.Base(inputs[idx]), err)
+	track := filepath.Base(inputs[idx])
+	if strings.Contains(err.Error(), "holds more audio than") {
+		if _, codec, _, _ := probeAudio(ctx, r, inputs[idx]); codec == "wma" {
+			return fmt.Errorf("track %s: %w: album mode cannot take a WMA file yet: the engine's album timeline refuses the frame tail its WMA decoder delivers past the declared length (the fix is upstream); process WMA tracks one at a time", track, ErrUnsupportedInput)
+		}
+	}
+	return fmt.Errorf("track %s: %w", track, err)
 }
 
 func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string, damage []string, empty bool) {

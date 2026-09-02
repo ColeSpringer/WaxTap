@@ -79,12 +79,22 @@ func TestHumanLUFS(t *testing.T) {
 	}
 }
 
+// TestCleanMessage pins the library prefixes the CLI strips before adding its
+// own: a sentinel's leading "waxtap: ", the same prefix nested behind context
+// the library wrapped around it, and an entry point's "waxtap.Func: " name.
+// Anything else, a file named waxtap.something included, is left alone.
 func TestCleanMessage(t *testing.T) {
-	if got := cleanMessage("waxtap: boom"); got != "boom" {
-		t.Errorf("cleanMessage stripped wrong: %q", got)
-	}
-	if got := cleanMessage("plain"); got != "plain" {
-		t.Errorf("cleanMessage altered plain: %q", got)
+	for _, tc := range []struct{ in, want string }{
+		{"waxtap: boom", "boom"},
+		{"plain", "plain"},
+		{"track one.wma: waxtap: unsupported or unreadable input: cause", "track one.wma: unsupported or unreadable input: cause"},
+		{"waxtap.ProcessAlbum: track 0 (x.flac): waxtap: unsupported or unreadable input: cause", "track 0 (x.flac): unsupported or unreadable input: cause"},
+		{"waxtap.Measure: no loudness measured for x.flac", "no loudness measured for x.flac"},
+		{"waxtap.json: unknown key", "waxtap.json: unknown key"},
+	} {
+		if got := cleanMessage(tc.in); got != tc.want {
+			t.Errorf("cleanMessage(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

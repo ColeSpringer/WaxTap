@@ -611,6 +611,12 @@ type Result struct {
 
 	Warnings []Warning // non-fatal conditions encountered during processing
 
+	// TagCarry itemizes what a local process did with the input's embedded
+	// metadata (tags, cover art, chapters, synced lyrics), the facts the
+	// WarnTagCarry warning tells in prose. It is nil when no carry ran; see
+	// TagCarry.
+	TagCarry *TagCarry
+
 	// Metadata contains extended video metadata when ProcessSpec.IncludeMetadata
 	// is set. It is nil otherwise.
 	Metadata *VideoMetadata

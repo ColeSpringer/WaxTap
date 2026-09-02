@@ -16,8 +16,8 @@ stale. Every license and notice text is reproduced verbatim.
 | Component | Version | License |
 |---|---|---|
 | Go runtime and standard library | go 1.26 | BSD-3-Clause |
-| github.com/colespringer/waxflow | v0.0.0-20260902125747-1e18dc88a1cd | MIT (see also THIRD-PARTY-NOTICES.md) |
-| github.com/colespringer/waxlabel | v1.6.1 | MIT |
+| github.com/colespringer/waxflow | v0.0.0-20260902192358-f6352566869c | MIT (see also THIRD-PARTY-NOTICES.md) |
+| github.com/colespringer/waxlabel | v1.6.2 | MIT |
 | github.com/dlclark/regexp2/v2 | v2.5.2 | MIT |
 | github.com/dop251/goja | v0.0.0-20260723142020-b4aef50fa347 | MIT / see text / BSD-3-Clause |
 | github.com/go-sourcemap/sourcemap | v2.1.4+incompatible | BSD-2-Clause |
@@ -62,7 +62,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/colespringer/waxflow v0.0.0-20260902125747-1e18dc88a1cd
+## github.com/colespringer/waxflow v0.0.0-20260902192358-f6352566869c
 
 License: MIT (LICENSE)
 
@@ -92,18 +92,19 @@ SOFTWARE.
 
 ### THIRD-PARTY-NOTICES.md
 
-Attributions the module carries for code ported into it, reproduced verbatim.
+Third-party attributions the module carries, reproduced verbatim.
 
 ```text
 # Third-party notices
 
 Attributions for code studied closely or ported into WaxFlow, per
 [ADR-0001](docs/adr/0001-clean-room-policy.md). Almost every entry below is
-permissively licensed (Tier A) source. The exception is **codec/wma**, whose
-parameter tables are extracted from a copyleft project under the ADR's
+permissively licensed (Tier A) source. The exceptions are **codec/wma**,
+whose parameter tables are extracted from a copyleft project under the ADR's
 provision for data-only artifacts, because the format has no published
-specification to restate; that entry states the difference and its reasoning
-in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
+specification to restate, and the **scripts/mpcchap** stub, which declares a
+copyleft library's API by name so a reference test tool can be built without
+it; each entry states the difference and its reasoning in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
 the module cache and are not vendored here.
 
 Entries follow this format:
@@ -434,11 +435,25 @@ Entries follow this format:
 > a second copy of the MPEG-1 filterbank beside codec/mp3's, kept separate so
 > the reference's arithmetic order is reproduced exactly and a shipped codec
 > stays untouched. The encoders in the same tarball (mpcenc, libmpcenc,
-> libmpcpsy) and mppenc 1.16 are LGPL and were never opened: `make mpc-tools`
-> builds them as test-time fixture generators only, beside the BSD `mpcdec`,
-> `mpc2sv8` and `mpccut` tools and `scripts/mpcdecraw`, which is our own code
-> linking libmpcdec to dump its float output for the differential. None of
-> them enters the runtime pipeline.
+> libmpcpsy) and mppenc 1.16 are LGPL and were never opened, and mpcchap, the
+> chapter editor beside them, is GPL: `make mpc-tools` builds them as
+> test-time fixture generators only (mpcchap against `scripts/mpcchap`, our
+> stub of the libcuefile API its cue-sheet path links, since the tarball
+> ships no libcuefile), beside the BSD `mpcdec`, `mpc2sv8` and `mpccut` tools
+> and `scripts/mpcdecraw`, which is our own code linking libmpcdec to dump
+> its float output for the differential. What the chapter reader assumes
+> about mpcchap's output is recorded from that output in
+> docs/notes/musepack-chapters.md. None of them enters the runtime pipeline.
+
+> **scripts/mpcchap (test tooling)**: `cuestub.c` and `cuetools/cuefile.h`
+> are our own stub of the API of *libcuefile* (GPL-2), the cue-sheet library
+> distributed with the Musepack tools at https://www.musepack.net, which the
+> reference chapter editor `mpcchap` links for cue sheets and which the r475
+> tarball does not ship. The six declarations were reconstructed from the
+> editor's own calls so that `make mpc-tools` can build it; libcuefile
+> itself, source or header, was never opened, and every stubbed call reports
+> failure, so the built editor serves .ini chapter files only. Test-time
+> tooling: compiled into that binary alone, never into WaxFlow.
 
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
@@ -457,7 +472,7 @@ Entries follow this format:
 > Tech 3341/3342; no source was ported.
 ```
 
-## github.com/colespringer/waxlabel v1.6.1
+## github.com/colespringer/waxlabel v1.6.2
 
 License: MIT (LICENSE)
 

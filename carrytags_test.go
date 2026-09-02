@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -60,8 +61,27 @@ func taggedFLAC(t *testing.T, dir string) string {
 	return flac
 }
 
+// carryItem returns the TagCarry item of kind (and key, for a field). The
+// report is the machine-readable twin of the output, so every carry test reads
+// both.
+func carryItem(t *testing.T, tc *TagCarry, kind CarryKind, key string) CarryItem {
+	t.Helper()
+	if tc == nil {
+		t.Fatal("TagCarry is nil: the carry did not run")
+	}
+	for _, it := range tc.Items {
+		if it.Kind == kind && it.Key == key {
+			return it
+		}
+	}
+	t.Fatalf("no %s item for %q in %+v", kind, key, tc.Items)
+	return CarryItem{}
+}
+
 // TestCarryTagsAcrossTranscode pins the carry pass: a local transcode delivers
-// the input's tags, picture, and chapters in the new container.
+// the input's tags, picture, and chapters in the new container, and the
+// itemized report says the same: every field carried but the own-audio one,
+// the picture and chapter sets whole.
 func TestCarryTagsAcrossTranscode(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -101,6 +121,20 @@ func TestCarryTagsAcrossTranscode(t *testing.T) {
 	if got, ok := doc.Get(tag.ReplayGainTrackGain); ok {
 		t.Errorf("re-encoded output carries ReplayGain %q, want none", got)
 	}
+	for _, key := range []tag.Key{tag.Title, tag.Artist} {
+		if it := carryItem(t, res.TagCarry, CarryField, string(key)); it.Disposition != DispositionCarried || it.Count != 1 {
+			t.Errorf("TagCarry %s = %+v, want 1 value carried", key, it)
+		}
+	}
+	if it := carryItem(t, res.TagCarry, CarryField, string(tag.ReplayGainTrackGain)); it.Disposition != DispositionExcluded || it.Reason == "" {
+		t.Errorf("TagCarry ReplayGain = %+v, want excluded with a reason", it)
+	}
+	if it := carryItem(t, res.TagCarry, CarryPictures, ""); it.Disposition != DispositionCarried || it.Count != 1 {
+		t.Errorf("TagCarry pictures = %+v, want 1 carried", it)
+	}
+	if it := carryItem(t, res.TagCarry, CarryChapters, ""); it.Disposition != DispositionCarried || it.Count != 3 || it.Removed != 0 {
+		t.Errorf("TagCarry chapters = %+v, want 3 carried, none removed", it)
+	}
 }
 
 // TestCarryTagsRemuxRestoresOwnAudio pins the remux exception: a whole-file
@@ -131,6 +165,9 @@ func TestCarryTagsRemuxRestoresOwnAudio(t *testing.T) {
 	}
 	if got, ok := doc.Get(tag.ReplayGainTrackGain); !ok || got[0] != "-6.50 dB" {
 		t.Errorf("remux output ReplayGain = %q (ok=%v), want -6.50 dB restored", got, ok)
+	}
+	if it := carryItem(t, res.TagCarry, CarryField, string(tag.ReplayGainTrackGain)); it.Disposition != DispositionCarried || it.Reason != "" {
+		t.Errorf("TagCarry ReplayGain after the restore = %+v, want carried", it)
 	}
 	if got, ok := doc.Get(tag.Title); !ok || got[0] != "Carried Title" {
 		t.Errorf("remux output TITLE = %q (ok=%v), want Carried Title", got, ok)
@@ -163,6 +200,12 @@ func TestCarryTagsAlbum(t *testing.T) {
 	if n := len(doc.Chapters()); n != 3 {
 		t.Errorf("album output chapters = %d, want 3", n)
 	}
+	if len(res.TagCarry) != 1 {
+		t.Fatalf("album TagCarry = %+v, want one report per track", res.TagCarry)
+	}
+	if it := carryItem(t, res.TagCarry[0], CarryChapters, ""); it.Disposition != DispositionCarried || it.Count != 3 {
+		t.Errorf("album TagCarry chapters = %+v, want 3 carried", it)
+	}
 	// The applied gain changed the loudness ReplayGain describes.
 	if got, ok := doc.Get(tag.ReplayGainTrackGain); ok {
 		t.Errorf("album output carries ReplayGain %q, want none", got)
@@ -186,6 +229,44 @@ func TestRemapChaptersUnsortedInput(t *testing.T) {
 	if len(got) != 2 || got[0].Title != "One" || got[0].Start != 0 ||
 		got[1].Title != "Three" || got[1].Start != 1*time.Second {
 		t.Errorf("remapChapters(unsorted) = %+v, want One@0 and Three@1s", got)
+	}
+}
+
+// TestRemapChaptersKeepsPointChapters pins the drop rule's edge: a chapter
+// with content inside the source is dropped when the cut removed all of it. A
+// chapter with no content of its own, sharing its start with the next or
+// sitting at or past the end (forms the Musepack and ASF readers keep), is a
+// point mark that follows the lyric-line rule: dropped when the cut took its
+// instant (the twin of a removed chapter goes with it), kept and shifted
+// otherwise, a join boundary and the end of the source included.
+func TestRemapChaptersKeepsPointChapters(t *testing.T) {
+	cut := &appliedCut{
+		keeps: []cutrange.Range{{Start: 0, End: 1 * time.Second}, {Start: 2 * time.Second, End: 3 * time.Second}},
+		total: 3 * time.Second,
+	}
+	chs := []waxlabel.Chapter{
+		{Start: 0, Title: "One"},
+		{Start: 500 * time.Millisecond, Title: "Twin A"},
+		{Start: 500 * time.Millisecond, Title: "Twin B"},
+		{Start: 1 * time.Second, Title: "Removed"},
+		{Start: 1500 * time.Millisecond, Title: "Cut twin A"},
+		{Start: 1500 * time.Millisecond, Title: "Cut twin B"},
+		{Start: 2 * time.Second, Title: "Three"},
+		{Start: 2 * time.Second, Title: "Three's twin"},
+		{Start: 3 * time.Second, Title: "At end"},
+		{Start: 4 * time.Second, Title: "Past end"},
+	}
+	want := []waxlabel.Chapter{
+		{Start: 0, Title: "One"},
+		{Start: 500 * time.Millisecond, Title: "Twin A"},
+		{Start: 500 * time.Millisecond, Title: "Twin B"},
+		{Start: 1 * time.Second, Title: "Three"},
+		{Start: 1 * time.Second, Title: "Three's twin"},
+		{Start: 2 * time.Second, Title: "At end"},
+		{Start: 2 * time.Second, Title: "Past end"},
+	}
+	if got := remapChapters(chs, cut); !slices.Equal(got, want) {
+		t.Errorf("remapChapters = %+v, want %+v", got, want)
 	}
 }
 
@@ -231,6 +312,11 @@ func TestCarryTagsCutRemapsChapters(t *testing.T) {
 	if chs[1].Title != "Three" || chs[1].Start != 1*time.Second {
 		t.Errorf("chapter 1 = %q@%v, want Three@1s", chs[1].Title, chs[1].Start)
 	}
+	// The report counts what the output holds and what the cut took, and a
+	// removal is not a loss: the set stays carried.
+	if it := carryItem(t, res.TagCarry, CarryChapters, ""); it.Disposition != DispositionCarried || it.Count != 2 || it.Removed != 1 {
+		t.Errorf("TagCarry chapters = %+v, want 2 carried with 1 removed by the cut", it)
+	}
 }
 
 // TestCarryTagsUntaggedSourceSilent pins the no-op: an input with no metadata
@@ -253,6 +339,9 @@ func TestCarryTagsUntaggedSourceSilent(t *testing.T) {
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("untagged carry warned: %+v", res.Warnings)
+	}
+	if res.TagCarry != nil {
+		t.Errorf("untagged TagCarry = %+v, want nil: nothing to carry means no carry ran", res.TagCarry)
 	}
 }
 
@@ -316,23 +405,30 @@ func TestCarryTagsCutRemapsSyncedLyrics(t *testing.T) {
 		wantTimes  []time.Duration
 		wantNote   string // "" means no WarnTagCarry at all
 		wantChapts []time.Duration
+		// wantSets and wantRemoved are the report's view: sets on the output,
+		// lines the cut took.
+		wantSets, wantRemoved int
 	}{
 		{
 			name:       "head cut shifts both lines",
 			remove:     TimeRange{Start: 0, End: 1 * time.Second},
 			wantTimes:  []time.Duration{500 * time.Millisecond, 2 * time.Second},
 			wantChapts: []time.Duration{0, 1 * time.Second, 4 * time.Second},
+			wantSets:   1,
 		},
 		{
-			name:      "a line inside the removed span is dropped",
-			remove:    TimeRange{Start: 2 * time.Second, End: 5 * time.Second},
-			wantTimes: []time.Duration{1500 * time.Millisecond},
-			wantNote:  "1 synced lyric line pointed at removed audio",
+			name:        "a line inside the removed span is dropped",
+			remove:      TimeRange{Start: 2 * time.Second, End: 5 * time.Second},
+			wantTimes:   []time.Duration{1500 * time.Millisecond},
+			wantNote:    "1 synced lyric line pointed at removed audio",
+			wantSets:    1,
+			wantRemoved: 1,
 		},
 		{
-			name:     "removing everything they point at drops the set",
-			remove:   TimeRange{Start: 0, End: 6 * time.Second},
-			wantNote: "2 synced lyric lines",
+			name:        "removing everything they point at drops the set",
+			remove:      TimeRange{Start: 0, End: 6 * time.Second},
+			wantNote:    "2 synced lyric lines",
+			wantRemoved: 2,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,6 +455,14 @@ func TestCarryTagsCutRemapsSyncedLyrics(t *testing.T) {
 				}
 			} else if !strings.Contains(detail, tc.wantNote) {
 				t.Errorf("carry note = %q, want it to contain %q", detail, tc.wantNote)
+			}
+			// A set the cut emptied reports removed, not carried with nothing.
+			wantDisp := DispositionCarried
+			if tc.wantSets == 0 {
+				wantDisp = DispositionRemoved
+			}
+			if it := carryItem(t, res.TagCarry, CarrySyncedLyrics, ""); it.Disposition != wantDisp || it.Count != tc.wantSets || it.Removed != tc.wantRemoved {
+				t.Errorf("TagCarry synced lyrics = %+v, want %d sets %s with %d lines removed", it, tc.wantSets, wantDisp, tc.wantRemoved)
 			}
 
 			doc, err := waxlabel.ParseFile(ctx, out)
@@ -436,5 +540,8 @@ func TestCarryTagsCutEmptyingOnlyMetadataSaysNothingCarried(t *testing.T) {
 	}
 	if !strings.Contains(detail, "no metadata carried") {
 		t.Errorf("detail = %q, want the no-metadata lead: nothing remains on the output", detail)
+	}
+	if it := carryItem(t, res.TagCarry, CarrySyncedLyrics, ""); it.Disposition != DispositionRemoved || it.Count != 0 || it.Removed != 1 {
+		t.Errorf("TagCarry synced lyrics = %+v, want the set removed by the cut, its 1 line counted", it)
 	}
 }

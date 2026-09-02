@@ -117,7 +117,11 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   copies it under its own identity rather than re-encoding it to AAC-LC.
   WavPack, Monkey's Audio (APE), WMA, and Musepack (`.mpc`) files are also
   accepted as local inputs; WMA and Musepack are decode-only, so
-  `--format copy` on one is refused.
+  `--format copy` on one is refused. Their chapters (ASF markers, SV8 chapter
+  packets) carry like any other input's. `--album` cannot take a WMA file yet:
+  the engine's album timeline refuses the frame tail its WMA decoder delivers
+  past the declared length (the fix is upstream), so process WMA tracks one at
+  a time.
 - `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
   and `{index}`. `{index}` numbers playlist items and expands empty for a single
   video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
@@ -175,8 +179,10 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 - Processing a local file (`transcode`, `normalize`, `cut`, `--album` included)
   carries the input's embedded metadata - tags, cover art, chapters, synced
   lyrics - onto the rewritten output. Anything the output format cannot hold is
-  reported as the `tag-carry-incomplete` warning, never dropped silently.
-  Chapter marks follow a cut the same way the embed flags do. Synced lyric
+  reported as the `tag-carry-incomplete` warning, never dropped silently; the
+  summary prints a `Metadata:` receipt (a column per track under `--album`)
+  and `--json` itemizes the carry as `tagCarry`. Chapter marks follow a cut the
+  same way the embed flags do. Synced lyric
   lines follow a cut too, and a line whose timestamp lands in removed audio is
   dropped - including a line at 0:00 when the cut starts at zero - and reported
   through the same warning. Tags describing

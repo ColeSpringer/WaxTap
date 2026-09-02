@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -452,10 +453,20 @@ func renderErrorKept(w io.Writer, jsonMode bool, err error, args []string, kept 
 	}
 }
 
-// cleanMessage strips a redundant leading "waxtap: " before the CLI adds its own
-// prefix.
+// libraryPrefixRe matches the name a library entry point puts on its own
+// errors ("waxtap.ProcessAlbum: ..."): the package, a dot, an exported name. A
+// file named waxtap.something does not match, since its extension is lowercase.
+var libraryPrefixRe = regexp.MustCompile(`^waxtap\.[A-Z][A-Za-z]*: `)
+
+// cleanMessage strips the library's own prefixes before the CLI adds its own:
+// the leading "waxtap: " a sentinel carries, the "waxtap.Func: " a library
+// entry point names itself by, and a sentinel's "waxtap: " nested behind
+// context the library put in front of it ("track x: waxtap: unsupported..."),
+// which would otherwise print as "waxtap: track x: waxtap: unsupported...".
 func cleanMessage(msg string) string {
-	return strings.TrimPrefix(msg, "waxtap: ")
+	msg = strings.TrimPrefix(msg, "waxtap: ")
+	msg = libraryPrefixRe.ReplaceAllString(msg, "")
+	return strings.ReplaceAll(msg, ": waxtap: ", ": ")
 }
 
 // classifiedError contains every user-visible representation of a terminal error.

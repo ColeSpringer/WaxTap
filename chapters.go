@@ -19,6 +19,21 @@ type appliedCut struct {
 	total     time.Duration // source duration, resolving until-next chapter ends
 }
 
+// removed reports whether the cut took the source instant t: inside the
+// source, [0, total), and in no keep. An instant at or past the end marks no
+// removed audio whatever the cut did.
+func (c *appliedCut) removed(t time.Duration) bool {
+	if t < 0 || t >= c.total {
+		return false
+	}
+	for _, k := range c.keeps {
+		if t >= k.Start && t < k.End {
+			return false
+		}
+	}
+	return true
+}
+
 // appliedCutFrom extracts the cut a pipeline run applied, or nil when the
 // delivered timeline matches the source.
 func appliedCutFrom(pres pipeline.Result) *appliedCut {
@@ -36,7 +51,11 @@ func appliedCutFrom(pres pipeline.Result) *appliedCut {
 // the next surviving chapter still starts exactly where this one's content
 // ends, so the convention remaps itself. The span is still resolved (against
 // the next chapter, or total for the last) to decide whether any content
-// survived.
+// survived. A chapter with no content of its own inside the source, one that
+// shares its start with the next or sits at or past the end (forms the
+// Musepack and ASF readers keep), is a point mark and follows the rule
+// remapSyncedLyrics applies to a line: dropped when the cut took its instant,
+// otherwise shifted with the audio around it.
 func remapChapters(chs []waxlabel.Chapter, cut *appliedCut) []waxlabel.Chapter {
 	// Sort a copy by start first: until-next resolution reads the following
 	// chapter, and containers do not promise file order is timeline order. An
@@ -55,7 +74,10 @@ func remapChapters(chs []waxlabel.Chapter, cut *appliedCut) []waxlabel.Chapter {
 		}
 		ms := cutrange.MapTime(cut.keeps, cut.crossfade, ch.Start)
 		me := cutrange.MapTime(cut.keeps, cut.crossfade, end)
-		if me <= ms {
+		// Only content inside the source is the cut's to remove: a span that
+		// maps to nothing was removed; a point mark went with its instant.
+		content := min(end, cut.total) > ch.Start
+		if (content && me <= ms) || (!content && cut.removed(ch.Start)) {
 			continue
 		}
 		nc := waxlabel.Chapter{Start: ms, Title: ch.Title}
@@ -83,21 +105,10 @@ func remapChapters(chs []waxlabel.Chapter, cut *appliedCut) []waxlabel.Chapter {
 // it survives and shifts like everything after the removals, which lands it at
 // the output's end.
 func remapSyncedLyrics(sls []waxlabel.SyncedLyrics, cut *appliedCut) (out []waxlabel.SyncedLyrics, dropped int) {
-	removed := func(t time.Duration) bool {
-		if t < 0 || t >= cut.total {
-			return false // outside the source: nothing there was cut
-		}
-		for _, k := range cut.keeps {
-			if t >= k.Start && t < k.End {
-				return false
-			}
-		}
-		return true
-	}
 	for _, sl := range sls {
 		lines := make([]waxlabel.SyncedLine, 0, len(sl.Lines))
 		for _, l := range sl.Lines {
-			if removed(l.Time) {
+			if cut.removed(l.Time) {
 				dropped++
 				continue
 			}

@@ -153,6 +153,9 @@ func renderResultHuman(env *appEnv, res *waxtap.Result) {
 	if effects := effectSummary(res); effects != "" {
 		env.printf("Applied:  %s\n", effects)
 	}
+	if res.TagCarry != nil {
+		env.printf("Metadata: %s\n", carrySummary(res.TagCarry))
+	}
 	if res.Loudness != nil {
 		renderLoudness(env, res)
 	}
@@ -194,6 +197,104 @@ func unmeasurableNote(res *waxtap.Result, side string) string {
 		}
 	}
 	return side + " integrated loudness could not be measured"
+}
+
+// carrySummary words a metadata carry as one line, the receipt beside the
+// warning: what landed, counted by kind, then what was dropped or left off,
+// and what a cut removed. The warning already explains a loss; this names it.
+func carrySummary(tc *waxtap.TagCarry) string {
+	if tc.Error != "" {
+		return "none carried (see warning)"
+	}
+	var tags, tagsDropped, tagsLeftOff int
+	landedSets := map[waxtap.CarryKind]int{}
+	droppedSets := map[waxtap.CarryKind]bool{}
+	var removed []string
+	for _, it := range tc.Items {
+		switch {
+		case it.Kind == waxtap.CarryField:
+			switch it.Disposition {
+			case waxtap.DispositionCarried, waxtap.DispositionDowngraded:
+				tags++
+			case waxtap.DispositionDropped:
+				tagsDropped++
+			case waxtap.DispositionExcluded:
+				tagsLeftOff++
+			}
+		case it.Disposition == waxtap.DispositionDropped:
+			droppedSets[it.Kind] = true
+		case it.Disposition == waxtap.DispositionRemoved:
+			// Nothing landed; the removal is counted below.
+		default:
+			landedSets[it.Kind] += it.Count
+		}
+		if it.Removed > 0 {
+			removed = append(removed, carryCount(it.Removed, removedNoun(it.Kind)))
+		}
+	}
+	var landed, lost []string
+	if tags > 0 {
+		landed = append(landed, carryCount(tags, "tag"))
+	}
+	if n := landedSets[waxtap.CarryPictures]; n > 0 {
+		landed = append(landed, carryCount(n, "picture"))
+	}
+	if n := landedSets[waxtap.CarryChapters]; n > 0 {
+		landed = append(landed, carryCount(n, "chapter"))
+	}
+	if landedSets[waxtap.CarrySyncedLyrics] > 0 {
+		landed = append(landed, "synced lyrics")
+	}
+	if tagsDropped > 0 {
+		lost = append(lost, carryCount(tagsDropped, "tag"))
+	}
+	for _, k := range []waxtap.CarryKind{waxtap.CarryPictures, waxtap.CarryChapters, waxtap.CarrySyncedLyrics} {
+		if droppedSets[k] {
+			lost = append(lost, setNoun(k))
+		}
+	}
+	line := "none carried"
+	if len(landed) > 0 {
+		line = strings.Join(landed, ", ") + " carried"
+	}
+	if len(lost) > 0 {
+		line += "; " + strings.Join(lost, ", ") + " dropped"
+	}
+	if tagsLeftOff > 0 {
+		line += "; " + carryCount(tagsLeftOff, "tag") + " left off"
+	}
+	if len(removed) > 0 {
+		line += " (" + strings.Join(removed, ", ") + " removed by the cut)"
+	}
+	return line
+}
+
+// carryCount is "1 tag" / "2 tags", for the nouns carrySummary counts.
+func carryCount(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+// setNoun names a metadata set the way the warning does.
+func setNoun(k waxtap.CarryKind) string {
+	switch k {
+	case waxtap.CarryPictures:
+		return "pictures"
+	case waxtap.CarryChapters:
+		return "chapters"
+	}
+	return "synced lyrics"
+}
+
+// removedNoun names what a cut removes from a set: whole chapters, or the
+// lines of a synced-lyrics set.
+func removedNoun(k waxtap.CarryKind) string {
+	if k == waxtap.CarryChapters {
+		return "chapter"
+	}
+	return "lyric line"
 }
 
 // effectSummary joins the applied effects into a short comma-separated list.
@@ -245,6 +346,42 @@ type warningJSON struct {
 	Detail string `json:"detail"`
 }
 
+// tagCarryJSON is the --json view of a local process's metadata carry: one
+// item per tag field and per set, in the library's stable spellings. The key
+// is absent when no carry ran; error stands in for the items when the carry
+// itself failed.
+type tagCarryJSON struct {
+	Items []carryItemJSON `json:"items,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+type carryItemJSON struct {
+	Kind        string `json:"kind"`
+	Key         string `json:"key,omitempty"`
+	Count       int    `json:"count"`
+	Disposition string `json:"disposition"`
+	Reason      string `json:"reason,omitempty"`
+	Removed     int    `json:"removed,omitempty"`
+}
+
+func tagCarryToJSON(tc *waxtap.TagCarry) *tagCarryJSON {
+	if tc == nil {
+		return nil
+	}
+	out := &tagCarryJSON{Error: tc.Error}
+	for _, it := range tc.Items {
+		out.Items = append(out.Items, carryItemJSON{
+			Kind:        it.Kind.String(),
+			Key:         it.Key,
+			Count:       it.Count,
+			Disposition: it.Disposition.String(),
+			Reason:      it.Reason,
+			Removed:     it.Removed,
+		})
+	}
+	return out
+}
+
 type resultJSON struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	SourceKind    string `json:"sourceKind"`
@@ -271,6 +408,8 @@ type resultJSON struct {
 	LoudnessApplied     bool `json:"loudnessApplied"`
 
 	Loudness *loudnessJSON `json:"loudness,omitempty"`
+	// TagCarry itemizes a local process's metadata carry; see tagCarryJSON.
+	TagCarry *tagCarryJSON `json:"tagCarry,omitempty"`
 	Warnings []warningJSON `json:"warnings,omitempty"`
 	// Notes are the run's note: diagnostics, in the same {code, detail} shape as
 	// Warnings. They were stderr-only and --quiet-gated, so --json --quiet, the
@@ -297,6 +436,7 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		LoudnessApplied:     res.LoudnessApplied,
 	}
 	out.SourceFormat, out.OutputFormat = formatDTOs(res)
+	out.TagCarry = tagCarryToJSON(res.TagCarry)
 	if res.Loudness != nil {
 		lj := &loudnessJSON{Target: jsonFloat(res.Loudness.Target)}
 		lj.Input = loudnessInfoToJSON(res.Loudness.Input)

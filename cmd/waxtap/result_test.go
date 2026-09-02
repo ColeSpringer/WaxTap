@@ -293,3 +293,120 @@ func TestResultHumanClientViaWatchPage(t *testing.T) {
 		t.Errorf("a player delivery must carry no suffix, got:\n%s", got)
 	}
 }
+
+// TestResultJSONTagCarry pins the tagCarry object: absent when no carry ran,
+// otherwise one item per piece in the library's spellings, with the optional
+// keys (key, reason, removed) present only where they say something, and
+// error standing in for the items when the carry itself failed.
+func TestResultJSONTagCarry(t *testing.T) {
+	marshal := func(res *waxtap.Result) map[string]any {
+		b, err := json.Marshal(resultToJSON(res))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	local := func(tc *waxtap.TagCarry) *waxtap.Result {
+		return &waxtap.Result{SourceKind: waxtap.SourceLocalFile, TagCarry: tc}
+	}
+
+	if m := marshal(local(nil)); m["tagCarry"] != nil {
+		t.Errorf("a result with no carry should omit tagCarry: %v", m["tagCarry"])
+	}
+
+	m := marshal(local(&waxtap.TagCarry{Items: []waxtap.CarryItem{
+		{Kind: waxtap.CarryField, Key: "TITLE", Count: 1, Disposition: waxtap.DispositionCarried},
+		{Kind: waxtap.CarryChapters, Count: 2, Disposition: waxtap.DispositionCarried, Removed: 1},
+		{Kind: waxtap.CarryPictures, Count: 1, Disposition: waxtap.DispositionDropped, Reason: "destination format does not store pictures"},
+	}}))
+	tc, ok := m["tagCarry"].(map[string]any)
+	if !ok {
+		t.Fatalf("tagCarry missing or not an object: %v", m)
+	}
+	items, _ := tc["items"].([]any)
+	if len(items) != 3 {
+		t.Fatalf("tagCarry.items = %v, want 3", tc["items"])
+	}
+	want := []map[string]any{
+		{"kind": "field", "key": "TITLE", "count": 1.0, "disposition": "carried"},
+		{"kind": "chapters", "count": 2.0, "disposition": "carried", "removed": 1.0},
+		{"kind": "pictures", "count": 1.0, "disposition": "dropped", "reason": "destination format does not store pictures"},
+	}
+	for i, w := range want {
+		got := items[i].(map[string]any)
+		if len(got) != len(w) {
+			t.Errorf("item %d = %v, want exactly the keys %v", i, got, w)
+		}
+		for k, v := range w {
+			if got[k] != v {
+				t.Errorf("item %d %s = %v, want %v", i, k, got[k], v)
+			}
+		}
+	}
+	if _, ok := tc["error"]; ok {
+		t.Errorf("a carry that ran should carry no error: %v", tc)
+	}
+
+	m = marshal(local(&waxtap.TagCarry{Error: "could not carry metadata into out.flac: boom"}))
+	tc, _ = m["tagCarry"].(map[string]any)
+	if tc["error"] != "could not carry metadata into out.flac: boom" || tc["items"] != nil {
+		t.Errorf("a failed carry should carry the error and no items: %v", tc)
+	}
+}
+
+// TestRenderResultHumanMetadataLine pins the Metadata: receipt: what landed by
+// kind, then what was dropped or left off, then what a cut removed; no line
+// without a carry, and nothing under --quiet.
+func TestRenderResultHumanMetadataLine(t *testing.T) {
+	render := func(res *waxtap.Result, quiet bool) string {
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{quiet: quiet}}
+		renderResultHuman(env, res)
+		return out.String()
+	}
+	base := waxtap.Result{SourceKind: waxtap.SourceLocalFile, InputPath: "/in.flac", OutputPath: "/out.opus", Transcoded: true}
+
+	if got := render(&base, false); strings.Contains(got, "Metadata:") {
+		t.Errorf("no carry should print no Metadata line:\n%s", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		carry waxtap.TagCarry
+		want  string
+	}{
+		{"all carried", waxtap.TagCarry{Items: []waxtap.CarryItem{
+			{Kind: waxtap.CarryField, Key: "TITLE", Count: 1, Disposition: waxtap.DispositionCarried},
+			{Kind: waxtap.CarryField, Key: "ARTIST", Count: 1, Disposition: waxtap.DispositionCarried},
+			{Kind: waxtap.CarryPictures, Count: 1, Disposition: waxtap.DispositionCarried},
+			{Kind: waxtap.CarryChapters, Count: 3, Disposition: waxtap.DispositionCarried},
+			{Kind: waxtap.CarrySyncedLyrics, Count: 1, Disposition: waxtap.DispositionCarried},
+		}}, "Metadata: 2 tags, 1 picture, 3 chapters, synced lyrics carried\n"},
+		{"losses and a cut", waxtap.TagCarry{Items: []waxtap.CarryItem{
+			{Kind: waxtap.CarryField, Key: "TITLE", Count: 1, Disposition: waxtap.DispositionDowngraded, Reason: "shortened"},
+			{Kind: waxtap.CarryField, Key: "REPLAYGAIN_TRACK_GAIN", Count: 1, Disposition: waxtap.DispositionExcluded, Reason: "own audio"},
+			{Kind: waxtap.CarryPictures, Count: 1, Disposition: waxtap.DispositionDropped, Reason: "no store"},
+			{Kind: waxtap.CarryChapters, Count: 2, Disposition: waxtap.DispositionCarried, Removed: 1},
+			{Kind: waxtap.CarrySyncedLyrics, Count: 0, Disposition: waxtap.DispositionRemoved, Removed: 2},
+		}}, "Metadata: 1 tag, 2 chapters carried; pictures dropped; 1 tag left off (1 chapter, 2 lyric lines removed by the cut)\n"},
+		{"nothing landed", waxtap.TagCarry{Items: []waxtap.CarryItem{
+			{Kind: waxtap.CarryChapters, Count: 2, Disposition: waxtap.DispositionDropped, Reason: "no store"},
+		}}, "Metadata: none carried; chapters dropped\n"},
+		{"carry failed", waxtap.TagCarry{Error: "could not carry metadata into /out.opus: boom"},
+			"Metadata: none carried (see warning)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := base
+			res.TagCarry = &tc.carry
+			if got := render(&res, false); !strings.Contains(got, tc.want) {
+				t.Errorf("summary:\n%s\nwant a line %q", got, tc.want)
+			}
+			if got := render(&res, true); strings.Contains(got, "Metadata:") {
+				t.Errorf("--quiet should print only the path:\n%s", got)
+			}
+		})
+	}
+}

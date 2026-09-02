@@ -961,9 +961,8 @@ func TestCutWavPackFallsBackToReencode(t *testing.T) {
 // The facade's tag carry parses sources with WaxLabel alone (no probe
 // fallback), resting on the cross-library invariant that WaxLabel identifies
 // every format the engine handles. This pins it for every format the engine
-// can write; the decode-only inputs are TestWaxLabelReadsMusepackInput's
-// business (WMA cannot be synthesized here and keeps its read side pinned
-// upstream).
+// can write; the decode-only inputs are TestWaxLabelReadsDecodeOnlyInputs's
+// business, on the fixtures the engine decodes.
 func TestWaxLabelReadsEveryEngineOutput(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()

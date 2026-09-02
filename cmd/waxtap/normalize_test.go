@@ -27,12 +27,26 @@ func TestAlbumTableHeaders(t *testing.T) {
 			GainDB:   -2,
 			PerTrack: perTrack,
 			Outputs:  []string{"out/a.flac", "out/b.flac"},
+			// One track carried its chapters, the other had nothing to carry.
+			TagCarry: []*waxtap.TagCarry{
+				{Items: []waxtap.CarryItem{{Kind: waxtap.CarryChapters, Count: 3, Disposition: waxtap.DispositionCarried}}},
+				nil,
+			},
 		}
 		if err := emitAlbumProcess(env, inputs, res); err != nil {
 			t.Fatal(err)
 		}
-		if s := out.String(); !strings.Contains(s, "IN-LUFS") || !strings.Contains(s, "OUTPUT") {
-			t.Errorf("process table header = %q, want IN-LUFS beside OUTPUT", s)
+		s := out.String()
+		if !strings.Contains(s, "IN-LUFS") || !strings.Contains(s, "METADATA") || !strings.Contains(s, "OUTPUT") {
+			t.Errorf("process table header = %q, want IN-LUFS, METADATA, and OUTPUT", s)
+		}
+		// The receipt column is the single-file Metadata: line per track, "-"
+		// where no carry ran.
+		if !strings.Contains(s, "3 chapters carried") {
+			t.Errorf("process table = %q, want track 1's receipt", s)
+		}
+		if !strings.Contains(s, "\t-\t") && !strings.Contains(s, "  -  ") {
+			t.Errorf("process table = %q, want a - cell for the track that carried nothing", s)
 		}
 	})
 
@@ -284,5 +298,29 @@ func assertNormalizeUsageError(t *testing.T, args []string) {
 	err := cmd.Execute()
 	if _, ok := errors.AsType[*usageError](err); !ok {
 		t.Errorf("normalize %v: err = %v (%T), want *usageError (exit 2)", args, err, err)
+	}
+}
+
+// TestAlbumTracksJSONTagCarry pins the per-track carry in the album document:
+// present with the report, absent for a track that carried nothing and for a
+// measurement, which carries nothing at all.
+func TestAlbumTracksJSONTagCarry(t *testing.T) {
+	inputs := []string{"a.flac", "b.flac"}
+	per := []waxtap.LoudnessInfo{{}, {}}
+	carries := []*waxtap.TagCarry{
+		{Items: []waxtap.CarryItem{{Kind: waxtap.CarryChapters, Count: 3, Disposition: waxtap.DispositionCarried}}},
+		nil,
+	}
+	rows := albumTracksJSON(inputs, per, []string{"out/a.flac", "out/b.flac"}, carries)
+	if rows[0].TagCarry == nil || len(rows[0].TagCarry.Items) != 1 || rows[0].TagCarry.Items[0].Kind != "chapters" {
+		t.Errorf("track 0 tagCarry = %+v, want the chapter item", rows[0].TagCarry)
+	}
+	if rows[1].TagCarry != nil {
+		t.Errorf("track 1 tagCarry = %+v, want none for a track that carried nothing", rows[1].TagCarry)
+	}
+	for i, row := range albumTracksJSON(inputs, per, nil, nil) {
+		if row.TagCarry != nil || row.Output != "" {
+			t.Errorf("measurement row %d = %+v, want no output and no carry", i, row)
+		}
 	}
 }

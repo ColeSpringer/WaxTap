@@ -11,7 +11,9 @@ package loudness
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"path/filepath"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -130,7 +132,9 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 	for i, in := range inputs {
 		res, aerr := r.AnalyzeFile(ctx, in, 0)
 		if aerr != nil {
-			return Loudness{}, nil, aerr
+			// The album has many inputs, so the failure names its file, the way
+			// a timeline error is named after its member.
+			return Loudness{}, nil, fmt.Errorf("track %s: %w", filepath.Base(in), aerr)
 		}
 		perTrack[i] = fromResult(res)
 	}

@@ -381,3 +381,19 @@ func TestProcessAlbumWarnsImplicitDownmix(t *testing.T) {
 		t.Errorf("a format that holds 6 channels must not warn: %+v", kept.Warnings)
 	}
 }
+
+// TestMeasureAlbumNamesUnreadableTrack pins the file name on a per-track
+// failure: an album has many inputs, and "unsupported or unreadable input"
+// alone sends the user through all of them to find the bad one.
+func TestMeasureAlbumNamesUnreadableTrack(t *testing.T) {
+	dir := t.TempDir()
+	good := synthSine(t, dir, "good.flac", 1, "flac")
+	bad := filepath.Join(dir, "bad.flac")
+	if err := os.WriteFile(bad, []byte("not audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := newOfflineClient(t).MeasureAlbum(context.Background(), []string{good, bad})
+	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "track bad.flac") {
+		t.Errorf("MeasureAlbum = %v, want ErrUnsupportedInput naming track bad.flac", err)
+	}
+}

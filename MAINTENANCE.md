@@ -335,10 +335,13 @@ responses. `.gitignore` excludes `testdata/real/`, `*.real.js`, and
 `*.real.json`.
 
 Audio fixtures are synthesized by the engine at test time (`internal/mediatest`
-writes WAV, the tests encode from it). The exception is a format WaxFlow only
-decodes, which nothing here can write: `internal/mediatest/testdata/` holds
-WaxFlow's own synthetic fixture for it (`tagged.mpc`, a reference-encoder
-render of a generated seed). Nothing under `testdata/` is a real recording.
+writes WAV, the tests encode from it). The exceptions are the formats WaxFlow
+only decodes, which nothing here can write: `internal/mediatest/testdata/`
+holds WaxFlow's own synthetic fixtures for them. `tagged.mpc` and `chapters.mpc`
+are reference-encoder renders of a generated seed, the second with chapters
+the reference chapter editor wrote; `chapters.wma` is an ffmpeg render of a
+generated sine with a chapter list. Nothing under `testdata/` is a real
+recording.
 
 ## Releasing
 
