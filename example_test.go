@@ -133,6 +133,47 @@ func ExampleClient_Enumerate() {
 	}
 }
 
+// ExampleClient_Enumerate_bounded refreshes the first entries of a listing with
+// full metadata, spending a fixed per-entry budget inside the enrichment that
+// escapes YouTube's metadata throttle, and reads each entry's outcome.
+func ExampleClient_Enumerate_bounded() {
+	client, err := waxtap.New(waxtap.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	pl, err := client.Enumerate(context.Background(),
+		"https://www.youtube.com/playlist?list=UUSMOQeBJ2RAnuFungnQOxLg",
+		waxtap.EnumerateOptions{
+			Enrich:        true,
+			MaxEnrich:     25, // the first 25 listed entries get an Info call
+			EnrichOptions: []waxtap.ReadOption{waxtap.WithFullMetadata()},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	failed := map[int]error{}
+	for _, perr := range pl.Errors {
+		if ee, ok := errors.AsType[*waxtap.EnrichError](perr); ok {
+			failed[ee.Index] = ee.Err // by position: a playlist can list one video twice
+		}
+	}
+	for _, entry := range pl.Entries {
+		switch ferr := failed[entry.Index]; {
+		case entry.Video != nil:
+			fmt.Printf("%s (%s): %s\n", entry.VideoID, entry.Video.PublishDate.Format("2006-01-02"), entry.Video.Description)
+		case errors.Is(ferr, waxtap.ErrTemporarilyUnavailable):
+			// Not a verdict: the throttle outlasted the rotation budget. Ask again
+			// in a later run.
+		case ferr != nil:
+			// An availability verdict or a hard failure for this entry.
+		default:
+			// Past MaxEnrich: listed, not refreshed.
+		}
+	}
+}
+
 // ExampleClient_DownloadPlaylist downloads up to ten playlist entries one at a
 // time, waiting between downloads. BuildRequest prepares or skips each entry;
 // OnItem receives the outcome for every entry the run reaches.

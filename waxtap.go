@@ -533,11 +533,29 @@ func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id strin
 // feed, which is newest-first and lists Shorts and past live streams as ordinary
 // entries. EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an
 // archive cursor. With Enrich set, InfoBasic calls refresh entries at bounded
-// concurrency. Successful calls update their entries; item-level failures are
-// added to Playlist.Errors.
+// concurrency, MaxEnrich caps how many from the front, and EnrichOptions shape
+// each call. A successful call refreshes its entry and attaches the fetched
+// metadata as PlaylistEntry.Video; item-level failures are added to
+// Playlist.Errors as EnrichError values.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
 	if opts.MaxItems < 0 {
 		return nil, configErr("Enumerate: MaxItems must be >= 0, got %d", opts.MaxItems)
+	}
+	if opts.MaxEnrich < 0 {
+		return nil, configErr("Enumerate: MaxEnrich must be >= 0, got %d", opts.MaxEnrich)
+	}
+	// The enrichment tuners are rejected without Enrich rather than ignored: a
+	// budget or options that silently do nothing are the outcome a caller least
+	// expects, and the first call is the cheapest place to learn it.
+	// OnEnrichProgress predates this guard and stays ignored, so a caller that
+	// wires progress unconditionally and toggles Enrich per run keeps working.
+	if !opts.Enrich {
+		switch {
+		case opts.MaxEnrich > 0:
+			return nil, configErr("Enumerate: MaxEnrich requires Enrich")
+		case len(opts.EnrichOptions) > 0:
+			return nil, configErr("Enumerate: EnrichOptions require Enrich")
+		}
 	}
 	id, channelID, err := c.resolveEnumerateTarget(ctx, url)
 	if err != nil {
@@ -554,7 +572,7 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 		return nil, err
 	}
 	if opts.Enrich {
-		if err := c.enrichEntries(ctx, pl, opts.OnEnrichProgress); err != nil {
+		if err := c.enrichEntries(ctx, pl, opts); err != nil {
 			return pl, err
 		}
 	}
@@ -577,6 +595,23 @@ func (c *Client) resolveEnumerateTarget(ctx context.Context, url string) (playli
 	return "", "", plErr
 }
 
+// EnrichError reports one playlist entry Enumerate could not enrich. It is what
+// Enrich appends to Playlist.Errors, so a caller can tell which entry failed
+// and why without parsing the message: VideoID and Index (the entry's
+// PlaylistEntry.Index) name the entry, and Err is the Info call's error. It
+// unwraps to Err, so errors.Is against the availability sentinels and
+// ErrTemporarilyUnavailable, and errors.AsType for a PlayabilityError, see
+// through it.
+type EnrichError struct {
+	VideoID string
+	Index   int
+	Err     error
+}
+
+func (e *EnrichError) Error() string { return "enrich " + e.VideoID + ": " + e.Err.Error() }
+
+func (e *EnrichError) Unwrap() error { return e.Err }
+
 // maxEnrichRotations bounds how many times one enrichment may retire its guest
 // identity to get past the metadata throttle. Each identity answers about a
 // thousand entries before it starts refusing, so four rotations carry roughly
@@ -592,11 +627,16 @@ const maxEnrichRotations = 4
 // entry; only the failure list is shared. Ordinary item failures stay on the
 // playlist, but context cancellation is returned to the caller.
 //
-// onProgress reports each completed entry, successful or failed. Calls are
-// serialized under a dedicated progress lock and arrive in increasing done-count
-// order. The final call reaches (total, total) unless context cancellation stops
-// enrichment early. Retried entries do not report progress twice; the count is
-// of entries settled, not of requests made.
+// opts.MaxEnrich bounds the entries asked about to the leading ones, so a
+// caller's per-entry budget is spent inside the loop below, the one place the
+// throttle is escaped. opts.EnrichOptions shape each Info call.
+//
+// opts.OnEnrichProgress reports each completed entry, successful or failed.
+// Calls are serialized under a dedicated progress lock and arrive in increasing
+// done-count order. total is the number of entries attempted, so the final call
+// reaches (total, total) for a capped run as for a full one, unless context
+// cancellation stops enrichment early. Retried entries do not report progress
+// twice; the count is of entries settled, not of requests made.
 //
 // # The metadata throttle
 //
@@ -622,12 +662,16 @@ const maxEnrichRotations = 4
 // Retrying without rotating first is deliberately not done: the window is
 // session-scoped and positional, so an immediate retry re-enters the same closed
 // window, fails identically, and triples the load on the failing share.
-func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress func(done, total int)) error {
+func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts EnumerateOptions) error {
 	limit := c.opts.Concurrency.Downloads
 	if limit <= 0 {
 		limit = 4
 	}
 	total := len(pl.Entries)
+	if opts.MaxEnrich > 0 && opts.MaxEnrich < total {
+		total = opts.MaxEnrich
+	}
+	onProgress := opts.OnEnrichProgress
 
 	var progressMu sync.Mutex
 	progressDone := 0
@@ -673,7 +717,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 				// first. A slow progress callback cannot occupy a worker slot, and
 				// progressMu stays separate from the failure lock.
 				defer func() { <-sem }()
-				v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic)
+				v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic, opts.EnrichOptions...)
 				if err != nil {
 					// Return cancellation through ctx.Err(), not as an item error.
 					if ctx.Err() == nil {
@@ -687,6 +731,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 					}
 					return
 				}
+				pl.Entries[i].Video = v
 				pl.Entries[i].Title = v.Title
 				pl.Entries[i].Author = v.Author
 				pl.Entries[i].Duration = v.Duration
@@ -705,7 +750,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 		return failed, causes
 	}
 
-	all := make([]int, len(pl.Entries))
+	all := make([]int, total)
 	for i := range all {
 		all[i] = i
 	}
@@ -723,7 +768,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, onProgress fun
 		if unproven && throttleShaped(cause) {
 			cause = fmt.Errorf("%w: %w", ErrTemporarilyUnavailable, cause)
 		}
-		pl.Errors = append(pl.Errors, fmt.Errorf("enrich %s: %w", pl.Entries[i].VideoID, cause))
+		pl.Errors = append(pl.Errors, &EnrichError{VideoID: pl.Entries[i].VideoID, Index: pl.Entries[i].Index, Err: cause})
 	}
 	return ctx.Err()
 }

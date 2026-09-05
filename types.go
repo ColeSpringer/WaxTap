@@ -656,8 +656,34 @@ type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
 	MaxItems int
 	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
-	// Successful calls update their entries; failures are added to Playlist.Errors.
+	// A successful call refreshes its entry's listing fields and attaches what
+	// it fetched as PlaylistEntry.Video; a failed one is added to
+	// Playlist.Errors as an EnrichError naming the entry.
+	//
+	// This is also where the metadata throttle is escaped: a session that has
+	// asked about enough videos is refused the rest, worded exactly like a
+	// removed video, and Enumerate retires its guest identity and re-asks to
+	// tell the two apart. A lone Info call cannot, so a caller with a per-entry
+	// budget should spend it here, through MaxEnrich, rather than on Info calls
+	// of its own. The escape needs an identity Enumerate can retire: the
+	// default client's cookie jar, or a SessionProvider that implements
+	// potoken.SessionInvalidator. A jarless HTTPClient, a static Session, or a
+	// provider without one gets no rotation, and a throttled entry is then
+	// reported as it came, ErrVideoUnavailable.
 	Enrich bool
+	// MaxEnrich caps how many entries Enrich refreshes: the first n entries
+	// returned, after Skip, Stop, and MaxItems (0 = every entry). Entries past
+	// the cap are returned as listed, with a nil Video. It requires Enrich.
+	MaxEnrich int
+	// EnrichOptions apply to each enrichment's Info call, as the same options
+	// do on Info at InfoBasic: WithFullMetadata adds the watch-page pass
+	// (publish date, chapters, availability) at one more fetch per entry, and
+	// WithNoFallback forbids that fetch along with the watch-page extraction
+	// fallback. Selection options are inert at InfoBasic. The pass is
+	// best-effort, as on Info; Video.Availability stays AvailabilityUnknown
+	// when it did not run, which tells a video without chapters or a date from
+	// a fetch that failed. It requires Enrich.
+	EnrichOptions []ReadOption
 
 	// Skip omits entries whose video ID it matches while continuing to page, for an
 	// archive cursor. The consumer owns persistence: pass a predicate that reads
@@ -677,8 +703,10 @@ type EnumerateOptions struct {
 	// optional and never triggers downloads.
 	OnProgress func(items int)
 	// OnEnrichProgress reports each completed InfoBasic refresh when Enrich is set.
-	// Calls are serialized in increasing done-count order. The final call reaches
-	// (total, total) unless context cancellation stops enrichment early.
+	// Calls are serialized in increasing done-count order. total counts the
+	// entries enrichment attempts, which MaxEnrich can hold below len(Entries).
+	// The final call reaches (total, total) unless context cancellation stops
+	// enrichment early. Without Enrich it is never called.
 	OnEnrichProgress func(done, total int)
 }
 

@@ -3,6 +3,7 @@ package waxtap
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestEnrichEntriesCancellation(t *testing.T) {
 	cancel()
 
 	pl := &Playlist{Entries: []PlaylistEntry{{VideoID: "testVideo01"}, {VideoID: "testVideo02"}}}
-	if err := c.enrichEntries(ctx, pl, nil); !errors.Is(err, context.Canceled) {
+	if err := c.enrichEntries(ctx, pl, EnumerateOptions{Enrich: true}); !errors.Is(err, context.Canceled) {
 		t.Errorf("enrichEntries(canceled) = %v, want context.Canceled", err)
 	}
 	if len(pl.Errors) != 0 {
@@ -97,12 +98,56 @@ func TestEnrichEntriesProgressReachesTotal(t *testing.T) {
 		lastTotal = tot
 	}
 	// Item failures are expected (invalid IDs); only progress accounting matters.
-	_ = c.enrichEntries(context.Background(), pl, onProgress)
+	_ = c.enrichEntries(context.Background(), pl, EnumerateOptions{Enrich: true, OnEnrichProgress: onProgress})
 
 	if calls != total {
 		t.Errorf("onProgress called %d times, want %d (once per entry)", calls, total)
 	}
 	if maxDone != total || lastTotal != total {
 		t.Errorf("progress reached (%d, %d), want (%d, %d)", maxDone, lastTotal, total, total)
+	}
+}
+
+// TestEnrichEntriesBoundedProgress pins the bound at the loop: with MaxEnrich
+// set, only the leading entries are attempted, each failure names its entry,
+// progress ends at (MaxEnrich, MaxEnrich), and the entries past the bound are
+// neither asked about nor reported.
+func TestEnrichEntriesBoundedProgress(t *testing.T) {
+	c, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := &Playlist{Entries: []PlaylistEntry{
+		{VideoID: "!bad1", Index: 3}, {VideoID: "!bad2", Index: 4}, {VideoID: "!bad3", Index: 5}, {VideoID: "!bad4", Index: 6},
+	}}
+
+	var mu sync.Mutex
+	var last [2]int
+	calls := 0
+	onProgress := func(done, tot int) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		last = [2]int{done, tot}
+	}
+	_ = c.enrichEntries(context.Background(), pl, EnumerateOptions{Enrich: true, MaxEnrich: 2, OnEnrichProgress: onProgress})
+
+	if calls != 2 || last != [2]int{2, 2} {
+		t.Errorf("progress: %d calls ending at %v, want 2 ending at (2, 2)", calls, last)
+	}
+	if len(pl.Errors) != 2 {
+		t.Fatalf("Errors = %v, want one per attempted entry", pl.Errors)
+	}
+	var indexes []int
+	for _, perr := range pl.Errors {
+		ee, ok := errors.AsType[*EnrichError](perr)
+		if !ok {
+			t.Fatalf("error %v is a %T, want *EnrichError", perr, perr)
+		}
+		indexes = append(indexes, ee.Index)
+	}
+	slices.Sort(indexes)
+	if !slices.Equal(indexes, []int{3, 4}) {
+		t.Errorf("failed entry indexes = %v, want the playlist positions of the two attempted entries", indexes)
 	}
 }

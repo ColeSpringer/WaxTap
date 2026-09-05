@@ -281,13 +281,18 @@ fetching it; a selector that names its own layout beats `WithChannels`, which
 only fills in one that named none. `Resolve` takes its selector as a parameter,
 so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist or
 channel URL with `Skip`/`Stop` predicates for an archive cursor, and
-`WithFullMetadata()` adds publish date and chapters.
+`WithFullMetadata()` adds publish date and chapters to `Info`, or through
+`EnrichOptions` to each enriched entry.
 
 Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
 throttle starts refusing entries, because the refusal is worded exactly like a
 removed video and only a fresh identity tells them apart. Entries left over
 after the rotation budget report `ErrTemporarilyUnavailable`, which means retry
-rather than skip.
+rather than skip. `Enrich` attaches what each call fetched as
+`PlaylistEntry.Video`, `MaxEnrich` caps the pass at the first n entries so a
+per-entry budget is spent inside the loop that rotates, `EnrichOptions` pass
+`WithFullMetadata()` or `WithNoFallback()` to each call, and a failed entry is
+an `EnrichError` naming it.
 
 Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
 `ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and

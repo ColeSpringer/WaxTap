@@ -81,6 +81,14 @@ func rotationPlayerJSON(vd string, clen int, extraQuery string) string {
 
 var playerBodyVD = regexp.MustCompile(`"visitorData"\s*:\s*"([^"]+)"`)
 
+// guestHomepage answers the homepage bootstrap with a fresh guest identity: the
+// visitorData in ytcfg and the cookie that anchors it.
+func guestHomepage(vd string) *http.Response {
+	resp := rotResp(http.StatusOK, `<html><script>ytcfg.set({"VISITOR_DATA":"`+vd+`"});</script></html>`)
+	resp.Header.Add("Set-Cookie", "VISITOR_INFO1_LIVE=vi-"+vd+"; Domain=.youtube.com; Path=/; Max-Age=31536000")
+	return resp
+}
+
 // rotationWorld fakes homepage, /player, and googlevideo. Media requests for
 // flaggedVD answer empty-body 403 (the delivery cap); any other visitorData is
 // served in full.
@@ -115,10 +123,7 @@ func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
 		switch {
 		case r.URL.Path == "/" && strings.Contains(r.URL.Host, "youtube.com"):
 			w.homepageHits++
-			vd := fmt.Sprintf("ROT_VD_%d", w.homepageHits)
-			resp := rotResp(http.StatusOK, `<html><script>ytcfg.set({"VISITOR_DATA":"`+vd+`"});</script></html>`)
-			resp.Header.Add("Set-Cookie", "VISITOR_INFO1_LIVE=vi-"+vd+"; Domain=.youtube.com; Path=/; Max-Age=31536000")
-			return resp, nil
+			return guestHomepage(fmt.Sprintf("ROT_VD_%d", w.homepageHits)), nil
 		case strings.HasSuffix(r.URL.Path, "/player"):
 			body, _ := io.ReadAll(r.Body)
 			m := playerBodyVD.FindSubmatch(body)

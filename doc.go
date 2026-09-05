@@ -65,7 +65,11 @@
 // player refused to describe the video right now and expects to later, which is
 // what bulk enumeration draws once a session has asked about enough videos. It
 // is not a skip: the video is very likely fine, and a consumer that drops it
-// loses a real item. Retry it, in a later run or a fresh session.
+// loses a real item. Retry it, in a later run or a fresh session. Enumerate's
+// Enrich escapes that throttle by retiring the guest identity and re-asking,
+// which a lone Info call cannot do; spend a per-entry budget through
+// [EnumerateOptions.MaxEnrich] rather than on Info calls, and read each entry's
+// failure from the [EnrichError] that names it.
 //
 // Everything else is a hard error the consumer should surface: extraction and
 // cipher maintenance signals ([ErrExtractionFailed], [ErrCipherSolve],
