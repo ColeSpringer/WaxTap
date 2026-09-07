@@ -89,6 +89,9 @@ func TestExtractWebContextMapping(t *testing.T) {
 	if v.ID != "aqz-KE-bpKQ" || v.Title != "Big Buck Bunny" || v.Author != "Blender" {
 		t.Errorf("video = %+v, want id/title/author populated", v)
 	}
+	if v.URL != "https://www.youtube.com/watch?v=aqz-KE-bpKQ" {
+		t.Errorf("video.URL = %q, want the canonical watch URL every extraction path sets", v.URL)
+	}
 	if v.Duration != 634*time.Second {
 		t.Errorf("video.Duration = %v, want 634s", v.Duration)
 	}
@@ -290,5 +293,24 @@ func TestExpiresAtFromURL(t *testing.T) {
 	}
 	if got := expiresAtFromURL("://bad"); !got.IsZero() {
 		t.Errorf("expiresAtFromURL(bad) = %v, want zero", got)
+	}
+}
+
+// A context that reports no video length still describes renditions that do,
+// so the longest rendition stands in, in whole seconds, as it does for a player
+// response; a negative length counts as none.
+func TestExtractWebContextBackfillsDurationFromFormats(t *testing.T) {
+	for name, length := range map[string]int{"zero": 0, "negative": -1} {
+		t.Run(name, func(t *testing.T) {
+			pc := sampleContext()
+			pc.LengthSeconds = length
+			ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "aqz-KE-bpKQ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ext.video.Duration != 634*time.Second {
+				t.Errorf("video.Duration = %v, want 634s from the longest rendition's approxDurationMs", ext.video.Duration)
+			}
+		})
 	}
 }

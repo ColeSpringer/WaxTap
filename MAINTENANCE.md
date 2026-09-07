@@ -1,7 +1,11 @@
 # Maintaining WaxTap
 
 YouTube's player, client profiles, and anti-bot behavior change without notice.
-This runbook covers diagnosis, runtime recovery, fixtures, and releases.
+This runbook covers diagnosis, runtime recovery, fixtures, and releases. Work
+cut from a change is tracked in [docs/deferred-work.md](docs/deferred-work.md)
+and asks of the sibling Wax repos in
+[docs/upstream-requests.md](docs/upstream-requests.md); add to both in the
+same change that defers the work.
 
 ## Breakage response
 

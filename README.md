@@ -289,10 +289,11 @@ throttle starts refusing entries, because the refusal is worded exactly like a
 removed video and only a fresh identity tells them apart. Entries left over
 after the rotation budget report `ErrTemporarilyUnavailable`, which means retry
 rather than skip. `Enrich` attaches what each call fetched as
-`PlaylistEntry.Video`, `MaxEnrich` caps the pass at the first n entries so a
-per-entry budget is spent inside the loop that rotates, `EnrichOptions` pass
-`WithFullMetadata()` or `WithNoFallback()` to each call, and a failed entry is
-an `EnrichError` naming it.
+`PlaylistEntry.Video` and overlays the entry's title, author, and duration with
+it, keeping a listing value where the fetch had none, `MaxEnrich` caps the pass
+at the first n entries so a per-entry budget is spent inside the loop that
+rotates, `EnrichOptions` pass `WithFullMetadata()` or `WithNoFallback()` to
+each call, and a failed entry is an `EnrichError` naming it.
 
 Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
 `ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and
@@ -380,7 +381,10 @@ contracts and SABR diagnostics.
 `waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
 check; `waxtap doctor --full` verifies complete delivery. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
-failures, SABR changes, fixtures, and releases.
+failures, SABR changes, fixtures, and releases. Work cut from a change is
+tracked in [docs/deferred-work.md](docs/deferred-work.md), and what WaxTap
+wants from WaxFlow, WaxLabel, and WaxSeal in
+[docs/upstream-requests.md](docs/upstream-requests.md).
 
 ## Acknowledgements
 

@@ -37,6 +37,10 @@ type Video struct {
 	Availability Availability
 }
 
+// watchURL is the canonical watch URL for a video ID, what Video.URL carries on
+// every extraction path.
+func watchURL(id string) string { return "https://www.youtube.com/watch?v=" + id }
+
 // LiveStatus reports a video's live-broadcast state.
 type LiveStatus uint8
 

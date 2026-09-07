@@ -62,10 +62,14 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 
 	video := &Video{
 		ID:       videoID,
+		URL:      watchURL(videoID),
 		Title:    pc.Title,
 		Author:   pc.Author,
-		Duration: time.Duration(pc.LengthSeconds) * time.Second,
+		Duration: time.Duration(max(0, pc.LengthSeconds)) * time.Second,
 		Formats:  mapFormats(raw),
+	}
+	if video.Duration == 0 {
+		video.Duration = longestFormatDuration(video.Formats)
 	}
 
 	sess := newSession(c.gl)

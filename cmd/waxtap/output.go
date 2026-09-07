@@ -281,6 +281,17 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// durationOrDash renders a duration the source reported, or a dash when it
+// reported none: a live item or a finished stream can answer no length, and
+// "0:00" would present that as a zero-length video. It is for lengths only; a
+// chapter or cut position of 0:00 is a real time and keeps humanDuration.
+func durationOrDash(d time.Duration) string {
+	if d <= 0 {
+		return "-"
+	}
+	return humanDuration(d)
+}
+
 // humanDuration formats a duration as H:MM:SS or M:SS.
 func humanDuration(d time.Duration) string {
 	if d <= 0 {

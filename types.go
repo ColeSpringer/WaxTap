@@ -656,9 +656,10 @@ type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
 	MaxItems int
 	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
-	// A successful call refreshes its entry's listing fields and attaches what
-	// it fetched as PlaylistEntry.Video; a failed one is added to
-	// Playlist.Errors as an EnrichError naming the entry.
+	// A successful call overlays its entry's title, author, and duration with
+	// what it fetched, keeping a listing value where the fetch had none, and
+	// attaches the fetch as PlaylistEntry.Video, whose doc states the rule; a
+	// failed one is added to Playlist.Errors as an EnrichError naming the entry.
 	//
 	// This is also where the metadata throttle is escaped: a session that has
 	// asked about enough videos is refused the rest, worded exactly like a

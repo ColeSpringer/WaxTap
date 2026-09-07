@@ -210,7 +210,7 @@ func (it playlistItem) toEntry(index int) (PlaylistEntry, error) {
 			Title:     r.Title.String(),
 			Author:    r.ShortByline.String(),
 			ChannelID: r.ShortByline.channelID(),
-			Duration:  time.Duration(atoi(r.LengthSeconds)) * time.Second,
+			Duration:  time.Duration(max(0, atoi(r.LengthSeconds))) * time.Second,
 			Index:     index,
 		}, nil
 	}

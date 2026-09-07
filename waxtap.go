@@ -1,6 +1,7 @@
 package waxtap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -486,6 +487,11 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		}
 		applyProbe(&video.Formats[idx], probe)
 		res.Probed = true
+		// A manifest that named no length anywhere still describes a stream the
+		// probe just measured, so the video length is the probed one.
+		if video.Duration == 0 {
+			video.Duration = video.Formats[idx].Duration.Truncate(time.Second)
+		}
 	}
 	return res, nil
 }
@@ -534,9 +540,10 @@ func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id strin
 // entries. EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an
 // archive cursor. With Enrich set, InfoBasic calls refresh entries at bounded
 // concurrency, MaxEnrich caps how many from the front, and EnrichOptions shape
-// each call. A successful call refreshes its entry and attaches the fetched
-// metadata as PlaylistEntry.Video; item-level failures are added to
-// Playlist.Errors as EnrichError values.
+// each call. A successful call overlays its entry's title, author, and duration
+// with what it fetched, keeping a listing value where the fetch had none, and
+// attaches the fetched metadata as PlaylistEntry.Video, whose doc states the
+// rule; item-level failures are added to Playlist.Errors as EnrichError values.
 func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOptions) (*Playlist, error) {
 	if opts.MaxItems < 0 {
 		return nil, configErr("Enumerate: MaxItems must be >= 0, got %d", opts.MaxItems)
@@ -731,16 +738,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 					}
 					return
 				}
-				pl.Entries[i].Video = v
-				pl.Entries[i].Title = v.Title
-				pl.Entries[i].Author = v.Author
-				pl.Entries[i].Duration = v.Duration
-				// Fill the channel ID when enumerate time did not carry a byline
-				// browseId (a mixed-channel playlist), leaving a channel-feed stamp
-				// intact.
-				if pl.Entries[i].ChannelID == "" {
-					pl.Entries[i].ChannelID = v.ChannelID
-				}
+				refreshEntry(&pl.Entries[i], v)
 				if report {
 					settled()
 				}
@@ -771,6 +769,19 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 		pl.Errors = append(pl.Errors, &EnrichError{VideoID: pl.Entries[i].VideoID, Index: pl.Entries[i].Index, Err: cause})
 	}
 	return ctx.Err()
+}
+
+// refreshEntry overlays what an enrichment fetched onto its listing entry, by
+// the rule PlaylistEntry.Video documents: a fetched title, author, or duration
+// wins, an empty one keeps the listing's, and the channel ID is filled only
+// when the listing carried none (a mixed-channel playlist has no byline
+// browseId). v is the fetched Video, never nil, and is attached unchanged.
+func refreshEntry(e *PlaylistEntry, v *Video) {
+	e.Video = v
+	e.Title = cmp.Or(v.Title, e.Title)
+	e.Author = cmp.Or(v.Author, e.Author)
+	e.Duration = cmp.Or(v.Duration, e.Duration)
+	e.ChannelID = cmp.Or(e.ChannelID, v.ChannelID)
 }
 
 // throttleShaped reports whether an enrichment failure has the metadata

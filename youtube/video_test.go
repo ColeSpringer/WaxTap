@@ -128,3 +128,43 @@ func TestFillWatchPageEnrichmentUnlisted(t *testing.T) {
 		t.Errorf("availability = %v, want unlisted", v.Availability)
 	}
 }
+
+// TestToVideoBackfillsDurationFromFormats pins where the length comes from when
+// videoDetails carry none. A finished live stream answers lengthSeconds "0"
+// while its renditions still say approxDurationMs, so the longest rendition
+// stands in, in whole seconds; a length videoDetails do report wins; a negative
+// microformat length counts as none; and with no rendition length either the
+// duration stays 0.
+func TestToVideoBackfillsDurationFromFormats(t *testing.T) {
+	newPR := func(length string, formatMs ...string) *playerResponse {
+		pr := &playerResponse{}
+		pr.VideoDetails.LengthSeconds = length
+		for i, ms := range formatMs {
+			pr.StreamingData.AdaptiveFormats = append(pr.StreamingData.AdaptiveFormats,
+				rawFormat{Itag: 251 + i, MimeType: `audio/webm; codecs="opus"`, ApproxDurationMs: ms})
+		}
+		return pr
+	}
+	cases := map[string]struct {
+		pr   *playerResponse
+		want time.Duration
+	}{
+		"renditions stand in":    {newPR("0", "634590", "634624"), 634 * time.Second},
+		"videoDetails wins":      {newPR("600", "634624"), 600 * time.Second},
+		"no length anywhere":     {newPR("0", "", ""), 0},
+		"negative rendition ms":  {newPR("", "-5000"), 0},
+		"negative microformat s": {newPR("", ""), 0},
+	}
+	cases["negative microformat s"].pr.Microformat.PlayerMicroformatRenderer.LengthSeconds = "-5"
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			v, _, err := tc.pr.toVideo("dummyVideo0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.Duration != tc.want {
+				t.Errorf("Duration = %v, want %v", v.Duration, tc.want)
+			}
+		})
+	}
+}

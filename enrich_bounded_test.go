@@ -391,3 +391,52 @@ func TestEnrichError(t *testing.T) {
 		t.Errorf("errors.AsType[*EnrichError] through a wrap = %v, %v", ee, ok)
 	}
 }
+
+// enrichFinishedStreamJSON is a player answer that reports no length anywhere:
+// status OK with isLiveContent and lengthSeconds "0", the shape a completed live
+// stream gives, and renditions without approxDurationMs, so nothing is left for
+// toVideo to back-fill from. Live and upcoming items never get this far, Info
+// refuses them with ErrLiveContent or ErrLiveNotStarted, so this is the fetch
+// that used to zero a listing's duration.
+func enrichFinishedStreamJSON(id string) string {
+	return fmt.Sprintf(`{
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [{
+				"itag": 251,
+				"mimeType": "audio/webm; codecs=\"opus\"",
+				"bitrate": 160000,
+				"audioSampleRate": "48000",
+				"audioChannels": 2,
+				"url": "https://rr1---sn-test.googlevideo.com/videoplayback?itag=251&id=%s"
+			}]
+		},
+		"videoDetails": {"videoId": %q, "title": "Stream %s", "author": "Streamer", "isLiveContent": true, "lengthSeconds": "0"}
+	}`, id, id, id)
+}
+
+// Enumeration routes each fetch through the overlay: a stream that answered no
+// length keeps the duration the listing gave it and takes the fetched title and
+// author, while the attached Video still says exactly what came back.
+func TestEnumerateEnrich_KeepsListingDurationTheFetchLacks(t *testing.T) {
+	w := &enrichWorld{verdicts: map[string]string{"bbbbbbbbbbb": enrichFinishedStreamJSON("bbbbbbbbbbb")}}
+	c := enrichClient(t, w)
+
+	pl, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{Enrich: true})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(pl.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none: the stream answered", pl.Errors)
+	}
+	e := pl.Entries[1]
+	if e.Video == nil {
+		t.Fatal("entry 1: Video = nil, want the fetched metadata")
+	}
+	if e.Title != "Stream bbbbbbbbbbb" || e.Author != "Streamer" || e.Duration != 240*time.Second {
+		t.Errorf("entry = {%q %q %v}, want the fetched title and author with the listing's duration", e.Title, e.Author, e.Duration)
+	}
+	if e.Video.Duration != 0 || e.Video.LiveStatus != LiveWasLive {
+		t.Errorf("Video = %+v, want the fetch verbatim: no length, was live", e.Video)
+	}
+}

@@ -151,3 +151,48 @@ func TestEnrichEntriesBoundedProgress(t *testing.T) {
 		t.Errorf("failed entry indexes = %v, want the playlist positions of the two attempted entries", indexes)
 	}
 }
+
+// TestRefreshEntryOverlaysListing pins the refresh as an overlay: a fetched field
+// replaces the listing's, a field the fetch left empty keeps the listing's, the
+// channel ID is filled only when the listing had none, and Video holds the fetch
+// verbatim so a caller can tell the two apart.
+func TestRefreshEntryOverlaysListing(t *testing.T) {
+	listed := PlaylistEntry{VideoID: "dummyVideo0", Title: "Listed", Author: "Listed Author", ChannelID: "UClisted", Duration: 240 * time.Second, Index: 4}
+	unstamped := listed
+	unstamped.ChannelID = ""
+
+	cases := map[string]struct {
+		listed  PlaylistEntry
+		fetched youtube.Video
+		want    PlaylistEntry
+	}{
+		"fetched values replace the listing's": {
+			listed:  listed,
+			fetched: youtube.Video{Title: "Fetched", Author: "Fetched Author", ChannelID: "UCfetched", Duration: 212 * time.Second},
+			want:    PlaylistEntry{VideoID: "dummyVideo0", Title: "Fetched", Author: "Fetched Author", ChannelID: "UClisted", Duration: 212 * time.Second, Index: 4},
+		},
+		"empty fetched fields keep the listing's": {
+			listed:  listed,
+			fetched: youtube.Video{LiveStatus: youtube.LiveWasLive},
+			want:    listed,
+		},
+		"a missing channel ID is filled": {
+			listed:  unstamped,
+			fetched: youtube.Video{ChannelID: "UCfetched"},
+			want:    PlaylistEntry{VideoID: "dummyVideo0", Title: "Listed", Author: "Listed Author", ChannelID: "UCfetched", Duration: 240 * time.Second, Index: 4},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e, v := tc.listed, tc.fetched
+			refreshEntry(&e, &v)
+			if e.Video != &v {
+				t.Fatalf("Video = %+v, want the fetched Video attached as is", e.Video)
+			}
+			got := [4]any{e.Title, e.Author, e.ChannelID, e.Duration}
+			if want := [4]any{tc.want.Title, tc.want.Author, tc.want.ChannelID, tc.want.Duration}; got != want {
+				t.Errorf("title/author/channel/duration = %v, want %v", got, want)
+			}
+		})
+	}
+}

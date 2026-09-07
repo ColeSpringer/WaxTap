@@ -134,12 +134,28 @@ func (pr *playerResponse) isLiveNow() bool {
 }
 
 // duration returns the video length, preferring videoDetails over the microformat
-// (the latter is WEB-only). It is zero when neither carries a length.
+// (the latter is WEB-only). It is zero when neither carries a usable length.
 func (pr *playerResponse) duration() time.Duration {
 	if d := parseSeconds(pr.VideoDetails.LengthSeconds); d > 0 {
 		return d
 	}
-	return parseSeconds(pr.Microformat.PlayerMicroformatRenderer.LengthSeconds)
+	if d := parseSeconds(pr.Microformat.PlayerMicroformatRenderer.LengthSeconds); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// longestFormatDuration is the video length the renditions report, for a
+// response whose videoDetails carry none: a finished live stream answers
+// lengthSeconds "0" while its formats still say approxDurationMs. The longest
+// rendition stands in, truncated to whole seconds like lengthSeconds, and it is
+// zero when no rendition reports a length either.
+func longestFormatDuration(fs []format.Format) time.Duration {
+	var d time.Duration
+	for _, f := range fs {
+		d = max(d, f.Duration)
+	}
+	return d.Truncate(time.Second)
 }
 
 // serverAbrURL returns the SABR streaming endpoint, if present.
@@ -231,7 +247,7 @@ func classifyUnplayableReason(reason string) error {
 func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 	v := &Video{
 		ID:          videoID,
-		URL:         "https://www.youtube.com/watch?v=" + videoID,
+		URL:         watchURL(videoID),
 		Title:       pr.VideoDetails.Title,
 		Author:      pr.VideoDetails.Author,
 		ChannelID:   pr.VideoDetails.ChannelID,
@@ -254,6 +270,9 @@ func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 	v.Formats = mapFormats(raw)
 	if len(v.Formats) == 0 {
 		return nil, nil, waxerr.ErrNoAudioFormats
+	}
+	if v.Duration == 0 {
+		v.Duration = longestFormatDuration(v.Formats)
 	}
 	return v, raw, nil
 }

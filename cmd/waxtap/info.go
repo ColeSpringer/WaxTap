@@ -159,7 +159,7 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	if info.SubstitutedFrom != "" {
 		env.printf("  (requested %s; fell back to %s)\n", info.SubstitutedFrom, info.Client)
 	}
-	env.printf("Duration:  %s\n", humanDuration(v.Duration))
+	env.printf("Duration:  %s\n", durationOrDash(v.Duration))
 	if !v.PublishDate.IsZero() {
 		env.printf("Published: %s\n", v.PublishDate.Format("2006-01-02"))
 	}
@@ -241,7 +241,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		ViaWatchPage    bool          `json:"viaWatchPage,omitempty"`
 		SubstitutedFrom string        `json:"substitutedFrom,omitempty"`
 		ChannelID       string        `json:"channelId,omitempty"`
-		DurationSecs    float64       `json:"durationSeconds"`
+		DurationSecs    float64       `json:"durationSeconds,omitempty"` // absent when the source reported none
 		PublishDate     string        `json:"publishDate,omitempty"`
 		IsLive          bool          `json:"isLive"`
 		IsUpcoming      bool          `json:"isUpcoming"`

@@ -13,6 +13,35 @@ import (
 	"github.com/colespringer/waxtap/v3"
 )
 
+// A video whose length the source did not report prints a dash, not 0:00, and
+// its JSON document omits durationSeconds like the listing and sidecar
+// documents do, rather than asserting a zero-length video.
+func TestInfoUnknownDuration(t *testing.T) {
+	noBest := errors.New("no best audio")
+	unknown := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A"}}
+	known := &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A", Duration: 90 * time.Second}}
+
+	t.Run("human", func(t *testing.T) {
+		var out bytes.Buffer
+		renderInfoHuman(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, unknown, 0, noBest, nil, false)
+		if got := out.String(); !strings.Contains(got, "Duration:  -\n") {
+			t.Errorf("want the unknown duration rendered as a dash, got:\n%s", got)
+		}
+	})
+	t.Run("json", func(t *testing.T) {
+		for name, res := range map[string]*waxtap.InfoResult{"unknown": unknown, "known": known} {
+			var out bytes.Buffer
+			if err := emitInfoJSON(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}, res, 0, noBest, nil); err != nil {
+				t.Fatal(err)
+			}
+			got := out.String()
+			if has := strings.Contains(got, `"durationSeconds"`); has != (res.Video.Duration > 0) {
+				t.Errorf("%s: durationSeconds present = %v, want it only for a reported length, got:\n%s", name, has, got)
+			}
+		}
+	})
+}
+
 // TestInfoChaptersDetail verifies info --full's chapters are detailed in the
 // human list and the JSON chapters array, with an open-ended last chapter that
 // omits its end.

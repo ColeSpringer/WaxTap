@@ -251,7 +251,7 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tID\tDURATION\tTITLE")
 	for _, e := range pl.Entries {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.Index+1, e.VideoID, humanDuration(e.Duration), e.Title)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.Index+1, e.VideoID, durationOrDash(e.Duration), e.Title)
 	}
 	tw.Flush()
 	for _, perr := range pl.Errors {
