@@ -36,6 +36,14 @@ type Result struct {
 	// Levels is WaxFlow's level measurement of the encode. It is zero for a
 	// container copy, which never re-derives samples.
 	Levels Levels
+	// InputWarnings is the input damage the read worked around, complete as of
+	// the end of the write: a demuxer that walks its payload lazily (MP3, bare
+	// or inside a WAV or AIFF-C; ADTS; a Matroska with only an advisory
+	// length) finds damage where the read reaches it, so a probe of the
+	// headers sees the head's share and this list the whole. It is the same
+	// list ProbeResult.Warnings carries, the probe's entries included, each
+	// once; nil for a clean source.
+	InputWarnings []string
 }
 
 // Levels carries WaxFlow's level measurement of one encode as numbers, so the
@@ -106,10 +114,12 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 	defer r.release()
 
 	var levels Levels
+	var found []string
 	if spec.Codec == CodecCopy {
 		// remux classifies its own failures; classifying again here would wrap an
 		// already-mapped error a second time.
-		if err := r.remux(ctx, src, input, output, staged); err != nil {
+		found, err = r.remux(ctx, src, input, output, staged)
+		if err != nil {
 			return Result{}, err
 		}
 	} else {
@@ -120,13 +130,13 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		if err != nil {
 			return Result{}, classifyEngineError(err, input, output)
 		}
-		levels = levelsOf(tres)
+		levels, found = levelsOf(tres), sourceWarnings(tres.InputWarnings)
 	}
 
 	if err := staged.Commit(); err != nil {
 		return Result{}, err
 	}
-	res := Result{Output: output, Codec: spec.Codec, Levels: levels}
+	res := Result{Output: output, Codec: spec.Codec, Levels: levels, InputWarnings: found}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}
@@ -185,25 +195,27 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 // remux rewrites the source packets into the container the output extension
 // names, choosing WaxFlow's output format from the source codec (the codec must
 // survive the trip) so no re-encode happens. It takes the paths rather than their
-// container hints so its failures can name the file they are about.
-func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) error {
+// container hints so its failures can name the file they are about. It
+// returns the damage the packet walk found; see Result.InputWarnings.
+func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) ([]string, error) {
 	demux, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return classifyInputError(err, input)
+		return nil, classifyInputError(err, input)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return remuxDeclined(track.Codec)
+		return nil, remuxDeclined(track.Codec)
 	}
 	opts := waxflow.TranscodeOptions{
 		Format:    outFormat,
 		Container: containerFor(outFormat, hintFor(output)),
 	}
-	if _, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts); err != nil {
-		return classifyEngineError(err, input, output)
+	tres, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts)
+	if err != nil {
+		return nil, classifyEngineError(err, input, output)
 	}
-	return nil
+	return sourceWarnings(tres.InputWarnings), nil
 }
 
 // remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own

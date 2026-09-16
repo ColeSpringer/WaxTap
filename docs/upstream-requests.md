@@ -34,43 +34,19 @@ upstream lands it, do the follow-up and remove both entries.
 
 ## WaxFlow
 
-- **The album timeline refuses the frame tail its own WMA decoder
-  delivers.** `Concat` fails a member that delivers past `Track.Samples`
-  ("timeline member N holds more audio than the M samples its headers
-  declared"), and the WMA decoder always delivers whole frames past the
-  declared length because WMA has no padding count. So `normalize --album`
-  and `MeasureAlbum` on any WMA input exit 2. Wanted: the bound to
-  tolerate a tail when `SamplesExact` is false, or the decoder to trim to
-  the declared length. Shipped workaround: WaxTap rewords the refusal
-  ("album mode cannot take a WMA file yet; process WMA tracks one at a
-  time"), documents it in the README, and pins it with
-  `TestProcessAlbumWMAIsUpstreamLimited`, which fails the day an album of
-  WMA succeeds so the wording and the note can go.
-
-- **One code for two refusals.** `waxerr.CodeUnsupportedFormat` marks both
-  an encoder refusing a spec and a container rejecting malformed bytes.
-  WaxTap maps it to the invalid-spec sentinel (exit 2) and can only
-  override that at sites known to be reading (`classifyInputError` in
-  `internal/media/errors.go`), so malformed input reaching a site that
-  both reads and encodes reports as a bad request. Wanted: a distinct code
-  for one of the two. Shipped workaround: the read-only-site override.
-
-- **Container warnings carry no severity.** `container.Warning` is an
-  offset and a message, and demuxers record tolerated damage and notes
-  about files that play fine (an ignored extra stream, a skipped trailing
-  tag, a rescaled timescale) through the same type. WaxTap's
-  `input-damage` warning therefore relays the notes in the decoder's words
-  with no lead that claims damage, because "the source is damaged" was
-  true of half of them. Wanted: a severity or kind on the warning so the
-  two can be told apart. Shipped workaround: the verbatim relay in
-  `inputDamageNote` (`mapping.go`).
+- **A span that outruns its source is refused as unreadable.** `Slice`
+  fails a read that reaches the end of the source inside a span with
+  `CodeSourceUnreadable` ("the source ended N samples into a span that
+  declared M; its cut points do not describe this file", `timeline.go`),
+  where the split that added `CodeMalformedInput` puts a file ending short
+  of what it declares under the new code (`container.ShortRead`'s own rule:
+  a source that ended early is damage, not a fetch that failed). WaxTap maps
+  the unreadable code to an I/O failure (exit 10), so a cut of a truncated
+  MP3 reports a bad disk. Wanted: `CodeMalformedInput` on that refusal.
+  Shipped workaround: none; the message names the cause, and the
+  WaxTap-side fix that avoids the refusal for the common case (measuring
+  the input before a cut) is in deferred-work.md.
 
 ## WaxLabel
 
-- **A transfer cannot take remapped chapters.** `PrepareTransfer` carries
-  a source's chapters as they are, and a `Document` is a projection of a
-  file, so a cut that moves or drops chapters costs a second metadata
-  rewrite: WaxTap transfers, then re-edits the post-write document with the
-  remapped set (`rewriteChapters` in `carrytags.go`). Wanted: a way to hand
-  the transfer a replacement chapter list so the write lands once. Shipped
-  workaround: the second rewrite, which is correct and only slower.
+No open requests.

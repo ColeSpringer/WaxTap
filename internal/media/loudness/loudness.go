@@ -56,6 +56,12 @@ type Loudness struct {
 	// hold the measurement against the probed length: a decode that ends early
 	// on a probe-clean file leaves this as the only evidence.
 	Duration time.Duration
+	// Warnings is the input damage the measurement's read found, in the
+	// source's own terms (media.Result.InputWarnings), complete as of the
+	// end of the read; nil for a clean source. A demuxer that walks its
+	// payload lazily reports damage past the headers only from the read
+	// that reaches it, and a measurement is such a read.
+	Warnings []string
 }
 
 // Gainable reports whether an integrated loudness can drive a gain. It is the
@@ -98,11 +104,13 @@ func fromResult(res *waxflow.AnalyzeResult) Loudness {
 // the measurement to a downmix target so the gain matches a downmixing encode; 0
 // keeps the source layout.
 func Measure(ctx context.Context, r *media.Runner, input string, channels int) (Loudness, error) {
-	res, err := r.AnalyzeFile(ctx, input, channels)
+	res, found, err := r.AnalyzeFile(ctx, input, channels)
 	if err != nil {
 		return Loudness{}, err
 	}
-	return fromResult(res), nil
+	l := fromResult(res)
+	l.Warnings = found
+	return l, nil
 }
 
 // MeasureCut measures the loudness of the cut-composed audio, so the gain matches
@@ -119,7 +127,9 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 	if err != nil {
 		return Loudness{}, err
 	}
-	return fromResult(res), nil
+	l := fromResult(res)
+	l.Warnings = media.InputWarnings(med)
+	return l, nil
 }
 
 // MeasureAlbum measures a set of tracks as a group and individually. The album
@@ -129,20 +139,28 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album Loudness, perTrack []Loudness, err error) {
 	// Album measurement never downmixes; each track is measured at its own layout.
 	perTrack = make([]Loudness, len(inputs))
+	// The per-track pass reads every file to its end, which is the measurement
+	// the group timeline needs for a member whose headers state its length
+	// only approximately; see media.Runner.OpenAlbumConcat.
+	measured := make([]int64, len(inputs))
 	for i, in := range inputs {
-		res, aerr := r.AnalyzeFile(ctx, in, 0)
+		res, found, aerr := r.AnalyzeFile(ctx, in, 0)
 		if aerr != nil {
 			// The album has many inputs, so the failure names its file, the way
 			// a timeline error is named after its member.
 			return Loudness{}, nil, fmt.Errorf("track %s: %w", filepath.Base(in), aerr)
 		}
 		perTrack[i] = fromResult(res)
+		perTrack[i].Warnings = found
+		measured[i] = res.Samples
 	}
-	med, closer, oerr := r.OpenAlbumConcat(inputs)
+	med, closer, oerr := r.OpenAlbumConcat(ctx, inputs, measured)
 	if oerr != nil {
 		return Loudness{}, nil, oerr
 	}
 	defer closer()
+	// The group read's own damage list is the members' again, each under a
+	// member index; the per-track measurements above already carry them.
 	ares, merr := r.AnalyzeMedia(ctx, med, 0)
 	if merr != nil {
 		return Loudness{}, nil, merr

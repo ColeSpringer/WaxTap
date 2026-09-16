@@ -12,6 +12,8 @@ import (
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
 
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/media/loudness"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 )
 
@@ -239,26 +241,135 @@ func TestProcessWMASource(t *testing.T) {
 	}
 }
 
-// Album mode cannot take a WMA input yet, and the failure is upstream's: WMA
-// carries no padding count, so the engine's decoder delivers a frame's tail
-// past the declared length (the media package's WMA test pins the tail), and
-// the engine's album timeline refuses a member that delivers more audio than
-// its headers declared. Per-track processing never concatenates and is
-// unaffected. WaxTap names the track and says what to do in its own words,
-// since the engine's read like a corrupt file. The pin keeps the README's
-// limitation true and makes an upstream fix visible: an album of WMA tracks
-// succeeding means WaxFlow resolved it, and this test, the wording in
-// albumTrackError, and the README note go.
-func TestProcessAlbumWMAIsUpstreamLimited(t *testing.T) {
+// An album takes the members whose headers state their length only
+// approximately, which the engine's timeline refuses at plan time until they
+// are measured: ASF states a rounded duration (and WMA carries no padding
+// count, so a decode delivers whole frames past it), and a WAV carrying MP3
+// frames counts everything they decode to. The per-track measurement reads
+// every file to its end and hands the count to the timeline, so the album
+// runs, every output holds its audio and its metadata, and the mixed rates
+// (8, 22.05 and 44.1 kHz) conform to the envelope. The MP3 member also
+// carries the one engine remark a fixture here can trigger, which the album
+// reports under its own code, apart from damage.
+func TestProcessAlbumTakesAdvisoryLengths(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
-	in := filepath.Join(dir, "in.wma")
-	if err := os.WriteFile(in, mediatest.ChapteredWMA(), 0o644); err != nil {
-		t.Fatal(err)
+	wma := filepath.Join(dir, "in.wma")
+	frames := filepath.Join(dir, "frames.wav")
+	wav := filepath.Join(dir, "in.wav")
+	for path, data := range map[string][]byte{wma: mediatest.ChapteredWMA(), frames: mediatest.MP3WAV(), wav: mediatest.SineWAV(2, 2)} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	_, err := newOfflineClient(t).ProcessAlbum(context.Background(),
-		[]AlbumTrack{{Input: in, Output: filepath.Join(dir, "out.flac")}}, -18, TranscodeSpec{Format: FormatFLAC})
-	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "track in.wma") || !strings.Contains(err.Error(), "one at a time") {
-		t.Errorf("album of a WMA track = %v, want ErrUnsupportedInput naming the track and the one-at-a-time escape (an album succeeding means WaxFlow fixed it: retire this pin, the wording, and the README note)", err)
+	res, err := newOfflineClient(t).ProcessAlbum(ctx, []AlbumTrack{
+		{Input: wma, Output: filepath.Join(dir, "one.flac")},
+		{Input: frames, Output: filepath.Join(dir, "two.flac")},
+		{Input: wav, Output: filepath.Join(dir, "three.flac")},
+	}, -18, TranscodeSpec{Format: FormatFLAC})
+	if err != nil {
+		t.Fatalf("album with advisory-length members: %v, want it to run on the measured lengths", err)
+	}
+	if !loudness.Gainable(res.Album.IntegratedLUFS) || !res.LoudnessApplied {
+		t.Errorf("album loudness = %+v applied %v, want a measurable album with its gain applied", res.Album, res.LoudnessApplied)
+	}
+	doc := parseOutput(t, res.Outputs[0])
+	assertTags(t, doc, mediatest.ChapteredWMATags)
+	assertChapters(t, "album", doc.Chapters(), mediatest.ChapteredWMAChapters())
+	for i, out := range res.Outputs {
+		if d := probeDuration(t, out); d < time.Second {
+			t.Errorf("output %d (%s) holds %s of audio, want the whole member", i, filepath.Base(out), d)
+		}
+	}
+	var note string
+	for _, w := range res.Warnings {
+		switch w.Code {
+		case WarnInputDamage:
+			t.Errorf("an undamaged album warned of damage: %q", w.Detail)
+		case WarnInputNote:
+			note = w.Detail
+		}
+	}
+	if !strings.HasPrefix(note, "frames.wav: ") || !strings.Contains(note, "nCodecDelay") {
+		t.Errorf("input-note = %q, want the MP3 member named with the engine's nCodecDelay remark", note)
+	}
+}
+
+// probeDuration reports the audio length an output declares.
+func probeDuration(t *testing.T, path string) time.Duration {
+	t.Helper()
+	pr, err := media.NewRunner(media.RunnerConfig{}).Probe(t.Context(), path)
+	if err != nil {
+		t.Fatalf("probe %s: %v", filepath.Base(path), err)
+	}
+	return pr.Format.Duration
+}
+
+// The codecs the engine only decodes that arrive inside containers WaxTap
+// writes: the file's name says nothing, so the refusal names the codec. A
+// G.711 WAV re-encodes to anything and copies to nothing; an MP3 carried in a
+// WAV copies out to a bare .mp3 without a re-encode, and not back into a WAV,
+// which WaxTap does not write it into; WMA Lossless decodes as the lossless
+// source it is.
+func TestProcessDecodeOnlyCodecsInWritableContainers(t *testing.T) {
+	c := newOfflineClient(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	alaw := filepath.Join(dir, "alaw.wav")
+	frames := filepath.Join(dir, "frames.wav")
+	lossless := filepath.Join(dir, "lossless.wma")
+	for path, data := range map[string][]byte{alaw: mediatest.ALawWAV(), frames: mediatest.MP3WAV(), lossless: mediatest.LosslessWMA()} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := c.Process(ctx, ProcessRequest{Input: alaw, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "alaw.opus")), Transcode: &TranscodeSpec{Format: FormatOpus}}})
+	if err != nil {
+		t.Fatalf("alaw to opus: %v", err)
+	}
+	if res.SourceFormat.Codec != "alaw" || res.SourceFormat.Extension != "wav" || hasWarning(res, WarnImplicitLossy) {
+		t.Errorf("alaw source = %+v (implicit-lossy warned: %v), want alaw/wav and no implicit-lossy warning on a source that was lossy already", res.SourceFormat, hasWarning(res, WarnImplicitLossy))
+	}
+	_, err = c.Process(ctx, ProcessRequest{Input: alaw, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "alaw-copy.wav")), Transcode: &TranscodeSpec{Format: FormatCopy}}})
+	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "G.711 A-law") || !strings.Contains(err.Error(), "--format") {
+		t.Errorf("alaw copy = %v, want ErrIncompatibleSpec naming G.711 A-law and the --format escape", err)
+	}
+
+	// A copy names the container by the output's extension, and the CLI
+	// turns a --format naming the family the source is already in into this
+	// same copy; the library re-encodes a named format as asked.
+	res, err = c.Process(ctx, ProcessRequest{Input: frames, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "frames.mp3")), Transcode: &TranscodeSpec{Format: FormatCopy}}})
+	if err != nil {
+		t.Fatalf("mp3-in-wav copied to .mp3: %v", err)
+	}
+	if res.SourceFormat.Codec != "mp3" || res.SourceFormat.Extension != "wav" || res.Transcoded || res.OutputFormat.Codec != "mp3" || res.OutputFormat.Extension != "mp3" {
+		t.Errorf("mp3-in-wav copied to .mp3 = source %+v, transcoded %v, output %+v; want the frames copied out unencoded", res.SourceFormat, res.Transcoded, res.OutputFormat)
+	}
+	if d := probeDuration(t, filepath.Join(dir, "frames.mp3")); d < time.Second {
+		t.Errorf("copied-out mp3 holds %s, want the whole second", d)
+	}
+	if head, err := os.ReadFile(filepath.Join(dir, "frames.mp3")); err != nil || len(head) < 4 || string(head[:4]) == "RIFF" {
+		t.Errorf("copied-out mp3 starts %q (err %v), want a bare MP3, not a WAV", head[:min(4, len(head))], err)
+	}
+	if note := warningDetail(res, WarnInputNote); !strings.Contains(note, "nCodecDelay") || hasWarning(res, WarnInputDamage) {
+		t.Errorf("input-note = %q (damage warned: %v), want the engine's nCodecDelay remark as a note and no damage", note, hasWarning(res, WarnInputDamage))
+	}
+	_, err = c.Process(ctx, ProcessRequest{Input: frames, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "frames-copy.wav")), Transcode: &TranscodeSpec{Format: FormatCopy}}})
+	if !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("mp3-in-wav copied back into a .wav = %v, want ErrIncompatibleSpec: WaxTap writes no MP3 into a WAV", err)
+	}
+
+	res, err = c.Process(ctx, ProcessRequest{Input: lossless, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "lossless.flac")), Transcode: &TranscodeSpec{Format: FormatFLAC}}})
+	if err != nil {
+		t.Fatalf("wma lossless to flac: %v", err)
+	}
+	if res.SourceFormat.Codec != "wmalossless" || res.SourceFormat.Extension != "wma" || !res.Transcoded {
+		t.Errorf("wma lossless source = %+v transcoded %v, want wmalossless/wma re-encoded", res.SourceFormat, res.Transcoded)
+	}
+	_, err = c.Process(ctx, ProcessRequest{Input: lossless, ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "lossless-copy.mka")), Transcode: &TranscodeSpec{Format: FormatCopy}}})
+	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "WMA Lossless") {
+		t.Errorf("wma lossless copy = %v, want ErrIncompatibleSpec naming WMA Lossless", err)
 	}
 }
 

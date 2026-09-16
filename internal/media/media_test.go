@@ -487,7 +487,7 @@ func TestAnalyzeFileCancellationNotBadInput(t *testing.T) {
 	in := wavFixture(t, 2, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := r.AnalyzeFile(ctx, in, 0)
+	_, _, err := r.AnalyzeFile(ctx, in, 0)
 	if err == nil {
 		t.Skip("engine completed before observing cancellation")
 	}

@@ -344,8 +344,11 @@ only decodes, which nothing here can write: `internal/mediatest/testdata/`
 holds WaxFlow's own synthetic fixtures for them. `tagged.mpc` and `chapters.mpc`
 are reference-encoder renders of a generated seed, the second with chapters
 the reference chapter editor wrote; `chapters.wma` is an ffmpeg render of a
-generated sine with a chapter list. Nothing under `testdata/` is a real
-recording.
+generated sine with a chapter list; `lossless.wma` is a synthesized signal
+written by Windows' own WMA Lossless encoder; `alaw.wav` is an ffmpeg G.711
+render of a generated sine, and `mp3.wav` the frames of a generated MP3
+wrapped in a WAV by ffmpeg's muxer, the two codec-in-a-writable-container
+cases. Nothing under `testdata/` is a real recording.
 
 ## Releasing
 

@@ -30,7 +30,12 @@ func TestClassifyEngineError(t *testing.T) {
 		{wferr.CodeInvalidRequest, wantSentinel(waxerr.ErrIncompatibleSpec)},
 		{wferr.CodePayloadTooLarge, wantSentinel(waxerr.ErrIncompatibleSpec)},
 		{wferr.CodeUnsupportedSource, wantSentinel(waxerr.ErrUnsupportedInput)},
+		// A file deviating from its own format is about the file wherever it
+		// surfaces, a transcode included: exit 2 as bad input, never as a spec
+		// the caller could rewrite.
+		{wferr.CodeMalformedInput, wantSentinel(waxerr.ErrUnsupportedInput)},
 		{wferr.CodeSourceUnreadable, func(t *testing.T, got error) {
+
 			pe, ok := errors.AsType[*fs.PathError](got)
 			if !ok {
 				t.Fatalf("got %T (%v), want *fs.PathError so it exits 10", got, got)
@@ -111,15 +116,25 @@ func TestClassifyInputError(t *testing.T) {
 	if got := classifyInputError(wferr.New(wferr.CodeInternal, "boom"), "in.flac"); !errors.Is(got, waxerr.ErrUnsupportedInput) {
 		t.Errorf("got %v, want the ErrUnsupportedInput default", got)
 	}
-	// WaxFlow's malformed() helpers all carry CodeUnsupportedFormat, so at a
-	// read-only site it describes the file, not the spec.
-	got := classifyInputError(wferr.New(wferr.CodeUnsupportedFormat, "mp4: fragment sample runs past end of source"), "in.m4a")
-	if !errors.Is(got, waxerr.ErrUnsupportedInput) {
-		t.Errorf("got %v, want ErrUnsupportedInput: a truncated file is not an incompatible spec", got)
+	// At a read-only site CodeUnsupportedFormat is a codec this build does not
+	// decode, which describes the file, not the spec; CodeMalformedInput is a
+	// broken file and says the same thing by every route.
+	for _, tc := range []struct {
+		code wferr.Code
+		msg  string
+	}{
+		{wferr.CodeUnsupportedFormat, `wma: codec "Windows Media Audio Pro over S/PDIF" is not one this build decodes`},
+		{wferr.CodeMalformedInput, "mp4: fragment sample runs past end of source"},
+	} {
+		got := classifyInputError(wferr.New(tc.code, tc.msg), "in.m4a")
+		if !errors.Is(got, waxerr.ErrUnsupportedInput) {
+			t.Errorf("%s: got %v, want ErrUnsupportedInput: a file this build cannot read is not an incompatible spec", tc.code, got)
+		}
+		if errors.Is(got, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("%s: got %v, want no spec sentinel on a read failure", tc.code, got)
+		}
 	}
-	if errors.Is(got, waxerr.ErrIncompatibleSpec) {
-		t.Errorf("got %v, want no spec sentinel on a read failure", got)
-	}
+
 	// A code that is unambiguous still maps normally.
 	if _, ok := errors.AsType[*fs.PathError](classifyInputError(wferr.New(wferr.CodeSourceUnreadable, "boom"), "in.flac")); !ok {
 		t.Error("want the I/O mapping to survive at a read-only site with a path")
@@ -199,5 +214,40 @@ func TestClassifyInputErrorKeepsNonMediaCodes(t *testing.T) {
 	// default rather than falling through to exit 1.
 	if got := classifyInputError(wferr.New(wferr.CodeSourceUnreadable, "boom"), ""); !errors.Is(got, waxerr.ErrUnsupportedInput) {
 		t.Errorf("got %v, want the pathless I/O code to keep the input default", got)
+	}
+}
+
+// Every code in WaxFlow's exit contract is either mapped above or on the
+// deliberately-unmapped list, so a code added upstream fails here and gets a
+// decision instead of a silent exit 1. The unmapped codes, each for its own
+// reason: internal is exit 1 by definition (the engine can raise it, and it
+// means a bug rather than a condition to classify); not-found and
+// source-changed come from WaxFlow's HTTP source client, which WaxTap never
+// hands a URL; the rest are the daemon's own (its auth, signed URLs, catalog,
+// and load shedding), which the in-process engine never raises.
+func TestEngineErrorMappingCoversExitContract(t *testing.T) {
+	unmapped := map[wferr.Code]bool{
+		wferr.CodeInternal: true, wferr.CodeNotFound: true, wferr.CodeOverloaded: true,
+		wferr.CodeUnauthorized: true, wferr.CodeSignatureInvalid: true, wferr.CodeSignatureExpired: true,
+		wferr.CodeSourceChanged: true, wferr.CodeCatalogUnavailable: true,
+	}
+	for _, class := range wferr.ExitContract() {
+		for _, code := range class.Codes {
+			got := classifyEngineError(wferr.New(code, "boom"), "in.flac", "out.flac")
+			mapped := errors.Is(got, waxerr.ErrIncompatibleSpec) || errors.Is(got, waxerr.ErrUnsupportedInput) ||
+				errors.Is(got, context.Canceled)
+			if _, ok := errors.AsType[*fs.PathError](got); ok {
+				mapped = true
+			}
+			if _, ok := errors.AsType[*tempfile.OutputError](got); ok {
+				mapped = true
+			}
+			switch {
+			case mapped && unmapped[code]:
+				t.Errorf("%s (exit class %q) is mapped but listed as deliberately unmapped", code, class.Name)
+			case !mapped && !unmapped[code]:
+				t.Errorf("%s (exit class %q) is neither mapped nor on the deliberately-unmapped list; decide which", code, class.Name)
+			}
+		}
 	}
 }

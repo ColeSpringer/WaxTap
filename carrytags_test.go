@@ -545,3 +545,32 @@ func TestCarryTagsCutEmptyingOnlyMetadataSaysNothingCarried(t *testing.T) {
 		t.Errorf("TagCarry synced lyrics = %+v, want the set removed by the cut, its 1 line counted", it)
 	}
 }
+
+// A cut's remap keeps the report's item order and its counts honest: a set
+// the cut emptied never entered the transfer, so its item is added where the
+// transfer would have placed it; a set the destination dropped keeps the
+// remap's count and takes what the cut removed beside it.
+func TestTagCarryRemappedKeepsOrderAndCounts(t *testing.T) {
+	tc := &TagCarry{Items: []CarryItem{
+		{Kind: CarryField, Key: "TITLE", Count: 1},
+		{Kind: CarryPictures, Count: 1},
+		{Kind: CarrySyncedLyrics, Count: 1},
+	}}
+	tc.remapped(CarryChapters, cutRemap{kept: 0, removed: 3, input: 3}, false)
+	var kinds []CarryKind
+	for _, it := range tc.Items {
+		kinds = append(kinds, it.Kind)
+	}
+	if want := []CarryKind{CarryField, CarryPictures, CarryChapters, CarrySyncedLyrics}; !slices.Equal(kinds, want) {
+		t.Errorf("item kinds = %v, want the transfer's order %v", kinds, want)
+	}
+	if it := carryItem(t, tc, CarryChapters, ""); it.Disposition != DispositionRemoved || it.Count != 0 || it.Removed != 3 {
+		t.Errorf("emptied set = %+v, want removed outright with 3 counted", it)
+	}
+
+	dropped := &TagCarry{Items: []CarryItem{{Kind: CarryChapters, Count: 2, Disposition: DispositionDropped, Reason: "wavpack cannot hold chapters"}}}
+	dropped.remapped(CarryChapters, cutRemap{kept: 2, removed: 1, input: 3}, false)
+	if it := dropped.Items[0]; it.Disposition != DispositionDropped || it.Count != 2 || it.Removed != 1 || it.Reason == "" {
+		t.Errorf("dropped set after a cut = %+v, want the remap's 2 dropped with the 1 the cut took beside it", it)
+	}
+}

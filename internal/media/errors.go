@@ -27,16 +27,23 @@ import (
 //
 //	CodeUnsupportedFormat                    unsupported  ErrIncompatibleSpec   exit 2
 //	CodeUnsupportedSource                    unsupported  ErrUnsupportedInput   exit 2
+//	CodeMalformedInput                       malformed    ErrUnsupportedInput   exit 2
 //	CodeInvalidRequest, CodePayloadTooLarge  invalid      ErrIncompatibleSpec   exit 2
 //	CodeSourceUnreadable                     io           *fs.PathError         exit 10
 //	CodeOutputUnwritable                     io           *tempfile.OutputError exit 10
 //	CodeCanceled                             canceled     context.Canceled      exit 130
 //	everything else                          -            unmapped              exit 1
 //
-// CodeUnsupportedFormat is overloaded upstream: it marks both an encoder refusing
-// a spec and a container rejecting malformed bytes. It maps to the spec sentinel
-// here, which is the case only this function can reach, and classifyInputError
-// overrides it for the sites that can only be reading.
+// CodeUnsupportedFormat is WaxFlow's "the file is fine and this build is not":
+// a codec it has no decoder for, a channel configuration outside its scope, a
+// spec its encoders cannot produce. It maps to the spec sentinel here, the
+// half only this function can reach, and classifyInputError keeps the input
+// half for the sites that can only be reading. CodeMalformedInput is the file
+// deviating from its own format (truncated, inconsistent, out of range), which
+// no request can convert away, so it is an unsupported input wherever it
+// surfaces: a damaged file handed to a transcode is a statement about the file,
+// not about the spec. The two codes were one until WaxFlow split them, and
+// TestEngineErrorMappingCoversExitContract holds this table to the next split.
 //
 // The two I/O codes are I/O in WaxFlow's taxonomy, not "unsupported", and they
 // stay that way here: a genuine read failure (a bad disk, a file truncated
@@ -53,7 +60,7 @@ func classifyEngineError(err error, input, output string) error {
 	switch wferr.CodeOf(err) {
 	case wferr.CodeUnsupportedFormat, wferr.CodeInvalidRequest, wferr.CodePayloadTooLarge:
 		return fmt.Errorf("%w: %v", waxerr.ErrIncompatibleSpec, err)
-	case wferr.CodeUnsupportedSource:
+	case wferr.CodeUnsupportedSource, wferr.CodeMalformedInput:
 		return fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	case wferr.CodeSourceUnreadable:
 		if input == "" {
@@ -82,10 +89,13 @@ func classifyEngineError(err error, input, output string) error {
 // unclassified failure there stays a statement about the file rather than
 // falling through to exit 1.
 //
-// The default also covers CodeUnsupportedFormat, which WaxFlow overloads: every
-// container and codec's malformed() helper carries it, and so does an encoder
-// refusing a spec it cannot serve. The code cannot separate a truncated file from
-// a 6-channel ALAC request, but the call site can, and these sites only ever read.
+// The default also covers CodeUnsupportedFormat, which at a site that only reads
+// is the input side of WaxFlow's "unsupported": a codec this build has no
+// decoder for, a channel configuration outside its scope. An encoder refusing a
+// spec carries the same code and cannot reach a site that never encodes, so the
+// default loses nothing. Malformed bytes carried that code too until WaxFlow
+// split CodeMalformedInput out of it; classifyEngineError maps that one to the
+// input sentinel for every site now, and it lands here by the same default.
 //
 // It names the codes it delegates rather than testing whether the delegate
 // changed the error: classifyEngineError deliberately returns some errors

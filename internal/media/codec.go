@@ -195,7 +195,23 @@ func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 // and a cut has no same-family encoder to fall back to, so the refusals that
 // meet one name the reason and the escape. TestDecoderRegistryParity pins the
 // table to the engine's decoder list.
-var decodeOnlyCodecs = map[string]string{"wma": "WMA", "musepack": "Musepack"}
+//
+// The WMA family is four codecs under one container, each its own ID upstream
+// (a different bitstream with its own decoder). The G.711 laws and the two
+// ADPCM families arrive inside WAV, AIFF-C and MP4/MOV, containers WaxTap
+// writes, so for them the codec alone is read-only, never the file's name:
+// decodeOnlyContainers has nothing to say about a .wav holding A-law.
+var decodeOnlyCodecs = map[string]string{
+	"wma":         "WMA",
+	"wmalossless": "WMA Lossless",
+	"wmapro":      "WMA Pro",
+	"wmavoice":    "WMA Voice",
+	"musepack":    "Musepack",
+	"alaw":        "G.711 A-law",
+	"mulaw":       "G.711 mu-law",
+	"ima-adpcm":   "IMA ADPCM",
+	"ms-adpcm":    "Microsoft ADPCM",
+}
 
 // DecodeOnlyCodec reports whether name (a probe codec name) is one WaxFlow
 // only decodes, and its display name.

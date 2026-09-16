@@ -86,6 +86,10 @@ type CutResult struct {
 	// Levels is WaxFlow's level measurement of the cut re-encode; see
 	// Result.Levels. It is always zero for a lossless cut-remux.
 	Levels Levels
+	// InputWarnings is the input damage the read found, complete as of the
+	// end of the write; see Result.InputWarnings. A cut reads only the spans
+	// it keeps, so damage inside a removed span stays unreported here.
+	InputWarnings []string
 }
 
 // Render applies spec's cut to input and writes the result to output. Output is
@@ -122,13 +126,14 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	tryRemux := spec.CopyCut && spec.Crossfade == 0 && spec.Encode.Channels == 0 && spec.Encode.GainDB == 0
 	mode := Mode(ModeAccurate)
 	var levels Levels
+	var found []string
 	if tryRemux {
-		done, rerr := r.cutRemux(ctx, src, hint, outExt, spec.Keeps, spec.Total, staged)
+		done, rfound, rerr := r.cutRemux(ctx, src, hint, outExt, spec.Keeps, spec.Total, staged)
 		if rerr != nil {
 			return CutResult{}, classifyEngineError(rerr, input, output)
 		}
 		if done {
-			mode = ModeCopy
+			mode, found = ModeCopy, rfound
 		} else {
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
@@ -142,12 +147,12 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			if spec.Encode.Codec == CodecCopy {
 				return CutResult{}, fmt.Errorf("%w: this source codec cannot be packet-cut and has no same-family encoder; pass an explicit format (e.g. flac) to render the cut", waxerr.ErrIncompatibleSpec)
 			}
-			if levels, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+			if levels, found, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
 				return CutResult{}, classifyEngineError(err, input, output)
 			}
 		}
 	} else {
-		if levels, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+		if levels, found, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
 			return CutResult{}, classifyEngineError(err, input, output)
 		}
 	}
@@ -156,63 +161,66 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		return CutResult{}, err
 	}
 	return CutResult{
-		Output:  output,
-		Removed: spec.Total - cutrange.OutputDuration(spec.Keeps, spec.Crossfade),
-		Mode:    mode,
-		Applied: true,
-		Levels:  levels,
+		Output:        output,
+		Removed:       spec.Total - cutrange.OutputDuration(spec.Keeps, spec.Crossfade),
+		Mode:          mode,
+		Applied:       true,
+		Levels:        levels,
+		InputWarnings: found,
 	}, nil
 }
 
 // cutRemux performs the lossless packet-level cut-remux. It reports done=false
 // (and no error) when WaxFlow declines the source codec, so the caller re-encodes
-// instead.
-func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, keeps []cutrange.Range, total time.Duration, dst *tempfile.File) (done bool, err error) {
+// instead, and the damage the packet walk found when it ran.
+func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, keeps []cutrange.Range, total time.Duration, dst *tempfile.File) (done bool, found []string, err error) {
 	grid, err := r.engine.PacketGrid(src, hint)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return false, nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return false, nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return false, nil // unknown codec: let the re-encode path handle it
+		return false, nil, nil // unknown codec: let the re-encode path handle it
 	}
 	spans := toSpans(keeps, total, track.Fmt.Rate)
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
 
 	plan, err := r.engine.PlanCut(track, opts, spans, grid)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if plan == nil {
-		return false, nil // declined (e.g. FLAC): fall back to a re-encode
+		return false, nil, nil // declined (e.g. FLAC): fall back to a re-encode
 	}
 	cutTrack, _, err := waxflow.CutTrack(track, spans, grid)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	cutDemux, err := waxflow.Cut(demux, track, spans, grid)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// NB: pass CutTrack's track, not plan.Track.
-	if _, err := r.engine.RemuxDemuxer(ctx, cutDemux, cutTrack, dst, opts); err != nil {
-		return false, err
+	tres, err := r.engine.RemuxDemuxer(ctx, cutDemux, cutTrack, dst, opts)
+	if err != nil {
+		return false, nil, err
 	}
-	return true, nil
+	return true, sourceWarnings(tres.InputWarnings), nil
 }
 
 // cutReencode renders the cut by decoding: it slices the kept spans, concatenates
 // them (with an optional crossfade), and re-encodes with spec.Encode. It reports
-// the encode's level measurement alongside; see Result.Levels.
-func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, error) {
+// the encode's level measurement and the damage the read found alongside; see
+// Result.Levels and Result.InputWarnings.
+func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, []string, error) {
 	med, err := r.openComposed(src, hint, spec.Keeps, spec.Total, spec.Crossfade)
 	if err != nil {
-		return Levels{}, err
+		return Levels{}, nil, err
 	}
 	defer med.Close()
 
@@ -221,9 +229,9 @@ func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, ou
 	opts.Container = containerFor(format, outExt)
 	tres, err := r.engine.TranscodeMedia(ctx, med, dst, opts)
 	if err != nil {
-		return Levels{}, err
+		return Levels{}, nil, err
 	}
-	return levelsOf(tres), nil
+	return levelsOf(tres), sourceWarnings(tres.InputWarnings), nil
 }
 
 // openComposed builds the WaxFlow Media for the kept spans: a single Slice for

@@ -1,11 +1,13 @@
 # Deferred work
 
 The tracked list of WaxTap work that was cut from an otherwise shipped
-change, or that waits on a sibling repo. Work that never started does not
-belong here; this list is for residuals that would otherwise survive only
-as a sentence in a plan or a progress note. Agents: when you cut
-something, add it here in the same change; when it lands, remove the
-entry. Asks of the sibling repos live in
+change, that waits on a sibling repo, or that a sibling repo's release made
+possible and WaxTap has not taken up. Work that never started for any other
+reason does not belong here; this list is for residuals that would otherwise
+survive only as a sentence in a plan or a progress note. Agents: when you
+cut something, or a dependency bump brings a capability you leave unbuilt,
+add it here in the same change; when it lands, remove the entry. Asks of
+the sibling repos live in
 [upstream-requests.md](upstream-requests.md), and an `[upstream]` entry
 here names the ask it waits on.
 
@@ -51,21 +53,46 @@ Gate tags:
   stereo going into a lossy format without `--downmix`; the
   `implicit-downmix` warning names the fold after the fact.
 
-- `[upstream]` **Retire the WMA album pin.** When WaxFlow's timeline
-  tolerates the WMA frame tail (upstream-requests.md, WaxFlow),
-  `TestProcessAlbumWMAIsUpstreamLimited` fails; delete it, the rewording
-  in `albumTrackError` (`process.go`), and the README note.
+- `[in-repo]` **Normalize Opus by its header gain instead of re-encoding.**
+  WaxLabel 1.7.0 reads and writes the `OpusHead` output gain
+  (`Editor.SetOutputGain`, signed Q7.8 dB, with the RFC 7845 rebase of
+  `R128_TRACK_GAIN`/`R128_ALBUM_GAIN`), and every compliant decoder applies
+  it, WaxFlow's included. `normalize` on an Opus source that stays Opus
+  decodes and re-encodes today, a generation of loss for the format most
+  YouTube downloads arrive in. In `--peak-mode cap` the gain is one scalar
+  (`loudness.GainFor`, held under the true-peak ceiling), which the header
+  field carries exactly, so the run could remux the packets untouched and
+  patch page 0; album mode's uniform gain fits the same way. `limit` cannot
+  take this path, since the limiter reshapes samples. Undecided: whether it
+  is the default for Opus-to-Opus (a behavior change: the delivered samples
+  no longer carry the gain, and a player that ignores the field plays the
+  old loudness) or opt-in behind a flag, and how the delivered measurement
+  reports a gain no sample was changed by. Surfaced by the 2026-09-16
+  WaxLabel bump.
 
-- `[upstream]` **Map encoder refusals apart from malformed input.** When
-  WaxFlow splits `CodeUnsupportedFormat` (upstream-requests.md, WaxFlow),
-  map the encoder half to `ErrIncompatibleSpec` and the malformed half to
-  `ErrUnsupportedInput` in `internal/media/errors.go`, and retire the
-  read-only-site override in `classifyInputError`.
+- `[in-repo]` **Split a single-file rip by its CUE sheet.** WaxFlow
+  published its `cue` package with the 2026-09-16 bump (`cue.Parse` reads a
+  sheet, `File.Starts` validates the track boundaries, in CD frames of
+  1/75 s). WaxTap has the pieces a split needs, the cut path and the carry,
+  but no flow that takes a sheet: it would be a new subcommand, or a `cut`
+  mode, that cuts one file into N outputs at the sheet's INDEX 01 positions,
+  names them from TITLE and PERFORMER, and writes those as tags. Undecided:
+  the command's shape, how disc-level metadata (CATALOG, REM DATE) maps onto
+  tags, and whether a pregap (INDEX 00) belongs to the previous track.
+  Nobody has asked for it.
 
-- `[upstream]` **Use a warning severity for `input-damage`.** When
-  `container.Warning` gains one (upstream-requests.md, WaxFlow), lead the
-  note with a damage verdict for the damage class only (`inputDamageNote`
-  in `mapping.go`).
+- `[in-repo]` **A cut trusts a header that overstates the length.** The
+  pipeline resolves cut ranges against the probe's duration, which for a
+  lazily walked payload (MP3, bare or in a WAV or AIFF-C; ADTS) is the
+  header's claim (`internal/pipeline/pipeline.go`, the probe stage). A
+  truncated MP3 still declares its Xing count, so a span that runs to the
+  declared end outruns the file and the engine refuses the run ("the source
+  ended N samples into a span that declared M; its cut points do not
+  describe this file", which WaxTap reports as an I/O failure, exit 10),
+  where a truncated FLAC clamps at the probe and the cut runs against the
+  real length. Fix: for a cut, walk such an input first (`format.Walker`,
+  which a strict probe runs) so the total is measured, and resolve the
+  ranges against that. Found by the 2026-09-16 review round.
 
 - `[in-repo]` **`info --probe` stages the whole stream.** `probeRemote`
   (`waxtap.go`) downloads the audio once to probe a header locally, which

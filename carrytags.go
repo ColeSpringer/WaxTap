@@ -63,7 +63,28 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	if err != nil {
 		return failed(err)
 	}
-	plan, report, err := src.PrepareTransfer(dst)
+	// A cut moved the timeline, so the source's chapters and synced lyrics
+	// are remapped onto it ahead of the transfer and handed over as the lists
+	// to write, in the same pass as the tags. Carried as they are they would
+	// point at removed audio; rewriting them after the transfer, which is what
+	// this did before WaxLabel's transfer took a replacement, cost a second
+	// metadata write. A set the remap empties goes over as an explicit
+	// nothing, which the transfer grades as no item at all.
+	tr := src.Transfer()
+	var chapters, lyrics *cutRemap
+	if cut != nil {
+		if chs := src.Chapters(); len(chs) > 0 {
+			kept := remapChapters(chs, cut)
+			tr.SetChapters(kept...)
+			chapters = &cutRemap{kept: len(kept), removed: len(chs) - len(kept), input: len(chs)}
+		}
+		if sls := src.SyncedLyrics(); len(sls) > 0 {
+			kept, dropped := remapSyncedLyrics(sls, cut)
+			tr.SetSyncedLyrics(kept...)
+			lyrics = &cutRemap{kept: len(kept), removed: dropped, input: lyricSets(sls)}
+		}
+	}
+	plan, report, err := tr.Prepare(dst)
 	if err != nil {
 		return failed(err)
 	}
@@ -78,60 +99,25 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 		notes = append(notes, note)
 	}
 
-	// The two post-transfer fix-ups are mutually exclusive: a cut forces a
-	// re-encode, so a remuxed output never has one. Both re-edit the document
-	// the transfer returned, the blessed path for writing after an in-place
-	// commit (and a no-op plan still returns the unchanged document).
-	// The fix-ups can empty what the transfer wrote (a cut that removes every
-	// chapter or lyric line), and the "carried" vs "no metadata carried" lead
-	// below must describe the output as delivered, not as the transfer report
-	// left it.
-	var chaptersCleared, lyricsCleared bool
 	switch {
 	case cut != nil:
-		// Each fix-up chains on the document the previous one saved. Re-editing
-		// the transfer's document after a save would write the stale chapter
-		// set back over the remapped one.
-		doc := postDoc
-		if chaptersLanded(report) {
-			remapped := remapChapters(src.Chapters(), cut)
-			saved, fixNote, ferr := rewriteChapters(ctx, doc, outPath, remapped)
-			if ferr != nil {
-				notes = append(notes, fmt.Sprintf("chapters describe the uncut input and could not be remapped: %v", ferr))
-			} else {
-				doc = saved
-				chaptersCleared = len(remapped) == 0
-				tc.remapped(CarryChapters, len(remapped), len(src.Chapters())-len(remapped))
-				if fixNote != "" {
-					notes = append(notes, fixNote)
-				}
-			}
+		if chapters != nil {
+			tc.remapped(CarryChapters, *chapters, chaptersLanded(report))
 		}
-		if lyricsLanded(report) {
-			sls := src.SyncedLyrics()
-			origSets := 0
-			for _, sl := range sls {
-				if len(sl.Lines) > 0 {
-					origSets++
-				}
-			}
-			remapped, dropped := remapSyncedLyrics(sls, cut)
-			_, fixNote, ferr := rewriteSyncedLyrics(ctx, doc, outPath, remapped)
-			switch {
-			case ferr != nil:
-				notes = append(notes, fmt.Sprintf("synced lyrics describe the uncut input and could not be remapped: %v", ferr))
-			default:
-				lyricsCleared = len(remapped) == 0
-				tc.remapped(CarrySyncedLyrics, len(remapped), dropped)
-				if fixNote != "" {
-					notes = append(notes, fixNote)
-				}
-				if dropped > 0 {
-					notes = append(notes, lyricsDropNote(dropped, origSets-len(remapped), origSets))
-				}
+		if lyrics != nil {
+			landed := lyricsLanded(report)
+			tc.remapped(CarrySyncedLyrics, *lyrics, landed)
+			// A line the cut took is worth a note where lines landed, and
+			// where the cut emptied the set; a set the destination dropped
+			// whole says so in its own item.
+			if lyrics.removed > 0 && (landed || lyrics.kept == 0) {
+				notes = append(notes, lyricsDropNote(lyrics.removed, lyrics.input-lyrics.kept, lyrics.input))
 			}
 		}
 	case remuxed:
+		// The one post-transfer fix-up left re-edits the document the
+		// transfer returned, the blessed path for writing after an in-place
+		// commit (and a no-op plan still returns the unchanged document).
 		restored, fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report)
 		if ferr != nil {
 			notes = append(notes, fmt.Sprintf("own-audio tags (ReplayGain and similar) could not be restored: %v", ferr))
@@ -145,11 +131,10 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 
 	if len(notes) > 0 {
 		lead := "metadata carried to %s with losses: %s"
-		if !landedRemains(report, chaptersCleared, lyricsCleared) {
-			// Nothing remains on the destination, so a "carried with losses"
-			// claim would be false: either nothing landed (a source whose only
-			// metadata is a chapter set, carried into a format that stores
-			// none) or everything that landed was cleared by a fix-up.
+		if !landedRemains(report) {
+			// Nothing landed, so a "carried with losses" claim would be
+			// false: a source whose only metadata is a chapter set, carried
+			// into a format that stores none, or one the cut emptied.
 			lead = "no metadata carried to %s: %s"
 		}
 		warn(fmt.Sprintf(lead, out, strings.Join(capNotes(notes), "; ")))
@@ -159,19 +144,30 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	return tc
 }
 
-// landedRemains reports whether anything the transfer wrote (carried or
-// downgraded; excluded and dropped items move nothing) is still on the
-// destination after the fix-ups. A chapter or lyric set the cut remap cleared
-// landed and then left again, and must not be counted as delivered.
-func landedRemains(r waxlabel.TransferReport, chaptersCleared, lyricsCleared bool) bool {
-	for _, it := range r.Items {
-		if it.Disposition != waxlabel.Carried && it.Disposition != waxlabel.Lossy {
-			continue
+// cutRemap is what a cut's remap of one set produced: the pieces handed to
+// the transfer (chapters, or lyric sets still holding a line), the pieces the
+// cut took (chapters, or lyric lines), and the pieces the source had.
+type cutRemap struct {
+	kept, removed, input int
+}
+
+// lyricSets counts the sets that hold a line, the ones a transfer writes.
+func lyricSets(sls []waxlabel.SyncedLyrics) int {
+	n := 0
+	for _, sl := range sls {
+		if len(sl.Lines) > 0 {
+			n++
 		}
-		switch {
-		case it.Kind == waxlabel.TransferChapter && chaptersCleared:
-		case it.Kind == waxlabel.TransferSyncedLyric && lyricsCleared:
-		default:
+	}
+	return n
+}
+
+// landedRemains reports whether the transfer wrote anything (carried or
+// downgraded; excluded and dropped items move nothing). A chapter or lyric set
+// the cut emptied never entered the transfer, so it cannot count.
+func landedRemains(r waxlabel.TransferReport) bool {
+	for _, it := range r.Items {
+		if it.Disposition == waxlabel.Carried || it.Disposition == waxlabel.Lossy {
 			return true
 		}
 	}
@@ -244,7 +240,8 @@ func transferItemNote(it waxlabel.TransferItem) string {
 }
 
 // chaptersLanded reports whether the transfer wrote a chapter set (carried or
-// downgraded); a dropped set needs no follow-up removal.
+// downgraded), so a cut's remap has an item on the output to describe; a
+// dropped set, or one the cut emptied ahead of the transfer, has none.
 func chaptersLanded(r waxlabel.TransferReport) bool {
 	for _, it := range r.Items {
 		if it.Kind == waxlabel.TransferChapter &&
@@ -266,7 +263,7 @@ func docOrParse(ctx context.Context, d *waxlabel.Document, path string) (*waxlab
 }
 
 // lyricsLanded reports whether the transfer wrote a synced-lyrics set (carried
-// or downgraded); a dropped set needs no follow-up removal.
+// or downgraded), for the reason chaptersLanded gives.
 func lyricsLanded(r waxlabel.TransferReport) bool {
 	for _, it := range r.Items {
 		if it.Kind == waxlabel.TransferSyncedLyric &&
@@ -296,50 +293,6 @@ func lyricsDropNote(dropped, setsDropped, origSets int) string {
 		note += fmt.Sprintf("; %d of %d sets were dropped", setsDropped, origSets)
 	}
 	return note
-}
-
-// rewriteChapters replaces the chapter set the transfer just wrote. It exists
-// for the cut case only, where the carried offsets describe the uncut input.
-//
-// It returns the saved document so a following fix-up edits what is on disk
-// rather than the pre-save one.
-func rewriteChapters(ctx context.Context, doc *waxlabel.Document, path string, chs []waxlabel.Chapter) (*waxlabel.Document, string, error) {
-	d, err := docOrParse(ctx, doc, path)
-	if err != nil {
-		return nil, "", err
-	}
-	ed := d.Edit()
-	if len(chs) == 0 {
-		ed.ClearChapters()
-	} else {
-		ed.SetChapters(chs...)
-	}
-	plan, err := ed.Prepare()
-	if err != nil {
-		return nil, "", err
-	}
-	return executeSaveBack(ctx, plan)
-}
-
-// rewriteSyncedLyrics replaces the synced-lyrics sets the transfer just wrote,
-// for the same reason as rewriteChapters: the carried timestamps describe the
-// uncut input.
-func rewriteSyncedLyrics(ctx context.Context, doc *waxlabel.Document, path string, sls []waxlabel.SyncedLyrics) (*waxlabel.Document, string, error) {
-	d, err := docOrParse(ctx, doc, path)
-	if err != nil {
-		return nil, "", err
-	}
-	ed := d.Edit()
-	if len(sls) == 0 {
-		ed.ClearSyncedLyrics()
-	} else {
-		ed.SetSyncedLyrics(sls...)
-	}
-	plan, err := ed.Prepare()
-	if err != nil {
-		return nil, "", err
-	}
-	return executeSaveBack(ctx, plan)
 }
 
 // restoreOwnAudio writes back the own-audio tags the transfer excluded. It

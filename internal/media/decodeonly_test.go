@@ -268,3 +268,187 @@ func TestWaxLabelReadsDecodeOnlyInputs(t *testing.T) {
 		})
 	}
 }
+
+// The decode-only codecs that arrive inside containers this package writes:
+// the codec alone is read-only, and the refusal names it. A byte-linear
+// payload counts its own length, so the G.711 decode delivers exactly what
+// the probe declared; WMA Lossless sits in ASF, which states a rounded
+// duration for a codec with no padding count, so its decode runs to the frame
+// boundary past the declared count.
+func TestDecodeOnlyCodecsInsideWritableContainers(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, codec, display string
+		data                 []byte
+		rate, channels       int
+		samples, tail        int64
+	}{
+		{"alaw.wav", "alaw", "G.711 A-law", mediatest.ALawWAV(), mediatest.ALawWAVRate, 1, mediatest.ALawWAVSamples, 0},
+		{"lossless.wma", "wmalossless", "WMA Lossless", mediatest.LosslessWMA(), mediatest.LosslessWMARate, mediatest.LosslessWMAChannels, mediatest.LosslessWMASamples, mediatest.LosslessWMAFrame},
+	} {
+		t.Run(tc.codec, func(t *testing.T) {
+			in := writeFixture(t, dir, tc.name, tc.data)
+			pr, err := r.Probe(ctx, in)
+			if err != nil {
+				t.Fatalf("probe: %v", err)
+			}
+			a, _ := pr.AudioStream()
+			if a.CodecName != tc.codec || a.SampleRate != tc.rate || a.Channels != tc.channels || a.Samples != tc.samples {
+				t.Errorf("probe = %+v, want %s %d Hz %d ch %d samples", a, tc.codec, tc.rate, tc.channels, tc.samples)
+			}
+			if len(pr.Warnings) != 0 || len(pr.Notes) != 0 {
+				t.Errorf("probe warnings %v notes %v, want none on a clean fixture", pr.Warnings, pr.Notes)
+			}
+			if display, ok := DecodeOnlyCodec(a.CodecName); !ok || display != tc.display {
+				t.Errorf("DecodeOnlyCodec(%q) = %q, %v; want %q, true", a.CodecName, display, ok, tc.display)
+			}
+			_, err = r.Transcode(ctx, in, filepath.Join(dir, tc.codec+"-copy.mka"), Spec{Codec: CodecCopy})
+			if !errors.Is(err, waxerr.ErrIncompatibleSpec) || !strings.Contains(err.Error(), tc.display) || !strings.Contains(err.Error(), "--format") {
+				t.Errorf("copy = %v, want ErrIncompatibleSpec naming %s and the --format escape", err, tc.display)
+			}
+			res, err := r.Transcode(ctx, in, filepath.Join(dir, tc.codec+".wav"), Spec{Codec: CodecWAV})
+			if err != nil {
+				t.Fatalf("transcode: %v", err)
+			}
+			if got := res.Levels.Samples; got < tc.samples || got > tc.samples+tc.tail {
+				t.Errorf("decode delivered %d frames, want %d to %d", got, tc.samples, tc.samples+tc.tail)
+			}
+			if len(res.InputWarnings) != 0 {
+				t.Errorf("decode found damage %v on a clean fixture", res.InputWarnings)
+			}
+		})
+	}
+}
+
+// An MP3 carried in a WAV is the one decode-only-in-a-writable-container
+// case that copies: the frames move into a bare .mp3 packet for packet, where
+// the LAME tag's own trims then apply (the WAV applied none, and says so in a
+// note that is not damage). The WAV's own length is advisory, the fact
+// chunk's count of everything the frames decode to.
+func TestMP3InWAVCopiesOutToBareMP3(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	in := writeFixture(t, dir, "frames.wav", mediatest.MP3WAV())
+	pr, err := r.Probe(ctx, in)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	a, _ := pr.AudioStream()
+	if pr.Format.Container != "wav" || a.CodecName != "mp3" || a.SampleRate != mediatest.MP3WAVRate || a.Samples != mediatest.MP3WAVSamples {
+		t.Errorf("probe = container %s stream %+v, want mp3 in wav at %d Hz declaring %d samples", pr.Format.Container, a, mediatest.MP3WAVRate, mediatest.MP3WAVSamples)
+	}
+	if len(pr.Warnings) != 0 || len(pr.Notes) != 1 || !strings.Contains(pr.Notes[0], "nCodecDelay") {
+		t.Errorf("probe warnings %v notes %v, want the nCodecDelay remark as the one note and no damage", pr.Warnings, pr.Notes)
+	}
+	if _, decodeOnly := DecodeOnlyCodec(a.CodecName); decodeOnly {
+		t.Error("mp3 classified decode-only; its frames copy and re-encode")
+	}
+
+	out := filepath.Join(dir, "frames.mp3")
+	if _, err := r.Transcode(ctx, in, out, Spec{Codec: CodecCopy}); err != nil {
+		t.Fatalf("copy out: %v", err)
+	}
+	op, err := r.Probe(ctx, out)
+	if err != nil {
+		t.Fatalf("probe copy: %v", err)
+	}
+	oa, _ := op.AudioStream()
+	if op.Format.Container != "mp3" || oa.CodecName != "mp3" || oa.Samples != mediatest.MP3WAVFrameSamples {
+		t.Errorf("copied-out file = container %s stream %+v, want a bare mp3 declaring %d samples (the LAME trims applied)", op.Format.Container, oa, mediatest.MP3WAVFrameSamples)
+	}
+
+	res, err := r.Transcode(ctx, in, filepath.Join(dir, "frames-decoded.wav"), Spec{Codec: CodecWAV})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Levels.Samples != mediatest.MP3WAVSamples {
+		t.Errorf("decode of the WAV delivered %d frames, want the untrimmed %d", res.Levels.Samples, mediatest.MP3WAVSamples)
+	}
+}
+
+// The probe keeps the engine's damage and its remarks on a well-formed file
+// apart, and a result's damage list drops the member index a timeline
+// prefixes, once per finding.
+func TestProbeAndResultWarningShapes(t *testing.T) {
+	pr := mapProbe(&format.Info{Container: "wav", Warnings: []string{"data chunk clamped"}, Notes: []string{"no ftyp box"}}, 0)
+	if !slices.Equal(pr.Warnings, []string{"data chunk clamped"}) || !slices.Equal(pr.Notes, []string{"no ftyp box"}) {
+		t.Errorf("mapProbe warnings %v notes %v, want the two lists kept apart", pr.Warnings, pr.Notes)
+	}
+	got := sourceWarnings([]string{"member 0: truncated final frame dropped (offset 9)", "member 1: truncated final frame dropped (offset 9)", "member 12: bad crc", "plain"})
+	if want := []string{"truncated final frame dropped (offset 9)", "bad crc", "plain"}; !slices.Equal(got, want) {
+		t.Errorf("sourceWarnings = %v, want %v", got, want)
+	}
+	if sourceWarnings(nil) != nil {
+		t.Error("sourceWarnings(nil) is not nil")
+	}
+}
+
+// A measurement reads the whole file, so it finds the damage a lazy walker
+// leaves for the read: a truncated ADTS stream declares no length and probes
+// clean, and only the read that reaches the torn frame can say so.
+func TestAnalyzeFileReportsReadDamage(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	wav := writeFixture(t, dir, "src.wav", mediatest.SineWAV(3, 2))
+	whole := filepath.Join(dir, "whole.aac")
+	if _, err := r.Transcode(ctx, wav, whole, Spec{Codec: CodecAAC}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	torn := writeFixture(t, dir, "torn.aac", data[:len(data)*6/10])
+	if pr, err := r.Probe(ctx, torn); err != nil || len(pr.Warnings) != 0 {
+		t.Fatalf("probe of the torn stream: warnings %v, err %v; want a clean probe, the damage lies past the headers", pr.Warnings, err)
+	}
+	_, found, err := r.AnalyzeFile(ctx, torn, 0)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if len(found) != 1 || !strings.Contains(found[0], "truncated") {
+		t.Errorf("AnalyzeFile damage = %v, want the torn final frame reported once", found)
+	}
+	if _, found, err := r.AnalyzeFile(ctx, wav, 0); err != nil || len(found) != 0 {
+		t.Errorf("AnalyzeFile on a clean file: damage %v, err %v", found, err)
+	}
+}
+
+// The album opener decodes and counts a member whose headers only estimate
+// its length when no count is handed over, on a concurrency slot and under
+// the caller's context, so a cancellation stops the count where it stops
+// every other decode.
+func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
+	r := NewRunner(RunnerConfig{MaxProcs: 1})
+	ctx := context.Background()
+	dir := t.TempDir()
+	wma := writeFixture(t, dir, "in.wma", mediatest.ChapteredWMA())
+	for name, measured := range map[string][]int64{"short slice": nil, "negative entry": {-1}} {
+		t.Run(name, func(t *testing.T) {
+			med, closer, err := r.OpenAlbumConcat(ctx, []string{wma}, measured)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer closer()
+			res, err := r.AnalyzeMedia(ctx, med, 0)
+			if err != nil {
+				t.Fatalf("analyze the timeline: %v", err)
+			}
+			if res.Samples < mediatest.ChapteredWMASamples || res.Samples > mediatest.ChapteredWMASamples+mediatest.ChapteredWMAFrame {
+				t.Errorf("timeline delivered %d frames, want the member's own decode (%d up to a frame more)", res.Samples, mediatest.ChapteredWMASamples)
+			}
+		})
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, closer, err := r.OpenAlbumConcat(canceled, []string{wma}, nil); !errors.Is(err, context.Canceled) {
+		if err == nil {
+			closer()
+		}
+		t.Errorf("open under a canceled context = %v, want context.Canceled from the count", err)
+	}
+}

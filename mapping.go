@@ -465,18 +465,19 @@ func encodePasses(n int) string {
 // wording; WaxTap adds the policy of when it is worth a warning and what to
 // suggest.
 //
-// A lossy source never warns. Its decoder legitimately reconstructs past full
-// scale on loud masters (a brickwalled release decodes with overs on most
-// commercial music), so the clamp is inherent to any faithful integer
-// conversion, and the post-clamp measurement carries no signal that could
-// separate that from a defect: the meter taps the chain output after the
-// quantizer, so the counts and peaks of an ordinary conversion look exactly
-// like a real one. The defects this warning exists for (a float master stored
-// past full scale, a normalization that attenuated but not enough) all read
-// from lossless sources, where a clipped sample is never the decoder's doing.
+// A source whose decode can overshoot never warns (decodeOvershoots). Such a
+// decoder legitimately reconstructs past full scale on loud masters (a
+// brickwalled release decodes with overs on most commercial music), so the
+// clamp is inherent to any faithful integer conversion, and the post-clamp
+// measurement carries no signal that could separate that from a defect: the
+// meter taps the chain output after the quantizer, so the counts and peaks of
+// an ordinary conversion look exactly like a real one. The defects this
+// warning exists for (a float master stored past full scale, a normalization
+// that attenuated but not enough) all read from sources whose decode stays in
+// range, where a clipped sample is never the decoder's doing.
 func warnOutputClipping(em *emitter, ls *LoudnessSpec, pres pipeline.Result) {
 	note := pres.Levels.Note()
-	if note == "" || lossySource(pres.SourceCodec) {
+	if note == "" || decodeOvershoots(pres.SourceCodec) {
 		return
 	}
 	em.warn(WarnOutputClipping, note+clipRemedy(ls, pres.Levels))
@@ -602,7 +603,8 @@ func codecOrUnknown(codec string) string {
 // warnInputDamage reports a local input the decoder had to work around, so a
 // short output is explained rather than merely delivered. The run succeeds:
 // the audio that read is real audio, and the only alternative is refusing a
-// file the user can still use.
+// file the user can still use. The engine's remarks on an input that is not
+// damaged go out beside it under their own code.
 //
 // Only local processing calls this. A YouTube delivery cannot produce it (the
 // containers on that path either probe exactly or fail outright), and firing it
@@ -610,6 +612,9 @@ func codecOrUnknown(codec string) string {
 func warnInputDamage(em *emitter, pres pipeline.Result) {
 	if note := inputDamageNote(pres.SourceWarnings); note != "" {
 		em.warn(WarnInputDamage, note)
+	}
+	if note := inputNote(pres.SourceNotes); note != "" {
+		em.warn(WarnInputNote, note)
 	}
 }
 
@@ -632,11 +637,12 @@ func warnEmptyInput(em *emitter, pres pipeline.Result) {
 }
 
 // inputDamageNote renders the source's damage notes as one detail line, or ""
-// when there are none. The notes stand on their own, in the decoder's (or the
-// short-decode check's) exact words: a lead like "the source is damaged" read
-// well on a truncated file and lied about the rest, since the decoder's
-// tolerated-damage list also carries notes about files that play fine (an extra
-// stream ignored, a trailing tag skipped, a rescaled timescale).
+// when there are none: the verdict, then the notes in the decoder's (or the
+// short-decode check's) exact words. The verdict is honest now that the list
+// holds damage alone. While the engine folded its remarks on well-formed files
+// into the same list (an extra stream ignored, a trailing tag skipped, a
+// rescaled timescale), a lead like this lied about half the entries and the
+// detail was the bare notes; those remarks are inputNote's now.
 //
 // The notes are copied because capNotes truncates in place and the probe's
 // slice belongs to its caller.
@@ -644,18 +650,61 @@ func inputDamageNote(notes []string) string {
 	if len(notes) == 0 {
 		return ""
 	}
+	return "the input is damaged: " + strings.Join(capNotes(slices.Clone(notes)), "; ")
+}
+
+// inputNote renders the engine's remarks on a well-formed input as one detail
+// line, or "" when there are none. No lead: the warning's own code says these
+// are not damage, and each remark names what the engine did in its own words.
+func inputNote(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
 	return strings.Join(capNotes(slices.Clone(notes)), "; ")
 }
 
-// lossySource reports whether the probed source codec name is a lossy family,
-// whose decode manufactures the overshoot warnOutputClipping would otherwise
-// report.
+// mergeRemarks appends each found list to have, each line once, for a track
+// whose damage was read more than once: the probe reports the headers' share,
+// and the measurement and the encode each report the whole, the probe's
+// entries included.
+func mergeRemarks(have []string, found ...[]string) []string {
+	out := slices.Clone(have)
+	for _, list := range found {
+		for _, w := range list {
+			if !slices.Contains(out, w) {
+				out = append(out, w)
+			}
+		}
+	}
+	return out
+}
+
+// lossySource reports whether the probed source codec name is a lossy family:
+// a transform codec, or a companded or ADPCM coding, which carries less than
+// the PCM it came from all the same. It is losslessSource's counterpart for
+// classifying every decoder the engine registers (TestSourceCodecClassParity);
+// the clipping warnings ask the narrower question decodeOvershoots answers.
 func lossySource(codec string) bool {
 	switch codec {
-	case "opus", "aac", "he-aac", "mp3", "vorbis", "wma", "musepack":
+	case "opus", "aac", "he-aac", "mp3", "vorbis", "wma", "wmapro", "wmavoice", "musepack",
+		"alaw", "mulaw", "ima-adpcm", "ms-adpcm":
 		return true
 	}
 	return false
+}
+
+// decodeOvershoots reports whether a source's decode can legitimately land
+// past full scale, which is what makes an output clip on it uninformative (see
+// warnOutputClipping): the transform codecs do, on any loud master. The
+// companded and ADPCM codings are lossy too, but they decode to whole 16-bit
+// samples that never leave the range, so a clip after one is the gain's doing
+// and worth the warning, exactly as on a lossless source.
+func decodeOvershoots(codec string) bool {
+	switch codec {
+	case "alaw", "mulaw", "ima-adpcm", "ms-adpcm":
+		return false
+	}
+	return lossySource(codec)
 }
 
 // losslessSource reports whether the probed source codec name is a lossless
@@ -665,7 +714,7 @@ func lossySource(codec string) bool {
 // media.Codec.IsLossless.
 func losslessSource(codec string) bool {
 	switch codec {
-	case "flac", "alac", "wavpack", "ape", "wav", "aiff":
+	case "flac", "alac", "wavpack", "ape", "wav", "aiff", "wmalossless":
 		return true
 	}
 	return strings.HasPrefix(codec, "pcm")
@@ -868,6 +917,16 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 	}
 	if p.Transcoded {
 		res.OutputFormat = outputFormat(p.OutputCodec, srcFmt)
+	} else if ext := strings.TrimPrefix(filepath.Ext(p.OutputPath), "."); p.OutputPath != "" && ext != "" {
+		// A copy keeps the codec and takes the container the output was
+		// named for, which is the one it was written into: the pipeline
+		// copies only into a container the extension names, so the source's
+		// extension would name a container the output is not in (an MP3
+		// carried in a WAV lands in a bare .mp3, Opus in WebM in .mka).
+		// Reported the way the source's own is, as the file's extension (see
+		// the local Format Process builds), rather than as the engine's
+		// container name, which is not an extension ("ogg" for an .opus).
+		res.OutputFormat.Extension = strings.ToLower(ext)
 	}
 	if p.Cut {
 		// A cut shrinks the output. For a copy cut OutputFormat is still srcFmt, whose

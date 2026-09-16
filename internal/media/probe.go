@@ -30,7 +30,19 @@ type ProbeResult struct {
 	// a short recording look alike without them. Damage the parser does not
 	// notice leaves this empty (a rewritten frame inside a file of the right
 	// length reads as clean), so an empty list is not a certificate of health.
+	//
+	// Damage only, and only what reading the headers finds. A demuxer that
+	// walks its payload lazily (MP3, bare or inside a WAV or AIFF-C; ADTS; a
+	// Matroska with only an advisory length) reports damage past the head
+	// from the read that reaches it, which Result.InputWarnings carries.
 	Warnings []string
+	// Notes are what WaxFlow did with an input that is not damaged: a stream
+	// it ignored, a chapter list it capped at its own limit, a timeline it
+	// rescaled, a band its decoder does not synthesize, a delay field it
+	// declined to apply. The engine once folded them in with Warnings and now
+	// keeps them apart, so a caller reporting damage reports Warnings alone.
+	// Nil when the engine had nothing to say.
+	Notes []string
 }
 
 // ProbeFormat describes the container.
@@ -118,7 +130,7 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, input, h
 // track, so a file whose default audio is not its longest track must not report
 // a longer duration than the track a cut will actually address.
 func mapProbe(info *format.Info, size int64) ProbeResult {
-	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags, Warnings: info.Warnings}
+	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags, Warnings: info.Warnings, Notes: info.Notes}
 	stream := func(t container.Track) ProbeStream {
 		return ProbeStream{
 			CodecType:  "audio",

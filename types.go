@@ -822,16 +822,19 @@ const (
 	// WarnInputDamage reports problems in a local input the decoder worked
 	// around: a header declaring more audio than the file holds, bytes that did
 	// not parse, or a decode that ended short of the declared length. Detail
-	// carries the decoder's notes in its own words (or the short-decode
-	// observation), because the tolerated-damage list also includes advisory
-	// notes about files that play fine, and a blanket "damaged" lead would
-	// overclaim for those. The run still succeeds, because the readable audio
-	// is real audio and refusing it would help nobody.
+	// leads with the verdict and carries the decoder's notes in its own words
+	// (or the short-decode observation); the engine's remarks on a file that
+	// plays fine are [WarnInputNote]'s, never this one's. The run still
+	// succeeds, because the readable audio is real audio and refusing it would
+	// help nobody.
 	//
-	// Absence is not a clean bill of health. Damage that leaves a file the
-	// right length and its headers consistent (a rewritten frame in the middle)
-	// probes without complaint; only a decode reaching it surfaces the
-	// short-decode note.
+	// The list is complete once the output is written, not once the input is
+	// probed: a demuxer that walks its payload lazily (MP3, bare or inside a
+	// WAV or AIFF-C; ADTS) finds damage past the head only when the read
+	// reaches it. Absence is still not a clean bill of health. Damage that
+	// leaves a file the right length and its headers consistent (a rewritten
+	// frame in the middle) probes without complaint; only a decode reaching it
+	// surfaces the short-decode note.
 	WarnInputDamage
 	// WarnLoudnessUnmeasurable reports an integrated loudness that came back
 	// non-finite, and why. Detail names the side ("input" or "output") and the
@@ -857,6 +860,14 @@ const (
 	// this condition also causes. A cut is the one request that refuses instead,
 	// since there is nothing to cut.
 	WarnEmptyInput
+	// WarnInputNote relays what the engine did with a local input that is not
+	// damaged, in its own words: a stream it ignored, a chapter list it capped
+	// at its own limit, a timeline it rescaled, a band its decoder does not
+	// synthesize, a delay field it declined to apply. None of it is damage,
+	// which is why it is not [WarnInputDamage]: the file is well formed and
+	// plays, and a listener who wants to know why the output is not quite the
+	// input's shape reads it here. Only local processing raises it.
+	WarnInputNote
 )
 
 func (w WarningCode) String() string {
@@ -905,6 +916,8 @@ func (w WarningCode) String() string {
 		return "source-policy-unmatched"
 	case WarnEmptyInput:
 		return "empty-input"
+	case WarnInputNote:
+		return "input-note"
 	default:
 		return "unknown"
 	}

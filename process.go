@@ -241,7 +241,7 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 	runner := c.engine()
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths)
 	if err != nil {
-		return nil, albumTrackError(ctx, runner, err, paths)
+		return nil, albumTrackError(err, paths)
 	}
 	res := &AlbumLoudnessResult{
 		Album:    loudnessInfo(album),
@@ -384,7 +384,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	}
 	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs)
 	if err != nil {
-		return nil, albumTrackError(ctx, runner, err, inputs)
+		return nil, albumTrackError(err, inputs)
 	}
 
 	// One uniform gain for the whole album, capped or limited per the peak mode.
@@ -420,7 +420,8 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	var fold albumFold
 	var levels albumLevels
 	var carry albumCarryWarns
-	var damaged albumDamageWarns
+	damaged := albumInputRemarks{code: WarnInputDamage}
+	noted := albumInputRemarks{code: WarnInputNote}
 	var empty albumEmptyWarns
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
@@ -429,16 +430,18 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album mode writes through runner.Transcode rather than the pipeline, so
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
-		srcCh, srcCodec, damage, srcEmpty := probeAudio(ctx, runner, t.Input)
-		damaged.observe(t.Input, damage)
-		empty.observe(t.Input, srcEmpty)
+		in := probeAudio(ctx, runner, t.Input)
+		empty.observe(t.Input, in.empty)
 		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
-		levels.observe(t.Output, srcCodec, tres.Levels)
-		outCh, _, _, _ := probeAudio(ctx, runner, t.Output)
-		fold.observe(srcCh, outCh)
+		// The probe's damage list covers the headers; the measurement's and
+		// the encode's cover the whole read, the probe's entries included.
+		damaged.observe(t.Input, inputDamageNote(mergeRemarks(in.damage, perTrack[i].Warnings, tres.InputWarnings)))
+		noted.observe(t.Input, inputNote(in.notes))
+		levels.observe(t.Output, in.codec, tres.Levels)
+		fold.observe(in.channels, probeAudio(ctx, runner, t.Output).channels)
 		// Album tracks are always re-encoded, so no cut remap and no own-audio
 		// restore apply. Carried ReplayGain would be wrong twice over here: the
 		// gain just changed the loudness it describes.
@@ -454,6 +457,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	levels.warn(em, ao.peakMode)
 	carry.warn(em)
 	damaged.warn(em)
+	noted.warn(em)
 	empty.warn(em)
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
@@ -490,35 +494,32 @@ func (f *albumFold) warn(em *emitter, c media.Codec) {
 		c, f.src, f.out))
 }
 
-// albumCarryWarns folds the per-track tag-carry warnings into one album
-// warning, the albumFold rule: an album into WavPack drops the same chapters
-// on every track, and one warning per track would print the near-identical
-// sentence N times. The first track's detail speaks for the album, with a
-// count of the others; any other warning code a track emits passes through
-// unfolded.
-// albumDamageWarns folds per-track input-damage notes into one album warning,
-// the same way every other ProcessAlbum warning aggregates: the first track's
+// albumInputRemarks folds per-track input remarks of one class (damage, or the
+// engine's notes on a well-formed file) into one album warning under code, the
+// same way every other ProcessAlbum warning aggregates: the first track's
 // detail leads and the rest are counted, so a batch of damaged rips does not
-// bury the summary under one warning per file.
-type albumDamageWarns struct {
+// bury the summary under one warning per file. observe takes the track's
+// rendered detail, "" for none, so the class's wording stays with the
+// single-file renderers (inputDamageNote, inputNote).
+type albumInputRemarks struct {
+	code  WarningCode
 	first string
 	n     int
 }
 
-func (a *albumDamageWarns) observe(track string, notes []string) {
-	note := inputDamageNote(notes)
-	if note == "" {
+func (a *albumInputRemarks) observe(track, detail string) {
+	if detail == "" {
 		return
 	}
 	a.n++
 	if a.n == 1 {
 		// Named per track: an album warning that did not say which file is
 		// damaged would send the listener through the whole record to find it.
-		a.first = filepath.Base(track) + ": " + note
+		a.first = filepath.Base(track) + ": " + detail
 	}
 }
 
-func (a *albumDamageWarns) warn(em *emitter) {
+func (a *albumInputRemarks) warn(em *emitter) {
 	switch {
 	case a.n == 0:
 		return
@@ -527,7 +528,7 @@ func (a *albumDamageWarns) warn(em *emitter) {
 	case a.n > 2:
 		a.first += fmt.Sprintf(" (and %d more tracks)", a.n-1)
 	}
-	em.warn(WarnInputDamage, a.first)
+	em.warn(a.code, a.first)
 }
 
 // albumEmptyWarns folds per-track empty inputs into one album warning, the same
@@ -566,6 +567,12 @@ func (a *albumEmptyWarns) warn(em *emitter) {
 	em.warn(WarnEmptyInput, detail)
 }
 
+// albumCarryWarns folds the per-track tag-carry warnings into one album
+// warning, the albumFold rule: an album into WavPack drops the same chapters
+// on every track, and one warning per track would print the near-identical
+// sentence N times. The first track's detail speaks for the album, with a
+// count of the others; any other warning code a track emits passes through
+// unfolded.
 type albumCarryWarns struct {
 	first string
 	n     int
@@ -598,8 +605,8 @@ func (a *albumCarryWarns) warn(em *emitter) {
 
 // albumLevels aggregates per-track level measurements into one album warning,
 // the way albumFold folds the downmix observation: the worst track speaks for
-// the album, with a count of the others that clipped. Lossy tracks never
-// count, for the reason warnOutputClipping gives.
+// the album, with a count of the others that clipped. A track whose decode
+// can overshoot never counts, for the reason warnOutputClipping gives.
 type albumLevels struct {
 	worst     media.Levels
 	worstPath string
@@ -607,7 +614,7 @@ type albumLevels struct {
 }
 
 func (a *albumLevels) observe(path, srcCodec string, l media.Levels) {
-	if l.Note() == "" || lossySource(srcCodec) {
+	if l.Note() == "" || decodeOvershoots(srcCodec) {
 		return
 	}
 	a.n++
@@ -655,16 +662,7 @@ var timelineMemberRe = regexp.MustCompile(`timeline member (\d+)`)
 // reports members by index. An album error that says "member 1" makes the user
 // count their inputs; one that names the file does not. Anything the pattern
 // does not match passes through unchanged.
-//
-// One refusal gets its own words: the timeline refusing a WMA track for
-// holding more audio than its headers declared. That is the engine's WMA
-// decoder doing what it must (WMA carries no padding count, so a decode runs
-// to the frame boundary past the declared end) meeting a timeline that holds
-// members to their headers, and in the engine's words it reads like a corrupt
-// file to a user holding a valid one. It is named here, after the refusal,
-// rather than refused up front, so an engine that stops refusing it is
-// noticed instead of masked.
-func albumTrackError(ctx context.Context, r *media.Runner, err error, inputs []string) error {
+func albumTrackError(err error, inputs []string) error {
 	m := timelineMemberRe.FindStringSubmatch(err.Error())
 	if m == nil {
 		return err
@@ -673,26 +671,32 @@ func albumTrackError(ctx context.Context, r *media.Runner, err error, inputs []s
 	if aerr != nil || idx < 0 || idx >= len(inputs) {
 		return err
 	}
-	track := filepath.Base(inputs[idx])
-	if strings.Contains(err.Error(), "holds more audio than") {
-		if _, codec, _, _ := probeAudio(ctx, r, inputs[idx]); codec == "wma" {
-			return fmt.Errorf("track %s: %w: album mode cannot take a WMA file yet: the engine's album timeline refuses the frame tail its WMA decoder delivers past the declared length (the fix is upstream); process WMA tracks one at a time", track, ErrUnsupportedInput)
-		}
-	}
-	return fmt.Errorf("track %s: %w", track, err)
+	return fmt.Errorf("track %s: %w", filepath.Base(inputs[idx]), err)
 }
 
-func probeAudio(ctx context.Context, r *media.Runner, path string) (channels int, codec string, damage []string, empty bool) {
+// albumProbe is what album mode reads off a track's probe: enough to describe
+// a fold, an empty input, and the input's damage and the engine's notes on it,
+// all best-effort, because failing to describe a file must not fail the album.
+type albumProbe struct {
+	channels int
+	codec    string
+	damage   []string
+	notes    []string
+	empty    bool
+}
+
+func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 	pr, err := r.Probe(ctx, path)
 	if err != nil {
-		return 0, "", nil, false
+		return albumProbe{}
 	}
+	p := albumProbe{damage: pr.Warnings, notes: pr.Notes}
 	if a, ok := pr.AudioStream(); ok {
 		// Exactly 0 frames. -1 means the container states no length, which is
 		// not a claim that there is nothing there.
-		return a.Channels, a.CodecName, pr.Warnings, a.Samples == 0
+		p.channels, p.codec, p.empty = a.Channels, a.CodecName, a.Samples == 0
 	}
-	return 0, "", pr.Warnings, false
+	return p
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only
@@ -720,8 +724,13 @@ func albumDelivered(ctx context.Context, runner *media.Runner, outputs []string,
 		}
 	}
 	// Best-effort, like the pipeline's post-measure: every track is already
-	// written, so a failed measurement must not fail the album.
-	med, closer, err := runner.OpenAlbumConcat(outputs)
+	// written, so a failed measurement must not fail the album. No lengths
+	// are handed over: the outputs were just encoded, so all but a raw ADTS
+	// or a Matroska state a countable length, and the opener decodes and
+	// counts those two itself. The write loop's Levels.Samples is not that
+	// number for ADTS, whose container carries no gapless trim, so a decode
+	// of the file delivers the encoder's priming and padding on top of it.
+	med, closer, err := runner.OpenAlbumConcat(ctx, outputs, nil)
 	if err != nil {
 		return nil
 	}

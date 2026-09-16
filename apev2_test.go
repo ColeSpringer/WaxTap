@@ -356,16 +356,22 @@ func TestSourceCodecClassParity(t *testing.T) {
 			}
 		}
 	}
-	// Probe-only names: PCM sources are lossless; WMA decodes are lossy; an
-	// unknown codec is neither, so warnings keyed on the split fail closed.
+	// Probe-only names: PCM sources are lossless; the decode-only codecs are
+	// lossy, WMA Lossless excepted, whose decode is the encoder's input bit for
+	// bit; an unknown codec is neither, so warnings keyed on the split fail
+	// closed.
 	if !losslessSource("pcm") || !losslessSource("pcm_s16le") || lossySource("pcm") {
 		t.Error("pcm must classify lossless")
 	}
-	for _, name := range []string{"wma", "musepack"} {
+	for _, name := range []string{"wma", "wmapro", "wmavoice", "musepack", "alaw", "mulaw", "ima-adpcm", "ms-adpcm"} {
 		if !lossySource(name) || losslessSource(name) {
 			t.Errorf("%s must classify lossy", name)
 		}
 	}
+	if !losslessSource("wmalossless") || lossySource("wmalossless") {
+		t.Error("wmalossless must classify lossless")
+	}
+
 	if lossySource("mystery") || losslessSource("mystery") {
 		t.Error("an unknown codec must classify as neither")
 	}

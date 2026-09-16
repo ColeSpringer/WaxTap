@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -125,14 +126,23 @@ type Result struct {
 	// compare it against OutputProbe to detect a fold the encoder applied on its
 	// own, which no field of the request would otherwise reveal.
 	SourceChannels int
-	// SourceWarnings are the input probe's damage notes (media.ProbeResult
-	// .Warnings), carried so a caller can report that the delivered audio is
-	// the readable part of a damaged file rather than all of it.
+	// SourceWarnings are the input's damage notes, carried so a caller can
+	// report that the delivered audio is the readable part of a damaged file
+	// rather than all of it: the probe's (media.ProbeResult.Warnings), then
+	// what the write's read found past the headers (media.Result
+	// .InputWarnings; a demuxer that walks its payload lazily finds damage
+	// where the read reaches it), each once, then the short-decode note when
+	// the output came up short of what the source declared.
 	//
-	// Only the input probe contributes. The output probe below is of a file
-	// this pipeline just wrote, where damage would be an encoder defect rather
-	// than something to warn the user about their input.
+	// Only the input contributes. The output probe below is of a file this
+	// pipeline just wrote, where damage would be an encoder defect rather than
+	// something to warn the user about their input.
 	SourceWarnings []string
+	// SourceNotes are the engine's remarks on an input that is not damaged
+	// (media.ProbeResult.Notes): what it did with a well-formed file. The
+	// probe's list is the whole of it: the engine raises every note when it
+	// opens the file, so unlike damage none turns up later in the read.
+	SourceNotes []string
 	// SourceEmpty says the input's audio track decodes to no frames at all: a
 	// container that parses and declares a codec but delivers nothing, whether
 	// it stores nothing or stores only samples its gapless trims discard. It is
@@ -278,7 +288,12 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		srcChannels = audio.Channels
 	}
 	res.SourceChannels = srcChannels
-	res.SourceWarnings = probe.Warnings
+	// Both lists are cloned: the warnings grow below and the notes go out
+	// to the caller, and the probe's backing arrays are its own. The notes
+	// are complete as probed, since the engine raises every note at open;
+	// only damage is found past the headers by a read.
+	res.SourceWarnings = slices.Clone(probe.Warnings)
+	res.SourceNotes = slices.Clone(probe.Notes)
 	res.SourceEmpty = sourceEmpty
 
 	// Reduce the channel count only when the source exceeds the requested target.
@@ -372,6 +387,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			return Result{}, err
 		}
 		res.LoudnessMeasured = true
+		// The measurement read the whole input, so its damage list is the
+		// complete one, with or without a write to follow.
+		res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, measured.Warnings)
 		m := measured
 		res.InputLoudness = &m
 	}
@@ -433,6 +451,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			res.Cut = cres.Applied
 			res.Removed = cres.Removed
 			res.Levels = cres.Levels
+			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, cres.InputWarnings)
 			// A copy cut that fell back to a re-encode (cut-remux declined the source
 			// codec) reports the encode it actually produced.
 			if copyCut && cres.Mode == media.ModeAccurate {
@@ -453,6 +472,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		tres, err := r.Transcode(ctx, input, output, enc)
 		if err == nil {
 			res.Levels = tres.Levels
+			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, tres.InputWarnings)
 		}
 		return err
 	}
@@ -525,6 +545,19 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		}
 	}
 	return res, nil
+}
+
+// mergeSourceWarnings appends the damage a write's read found to the probe's
+// list, each line once: the write closure can run more than once (the
+// PeakLimit gain search), and every pass reads the same file and finds the
+// same damage.
+func mergeSourceWarnings(have, found []string) []string {
+	for _, w := range found {
+		if !slices.Contains(have, w) {
+			have = append(have, w)
+		}
+	}
+	return have
 }
 
 // Tuning for the PeakLimit gain search.

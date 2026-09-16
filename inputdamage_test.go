@@ -5,11 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
+	"github.com/colespringer/waxtap/v3/internal/pipeline"
 )
 
 // warningDetail returns the detail of the first warning carrying code, or "".
@@ -62,6 +65,12 @@ func TestProcessWarnsInputDamage(t *testing.T) {
 	}{
 		{"wav", FormatWAV, ".wav", "clamped"},
 		{"flac", FormatFLAC, ".flac", "declares"},
+		// The frame-indexed payloads walk lazily: their probe reads the headers
+		// clean, and the truncated frame is found by the read that reaches it,
+		// which the write reports and the warning carries. ADTS declares no
+		// length at all, so nothing else would have said the file was short.
+		{"mp3", FormatMP3, ".mp3", "truncated final frame"},
+		{"aac", FormatAAC, ".aac", "final frame truncated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -92,7 +101,124 @@ func TestProcessWarnsInputDamage(t *testing.T) {
 			if !strings.Contains(detail, tc.detail) {
 				t.Errorf("detail = %q, want it to carry the parser's own note (%q)", detail, tc.detail)
 			}
+			if !strings.HasPrefix(detail, "the input is damaged: ") {
+				t.Errorf("detail = %q, want the verdict to lead now that the list holds damage alone", detail)
+			}
+			if hasWarning(res, WarnInputNote) {
+				t.Errorf("a truncated input raised the not-damage note: %+v", res.Warnings)
+			}
 		})
+	}
+}
+
+// A measure-only run reads the whole input too, so the damage a lazy walker
+// leaves for the read reaches the warning with no output written: a truncated
+// ADTS stream declares no length, so nothing else would say it was short.
+func TestMeasureOnlyWarnsReadDamage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, truncated := damagedFixture(t, dir, "in.aac", FormatAAC)
+	res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+		Input:       truncated,
+		ProcessSpec: ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly}},
+	})
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+	detail := warningDetail(res, WarnInputDamage)
+	if !strings.HasPrefix(detail, "the input is damaged: ") || !strings.Contains(detail, "truncated") {
+		t.Errorf("measure-only damage = %q, want the verdict and the torn frame the read found", detail)
+	}
+}
+
+// A cut of several spans reads the one source through a timeline, which names
+// each span's findings after its member; the warning carries the source's own
+// words once, with no member index, whatever the engine's prefix looks like.
+// The damage is junk spliced into the middle of an MP3: the frame walk is
+// lazy, so the probe passes the file clean and the resync is found by the
+// read, and every frame is still there, so no span outruns the file.
+func TestCutWarningsCarryNoMemberPrefix(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	intact, _ := damagedFixture(t, dir, "in.mp3", FormatMP3)
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid := len(whole) / 2
+	spliced := filepath.Join(dir, "spliced.mp3")
+	if err := os.WriteFile(spliced, slices.Concat(whole[:mid], make([]byte, 300), whole[mid:]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
+		Input: spliced,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "cut.wav")),
+			Transcode: &TranscodeSpec{Format: FormatWAV},
+			Cut: &CutSpec{Ranges: []TimeRange{
+				{Start: 100 * time.Millisecond, End: 200 * time.Millisecond},
+				{Start: 350 * time.Millisecond, End: 450 * time.Millisecond},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+	detail := warningDetail(res, WarnInputDamage)
+	if detail == "" {
+		t.Fatalf("no %s warning on a spliced input; warnings = %+v", WarnInputDamage, res.Warnings)
+	}
+	if !strings.HasPrefix(detail, "the input is damaged: ") || strings.Contains(detail, "member ") {
+		t.Errorf("detail = %q, want the verdict then the engine's finding, with no member index", detail)
+	}
+	finding := strings.TrimPrefix(detail, "the input is damaged: ")
+	if first, _, _ := strings.Cut(finding, ";"); strings.Count(finding, first) != 1 {
+		t.Errorf("detail = %q, want each finding once across the spans", detail)
+	}
+}
+
+// A clipped sample on a source whose decode stays in range is the gain's
+// doing, so it warns; on a transform codec the decoder's own overshoot makes
+// the count meaningless, so it does not.
+func TestDecodeOvershootsGatesClipping(t *testing.T) {
+	for codec, want := range map[string]bool{
+		"opus": true, "mp3": true, "aac": true, "wma": true, "wmapro": true, "musepack": true,
+		"alaw": false, "mulaw": false, "ima-adpcm": false, "ms-adpcm": false, "flac": false, "wmalossless": false, "pcm": false,
+	} {
+		if got := decodeOvershoots(codec); got != want {
+			t.Errorf("decodeOvershoots(%q) = %v, want %v", codec, got, want)
+		}
+	}
+	levels := media.Levels{ClippedSamples: 3, Samples: 8000, Channels: 1, Quantized: true}
+	for codec, warns := range map[string]bool{"alaw": true, "flac": true, "opus": false} {
+		em := newEmitter(nil, "")
+		warnOutputClipping(em, nil, pipeline.Result{SourceCodec: codec, Levels: levels})
+		if got := len(em.collected()) == 1; got != warns {
+			t.Errorf("%s source with clipped samples warned = %v, want %v", codec, got, warns)
+		}
+	}
+}
+
+// The engine's damage and its remarks on a well-formed input go out under
+// different codes: the damage with its verdict, the remarks verbatim.
+func TestInputRemarksSplitDamageFromNotes(t *testing.T) {
+	em := newEmitter(nil, "")
+	warnInputDamage(em, pipeline.Result{
+		SourceWarnings: []string{"data chunk clamped to the file"},
+		SourceNotes:    []string{"no ftyp box", "ignoring a video track"},
+	})
+	got := em.collected()
+	if len(got) != 2 {
+		t.Fatalf("warnings = %+v, want one damage and one note", got)
+	}
+	if got[0].Code != WarnInputDamage || got[0].Detail != "the input is damaged: data chunk clamped to the file" {
+		t.Errorf("damage = %+v, want the verdict then the note", got[0])
+	}
+	if got[1].Code != WarnInputNote || got[1].Detail != "no ftyp box; ignoring a video track" {
+		t.Errorf("note = %+v, want the remarks verbatim under input-note", got[1])
+	}
+	if em := newEmitter(nil, ""); len(func() []Warning { warnInputDamage(em, pipeline.Result{}); return em.collected() }()) != 0 {
+		t.Error("a clean input warned")
 	}
 }
 

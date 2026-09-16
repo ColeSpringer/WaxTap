@@ -115,13 +115,14 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   in `.m4a` at 64 kbps by default (a low-bitrate preset; `aac` stays the
   256 kbps AAC-LC one), and `--format aac` on a source that is already HE-AAC
   copies it under its own identity rather than re-encoding it to AAC-LC.
-  WavPack, Monkey's Audio (APE), WMA, and Musepack (`.mpc`) files are also
-  accepted as local inputs; WMA and Musepack are decode-only, so
-  `--format copy` on one is refused. Their chapters (ASF markers, SV8 chapter
-  packets) carry like any other input's. `--album` cannot take a WMA file yet:
-  the engine's album timeline refuses the frame tail its WMA decoder delivers
-  past the declared length (the fix is upstream), so process WMA tracks one at
-  a time.
+  WavPack, Monkey's Audio (APE), WMA (versions 1 and 2, Pro, Voice, and
+  Lossless), and Musepack (`.mpc`) files are also accepted as local inputs, as
+  are WAV, AIFF-C, and MP4/MOV files carrying G.711 or IMA ADPCM audio or MP3
+  frames, Microsoft ADPCM in WAV and MP4/MOV, and uncompressed PCM in
+  MP4/MOV. WMA, Musepack, G.711, and ADPCM are decode-only, so
+  `--format copy` on one is refused; an MP3 carried in a WAV or MP4 copies
+  out to a bare `.mp3`. Chapters (ASF markers, SV8 chapter packets) carry
+  like any other input's.
 - `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
   and `{index}`. `{index}` numbers playlist items and expands empty for a single
   video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`

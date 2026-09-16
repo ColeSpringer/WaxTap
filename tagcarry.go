@@ -1,6 +1,10 @@
 package waxtap
 
-import "github.com/colespringer/waxlabel"
+import (
+	"slices"
+
+	"github.com/colespringer/waxlabel"
+)
 
 // TagCarry itemizes what carrying a local input's embedded metadata onto the
 // output did with each piece: the facts the tag-carry-incomplete warning tells
@@ -97,7 +101,8 @@ type CarryItem struct {
 	// Count is what the item stands for: a field's values, or the pictures,
 	// chapters, or synced-lyrics sets in a set. For a set that landed it is
 	// the output's count, a cut's removals taken out; for one that did not,
-	// the input's.
+	// what the carry would have written: the input's, or after a cut the
+	// remap's, with Removed the rest.
 	Count       int
 	Disposition CarryDisposition
 	// Reason says why, for anything but DispositionCarried and
@@ -150,28 +155,41 @@ func carryDisposition(d waxlabel.Disposition) CarryDisposition {
 	return DispositionCarried
 }
 
-// remapped records a cut's remap of a set that landed: its carried and
-// downgraded items fold into one that states what the output holds and what
-// the cut removed, downgraded if any part was, and removed outright when the
-// cut left nothing.
-func (tc *TagCarry) remapped(kind CarryKind, count, removed int) {
-	landed := func(it CarryItem) bool {
+// remapped records a cut's remap of a set. Where the set landed, its carried
+// and downgraded items fold into one that states what the output holds and
+// what the cut removed, downgraded if any part was. A set the cut emptied
+// never entered the transfer and has no item, so one is added, in the
+// transfer's place for it, reporting it removed outright. A set the
+// destination dropped keeps its item, whose Count is the remap's (the list
+// the transfer graded), and takes what the cut removed beside it.
+func (tc *TagCarry) remapped(kind CarryKind, r cutRemap, landed bool) {
+	if !landed {
+		if r.kept == 0 && r.removed > 0 {
+			tc.insert(CarryItem{Kind: kind, Disposition: DispositionRemoved, Removed: r.removed})
+			return
+		}
+		for i, it := range tc.Items {
+			if it.Kind == kind {
+				tc.Items[i].Removed = r.removed
+				break
+			}
+		}
+		return
+	}
+	isLanded := func(it CarryItem) bool {
 		return it.Kind == kind && (it.Disposition == DispositionCarried || it.Disposition == DispositionDowngraded)
 	}
-	merged := CarryItem{Kind: kind, Count: count, Removed: removed}
+	merged := CarryItem{Kind: kind, Count: r.kept, Removed: r.removed}
 	for _, it := range tc.Items {
-		if landed(it) && it.Disposition == DispositionDowngraded {
+		if isLanded(it) && it.Disposition == DispositionDowngraded {
 			merged.Disposition, merged.Reason = DispositionDowngraded, it.Reason
 		}
-	}
-	if count == 0 && removed > 0 {
-		merged.Disposition, merged.Reason = DispositionRemoved, ""
 	}
 	out := make([]CarryItem, 0, len(tc.Items))
 	placed := false
 	for _, it := range tc.Items {
 		switch {
-		case !landed(it):
+		case !isLanded(it):
 			out = append(out, it)
 		case !placed:
 			out = append(out, merged)
@@ -179,6 +197,20 @@ func (tc *TagCarry) remapped(kind CarryKind, count, removed int) {
 		}
 	}
 	tc.Items = out
+}
+
+// insert places it before the first item of a later kind, so Items keeps the
+// transfer's order (fields, then pictures, chapters, synced lyrics), which is
+// the order CarryKind's values run in.
+func (tc *TagCarry) insert(it CarryItem) {
+	at := len(tc.Items)
+	for i, have := range tc.Items {
+		if have.Kind > it.Kind {
+			at = i
+			break
+		}
+	}
+	tc.Items = slices.Insert(tc.Items, at, it)
 }
 
 // restored marks the excluded fields a remux put back as carried.

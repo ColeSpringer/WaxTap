@@ -16,8 +16,8 @@ stale. Every license and notice text is reproduced verbatim.
 | Component | Version | License |
 |---|---|---|
 | Go runtime and standard library | go 1.26 | BSD-3-Clause |
-| github.com/colespringer/waxflow | v0.0.0-20260902192358-f6352566869c | MIT (see also THIRD-PARTY-NOTICES.md) |
-| github.com/colespringer/waxlabel | v1.6.2 | MIT |
+| github.com/colespringer/waxflow | v0.0.0-20260914172240-dc7ff3fe670a | MIT (see also THIRD-PARTY-NOTICES.md) |
+| github.com/colespringer/waxlabel | v1.8.0 | MIT |
 | github.com/dlclark/regexp2/v2 | v2.5.2 | MIT |
 | github.com/dop251/goja | v0.0.0-20260723142020-b4aef50fa347 | MIT / see text / BSD-3-Clause |
 | github.com/go-sourcemap/sourcemap | v2.1.4+incompatible | BSD-2-Clause |
@@ -62,7 +62,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/colespringer/waxflow v0.0.0-20260902192358-f6352566869c
+## github.com/colespringer/waxflow v0.0.0-20260914172240-dc7ff3fe670a
 
 License: MIT (LICENSE)
 
@@ -100,9 +100,11 @@ Third-party attributions the module carries, reproduced verbatim.
 Attributions for code studied closely or ported into WaxFlow, per
 [ADR-0001](docs/adr/0001-clean-room-policy.md). Almost every entry below is
 permissively licensed (Tier A) source. The exceptions are **codec/wma**,
-whose parameter tables are extracted from a copyleft project under the ADR's
-provision for data-only artifacts, because the format has no published
-specification to restate, and the **scripts/mpcchap** stub, which declares a
+**codec/wmapro** and **codec/wmavoice**, whose parameter tables are extracted
+from a copyleft project under the ADR's provision for data-only artifacts,
+because none of the three formats has a published specification to restate,
+and the **scripts/mpcchap**
+stub, which declares a
 copyleft library's API by name so a reference test tool can be built without
 it; each entry states the difference and its reasoning in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
 the module cache and are not vendored here.
@@ -137,6 +139,52 @@ Entries follow this format:
 > analysis window is derived from the synthesis window (attributed
 > above). *Shine* (LGPL, Tier B) is used only as a black-box quality
 > oracle through `ffmpeg -c:a libshine`; its source was not consulted.
+
+> **codec/adpcm tables**: four tables of published specification data,
+> restated rather than ported from any implementation. The IMA step
+> table (89 entries) and step-index adjustment table (16 entries) are
+> the data of the IMA Digital Audio Special Interest Group's
+> *Recommended Practices for Enhancing Digital Audio Compatibility in
+> Multimedia Systems*, revision 3.00 (1992); the Microsoft adaptation
+> table (16 entries) and default predictor coefficient table (7 pairs)
+> are the data of Microsoft's *Multimedia Programming Interface and Data
+> Specifications 1.0* and the *Multimedia Data Standards Update*, which
+> define WAVE format tags 0x0011 and 0x0002. Both documents are
+> published format specifications, so this is spec data under ADR-0001's
+> Tier A provision and not an extraction from a copyleft project. The
+> decoders themselves are original code written against those documents
+> and against the QuickTime File Format specification for the `ima4`
+> packet layout; ffmpeg is the differential oracle and the fixture
+> generator only, and its source was not consulted. The two places the
+> documents are silent (the WAV layout's multiply form, and QuickTime's
+> predictor carry across blocks) were established black-box, by
+> measuring the reference binary's output against both candidate
+> readings.
+
+> **codec/g711**: no table is ported. ITU-T Recommendation G.711 (1988)
+> states the segment structure and the bit inversions of both laws, and
+> the 256-entry expansion tables are computed from that structure at
+> init; the tests check every code against a second closed form written
+> from the same text, so a transcription error has nowhere to hide.
+
+> **container/mp4 layout tables**: two tables of published specification
+> data, restated rather than ported from any implementation. The QuickTime
+> `chan` box's layout tags, channel labels and bitmap bits (`chan.go`) are
+> the values of Apple's public *CoreAudioTypes* header (the
+> AudioChannelLayoutTag, AudioChannelLabel and AudioChannelBitmap
+> enumerations, as shipped in the macOS SDK), each tag's channel order
+> taken from the header's own comment on it. The ISO `chnl` box's speaker
+> positions and channel configurations (`chnl.go`) are the data of the
+> OutputChannelPosition and ChannelConfiguration tables of ISO/IEC 23091-3
+> (coding-independent code points, audio; the successor of the withdrawn
+> ISO/IEC 23001-8 that ISO/IEC 14496-12 names), checked against the text of
+> the amendment that restates both tables (MAINTENANCE.md records the
+> sources and which rows files confirm besides). Both are
+> published format specifications, so this is spec data under ADR-0001's
+> Tier A provision and not an extraction from a copyleft project. The
+> readers themselves are original code written against those documents
+> and ISO/IEC 14496-12; ffmpeg is the fixture generator and the layout
+> oracle only, and its source was not consulted.
 
 > **codec/alac decoder**: a clean-room port of Apple's *ALAC* reference
 > decoder (Apache-2.0), https://github.com/macosforge/alac. The adaptive
@@ -341,7 +389,7 @@ Entries follow this format:
 > decisions, and the container writer.
 
 > **codec/ape decoder**: a clean-room port of the *Monkey's Audio* reference
-> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.25. A lossless
+> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.26. A lossless
 > decoder has to reproduce the reference bit for bit, so the parts that define
 > the bitstream are ported faithfully: the range decoder and its two symbol
 > models (`UnBitArray.cpp` and `Old/UnBitArrayOld.cpp`, with the model tables
@@ -412,6 +460,80 @@ Entries follow this format:
 > silent on a combination, the decoder refuses it by name rather than
 > guessing at FFmpeg's behaviour.
 
+> **codec/wmapro parameter tables**: the same black-box PARAMETER
+> artifact as the entry above, for a different codec. WMA Pro
+> (`wFormatTag` 0x0162) has no published bitstream specification either,
+> so `codec/wmapro/tables_bands.go`, `tables_scale.go`, `tables_coef.go`
+> and `tables_decorr.go` have *FFmpeg* (LGPL-2.1-or-later),
+> https://github.com/FFmpeg/FFmpeg, n9.0, commit
+> d32b387f2b0a484599d4587d651891f0c63c4238, as their primary source: the
+> scale-factor books (DPCM and run-level) with the run and level a
+> run-level symbol names, the two run-level coefficient books, the 4-,
+> 2- and 1-element vector books, the default channel decorrelation
+> matrices, and the critical-band upper edges in Hz, all from
+> `libavcodec/wmaprodata.h`. The band edges are published Bark-scale
+> data; the books and the matrices are not. They are **data only**:
+> codeword, length, symbol, run and level values, with no decoder logic
+> of any kind, and nothing derived from them is tabulated here (the
+> per-block-size scale-factor band layout, the subwoofer cutoff and the
+> sine windows are all computed at run time from the edges, the block
+> size and the sample rate). The extraction is mechanical and auditable:
+> `codec/wmapro/tablesgen_test.go` parses the upstream file under a
+> SHA-256 pin and emits the Go tables, so a reviewer can re-run it and
+> diff. It runs under a build tag and needs a checked-out FFmpeg tree,
+> so it is never part of an ordinary build. The behavioural analysis
+> from the same pass is in `docs/notes/wma-pro-bitstream.md` and
+> `docs/notes/wma-pro-oracle-corpus.md`; the stage that implements the
+> decoder consumes those notes and these tables and does not open
+> FFmpeg. The `ffmpeg` binary additionally serves as a test-only
+> differential oracle, though not a fixture generator: it has no encoder
+> for this format, so the fixtures come from Windows' own encoder.
+>
+> The decoder in `codec/wmapro` was written in that later stage, from
+> those notes and these tables and nothing else. It is not a port: no
+> FFmpeg source was open while it was written, the checkouts the analysis
+> sessions had fetched were deleted from the machine before it began, and
+> the two are structured differently (the transform is built on this
+> tree's shared `dsp/fft` kernel, the reader is its own, and the walk is
+> organised around the notes' description rather than around any source
+> file). Where the notes mark a shape as undetermined, the decoder refuses
+> it by name rather than guessing at FFmpeg's behaviour.
+
+> **codec/wmavoice parameter tables**: the same black-box PARAMETER
+> artifact as the two entries above, for a third codec. WMA Voice
+> (`wFormatTag` 0x000A) has no published bitstream specification either,
+> so `codec/wmavoice/tables_lsp.go`, `tables_gain.go`, `tables_pulse.go`,
+> `tables_interp.go` and `tables_denoise.go` have *FFmpeg*
+> (LGPL-2.1-or-later), https://github.com/FFmpeg/FFmpeg, n9.0, commit
+> d32b387f2b0a484599d4587d651891f0c63c4238, as their primary source: the
+> eight LSP vector-quantiser codebooks, the four LSP interpolation
+> coefficient sets, the two mean-LSF vectors, the comfort-noise codebook,
+> the four gain codebooks, the two adaptive-codebook interpolation
+> filters and the two postfilter tables, all from
+> `libavcodec/wmavoice_data.h`, plus one array of pitch-adaptive window
+> start offsets from `libavcodec/wmavoice.c`, which is where that one
+> lives upstream and which is the only thing read from that file. Two of
+> the tables are samplings of published closed forms (an exponential
+> magnitude ladder and a power law, both stated in the note) and ship
+> tabulated rather than computed because the values feed integer index
+> lookups; the codebooks and the filters are not published anywhere.
+> They are **data only**: codebook entries, gains, filter taps and
+> offsets, with no decoder logic of any kind, and nothing derived from
+> them is tabulated here (the pitch bounds, every derived field width,
+> the frame-type descriptor table, the frame-type codeword lengths, the
+> postfilter's phase table and its four transforms are all computed at
+> run time). The extraction is mechanical and auditable:
+> `codec/wmavoice/tablesgen_test.go` parses the two upstream files under
+> SHA-256 pins and emits the Go tables, so a reviewer can re-run it and
+> diff. It runs under a build tag and needs a checked-out FFmpeg tree, so
+> it is never part of an ordinary build. The behavioural analysis from
+> the same pass is in `docs/notes/wma-voice-bitstream.md` and
+> `docs/notes/wma-voice-oracle-corpus.md`; the stage that implements the
+> decoder consumes those notes and these tables and does not open
+> FFmpeg. The `ffmpeg` binary additionally serves as a test-only
+> differential oracle, though not a fixture generator: it has no encoder
+> for this format, so the fixtures come from Windows' own encoder.
+
 > **codec/musepack decoder and container/mpc**: a clean-room port of
 > *libmpcdec* from the Musepack Development Team's musepack_src_r475
 > (BSD-3-Clause, Copyright (c) 2005-2009, The Musepack Development Team),
@@ -472,7 +594,7 @@ Entries follow this format:
 > Tech 3341/3342; no source was ported.
 ```
 
-## github.com/colespringer/waxlabel v1.6.2
+## github.com/colespringer/waxlabel v1.8.0
 
 License: MIT (LICENSE)
 
