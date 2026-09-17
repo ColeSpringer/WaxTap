@@ -286,3 +286,39 @@ func buildDefaultProfiles(webUA string) []ClientProfile {
 		makeProfile(embedded),
 	}
 }
+
+// adoptedProfile applies an adopted session's browser identity to a browser
+// profile, the way webContextProfile applies a context's version: the profile is
+// rebuilt through makeProfile so the User-Agent and X-Youtube-Client-Version
+// headers follow the scalars (see doc.go: profiles are immutable, derive, never
+// mutate).
+//
+// The user agent applies to WEB and WEB_EMBEDDED_PLAYER; the client version to
+// WEB alone, since it is the WEB player's. Native clients and sessions without an
+// identity return profile unchanged. An adopted identity outranks
+// Options.ChromeMajor and a WEB profile from a ProfileOverridePath: the cookies,
+// the visitor id, and the token all belong to that browser, so the requests
+// carrying them have to present it too.
+func adoptedProfile(profile ClientProfile, sess *session) ClientProfile {
+	if sess == nil || sess.source != visitorAdopted || (sess.userAgent == "" && sess.clientVersion == "") {
+		return profile
+	}
+	isWeb := profile.InnerTubeName == profileWeb.InnerTubeName
+	if !isWeb && !isWebEmbedded(profile) {
+		return profile
+	}
+	base := profile
+	changed := false
+	if sess.userAgent != "" {
+		base.UserAgent = sess.userAgent
+		changed = true
+	}
+	if isWeb && sess.clientVersion != "" {
+		base.Version = sess.clientVersion
+		changed = true
+	}
+	if !changed {
+		return profile
+	}
+	return makeProfile(base)
+}

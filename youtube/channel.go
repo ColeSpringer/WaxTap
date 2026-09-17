@@ -137,11 +137,11 @@ func (c *Client) resolveChannelID(ctx context.Context, channelURL string) (strin
 // independent navigation/resolve_url endpoint, reading the channel ID from the
 // returned browse endpoint.
 func (c *Client) resolveChannelIDViaInnerTube(ctx context.Context, channelURL string) (string, error) {
-	profile := c.playlistProfile()
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
 		return "", err
 	}
+	profile := adoptedProfile(c.playlistProfile(), sess)
 	body, err := c.innertubePost(ctx, profile, sess, resolveEndpoint, c.newResolveRequest(profile, sess, channelURL))
 	if err != nil {
 		return "", explainBareDeadline(err, sess)
@@ -171,7 +171,7 @@ func (c *Client) resolveChannelIDViaScrape(ctx context.Context, channelURL strin
 	if err != nil {
 		return "", err
 	}
-	body, err := c.httpGet(ctx, c.webFallback, sess, consentBypassURL(channelURL))
+	body, err := c.httpGet(ctx, adoptedProfile(c.webFallback, sess), sess, consentBypassURL(channelURL))
 	if err != nil {
 		// A 404 means the handle or vanity name does not resolve to a channel: a
 		// user-input problem, classified alongside other availability verdicts,

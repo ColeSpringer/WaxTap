@@ -7,7 +7,8 @@ import (
 )
 
 // Options configures a Client. The zero value is usable; New fills in defaults
-// for timeouts, retry policy, and limits. All fields are read once during New.
+// for retry policy and limits. Timeouts has none, a zero field adds no deadline
+// (the CLI supplies its own). All fields are read once during New.
 type Options struct {
 	// HTTPClient is used for all requests. It should set a DialContext and a
 	// conservative Timeout, or rely on the per-operation context deadlines
@@ -52,8 +53,9 @@ type Options struct {
 	//
 	// The value applies to the default profile chain and to built-in WEB requests
 	// used for discovery and fallbacks. It does not modify profiles loaded from
-	// ProfileOverridePath, so the two options cannot be combined. New rejects
-	// values outside 0..999.
+	// ProfileOverridePath, so the two options cannot be combined. An adopted
+	// session carrying its own UserAgent outranks it on the adopted chain,
+	// watch-page fallback included. New rejects values outside 0..999.
 	ChromeMajor int
 
 	SponsorBlock SponsorBlockOptions // configures SponsorBlock API access
@@ -89,7 +91,8 @@ type Options struct {
 	// this chain; the forced client serves as its fallback.
 	Client string
 
-	// Session is an externally supplied guest identity (visitorData + cookies)
+	// Session is an externally supplied guest identity (visitorData + cookies,
+	// with the browser identity fields, see [potoken.Session])
 	// WaxTap adopts verbatim instead of bootstrapping its own, for byte-exact
 	// session coherence with a PO-token minter. Session.VisitorData must be the
 	// browser's exact X-Goog-Visitor-Id literal (the URL-escaped form in
@@ -108,8 +111,10 @@ type Options struct {
 	Session *POTokenSession
 
 	// SessionProvider resolves the adopted guest identity lazily, at most once per
-	// Client (cached on success). It is the pull-based form of Session and shares
-	// its uniform-chain requirement. Mutually exclusive with Session.
+	// Client (cached on success), under Timeouts.WebContext (with the browser
+	// identity fields, see [potoken.Session]). It is the pull-based form of
+	// Session and shares its uniform-chain requirement. Mutually exclusive with
+	// Session.
 	//
 	// A provider that also implements [potoken.SessionInvalidator] can replace its
 	// session mid-download when googlevideo caps delivery on it; without that, a
@@ -151,9 +156,14 @@ type Concurrency struct {
 // single global download cap; each operation gets its own budget. A zero field
 // means WaxTap adds no extra deadline for that operation.
 type Timeouts struct {
-	Extraction   time.Duration // player-response fetch + parse
-	Resolve      time.Duration // stream-URL resolution (incl. cipher JS)
-	WebContext   time.Duration // per attested /player-context fetch, mid-stream re-fetches included
+	Extraction time.Duration // player-response fetch + parse
+	Resolve    time.Duration // stream-URL resolution (incl. cipher JS)
+	// WebContext bounds one attested handoff, a /player-context call or the
+	// /session resolution an extraction runs ahead of its own budget, including
+	// the wait the sidecar asks for and the one retry; mid-stream re-fetches
+	// included. Enumeration resolves its session inline instead and is bounded
+	// only by the caller's context.
+	WebContext   time.Duration
 	SponsorBlock time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
 	ChunkRetry   time.Duration // per-chunk deadline for ranged downloads
 }

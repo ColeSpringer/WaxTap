@@ -121,7 +121,11 @@ waxtap info <url> --chrome-major 151
 ```
 
 The valid range is `0..999`; `0` selects the built-in default.
-`--chrome-major` cannot be combined with `--profile-override`.
+`--chrome-major` cannot be combined with `--profile-override`. An adopted
+session that carries its own `user_agent` outranks both on the adopted chain,
+including a WEB profile loaded from `--profile-override`: the cookies, the
+visitor id, and the PO token all belong to that browser, so the requests
+carrying them present it too.
 
 ### Profile overrides
 
@@ -207,9 +211,41 @@ Sidecar response classification:
 
 | Failure | Exit |
 |---|---|
-| HTTP 4xx except 408/429 | 2 |
+| HTTP 422 `video-unavailable` | 3 (the playability verdict's class) |
+| HTTP 4xx except 408/422/429 | 2 |
 | HTTP 429 | 5 |
 | Connection failure, HTTP 408/5xx, or invalid response | 9 |
+
+A refusal is retried once. A transport failure or an HTTP 408/5xx earns it after
+the wait the sidecar stated (`Retry-After` or `retry_after_seconds`), else after
+500 ms; a 429 earns it only with a stated wait, since a bare 429 says back off.
+Any other refusal, including a playability verdict, does not. A stated wait over
+60 s is reported rather than slept through.
+
+Every sidecar request is bounded by `WithSidecarTimeout` (CLI
+`sidecarTimeoutSeconds`), 60 s by default; a `/session` resolution runs under
+`Timeouts.WebContext` like a `/player-context` call, ahead of the extraction
+budget.
+
+A bot check the sidecar's browser hits ("Sign in to confirm you're not a bot",
+status `LOGIN_REQUIRED`) arrives as a per-video `video-unavailable` and
+classifies as `login-required`, as WaxTap's own WEB `/player` does; it arms no
+cool-down, so a batch run pays one context call per item until the chain
+delivers. If a later client reaches the stream, that verdict is dropped (see
+the precedence note below), so it decides the exit code only when nothing
+delivered. The ask for WaxSeal to answer it as `player-context-failed` is in
+docs/upstream-requests.md.
+
+Error precedence across a download's attempts: `waxerr.PreferErr` ranks
+availability verdicts above everything else, but an attempt that reached the
+transfer proves the video is there (a `/player` response carried playable
+formats and a signed URL resolved). Once one attempt has, a verdict from an
+attempt that never got that far is dropped from the choice, so a bot-checked
+sidecar or a token-less WEB client cannot make a video that demonstrably
+streams report exit 3. A verdict hit by the attempt that was itself delivering
+still stands, since that is the video refusing mid-download. Every dropped
+cause stays in the per-attempt detail `IncompleteDeliveryError.Attempts`
+renders.
 
 Player-context failures and GVS-token failures detected before delivery may
 fall back to the configured client chain. After delivery starts, token-refresh
@@ -225,12 +261,20 @@ response must include:
 - `video_playback_ustreamer_config`
 - non-empty `audio_formats`
 
-If present, `playability_status` must be `OK`.
+If present, `playability_status` must be `OK`. A non-200 answer carries
+`{"error","code"}` and, for `video-unavailable`, `details` holding the
+playability status; the status is classified as a `/player` status would be.
 `player_url` is needed when the streaming URL's `n` parameter must be
 descrambled. Format entries require enough identity to select and request the
 audio, especially `itag`, `lmt`, `xtags`, and `mime_type`; richer quality,
 duration, DRC, and track fields are optional. An optional `session_generation`
 names the daemon session behind the context.
+
+Optional metadata keys: `channel_id`, `description`, `thumbnails` (`url`,
+`width`, `height`, in the player response's order), `is_live_content`,
+`is_live_now`, `is_upcoming`, and `publish_date` (RFC 3339 or `2006-01-02`).
+They fill the delivered `Video` as a `/player` response would; a live or
+upcoming flag refuses the context with the same sentinels.
 
 `--player-context-url` requires `--potoken-url`, and the context mint and
 download must share an egress IP because the signed URL is IP-bound.
@@ -261,8 +305,12 @@ waxtap download <url> --client web \
 ```
 
 The `/session` response contains the exact `visitor_data` literal, optional
-cookies, and an optional `session_generation` naming the session. The camelCase
-keys `visitorData` and `sessionGeneration` are also accepted. Adoption requires
+cookies, an optional `session_generation` naming the session, and optional
+`user_agent` and `client_version` (the attesting browser's identity, applied to
+WEB requests under the session; WEB_EMBEDDED_PLAYER takes only the user agent).
+`cookie_header` and `same_site` are ignored: the cookies array carries the same
+information. The camelCase keys `visitorData`, `sessionGeneration`, `userAgent`,
+and `clientVersion` are also accepted. Adoption requires
 a single-client chain and drops login cookies. Adoption failures are fatal. The
 minter and download must share an egress IP.
 

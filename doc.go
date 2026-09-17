@@ -14,8 +14,9 @@
 // The default client chain returns playable audio for public videos with no PO
 // token. WEB-family clients need a [POTokenProvider] and remain experimental. For
 // byte-exact session coherence with a token minter, [Options.Session] /
-// [Options.SessionProvider] adopt an externally supplied guest visitorData and
-// cookies verbatim instead of bootstrapping; adoption requires a uniform client
+// [Options.SessionProvider] adopt an externally supplied guest visitorData,
+// cookies, and, when the provider exports them, the browser's user agent and
+// client version verbatim instead of bootstrapping; adoption requires a uniform client
 // chain ([Options.Client] or a single-family profile override) and resolves once
 // per Client.
 //

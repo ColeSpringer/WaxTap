@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,19 +97,113 @@ func TestCapRunes(t *testing.T) {
 	}
 }
 
-func TestSidecarReason(t *testing.T) {
-	if got := sidecarReason(strings.NewReader(`{"error":"bad scope"}`)); got != "bad scope" {
-		t.Errorf("reason from error field = %q", got)
+func TestReadSidecarRefusal(t *testing.T) {
+	refusal := func(status int, h http.Header, body string) sidecarRefusal {
+		if h == nil {
+			h = http.Header{}
+		}
+		return readSidecarRefusal(&http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body))})
 	}
-	if got := sidecarReason(strings.NewReader(`{"message":"try later"}`)); got != "try later" {
-		t.Errorf("reason from message field = %q", got)
+	if got := refusal(500, nil, `{"error":"bad scope"}`); got.Reason != "bad scope" {
+		t.Errorf("reason from error field = %q", got.Reason)
+	}
+	if got := refusal(500, nil, `{"message":"try later"}`); got.Reason != "try later" {
+		t.Errorf("reason from message field = %q", got.Reason)
 	}
 	// Non-JSON and fieldless bodies must not be echoed.
-	if got := sidecarReason(strings.NewReader("<html>secret token</html>")); got != "" {
-		t.Errorf("reason from HTML = %q, want empty (no leak)", got)
+	if got := refusal(500, nil, "<html>secret token</html>"); got != (sidecarRefusal{}) {
+		t.Errorf("refusal from HTML = %+v, want empty (no leak)", got)
 	}
-	if got := sidecarReason(strings.NewReader(`{"other":"x"}`)); got != "" {
-		t.Errorf("reason from fieldless JSON = %q, want empty", got)
+	if got := refusal(500, nil, `{"other":"x"}`); got != (sidecarRefusal{}) {
+		t.Errorf("refusal from fieldless JSON = %+v, want empty", got)
+	}
+
+	body := `{"error":"video unplayable: This video is private (playabilityStatus \"LOGIN_REQUIRED\")","code":"video-unavailable","details":"LOGIN_REQUIRED","retry_after_seconds":7}`
+	r := refusal(422, http.Header{"Retry-After": {"25"}}, body)
+	if r.Code != "video-unavailable" || r.Details != "LOGIN_REQUIRED" || !strings.Contains(r.Reason, "private") {
+		t.Errorf("refusal = %+v", r)
+	}
+	if r.RetryAfter != 25*time.Second {
+		t.Errorf("RetryAfter = %v, want the header to win over retry_after_seconds", r.RetryAfter)
+	}
+	if r := refusal(503, nil, `{"error":"no session","code":"no-session","retry_after_seconds":12}`); r.RetryAfter != 12*time.Second || r.Code != "no-session" {
+		t.Errorf("refusal = %+v, want retry_after_seconds honoured", r)
+	}
+
+	// Reason and code are rune-capped so a hostile body cannot flood a message.
+	long := strings.Repeat("x", 300)
+	longCode := strings.Repeat("c", 100)
+	r = refusal(500, nil, `{"error":"`+long+`","code":"`+longCode+`"}`)
+	if []rune(r.Reason)[sidecarReasonRunes] != '…' || len([]rune(r.Reason)) != sidecarReasonRunes+1 {
+		t.Errorf("reason len = %d runes, want %d plus an ellipsis", len([]rune(r.Reason)), sidecarReasonRunes)
+	}
+	if len([]rune(r.Code)) != sidecarCodeRunes+1 {
+		t.Errorf("code len = %d runes, want %d plus an ellipsis", len([]rune(r.Code)), sidecarCodeRunes)
+	}
+}
+
+func TestSidecarResponseErrorVerdict(t *testing.T) {
+	sre := &SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context", StatusCode: 422,
+		Code: SidecarCodeVideoUnavailable, Details: "LOGIN_REQUIRED", Reason: "video unplayable: This video is private"}
+	if !errors.Is(sre, ErrVideoRestricted) {
+		t.Errorf("private LOGIN_REQUIRED must unwrap to ErrVideoRestricted: %v", sre)
+	}
+	if !strings.Contains(sre.Error(), "HTTP 422 (video-unavailable)") {
+		t.Errorf("Error() = %q, want the code beside the status", sre.Error())
+	}
+	generic := &SidecarResponseError{StatusCode: 422, Code: SidecarCodeVideoUnavailable}
+	if !errors.Is(generic, ErrVideoUnavailable) {
+		t.Error("a video-unavailable refusal without details is the generic verdict")
+	}
+	other := &SidecarResponseError{StatusCode: 502, Code: "player-context-failed"}
+	if errors.Is(other, ErrVideoUnavailable) || other.Unwrap() != nil {
+		t.Error("only video-unavailable carries a verdict")
+	}
+	// A verdict a provider raised from a 200 body has no status, but the code is
+	// what explains its exit 3, so it has to reach the message there too.
+	coded200 := &SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+		Code: SidecarCodeVideoUnavailable, Details: "ERROR", Reason: `playability_status "ERROR"`}
+	if !strings.Contains(coded200.Error(), "(video-unavailable)") {
+		t.Errorf("Error() = %q, want the code even without an HTTP status", coded200.Error())
+	}
+	if !errors.Is(coded200, ErrVideoUnavailable) {
+		t.Errorf("a coded 200 verdict must still unwrap: %v", coded200)
+	}
+}
+
+func TestSidecarRetryWait(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		want  time.Duration
+		retry bool
+	}{
+		{"transport", &SidecarError{Err: errors.New("dial")}, sidecarTransientWait, true},
+		{"408", &SidecarResponseError{StatusCode: 408}, sidecarTransientWait, true},
+		{"500", &SidecarResponseError{StatusCode: 500}, sidecarTransientWait, true},
+		{"502", &SidecarResponseError{StatusCode: 502}, sidecarTransientWait, true},
+		{"503", &SidecarResponseError{StatusCode: 503}, sidecarTransientWait, true},
+		{"504", &SidecarResponseError{StatusCode: 504}, sidecarTransientWait, true},
+		// The set matches internal/httpx: a status that names something the
+		// sidecar will not do is final there too.
+		{"501", &SidecarResponseError{StatusCode: 501}, 0, false},
+		{"505", &SidecarResponseError{StatusCode: 505}, 0, false},
+		{"507", &SidecarResponseError{StatusCode: 507}, 0, false},
+		{"bare 429", &SidecarResponseError{StatusCode: 429}, 0, false},
+		{"429 with a stated wait", &SidecarResponseError{StatusCode: 429, RetryAfter: 3 * time.Second}, 3 * time.Second, true},
+		{"401", &SidecarResponseError{StatusCode: 401}, 0, false},
+		{"malformed 200", &SidecarResponseError{StatusCode: 0, Reason: "malformed JSON response"}, 0, false},
+		{"verdict", &SidecarResponseError{StatusCode: 422, Code: SidecarCodeVideoUnavailable}, 0, false},
+		{"wait past the cap", &SidecarResponseError{StatusCode: 502, RetryAfter: sidecarRetryMaxWait + time.Second}, 0, false},
+		{"other error", errors.New("boom"), 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, retry := sidecarRetryWait(tc.err)
+			if retry != tc.retry || (retry && got != tc.want) {
+				t.Errorf("sidecarRetryWait = %v, %v; want %v, %v", got, retry, tc.want, tc.retry)
+			}
+		})
 	}
 }
 
@@ -320,6 +416,17 @@ const validPlayerContextJSON = `{
   "title": "Big Buck Bunny",
   "author": "Blender",
   "length_seconds": 634,
+  "channel_id": "UCdummy",
+  "description": "desc",
+  "thumbnails": [
+    {"url":"https://i.ytimg.com/vi/dummyVideo0/default.jpg","width":168,"height":94},
+    {"url":"https://i.ytimg.com/vi/dummyVideo0/mqdefault.jpg","width":336,"height":188},
+    {"url":"https://i.ytimg.com/vi/dummyVideo0/maxresdefault.jpg","width":1280,"height":720}
+  ],
+  "is_live_content": true,
+  "is_live_now": false,
+  "is_upcoming": false,
+  "publish_date": "2015-04-10T00:00:00-07:00",
   "audio_formats": [
     {"itag":251,"lmt":"1719185012384481","xtags":"","mime_type":"audio/webm; codecs=\"opus\"","bitrate":143452,"audio_channels":2,"audio_sample_rate":48000,"content_length":9700000,"approx_duration_ms":634624}
   ],
@@ -368,6 +475,41 @@ func TestPlayerContextProviderDecode(t *testing.T) {
 	if pc.Generation != 7 {
 		t.Errorf("Generation = %d, want 7 (session_generation)", pc.Generation)
 	}
+	if pc.ChannelID != "UCdummy" || pc.Description != "desc" {
+		t.Errorf("channel/description = %q/%q", pc.ChannelID, pc.Description)
+	}
+	if len(pc.Thumbnails) != 3 || pc.Thumbnails[0].Width != 168 {
+		t.Errorf("thumbnails = %+v, want the wire order kept on the contract type", pc.Thumbnails)
+	}
+	if !pc.IsLiveContent || pc.IsLiveNow || pc.IsUpcoming {
+		t.Errorf("live flags = %v/%v/%v, want a finished broadcast", pc.IsLiveContent, pc.IsLiveNow, pc.IsUpcoming)
+	}
+	if pc.PublishDate != "2015-04-10T00:00:00-07:00" {
+		t.Errorf("publishDate = %q, want the raw microformat string", pc.PublishDate)
+	}
+
+	t.Run("older provider omits the metadata keys", func(t *testing.T) {
+		bare := `{"playability_status":"OK","server_abr_streaming_url":"u","video_playback_ustreamer_config":"c","visitor_data":"v","audio_formats":[{"itag":251}]}`
+		srv := newPlayerContextServer(t, http.StatusOK, bare)
+		defer srv.Close()
+		p, err := NewSidecarPlayerContextProvider(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc, err := p.ProvidePlayerContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pc.ChannelID != "" || pc.Description != "" || pc.PublishDate != "" {
+			t.Errorf("absent keys = %q/%q/%q, want empty", pc.ChannelID, pc.Description, pc.PublishDate)
+		}
+		if pc.Thumbnails != nil {
+			t.Errorf("thumbnails = %+v, want nil when the body carried none", pc.Thumbnails)
+		}
+		if pc.IsLiveContent || pc.IsLiveNow || pc.IsUpcoming {
+			t.Error("absent live flags must be false")
+		}
+	})
 }
 
 func TestPlayerContextProviderErrors(t *testing.T) {
@@ -379,6 +521,7 @@ func TestPlayerContextProviderErrors(t *testing.T) {
 	}{
 		{"non-200", http.StatusInternalServerError, "boom", "returned"},
 		{"status not OK", http.StatusOK, `{"playability_status":"ERROR: bot check"}`, "playability_status"},
+		{"video-unavailable 422", http.StatusUnprocessableEntity, `{"error":"video unplayable: This video is private","code":"video-unavailable","details":"LOGIN_REQUIRED"}`, "video-unavailable"},
 		{"missing url", http.StatusOK, `{"playability_status":"OK","visitor_data":"v","audio_formats":[{"itag":251}]}`, "missing"},
 		{"missing visitor", http.StatusOK, `{"playability_status":"OK","server_abr_streaming_url":"u","audio_formats":[{"itag":251}]}`, "missing"},
 		{"no formats", http.StatusOK, `{"playability_status":"OK","server_abr_streaming_url":"u","visitor_data":"v"}`, "missing"},
@@ -397,6 +540,21 @@ func TestPlayerContextProviderErrors(t *testing.T) {
 			}
 			if !strings.Contains(provErr.Error(), tc.want) {
 				t.Errorf("err = %q, want substring %q", provErr.Error(), tc.want)
+			}
+			switch tc.name {
+			case "video-unavailable 422":
+				if !errors.Is(provErr, ErrVideoRestricted) {
+					t.Errorf("err = %v, want the relayed playability verdict", provErr)
+				}
+				sre, ok := errors.AsType[*SidecarResponseError](provErr)
+				if !ok || sre.Code != SidecarCodeVideoUnavailable {
+					t.Errorf("err = %v, want a SidecarResponseError carrying the code", provErr)
+				}
+			case "status not OK":
+				// A 200 whose playability status is not OK is the same verdict.
+				if !errors.Is(provErr, ErrVideoUnavailable) {
+					t.Errorf("err = %v, want ErrVideoUnavailable", provErr)
+				}
 			}
 		})
 	}
@@ -482,8 +640,8 @@ func TestHTTPSessionProvider(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"visitor_data": "CgtBROWSER%3D%3D",
-			"user_agent": "Mozilla/5.0 ignored",
-			"client_version": "2.x",
+			"user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36",
+			"client_version": "2.20260901.00.00",
 			"cookie_header": "ignored=1",
 			"cookies": [
 				{"name":"PREF","value":"p","domain":".youtube.com","path":"/","secure":true,"http_only":false,"expires":1799999999},
@@ -513,13 +671,16 @@ func TestHTTPSessionProvider(t *testing.T) {
 	if sess.Cookies[1].Name != "YSC" || !sess.Cookies[1].HttpOnly {
 		t.Errorf("YSC http_only not parsed: %+v", sess.Cookies[1])
 	}
+	if sess.UserAgent != "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36" || sess.ClientVersion != "2.20260901.00.00" {
+		t.Errorf("browser identity = %q / %q, want the attesting browser's", sess.UserAgent, sess.ClientVersion)
+	}
 }
 
 // TestHTTPSessionProviderCamelCase confirms the documented camelCase variant is
 // still accepted (visitorData/httpOnly), so the contract does not break on casing.
 func TestHTTPSessionProviderCamelCase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"visitorData":"CgtX%3D%3D","cookies":[{"name":"PREF","value":"p","domain":".youtube.com","httpOnly":true}]}`))
+		_, _ = w.Write([]byte(`{"visitorData":"CgtX%3D%3D","userAgent":"Mozilla/5.0 camel","clientVersion":"2.20260901.00.00","cookies":[{"name":"PREF","value":"p","domain":".youtube.com","httpOnly":true}]}`))
 	}))
 	defer srv.Close()
 	p, err := NewSidecarSessionProvider(srv.URL)
@@ -532,6 +693,29 @@ func TestHTTPSessionProviderCamelCase(t *testing.T) {
 	}
 	if sess.VisitorData != "CgtX%3D%3D" || len(sess.Cookies) != 1 || !sess.Cookies[0].HttpOnly {
 		t.Errorf("camelCase not accepted: vd=%q cookies=%+v", sess.VisitorData, sess.Cookies)
+	}
+	if sess.UserAgent != "Mozilla/5.0 camel" || sess.ClientVersion != "2.20260901.00.00" {
+		t.Errorf("camelCase identity not accepted: %q / %q", sess.UserAgent, sess.ClientVersion)
+	}
+}
+
+// TestHTTPSessionProviderNoIdentity pins the optional half: a document without
+// the identity keys leaves both fields empty, so WaxTap keeps its own.
+func TestHTTPSessionProviderNoIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"visitor_data":"CgtX%3D%3D"}`))
+	}))
+	defer srv.Close()
+	p, err := NewSidecarSessionProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := p.ProvideSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.UserAgent != "" || sess.ClientVersion != "" {
+		t.Errorf("identity = %q / %q, want both empty", sess.UserAgent, sess.ClientVersion)
 	}
 }
 
@@ -550,12 +734,8 @@ func TestHTTPSessionProviderEmptyVisitorDataErrors(t *testing.T) {
 }
 
 func TestHTTPSessionProviderRetriesOnceThenFails(t *testing.T) {
-	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits++
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+	waits := recordSidecarSleeps(t)
+	srv, hitCount := scriptedSidecar(t, sidecarReply{status: http.StatusInternalServerError, body: "boom"})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	p, err := NewSidecarSessionProvider(srv.URL)
@@ -565,8 +745,11 @@ func TestHTTPSessionProviderRetriesOnceThenFails(t *testing.T) {
 	if _, err := p.ProvideSession(ctx); err == nil {
 		t.Fatal("expected failure after retries")
 	}
-	if hits != 2 {
-		t.Errorf("server hits = %d, want 2 (one retry)", hits)
+	if hitCount.Load() != 2 {
+		t.Errorf("server hits = %d, want 2 (one retry)", hitCount.Load())
+	}
+	if len(*waits) != 1 || (*waits)[0] != sidecarTransientWait {
+		t.Errorf("waits = %v, want one %v poke", *waits, sidecarTransientWait)
 	}
 }
 
@@ -745,5 +928,273 @@ func TestRedactURLsIn(t *testing.T) {
 	}
 	if got := redactURLsIn("pot=X only in https://host/p?pot=X"); strings.Contains(got, "?pot=X") {
 		t.Errorf("query string survived: %q", got)
+	}
+}
+
+// recordSidecarSleeps replaces sidecarSleep for the test and returns the waits
+// sidecarCall asked for, without sleeping.
+func recordSidecarSleeps(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var waits []time.Duration
+	prev := sidecarSleep
+	sidecarSleep = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return ctx.Err()
+	}
+	t.Cleanup(func() { sidecarSleep = prev })
+	return &waits
+}
+
+// sidecarReply is one scripted answer from a fake sidecar.
+type sidecarReply struct {
+	status     int
+	retryAfter string // Retry-After header, when the sidecar states one
+	body       string
+}
+
+// scriptedSidecar answers each request with the next reply, repeating the last
+// one once the script runs out, and counts the requests it served.
+func scriptedSidecar(t *testing.T, replies ...sidecarReply) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		r := replies[min(int(hits.Add(1))-1, len(replies)-1)]
+		if r.retryAfter != "" {
+			w.Header().Set("Retry-After", r.retryAfter)
+		}
+		if r.status != 0 && r.status != http.StatusOK {
+			w.WriteHeader(r.status)
+		}
+		_, _ = io.WriteString(w, r.body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestSidecarCall covers the whole retry policy against a scripted sidecar: how
+// many requests a refusal earns, and what it waits first.
+func TestSidecarCall(t *testing.T) {
+	const okContext = validPlayerContextJSON
+	coolDown := sidecarReply{status: http.StatusBadGateway, body: `{"error":"proof cool-down","code":"player-context-failed"}`}
+
+	cases := []struct {
+		name string
+		// deadline bounds the call; zero means none.
+		deadline time.Duration
+		replies  []sidecarReply
+		wantHits int64
+		wantWait []time.Duration
+		// check inspects the final error; nil means the call must succeed.
+		check func(t *testing.T, err error)
+	}{
+		{
+			name:     "a stated wait is honoured",
+			replies:  []sidecarReply{withRetryAfter(coolDown, "25"), {body: okContext}},
+			wantHits: 2,
+			wantWait: []time.Duration{25 * time.Second},
+		},
+		{
+			name: "a stated wait is read from the body when no header carries one",
+			replies: []sidecarReply{
+				{status: http.StatusServiceUnavailable, body: `{"error":"no session","code":"no-session","retry_after_seconds":12}`},
+				{body: okContext},
+			},
+			wantHits: 2,
+			wantWait: []time.Duration{12 * time.Second},
+		},
+		{
+			name:     "a wait past the cap is reported rather than slept through",
+			replies:  []sidecarReply{withRetryAfter(coolDown, "120")},
+			wantHits: 1,
+			check: func(t *testing.T, err error) {
+				sre, ok := errors.AsType[*SidecarResponseError](err)
+				if !ok || sre.RetryAfter != 120*time.Second {
+					t.Errorf("err = %v, want the stated 120s reported on the refusal", err)
+				}
+			},
+		},
+		{
+			name: "a wait that cannot fit the deadline is not slept through",
+			// 2s plus the one-second retry headroom does not fit a 3s budget.
+			deadline: 3 * time.Second,
+			replies:  []sidecarReply{withRetryAfter(coolDown, "2")},
+			wantHits: 1,
+			check: func(t *testing.T, err error) {
+				if _, ok := errors.AsType[*SidecarResponseError](err); !ok {
+					t.Errorf("err = %v, want the refusal rather than a deadline error", err)
+				}
+			},
+		},
+		{
+			name:     "a server error earns the quick retry",
+			replies:  []sidecarReply{{status: http.StatusInternalServerError, body: "boom"}},
+			wantHits: 2,
+			wantWait: []time.Duration{sidecarTransientWait},
+			check: func(t *testing.T, err error) {
+				sre, ok := errors.AsType[*SidecarResponseError](err)
+				if !ok || sre.StatusCode != 500 {
+					t.Errorf("err = %v, want the second attempt's 500", err)
+				}
+			},
+		},
+		{
+			// A bare 429 says back off, which is what the CLI's exit 5 tells the
+			// user; a 500 ms poke would contradict it.
+			name:     "a bare 429 earns none",
+			replies:  []sidecarReply{{status: http.StatusTooManyRequests, body: "slow down"}},
+			wantHits: 1,
+			check:    wantRefusal,
+		},
+		{
+			name:     "a 429 that states a wait earns one",
+			replies:  []sidecarReply{{status: http.StatusTooManyRequests, retryAfter: "3", body: "slow down"}, {body: okContext}},
+			wantHits: 2,
+			wantWait: []time.Duration{3 * time.Second},
+		},
+		{
+			name:     "another client refusal earns none",
+			replies:  []sidecarReply{{status: http.StatusUnauthorized, body: "unauthorized"}},
+			wantHits: 1,
+			check:    wantRefusal,
+		},
+		{
+			name: "a playability verdict earns none",
+			replies: []sidecarReply{{status: http.StatusUnprocessableEntity,
+				body: `{"error":"video unplayable: Video unavailable","code":"video-unavailable","details":"ERROR"}`}},
+			wantHits: 1,
+			check: func(t *testing.T, err error) {
+				if !errors.Is(err, ErrVideoUnavailable) {
+					t.Errorf("err = %v, want the verdict", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			waits := recordSidecarSleeps(t)
+			srv, hits := scriptedSidecar(t, tc.replies...)
+			p, err := NewSidecarPlayerContextProvider(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
+			_, callErr := p.ProvidePlayerContext(ctx, "dummyVideo0")
+			if tc.check == nil {
+				if callErr != nil {
+					t.Fatalf("call should succeed: %v", callErr)
+				}
+			} else {
+				if callErr == nil {
+					t.Fatal("expected a refusal")
+				}
+				tc.check(t, callErr)
+			}
+			if got := hits.Load(); got != tc.wantHits {
+				t.Errorf("requests = %d, want %d", got, tc.wantHits)
+			}
+			if !slices.Equal(*waits, tc.wantWait) {
+				t.Errorf("waits = %v, want %v", *waits, tc.wantWait)
+			}
+		})
+	}
+}
+
+func withRetryAfter(r sidecarReply, v string) sidecarReply {
+	r.retryAfter = v
+	return r
+}
+
+func wantRefusal(t *testing.T, err error) {
+	t.Helper()
+	if _, ok := errors.AsType[*SidecarResponseError](err); !ok {
+		t.Errorf("err = %v, want a SidecarResponseError", err)
+	}
+}
+
+// TestSidecarCallCancelOutranksRefusal pins PauseBlocked's precedence through
+// sidecarCall: a cancelled caller gets the cancellation, not the retryable
+// transport failure the cancellation itself produced.
+func TestSidecarCallCancelOutranksRefusal(t *testing.T) {
+	waits := recordSidecarSleeps(t)
+	srv, _ := scriptedSidecar(t, sidecarReply{body: validPlayerContextJSON})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p, err := NewSidecarPlayerContextProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ProvidePlayerContext(ctx, "dummyVideo0"); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the cancellation to outrank the pending failure", err)
+	}
+	if len(*waits) != 0 {
+		t.Errorf("waits = %v, want none", *waits)
+	}
+}
+
+func TestSidecarCallTransportRetry(t *testing.T) {
+	waits := recordSidecarSleeps(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	p, err := NewSidecarPlayerContextProvider(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.ProvidePlayerContext(context.Background(), "dummyVideo0")
+	if _, ok := errors.AsType[*SidecarError](err); !ok {
+		t.Fatalf("err = %v, want a transport failure", err)
+	}
+	if len(*waits) != 1 || (*waits)[0] != sidecarTransientWait {
+		t.Errorf("waits = %v, want one %v wait before the second dial", *waits, sidecarTransientWait)
+	}
+}
+
+func TestBgutilProviderRetriesOnce(t *testing.T) {
+	waits := recordSidecarSleeps(t)
+	srv, hits := scriptedSidecar(t,
+		sidecarReply{status: http.StatusBadGateway, body: "cool-down"},
+		sidecarReply{body: `{"poToken":"tok"}`},
+	)
+	p, err := NewSidecarPOTokenProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.ProvidePOToken(context.Background(), potoken.Request{Scope: potoken.ScopePlayer, VideoID: "dummyVideo0"})
+	if err != nil || got.Token != "tok" {
+		t.Fatalf("ProvidePOToken = %+v, %v; want the token on the retry", got, err)
+	}
+	if hits.Load() != 2 || len(*waits) != 1 {
+		t.Errorf("hits = %d, waits = %v; want 2 hits after one wait", hits.Load(), *waits)
+	}
+}
+
+func TestSidecarClientTimeouts(t *testing.T) {
+	tok, err := NewSidecarPOTokenProvider("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tok.(*bgutilProvider).http.Timeout; got != defaultSidecarTimeout {
+		t.Errorf("token client timeout = %v, want %v", got, defaultSidecarTimeout)
+	}
+	pc, err := NewSidecarPlayerContextProvider("http://127.0.0.1:1", WithSidecarTimeout(90*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pc.(*playerContextProvider)
+	if p.http.Timeout != 90*time.Second || p.reporter.http.Timeout != 90*time.Second {
+		t.Errorf("option must reach the context client and its reporter: %v, %v", p.http.Timeout, p.reporter.http.Timeout)
+	}
+	sp, err := NewSidecarSessionProvider("http://127.0.0.1:1", WithSidecarTimeout(-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sp.(*httpSessionProvider).http.Timeout; got != defaultSidecarTimeout {
+		t.Errorf("non-positive option must select the default, got %v", got)
 	}
 }

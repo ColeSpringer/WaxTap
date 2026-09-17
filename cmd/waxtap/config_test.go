@@ -228,7 +228,7 @@ func TestReadConfigFileMalformedEnvErrors(t *testing.T) {
 
 func TestExternalSessionBadCookiesIsUsageError(t *testing.T) {
 	a := &appConfig{visitorData: "VD", cookiesPath: filepath.Join(t.TempDir(), "nope.txt")}
-	_, _, err := a.externalSession()
+	_, _, err := a.externalSession(sidecarProviders{})
 	if err == nil {
 		t.Fatal("a missing --cookies file should error")
 	}
@@ -460,6 +460,7 @@ var negativeNumericKeys = []struct{ jsonKey, envVar string }{
 	{"extractionTimeoutSeconds", "WAXTAP_EXTRACTION_TIMEOUT"},
 	{"resolveTimeoutSeconds", "WAXTAP_RESOLVE_TIMEOUT"},
 	{"webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT"},
+	{"sidecarTimeoutSeconds", "WAXTAP_SIDECAR_TIMEOUT"},
 	{"sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT"},
 	{"chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT"},
 }
@@ -618,5 +619,27 @@ func TestClampedSecondsSaturates(t *testing.T) {
 	}
 	if d := clampedSeconds(1e15); d < 0 {
 		t.Error("a huge timeout wrapped negative")
+	}
+}
+
+// The defaults are constants, so pin them directly; the env layer is exercised
+// through envOverlay and coalesceDuration, the two functions resolution uses.
+func TestTimeoutDefaults(t *testing.T) {
+	if defaultWebContextTimeout != 60*time.Second {
+		t.Errorf("defaultWebContextTimeout = %v, want 60s: WaxSeal's first context after a relaunch costs up to 30s plus a 12s separation window, and one honoured Retry-After must fit", defaultWebContextTimeout)
+	}
+	if defaultSidecarTimeout != 60*time.Second {
+		t.Errorf("defaultSidecarTimeout = %v, want 60s", defaultSidecarTimeout)
+	}
+	t.Setenv("WAXTAP_SIDECAR_TIMEOUT", "90")
+	ec, err := envOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := coalesceDuration(defaultSidecarTimeout, nil, ec.SidecarTimeoutSec); got != 90*time.Second {
+		t.Errorf("WAXTAP_SIDECAR_TIMEOUT=90 resolves to %v, want 90s", got)
+	}
+	if got := coalesceDuration(defaultSidecarTimeout, nil, nil); got != 60*time.Second {
+		t.Errorf("unset resolves to %v, want the default", got)
 	}
 }

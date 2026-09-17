@@ -255,3 +255,29 @@ func TestParseWatchPageFallback(t *testing.T) {
 		t.Errorf("formats = %+v, want one opus format", v.Formats)
 	}
 }
+
+func TestClassifyPlayability(t *testing.T) {
+	cases := []struct {
+		status, reason string
+		want           error
+	}{
+		{"LOGIN_REQUIRED", "This video is private", waxerr.ErrVideoRestricted},
+		{"LOGIN_REQUIRED", "Sign in to confirm your age", waxerr.ErrLoginRequired},
+		{"AGE_CHECK_REQUIRED", "", waxerr.ErrAgeRestricted},
+		{"CONTENT_CHECK_REQUIRED", "", waxerr.ErrLoginRequired},
+		{"LIVE_STREAM_OFFLINE", "", waxerr.ErrLiveNotStarted},
+		{"UNPLAYABLE", "Join this channel to get access to members-only content", waxerr.ErrMembersOnly},
+		{"UNPLAYABLE", "The uploader has not made this video available in your country", waxerr.ErrGeoBlocked},
+		{"ERROR", "Video unavailable", waxerr.ErrVideoUnavailable},
+		{"", "video unplayable", waxerr.ErrVideoUnavailable},
+	}
+	for _, tc := range cases {
+		pe := ClassifyPlayability(tc.status, tc.reason)
+		if !errors.Is(pe, tc.want) {
+			t.Errorf("ClassifyPlayability(%q, %q) = %v, want %v", tc.status, tc.reason, pe, tc.want)
+		}
+		if tc.status == "" && pe.Status != "ERROR" {
+			t.Errorf("empty status classified as %q, want ERROR", pe.Status)
+		}
+	}
+}

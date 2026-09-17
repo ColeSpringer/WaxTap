@@ -303,6 +303,9 @@ type stubSessionProvider struct {
 	failWith    error
 	cookieless  bool
 	unversioned bool
+	// userAgent, when set, is served as the attesting browser's identity with the
+	// serve number appended, so a rotation's replacement is distinguishable.
+	userAgent string
 }
 
 func (p *stubSessionProvider) ProvideSession(context.Context) (potoken.Session, error) {
@@ -318,6 +321,9 @@ func (p *stubSessionProvider) ProvideSession(context.Context) (potoken.Session, 
 	}
 	if !p.cookieless {
 		sess.Cookies = []*http.Cookie{{Name: "VISITOR_INFO1_LIVE", Value: fmt.Sprintf("vi-%d", p.served), Domain: ".youtube.com", Path: "/"}}
+	}
+	if p.userAgent != "" {
+		sess.UserAgent = fmt.Sprintf("%s-%d", p.userAgent, p.served)
 	}
 	return sess, nil
 }

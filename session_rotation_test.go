@@ -296,9 +296,18 @@ type rotationSessionProvider struct {
 	mu      sync.Mutex
 	served  int
 	reports []potoken.SessionInvalidation
+	// delay models a sidecar paying a browser relaunch before it answers.
+	delay time.Duration
 }
 
-func (p *rotationSessionProvider) ProvideSession(context.Context) (potoken.Session, error) {
+func (p *rotationSessionProvider) ProvideSession(ctx context.Context) (potoken.Session, error) {
+	if p.delay > 0 {
+		select {
+		case <-time.After(p.delay):
+		case <-ctx.Done():
+			return potoken.Session{}, ctx.Err()
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.served++
@@ -454,5 +463,44 @@ func countChainRetries(n *int) func(Event) {
 			strings.Contains(ev.Warning.Detail, "retrying the chain once on a fresh session") {
 			*n++
 		}
+	}
+}
+
+// TestDownload_AdoptedSessionResolvedOutsideExtractionBudget pins the handoff
+// budget: a /session that pays a relaunch is charged to Timeouts.WebContext, not
+// to the extraction budget the token mint and the /player call share.
+func TestDownload_AdoptedSessionResolvedOutsideExtractionBudget(t *testing.T) {
+	w := &rotationWorld{media: strings.Repeat("M", 4096)}
+	p := &rotationSessionProvider{delay: 100 * time.Millisecond}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{
+		HTTPClient:       &http.Client{Jar: jar, Transport: w.roundTrip(t)},
+		Client:           "android_vr",
+		DisableDiskCache: true,
+		SessionProvider:  p,
+		Timeouts:         Timeouts{Extraction: 50 * time.Millisecond, WebContext: 2 * time.Second},
+		Retry:            RetryPolicy{MaxRetries: 1, BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "out.webm")
+	res, err := c.Download(context.Background(), Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: ProcessSpec{Output: ToFile(out)},
+	})
+	if err != nil {
+		t.Fatalf("the session resolution must not be charged to the 50ms extraction budget: %v", err)
+	}
+	if res.OutputBytes != 4096 {
+		t.Errorf("OutputBytes = %d, want 4096", res.OutputBytes)
+	}
+	if w.homepageHits != 0 {
+		t.Errorf("homepage hits = %d, want 0 (an adopted session must never bootstrap)", w.homepageHits)
 	}
 }

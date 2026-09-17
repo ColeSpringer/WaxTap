@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,16 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		// Preserve the provider cause for transport and HTTP classification.
 		return nil, &waxerr.ProviderError{Endpoint: "player-context", Cause: err}
 	}
+	// Live and upcoming broadcasts are refused as they are on /player: the
+	// download pipeline does not handle them. These are verdicts about the video,
+	// not provider failures, so they are not wrapped in a ProviderError and they
+	// arm no provider cool-down. Upcoming ranks first: a premiere can be both.
+	switch {
+	case pc.IsUpcoming:
+		return nil, &waxerr.PlayabilityError{Status: "OK", Reason: "upcoming content", Sentinel: waxerr.ErrLiveNotStarted}
+	case pc.IsLiveNow:
+		return nil, &waxerr.PlayabilityError{Status: "OK", Reason: "live content", Sentinel: waxerr.ErrLiveContent}
+	}
 	// UstreamerConfig is validated here with the other essentials: a SABR
 	// session cannot stream without it, and rejecting the context now lets the
 	// caller fall back instantly instead of failing in the SABR reload loop
@@ -61,13 +72,23 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 	}
 
 	video := &Video{
-		ID:       videoID,
-		URL:      watchURL(videoID),
-		Title:    pc.Title,
-		Author:   pc.Author,
-		Duration: time.Duration(max(0, pc.LengthSeconds)) * time.Second,
-		Formats:  mapFormats(raw),
+		ID:          videoID,
+		URL:         watchURL(videoID),
+		Title:       pc.Title,
+		Author:      pc.Author,
+		ChannelID:   pc.ChannelID,
+		Description: pc.Description,
+		Duration:    time.Duration(max(0, pc.LengthSeconds)) * time.Second,
+		PublishDate: parseDate(pc.PublishDate),
+		// Live and upcoming are refused above, so only LiveNone and LiveWasLive
+		// can reach a delivered Video, as on every other path.
+		LiveStatus: liveStatusFrom(false, false, pc.IsLiveContent),
+		Formats:    mapFormats(raw),
 	}
+	for _, t := range pc.Thumbnails {
+		video.Thumbnails = append(video.Thumbnails, Thumbnail{URL: t.URL, Width: t.Width, Height: t.Height})
+	}
+	orderContextThumbnails(video.Thumbnails)
 	if video.Duration == 0 {
 		video.Duration = longestFormatDuration(video.Formats)
 	}
@@ -89,6 +110,26 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		identityGen:     c.resetSeq.Load(),
 		contextGen:      pc.Generation,
 	}, nil
+}
+
+// orderContextThumbnails delivers a context's ladder largest-first, so
+// Thumbnails[0] is the best rung here as it is on every other path.
+//
+// A provider may send rungs with no width or height (the contract calls both
+// optional). Sorting those by area would make every key zero and fall through to
+// sortThumbnailsLargestFirst's URL tie-break, which orders the ladder
+// alphabetically: "default" before "maxresdefault" before "mqdefault", the
+// opposite of what the caller is promised. The wire order is documented as the
+// player response's, smallest first, so reversing it is the only ordering the
+// response actually supports.
+func orderContextThumbnails(ts []Thumbnail) {
+	for _, t := range ts {
+		if t.Width > 0 || t.Height > 0 {
+			sortThumbnailsLargestFirst(ts)
+			return
+		}
+	}
+	slices.Reverse(ts)
 }
 
 // ClientNameWebContext is the profile and [Extraction.ClientName] value reported

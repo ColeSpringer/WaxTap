@@ -20,16 +20,6 @@ Gate tags:
 
 ## Enumeration and metadata
 
-- `[upstream]` **Fill the web-context `Video`.** Once WaxSeal's
-  `/player-context` carries the channel ID, description, thumbnail
-  ladder, publish date, and live flags (upstream-requests.md, WaxSeal),
-  map them through `playerContextResponse` (`sidecar.go`),
-  `potoken.PlayerContext`, and `ExtractWebContext`
-  (`youtube/web_context.go`), so `Result.Metadata` and
-  `--write-info-json` carry them on that path as on every other. The
-  empty-ladder note on `minProbeArea` in `thumbnail.go` describes the
-  path as it is today and needs rewording then.
-
 - `[in-repo]` **A live or upcoming marker on the listing entry.** The
   legacy renderer's thumbnail overlay carries a LIVE or UPCOMING
   time-status style, and the lockup's badge text is what

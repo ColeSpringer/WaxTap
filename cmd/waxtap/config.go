@@ -33,9 +33,18 @@ const cacheSubdir = "waxtap"
 // Default per-operation timeouts. They bound extraction, resolving, and retry
 // waits without putting a deadline on an entire large download.
 const (
-	defaultExtractionTimeout   = 45 * time.Second
-	defaultResolveTimeout      = 30 * time.Second
-	defaultWebContextTimeout   = 20 * time.Second
+	defaultExtractionTimeout = 45 * time.Second
+	defaultResolveTimeout    = 30 * time.Second
+	// Sized for WaxSeal's documented first call after a relaunch: launch,
+	// attestation, and a streaming proof (10 to 30 s), then the 12 s separation
+	// window, with room for one honoured Retry-After.
+	defaultWebContextTimeout = 60 * time.Second
+	// defaultSidecarTimeout bounds each individual sidecar request inside that.
+	// Unlike the other timeout keys, 0 selects this default rather than "no
+	// deadline": an unbounded sidecar request has nothing to offer, since the
+	// handoff and extraction budgets already bound the call, and the one retry
+	// needs a bound to be reached at all.
+	defaultSidecarTimeout      = 60 * time.Second
 	defaultSponsorBlockTimeout = 10 * time.Second
 	defaultChunkTimeout        = 120 * time.Second
 )
@@ -75,9 +84,15 @@ type appConfig struct {
 	channels string // default channel layout for download/transcode/cut
 	downmix  bool   // default --downmix
 
-	extractionTimeout   time.Duration
-	resolveTimeout      time.Duration
-	webContextTimeout   time.Duration
+	extractionTimeout time.Duration
+	resolveTimeout    time.Duration
+	webContextTimeout time.Duration
+	sidecarTimeout    time.Duration
+	// sidecars caches the providers sidecarProviders built, so options and
+	// doctor share one set. sidecarsBuilt distinguishes "none configured" from
+	// "not built yet".
+	sidecars            sidecarProviders
+	sidecarsBuilt       bool
 	sponsorBlockTimeout time.Duration
 	chunkTimeout        time.Duration
 }
@@ -113,6 +128,7 @@ type fileConfig struct {
 	ExtractionTimeoutSec   *float64 `json:"extractionTimeoutSeconds"`
 	ResolveTimeoutSec      *float64 `json:"resolveTimeoutSeconds"`
 	WebContextTimeoutSec   *float64 `json:"webContextTimeoutSeconds"`
+	SidecarTimeoutSec      *float64 `json:"sidecarTimeoutSeconds"`
 	SponsorBlockTimeoutSec *float64 `json:"sponsorBlockTimeoutSeconds"`
 	ChunkTimeoutSec        *float64 `json:"chunkTimeoutSeconds"`
 }
@@ -193,6 +209,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		extractionTimeout:   coalesceDuration(defaultExtractionTimeout, fc.ExtractionTimeoutSec, ec.ExtractionTimeoutSec),
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
 		webContextTimeout:   coalesceDuration(defaultWebContextTimeout, fc.WebContextTimeoutSec, ec.WebContextTimeoutSec),
+		sidecarTimeout:      coalesceDuration(defaultSidecarTimeout, fc.SidecarTimeoutSec, ec.SidecarTimeoutSec),
 		sponsorBlockTimeout: coalesceDuration(defaultSponsorBlockTimeout, fc.SponsorBlockTimeoutSec, ec.SponsorBlockTimeoutSec),
 		chunkTimeout:        coalesceDuration(defaultChunkTimeout, fc.ChunkTimeoutSec, ec.ChunkTimeoutSec),
 	}
@@ -314,6 +331,7 @@ func validateConfigNumbers(fc *fileConfig, label func(jsonKey, envVar string) st
 	checkFloat(fc.ExtractionTimeoutSec, "extractionTimeoutSeconds", "WAXTAP_EXTRACTION_TIMEOUT")
 	checkFloat(fc.ResolveTimeoutSec, "resolveTimeoutSeconds", "WAXTAP_RESOLVE_TIMEOUT")
 	checkFloat(fc.WebContextTimeoutSec, "webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT")
+	checkFloat(fc.SidecarTimeoutSec, "sidecarTimeoutSeconds", "WAXTAP_SIDECAR_TIMEOUT")
 	checkFloat(fc.SponsorBlockTimeoutSec, "sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT")
 	checkFloat(fc.ChunkTimeoutSec, "chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT")
 	return errors.Join(errs...)
@@ -404,6 +422,7 @@ func envOverlay() (fileConfig, error) {
 	ec.ExtractionTimeoutSec = getFloat("WAXTAP_EXTRACTION_TIMEOUT")
 	ec.ResolveTimeoutSec = getFloat("WAXTAP_RESOLVE_TIMEOUT")
 	ec.WebContextTimeoutSec = getFloat("WAXTAP_WEB_CONTEXT_TIMEOUT")
+	ec.SidecarTimeoutSec = getFloat("WAXTAP_SIDECAR_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
 	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT")
 
@@ -461,37 +480,15 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	if err != nil {
 		return waxtap.Options{}, err
 	}
-	// A configured PO-token URL enables WEB/GVS tokens. The constructor builds a
-	// provider with its own dedicated client, not hc, so token traffic is never
-	// proxied through --proxy/--insecure.
-	var poProvider waxtap.POTokenProvider
-	if a.potokenURL != "" {
-		p, err := waxtap.NewSidecarPOTokenProvider(a.potokenURL, waxtap.WithSidecarAPIKey(a.apiKey))
-		if err != nil {
-			return waxtap.Options{}, usagef("invalid --potoken-url %q: %v", a.potokenURL, err)
-		}
-		poProvider = p
-	}
-
-	// The attested WEB /player-context path streams full WEB audio Go-side. It
-	// binds a GVS PO token to the context's visitorData, so it requires a token
-	// provider alongside it. Its own dedicated client is never proxied.
-	var pcProvider waxtap.PlayerContextProvider
-	if a.playerContextURL != "" {
-		if a.potokenURL == "" {
-			return waxtap.Options{}, usagef("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
-		}
-		p, err := waxtap.NewSidecarPlayerContextProvider(a.playerContextURL, waxtap.WithSidecarAPIKey(a.apiKey))
-		if err != nil {
-			return waxtap.Options{}, usagef("invalid --player-context-url %q: %v", a.playerContextURL, err)
-		}
-		pcProvider = p
+	sc, err := a.sidecarProviders()
+	if err != nil {
+		return waxtap.Options{}, err
 	}
 
 	// External session adoption: a pull-based --session-url provider, or a static
 	// --visitor-data (+ optional --cookies) session. New enforces the uniform-chain
 	// requirement and the Session/SessionProvider exclusivity.
-	session, sessionProvider, err := a.externalSession()
+	session, sessionProvider, err := a.externalSession(sc)
 	if err != nil {
 		return waxtap.Options{}, err
 	}
@@ -505,8 +502,8 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 		TempDir:               a.tempDir,
 		ProfileOverridePath:   a.profileOverride,
 		ChromeMajor:           a.chromeMajor,
-		POTokenProvider:       poProvider,
-		PlayerContextProvider: pcProvider,
+		POTokenProvider:       sc.token,
+		PlayerContextProvider: sc.context,
 		Client:                a.client,
 		Session:               session,
 		SessionProvider:       sessionProvider,
@@ -533,21 +530,72 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 	}, nil
 }
 
-// externalSession builds the adopted-session inputs: a pull-based --session-url
-// provider, or a static --visitor-data (+ optional --cookies) session. The two
-// sources are mutually exclusive, and --cookies requires --visitor-data because
-// adoption skips the bootstrap that would otherwise supply visitorData.
-func (a *appConfig) externalSession() (*waxtap.POTokenSession, waxtap.POTokenSessionProvider, error) {
+// sidecarProviders holds the providers a run's sidecar URLs built, so doctor can
+// probe the same objects the download uses. Nil fields are unconfigured.
+type sidecarProviders struct {
+	token   waxtap.POTokenProvider
+	context waxtap.PlayerContextProvider
+	session waxtap.POTokenSessionProvider
+}
+
+// sidecarProviders builds every configured sidecar provider once. Each gets its
+// own dedicated client, never the run's HTTP client, so sidecar traffic is never
+// proxied through --proxy/--insecure and the token mint shares egress with the
+// stream.
+func (a *appConfig) sidecarProviders() (sidecarProviders, error) {
+	// Built once per run: doctor probes the objects the download uses, and each
+	// provider owns a dedicated client, so a second set would mean a second pool.
+	if a.sidecarsBuilt {
+		return a.sidecars, nil
+	}
+	var sc sidecarProviders
+
+	// A configured PO-token URL enables WEB/GVS tokens.
+	if a.potokenURL != "" {
+		p, err := waxtap.NewSidecarPOTokenProvider(a.potokenURL, waxtap.WithSidecarAPIKey(a.apiKey), waxtap.WithSidecarTimeout(a.sidecarTimeout))
+		if err != nil {
+			return sidecarProviders{}, usagef("invalid --potoken-url %q: %v", a.potokenURL, err)
+		}
+		sc.token = p
+	}
+
+	// The attested WEB /player-context path streams full WEB audio Go-side. It
+	// binds a GVS PO token to the context's visitorData, so it requires a token
+	// provider alongside it.
+	if a.playerContextURL != "" {
+		if a.potokenURL == "" {
+			return sidecarProviders{}, usagef("--player-context-url requires --potoken-url (the WEB stream needs a GVS PO token bound to the context's visitorData)")
+		}
+		p, err := waxtap.NewSidecarPlayerContextProvider(a.playerContextURL, waxtap.WithSidecarAPIKey(a.apiKey), waxtap.WithSidecarTimeout(a.sidecarTimeout))
+		if err != nil {
+			return sidecarProviders{}, usagef("invalid --player-context-url %q: %v", a.playerContextURL, err)
+		}
+		sc.context = p
+	}
+
+	if a.sessionURL != "" {
+		if a.visitorData != "" || a.cookiesPath != "" {
+			return sidecarProviders{}, usagef("--session-url cannot be combined with --visitor-data/--cookies")
+		}
+		p, err := waxtap.NewSidecarSessionProvider(a.sessionURL, waxtap.WithSidecarAPIKey(a.apiKey), waxtap.WithSidecarTimeout(a.sidecarTimeout))
+		if err != nil {
+			return sidecarProviders{}, usagef("invalid --session-url %q: %v", a.sessionURL, err)
+		}
+		sc.session = p
+	}
+	a.sidecars, a.sidecarsBuilt = sc, true
+	return sc, nil
+}
+
+// externalSession builds the adopted-session inputs: the pull-based --session-url
+// provider sc already holds, or a static --visitor-data (+ optional --cookies)
+// session. The two sources are mutually exclusive, and --cookies requires
+// --visitor-data because adoption skips the bootstrap that would otherwise
+// supply visitorData.
+func (a *appConfig) externalSession(sc sidecarProviders) (*waxtap.POTokenSession, waxtap.POTokenSessionProvider, error) {
 	switch {
 	case a.sessionURL != "":
-		if a.visitorData != "" || a.cookiesPath != "" {
-			return nil, nil, usagef("--session-url cannot be combined with --visitor-data/--cookies")
-		}
-		p, err := waxtap.NewSidecarSessionProvider(a.sessionURL, waxtap.WithSidecarAPIKey(a.apiKey))
-		if err != nil {
-			return nil, nil, usagef("invalid --session-url %q: %v", a.sessionURL, err)
-		}
-		return nil, p, nil
+		return nil, sc.session, nil
 	case a.visitorData != "" || a.cookiesPath != "":
 		if a.visitorData == "" {
 			return nil, nil, usagef("--cookies requires --visitor-data: adoption needs the browser's exact visitorData")

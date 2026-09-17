@@ -49,15 +49,18 @@ const retryHeadroom = time.Second
 // before ctx's deadline. A ctx with no deadline always fits.
 //
 // It answers only the deadline question. Cancellation is separate and outranks it;
-// see pauseBlocked.
+// see PauseBlocked.
 func fitsBeforeDeadline(ctx context.Context, d time.Duration) bool {
 	dl, has := ctx.Deadline()
 	return !has || time.Until(dl) > d+retryHeadroom
 }
 
-// pauseBlocked returns the error to report instead of pausing for d, or nil when
+// PauseBlocked returns the error to report instead of pausing for d, or nil when
 // the pause may proceed. pending is the typed error the caller is already holding
 // for the failure that provoked the pause.
+//
+// Exported, with ParseRetryAfter, for the sidecar providers, whose dedicated
+// clients bypass Client.Do.
 //
 // Cancellation outranks pending. A context canceled while a request was failing is
 // a caller giving up (a Ctrl-C at the CLI), and reporting that as a rate limit or a
@@ -69,7 +72,7 @@ func fitsBeforeDeadline(ctx context.Context, d time.Duration) bool {
 // An expired deadline is deliberately not treated the same way. That is the exact
 // case pending exists to explain, and replacing it with a bare timeout is the
 // finding this whole fail-fast path closed.
-func pauseBlocked(ctx context.Context, d time.Duration, pending error) error {
+func PauseBlocked(ctx context.Context, d time.Duration, pending error) error {
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -89,7 +92,7 @@ func pauseBlocked(ctx context.Context, d time.Duration, pending error) error {
 // proxyconnect, and by the retry there is no time left to reach the proxy.
 //
 // earlier is preferred whatever its type, not only for transport causes: a 429
-// or 5xx from the previous attempt explains the run the way pauseBlocked's
+// or 5xx from the previous attempt explains the run the way PauseBlocked's
 // pending does when the deadline cannot fit the pause, and both of those paths
 // deliberately outrank a bare timeout. earlier can never itself be a bare
 // deadline, because the attempt that hit one returned instead of recording it.
@@ -110,10 +113,10 @@ func NamesTransportCause(err error) bool {
 }
 
 // keepCause chooses between a backoff interrupted by the context and the error
-// that provoked the backoff, applying pauseBlocked's policy to the pause that
+// that provoked the backoff, applying PauseBlocked's policy to the pause that
 // started before the context ended: a cancellation is the caller giving up and
 // outranks pending, while an expired deadline is the case pending exists to
-// explain. pauseBlocked has already run at every call site, so reaching here
+// explain. PauseBlocked has already run at every call site, so reaching here
 // with a deadline error means the deadline moved or the clock did.
 func keepCause(interrupted, pending error) error {
 	if pending == nil || !errors.Is(interrupted, context.DeadlineExceeded) {
@@ -291,7 +294,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 		resp, err := c.http.Do(req)
 		if err != nil {
-			// Same policy as pauseBlocked: a cancellation outranks the pending
+			// Same policy as PauseBlocked: a cancellation outranks the pending
 			// error, an expired deadline does not. A transport failure the deadline
 			// happened to interrupt is the one thing that can name a cause (a dead
 			// proxy, a refused dial), and ctx.Err() names none.
@@ -305,7 +308,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			if attempt < attempts-1 {
 				wait := c.backoffDuration(attempt)
 				// The deadline would swallow the retry: report the transport error.
-				if berr := pauseBlocked(ctx, wait, err); berr != nil {
+				if berr := PauseBlocked(ctx, wait, err); berr != nil {
 					return nil, berr
 				}
 				c.log.DebugContext(ctx, "httpx: transport error, retrying", "host", host, "attempt", attempt, "err", err)
@@ -325,7 +328,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		if resp.StatusCode == http.StatusTooManyRequests ||
 			(retryAfterPresent && (resp.StatusCode == http.StatusServiceUnavailable ||
 				resp.StatusCode == http.StatusForbidden)) {
-			wait, ok := parseRetryAfter(resp)
+			wait, ok := ParseRetryAfter(resp.Header)
 			status := resp.StatusCode
 			drain(resp)
 			rlErr := &waxerr.RateLimitError{Host: host, RetryAfter: wait, StatusCode: status}
@@ -353,7 +356,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				// A pause the deadline cannot accommodate folds into the over-cap
 				// fail-fast above: report the rate limit rather than sleeping into a
 				// context timeout that names no cause.
-				if berr := pauseBlocked(ctx, sleepFor, rlErr); berr != nil {
+				if berr := PauseBlocked(ctx, sleepFor, rlErr); berr != nil {
 					return nil, berr
 				}
 				rlRetryStatus = status
@@ -373,7 +376,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			wait := c.backoffDuration(attempt)
 			// The typed status error carries the server's code into --json; a deadline
 			// reached mid-backoff would replace it with a bare timeout.
-			if berr := pauseBlocked(ctx, wait, lastErr); berr != nil {
+			if berr := PauseBlocked(ctx, wait, lastErr); berr != nil {
 				return nil, berr
 			}
 			c.log.DebugContext(ctx, "httpx: server error, retrying", "host", host, "status", resp.StatusCode, "attempt", attempt)
@@ -430,10 +433,12 @@ func Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// parseRetryAfter reads the Retry-After header as either delta-seconds or an
-// HTTP date. The bool reports whether a value was present and parseable.
-func parseRetryAfter(resp *http.Response) (time.Duration, bool) {
-	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+// ParseRetryAfter reads a Retry-After header as delta-seconds or an HTTP date.
+// The bool reports whether a value was present and parseable. Exported, with
+// PauseBlocked, for the sidecar providers, whose dedicated clients bypass
+// Client.Do.
+func ParseRetryAfter(h http.Header) (time.Duration, bool) {
+	v := strings.TrimSpace(h.Get("Retry-After"))
 	if v == "" {
 		return 0, false
 	}

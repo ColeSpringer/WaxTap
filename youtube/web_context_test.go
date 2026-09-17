@@ -21,6 +21,15 @@ func sampleContext() potoken.PlayerContext {
 		Title:           "Big Buck Bunny",
 		Author:          "Blender",
 		LengthSeconds:   634,
+		ChannelID:       "UCdummy",
+		Description:     "desc",
+		Thumbnails: []potoken.PlayerContextThumbnail{
+			{URL: "https://i.ytimg.com/vi/dummyVideo0/default.jpg", Width: 168, Height: 94},
+			{URL: "https://i.ytimg.com/vi/dummyVideo0/mqdefault.jpg", Width: 336, Height: 188},
+			{URL: "https://i.ytimg.com/vi/dummyVideo0/maxresdefault.jpg", Width: 1280, Height: 720},
+		},
+		IsLiveContent: true,
+		PublishDate:   "2015-04-10T00:00:00-07:00",
 		AudioFormats: []potoken.PlayerContextFormat{
 			{Itag: 251, LMT: "1719185012384481", XTags: "", MimeType: `audio/webm; codecs="opus"`, Bitrate: 143452, AudioChannels: 2, AudioSampleRate: 48000, ContentLength: 9700000, ApproxDurationMs: 634624},
 			{Itag: 140, LMT: "1719185037000000", XTags: "", MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 130992, AudioChannels: 2, AudioSampleRate: 44100, ContentLength: 10300000, ApproxDurationMs: 634590},
@@ -103,6 +112,82 @@ func TestExtractWebContextMapping(t *testing.T) {
 	}
 	if v.Formats[0].Itag != 251 {
 		t.Errorf("public Formats[0].Itag = %d, want 251 (parallel order)", v.Formats[0].Itag)
+	}
+
+	if v.ChannelID != "UCdummy" || v.Description != "desc" {
+		t.Errorf("channel/description = %q/%q, want the context's", v.ChannelID, v.Description)
+	}
+	if len(v.Thumbnails) != 3 || v.Thumbnails[0].Width != 1280 || v.Thumbnails[2].Width != 168 {
+		t.Errorf("thumbnails = %+v, want the ladder sorted largest first", v.Thumbnails)
+	}
+	if want := time.Date(2015, 4, 10, 7, 0, 0, 0, time.UTC); !v.PublishDate.Equal(want) {
+		t.Errorf("publishDate = %v, want %v (RFC 3339 with offset, in UTC)", v.PublishDate, want)
+	}
+	if v.LiveStatus != LiveWasLive {
+		t.Errorf("liveStatus = %v, want was_live from is_live_content", v.LiveStatus)
+	}
+}
+
+func TestExtractWebContextRefusesLiveAndUpcoming(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		live, upcoming bool
+		want           error
+	}{
+		{"live", true, false, waxerr.ErrLiveContent},
+		{"upcoming", false, true, waxerr.ErrLiveNotStarted},
+		{"both, upcoming wins", true, true, waxerr.ErrLiveNotStarted},
+	} {
+		pc := sampleContext()
+		pc.IsLiveNow, pc.IsUpcoming = tc.live, tc.upcoming
+		_, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
+		if _, isProvider := errors.AsType[*waxerr.ProviderError](err); isProvider {
+			t.Errorf("%s: a verdict about the video is not a provider failure", tc.name)
+		}
+	}
+}
+
+// TestExtractWebContextMetadataOptional covers a provider that sends none of the
+// metadata keys (an older WaxSeal, or a non-WaxSeal sidecar).
+func TestExtractWebContextMetadataOptional(t *testing.T) {
+	pc := sampleContext()
+	pc.ChannelID, pc.Description, pc.PublishDate = "", "", ""
+	pc.Thumbnails = nil
+	pc.IsLiveContent, pc.IsLiveNow, pc.IsUpcoming = false, false, false
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("ExtractWebContext: %v", err)
+	}
+	v := ext.video
+	if v.ChannelID != "" || v.Description != "" || !v.PublishDate.IsZero() || v.Thumbnails != nil {
+		t.Errorf("video = %+v, want the metadata fields left zero", v)
+	}
+	if v.LiveStatus != LiveNone {
+		t.Errorf("liveStatus = %v, want LiveNone", v.LiveStatus)
+	}
+}
+
+func TestExtractWebContextBareDate(t *testing.T) {
+	pc := sampleContext()
+	pc.PublishDate = "2015-04-10"
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2015, 4, 10, 0, 0, 0, 0, time.UTC); !ext.video.PublishDate.Equal(want) {
+		t.Errorf("publishDate = %v, want %v", ext.video.PublishDate, want)
+	}
+
+	pc.PublishDate = "soon"
+	ext, err = webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("an unparseable date is not an error: %v", err)
+	}
+	if !ext.video.PublishDate.IsZero() {
+		t.Errorf("publishDate = %v, want zero", ext.video.PublishDate)
 	}
 }
 
@@ -312,5 +397,41 @@ func TestExtractWebContextBackfillsDurationFromFormats(t *testing.T) {
 				t.Errorf("video.Duration = %v, want 634s from the longest rendition's approxDurationMs", ext.video.Duration)
 			}
 		})
+	}
+}
+
+// TestExtractWebContextDimensionlessLadder covers a provider that sends urls
+// with no width or height (both are optional): sorting by area would make every
+// key zero and fall through to the URL tie-break, ordering the ladder
+// alphabetically, which is the opposite of largest-first.
+func TestExtractWebContextDimensionlessLadder(t *testing.T) {
+	pc := sampleContext()
+	pc.Thumbnails = []potoken.PlayerContextThumbnail{
+		{URL: "https://i.ytimg.com/vi/dummyVideo0/default.jpg"},
+		{URL: "https://i.ytimg.com/vi/dummyVideo0/mqdefault.jpg"},
+		{URL: "https://i.ytimg.com/vi/dummyVideo0/maxresdefault.jpg"},
+	}
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ext.video.Thumbnails
+	if len(got) != 3 {
+		t.Fatalf("thumbnails = %+v, want 3", got)
+	}
+	// The wire order is the player response's, smallest first, so the largest is
+	// the last rung the provider sent.
+	if !strings.HasSuffix(got[0].URL, "maxresdefault.jpg") || !strings.HasSuffix(got[2].URL, "default.jpg") {
+		t.Errorf("thumbnails = %+v, want the wire order reversed, not sorted by URL", got)
+	}
+
+	// One rung with dimensions is enough to sort by area again.
+	pc.Thumbnails[0].Width, pc.Thumbnails[0].Height = 1280, 720
+	ext, err = webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(ext.video.Thumbnails[0].URL, "default.jpg") {
+		t.Errorf("thumbnails = %+v, want the declared 1280x720 rung first", ext.video.Thumbnails)
 	}
 }

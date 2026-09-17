@@ -403,21 +403,33 @@ func TestClassifyError_TimeoutConsistentAcrossPhases(t *testing.T) {
 
 func TestClassifyError_SidecarResponse(t *testing.T) {
 	cases := []struct {
-		name   string
-		status int
-		exit   int
-		code   string
+		name    string
+		status  int
+		code422 string // refusal code, when the case is a coded refusal
+		details string
+		reason  string
+		exit    int
+		code    string
 	}{
-		{"bad request", 400, 2, "invalid-config"},
-		{"unauthorized", 401, 2, "invalid-config"},
-		{"too many requests", 429, 5, "rate-limited"},
-		{"request timeout", 408, 9, "network"},
-		{"server error", 500, 9, "network"},
-		{"invalid 200 response", 0, 9, "network"},
+		{name: "bad request", status: 400, exit: 2, code: "invalid-config"},
+		{name: "unauthorized", status: 401, exit: 2, code: "invalid-config"},
+		{name: "too many requests", status: 429, exit: 5, code: "rate-limited"},
+		{name: "request timeout", status: 408, exit: 9, code: "network"},
+		{name: "server error", status: 500, exit: 9, code: "network"},
+		{name: "invalid 200 response", status: 0, exit: 9, code: "network"},
+		// A relayed playability verdict classifies as the verdict, not by status:
+		// a dead video is not an invalid configuration.
+		{name: "video-unavailable", status: 422, code422: waxtap.SidecarCodeVideoUnavailable,
+			details: "LOGIN_REQUIRED", reason: "video unplayable: This video is private",
+			exit: 3, code: "video-restricted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sre := &waxtap.SidecarResponseError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", StatusCode: tc.status, Reason: "x"}
+			reason := tc.reason
+			if reason == "" {
+				reason = "x"
+			}
+			sre := &waxtap.SidecarResponseError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", StatusCode: tc.status, Reason: reason, Code: tc.code422, Details: tc.details}
 			prov := &waxtap.ProviderError{Endpoint: "session", Cause: sre}
 			if c := classifyError(prov); c.exitCode != tc.exit || c.code != tc.code {
 				t.Errorf("provider %s = %+v, want exit %d and code %s", tc.name, c, tc.exit, tc.code)
@@ -1133,5 +1145,23 @@ func TestClassifyTemporarilyUnavailable(t *testing.T) {
 	c := classifyError(fmt.Errorf("enrich abc: %w", waxtap.ErrTemporarilyUnavailable))
 	if c.exitCode != 5 || c.code != "temporarily-unavailable" {
 		t.Errorf("classify = %+v, want the rate-limit class and code temporarily-unavailable", c)
+	}
+}
+
+func TestSidecarHint_StatedWait(t *testing.T) {
+	sre := &waxtap.SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context", StatusCode: 502, Code: "player-context-failed", RetryAfter: 25 * time.Second}
+	c := classifyError(&waxtap.ProviderError{Endpoint: "player-context", Cause: sre})
+	if c.exitCode != 9 || c.code != "network" {
+		t.Errorf("502 = %+v, want network/9", c)
+	}
+	if !strings.Contains(c.hint, "retry in 25s") {
+		t.Errorf("hint = %q, want the stated wait", c.hint)
+	}
+	if !strings.Contains(c.message, "(player-context-failed)") {
+		t.Errorf("message = %q, want the sidecar's code", c.message)
+	}
+	auth := &waxtap.SidecarResponseError{StatusCode: 401, RetryAfter: 5 * time.Second}
+	if h := sidecarHint(auth); !strings.Contains(h, "--api-key") || !strings.Contains(h, "retry in 5s") {
+		t.Errorf("hint = %q, want both parts joined", h)
 	}
 }

@@ -35,6 +35,22 @@ type PlayerContext struct {
 	Author string // channel or uploader name
 	// LengthSeconds is the video duration in seconds. Zero means unknown.
 	LengthSeconds int
+	// ChannelID and Description are videoDetails.channelId and shortDescription.
+	ChannelID   string
+	Description string
+	// Thumbnails is the videoDetails thumbnail ladder in the provider's own order
+	// (the player response's, smallest first). WaxTap sorts it largest first.
+	Thumbnails []PlayerContextThumbnail
+	// IsLiveContent, IsLiveNow, and IsUpcoming are the videoDetails live flags. A
+	// context for a broadcast that is live or upcoming is refused the way a
+	// /player response for one is (ErrLiveContent, ErrLiveNotStarted); a finished
+	// broadcast (IsLiveContent alone) is a VOD and reports LiveWasLive.
+	IsLiveContent bool
+	IsLiveNow     bool
+	IsUpcoming    bool
+	// PublishDate is the microformat's publishDate as sent, RFC 3339 or a bare
+	// 2006-01-02 date; WaxTap parses it. Empty when the response carried none.
+	PublishDate string
 	// AudioFormats are the audio renditions available for this context.
 	AudioFormats []PlayerContextFormat
 	// Generation names the provider session that minted this context, so WaxTap
@@ -42,6 +58,14 @@ type PlayerContext struct {
 	// WaxTap and echoed back verbatim. Zero means the provider does not version
 	// its sessions, which leaves the session unreportable.
 	Generation uint64
+}
+
+// PlayerContextThumbnail is one rung of a context's thumbnail ladder. Width and
+// Height are zero when the player response omits them.
+type PlayerContextThumbnail struct {
+	URL    string
+	Width  int
+	Height int
 }
 
 // PlayerContextFormat is one audio rendition in a PlayerContext. Itag, LMT, and

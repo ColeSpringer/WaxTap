@@ -50,12 +50,14 @@ func (c *Client) newBootstrappedSession(ctx context.Context) (*session, error) {
 	sess := newSession(c.gl)
 
 	if c.adoptionConfigured() {
-		vd, gen, err := c.resolveAdoptedSession(ctx)
+		id, err := c.resolveAdoptedSession(ctx)
 		if err != nil {
 			return nil, err
 		}
-		sess.adoptVisitorData(vd)
-		sess.identityGen = gen
+		sess.adoptVisitorData(id.visitorData)
+		sess.identityGen = id.rotationGen
+		sess.userAgent = id.userAgent
+		sess.clientVersion = id.clientVersion
 		c.log.DebugContext(ctx, "adopted external visitorData", "source", sess.source.String())
 		return sess, nil
 	}

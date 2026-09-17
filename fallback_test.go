@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/waxerr"
@@ -462,5 +463,108 @@ func TestAcquiredViaWatchPage(t *testing.T) {
 				t.Errorf("viaWatchPage() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNoteWebContextFailure(t *testing.T) {
+	c := &Client{}
+	verdict := &ProviderError{Endpoint: "player-context", Cause: &SidecarResponseError{StatusCode: 422, Code: SidecarCodeVideoUnavailable, Details: "ERROR"}}
+	c.noteWebContextFailure(verdict)
+	if c.webContextCoolingDown() {
+		t.Error("an availability verdict must not arm the provider cooldown")
+	}
+	c.noteWebContextFailure(&ProviderError{Endpoint: "player-context", Cause: &SidecarResponseError{StatusCode: 502, Code: "player-context-failed", RetryAfter: 2 * time.Minute}})
+	if until := c.webCtxDownUntil; time.Until(until) < 110*time.Second || time.Until(until) > 2*time.Minute {
+		t.Errorf("cooldown until %v from now, want the stated 2m wait", time.Until(until))
+	}
+	c.noteWebContextFailure(&ProviderError{Endpoint: "player-context", Cause: &SidecarResponseError{StatusCode: 502, RetryAfter: time.Hour}})
+	if time.Until(c.webCtxDownUntil) > webContextCooldownMax {
+		t.Error("a stated wait is capped at webContextCooldownMax")
+	}
+	c.noteWebContextFailure(errors.New("boom"))
+	if d := time.Until(c.webCtxDownUntil); d < 25*time.Second || d > webContextCooldown {
+		t.Errorf("a plain failure arms the default window, got %v", d)
+	}
+}
+
+func TestPreferContextVerdict(t *testing.T) {
+	verdict := &ProviderError{Endpoint: "player-context", Cause: &SidecarResponseError{StatusCode: 422, Code: SidecarCodeVideoUnavailable, Details: "LOGIN_REQUIRED", Reason: "private"}}
+	if got := preferContextVerdict(errors.New("dial tcp: refused"), verdict); !errors.Is(got, ErrVideoRestricted) {
+		t.Errorf("verdict must outrank a network failure, got %v", got)
+	}
+	if got := preferContextVerdict(ErrRateLimited, verdict); !errors.Is(got, ErrRateLimited) {
+		t.Error("rate limiting is never replaced")
+	}
+	if got := preferContextVerdict(context.Canceled, verdict); !errors.Is(got, context.Canceled) {
+		t.Error("a cancellation is never replaced")
+	}
+	// A deadline is not on that list: attemptErrors.aggregate lets a verdict
+	// outrank an expired sub-budget on the file-download path, so acquire has to
+	// agree. The caller's own context is checked at the call site instead.
+	if got := preferContextVerdict(context.DeadlineExceeded, verdict); !errors.Is(got, ErrVideoRestricted) {
+		t.Errorf("verdict must outrank an expired sub-budget, got %v", got)
+	}
+	plain := &ProviderError{Endpoint: "player-context", Cause: &SidecarResponseError{StatusCode: 502}}
+	if got := preferContextVerdict(errors.New("chain"), plain); got.Error() != "chain" {
+		t.Error("a non-verdict context failure leaves the chain error alone")
+	}
+	if got := preferContextVerdict(errors.New("chain"), nil); got.Error() != "chain" {
+		t.Error("no context failure leaves the chain error alone")
+	}
+}
+
+// TestAttemptErrorsAggregate_DeliveryDisprovesAvailabilityVerdict covers the
+// cross-attempt evidence PreferErr cannot see on its own: one client refused the
+// video, another reached the stream. Reaching the stream means a /player
+// response carried playable formats and a signed URL resolved, so the video
+// answered for itself and the refusal described that client, not the video.
+func TestAttemptErrorsAggregate_DeliveryDisprovesAvailabilityVerdict(t *testing.T) {
+	verdict := &waxerr.PlayabilityError{Status: "LOGIN_REQUIRED", Reason: "Sign in to confirm you're not a bot", Sentinel: waxerr.ErrLoginRequired}
+	incomplete := fmt.Errorf("%w: stream stalled at offset 524288", ErrIncompleteStream)
+
+	var causes attemptErrors
+	causes.add(youtube.AttemptWebContext, verdict)
+	causes.addDelivered(&acquired{attempt: "profile:1", stats: &refreshStats{}}, incomplete)
+
+	err := causes.aggregate()
+	if !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("aggregate = %v, want ErrIncompleteStream (exit 7, retryable)", err)
+	}
+	if errors.Is(err, ErrLoginRequired) {
+		t.Errorf("aggregate = %v, want the verdict disproved: a client streamed bytes from this video", err)
+	}
+	// The verdict is still worth reading, so it stays in the per-attempt detail.
+	if !strings.Contains(err.Error(), "not a bot") {
+		t.Errorf("message = %q, want the demoted verdict kept as diagnosis", err)
+	}
+}
+
+// TestAttemptErrorsAggregate_VerdictOnADeliveringAttemptStands covers the other
+// side: a video taken down mid-download refuses on the attempt that was already
+// streaming, which is the video answering, not another client's view of it.
+func TestAttemptErrorsAggregate_VerdictOnADeliveringAttemptStands(t *testing.T) {
+	verdict := &waxerr.PlayabilityError{Status: "ERROR", Sentinel: waxerr.ErrVideoUnavailable}
+
+	var causes attemptErrors
+	causes.addDelivered(&acquired{attempt: "profile:0", stats: &refreshStats{}}, fmt.Errorf("%w: short chunk", ErrIncompleteStream))
+	causes.addDelivered(&acquired{attempt: "profile:1", stats: &refreshStats{}}, verdict)
+
+	if err := causes.aggregate(); !errors.Is(err, ErrVideoUnavailable) {
+		t.Errorf("aggregate = %v, want the verdict the delivering attempt itself hit", err)
+	}
+}
+
+// TestAttemptErrorsAggregate_VerdictStandsWithoutDeliveryEvidence pins that the
+// demotion needs evidence: with nothing reaching the stream, the verdict is the
+// best answer the chain has.
+func TestAttemptErrorsAggregate_VerdictStandsWithoutDeliveryEvidence(t *testing.T) {
+	verdict := &waxerr.PlayabilityError{Status: "ERROR", Sentinel: waxerr.ErrVideoUnavailable}
+
+	var causes attemptErrors
+	causes.add(youtube.AttemptWebContext, verdict)
+	causes.add(youtube.AttemptID("profile:1"), ErrNeedsPOToken)
+
+	if err := causes.aggregate(); !errors.Is(err, ErrVideoUnavailable) {
+		t.Errorf("aggregate = %v, want the verdict: no attempt reached the stream to disprove it", err)
 	}
 }

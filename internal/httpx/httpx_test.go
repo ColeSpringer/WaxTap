@@ -539,7 +539,7 @@ func TestDoDeadlineKeepsTransportCause(t *testing.T) {
 	}
 }
 
-// The counterpart, and the policy pauseBlocked already states: a caller that
+// The counterpart, and the policy PauseBlocked already states: a caller that
 // gave up is reported as a cancellation, never as the failure it interrupted.
 func TestDoCancellationStaysBare(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -595,5 +595,42 @@ func TestDoDeadlineFallsBackToEarlierCause(t *testing.T) {
 	}
 	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "proxyconnect" {
 		t.Fatalf("err = %v, want the earlier attempt's proxyconnect cause", err)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	h := func(v string) http.Header { return http.Header{"Retry-After": {v}} }
+	if d, ok := ParseRetryAfter(h("25")); !ok || d != 25*time.Second {
+		t.Errorf("delta-seconds = %v, %v; want 25s, true", d, ok)
+	}
+	if _, ok := ParseRetryAfter(h("-1")); ok {
+		t.Error("negative seconds must not parse")
+	}
+	if _, ok := ParseRetryAfter(h("soon")); ok {
+		t.Error("prose must not parse")
+	}
+	if _, ok := ParseRetryAfter(http.Header{}); ok {
+		t.Error("absent header must report false")
+	}
+	past := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
+	if d, ok := ParseRetryAfter(h(past)); !ok || d != 0 {
+		t.Errorf("past date = %v, %v; want 0, true", d, ok)
+	}
+}
+
+func TestPauseBlocked(t *testing.T) {
+	pending := errors.New("refusal")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := PauseBlocked(cancelled, time.Second, pending); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled = %v, want the cancellation to outrank the pending error", err)
+	}
+	tight, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := PauseBlocked(tight, time.Second, pending); err != pending {
+		t.Errorf("no headroom = %v, want the pending error", err)
+	}
+	if err := PauseBlocked(context.Background(), time.Hour, pending); err != nil {
+		t.Errorf("no deadline = %v, want nil", err)
 	}
 }

@@ -127,6 +127,18 @@ func (f ProviderFunc) ProvidePOToken(ctx context.Context, req Request) (Response
 type Session struct {
 	VisitorData string         // exact X-Goog-Visitor-Id literal
 	Cookies     []*http.Cookie // guest-session cookies associated with VisitorData
+	// UserAgent and ClientVersion are the browser identity the session was
+	// attested under: the exact navigator.userAgent, and the INNERTUBE_CLIENT_VERSION
+	// its player ran. When set, WaxTap's WEB requests under this session (the
+	// /player call, the stream and SABR requests, and the token requests'
+	// [Request]) carry them in place of WaxTap's own Chrome identity, so the
+	// cookies, the visitor id, the token, and the requests present one browser.
+	// Empty means WaxTap's own, with Options.ChromeMajor applied. A native client
+	// (VISIONOS, ANDROID_VR, IOS) keeps its own identity either way: a browser
+	// identity is coherent only on a browser client, and the client version is
+	// the WEB player's, so WEB_EMBEDDED_PLAYER takes only the user agent.
+	UserAgent     string
+	ClientVersion string
 	// Generation names this session at the provider, so WaxTap can report it
 	// unusable through [SessionInvalidator]. It is opaque to WaxTap and echoed
 	// back verbatim. Zero means the provider does not version its sessions,

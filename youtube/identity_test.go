@@ -126,6 +126,58 @@ func TestExtractResolve_IdentityContract(t *testing.T) {
 	}
 }
 
+// TestExtractResolve_AdoptedIdentityContract is TestExtractResolve_IdentityContract
+// under adoption: on the WEB-only chain the facade permits there, the session's
+// browser identity replaces WaxTap's on the token requests and the stream
+// headers, while the GVS content binding stays the adopted visitorData literal.
+func TestExtractResolve_AdoptedIdentityContract(t *testing.T) {
+	const adoptedVD = "CgtBRE9QVEVE%3D%3D"
+	ok := readFixture(t, "player_ok.json")
+	rp := &recordingProvider{resp: potoken.Response{Token: "TOK"}}
+	fr := &fakeResolver{stream: resolver.Stream{URL: "https://signed/"}}
+
+	c := New(Config{
+		ChromeMajor:     151, // outranked by the session's own identity
+		Profiles:        []ClientProfile{makeProfile(profileWeb)},
+		Resolver:        fr,
+		POTokenProvider: rp,
+		Session:         &potoken.Session{VisitorData: adoptedVD, UserAgent: adoptedUA, ClientVersion: adoptedVersion},
+		HTTP: fastTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/v1/player") {
+				return fixtureResp(http.StatusOK, ok), nil
+			}
+			return fixtureResp(http.StatusNotFound, nil), nil
+		})),
+	})
+
+	ext, err := c.Extract(context.Background(), "testVideo01")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if _, err := c.Resolve(context.Background(), ext, 0); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	player := rp.byScope(potoken.ScopePlayer)
+	gvs := rp.byScope(potoken.ScopeGVS)
+	if player == nil || gvs == nil {
+		t.Fatalf("want both player and gvs token requests, got %d: %+v", len(rp.reqs), rp.reqs)
+	}
+	if player.UserAgent != adoptedUA || gvs.UserAgent != adoptedUA {
+		t.Errorf("token UAs: player=%q gvs=%q, want the adopted %q", player.UserAgent, gvs.UserAgent, adoptedUA)
+	}
+	if player.ClientVersion != adoptedVersion || gvs.ClientVersion != adoptedVersion {
+		t.Errorf("token versions: player=%q gvs=%q, want the adopted %q", player.ClientVersion, gvs.ClientVersion, adoptedVersion)
+	}
+	if got := fr.gotCtx.Headers.Get("User-Agent"); got != adoptedUA {
+		t.Errorf("stream-header UA = %q, want the adopted %q", got, adoptedUA)
+	}
+	// The content binding is the identity, not the header set: it stays verbatim.
+	if gvs.VisitorData != adoptedVD {
+		t.Errorf("gvs VisitorData = %q, want the adopted literal %q", gvs.VisitorData, adoptedVD)
+	}
+}
+
 // TestExtract_WatchPageFallbackUsesChromeMajor verifies that watch-page fallback
 // uses the configured Chrome major.
 func TestExtract_WatchPageFallbackUsesChromeMajor(t *testing.T) {

@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/youtube"
 )
 
 // SidecarOption configures a sidecar provider built by NewSidecarPOTokenProvider,
@@ -26,7 +28,8 @@ type SidecarOption func(*sidecarConfig)
 // the option type lets a later setting be added without changing the constructor
 // signatures.
 type sidecarConfig struct {
-	apiKey string
+	apiKey  string
+	timeout time.Duration
 }
 
 // WithSidecarAPIKey sends key as the X-API-Key header on every sidecar request.
@@ -35,12 +38,25 @@ func WithSidecarAPIKey(key string) SidecarOption {
 	return func(c *sidecarConfig) { c.apiKey = key }
 }
 
+// WithSidecarTimeout bounds each HTTP request a sidecar provider makes, /report
+// included. Zero or negative selects the default, 60 s, sized for WaxSeal's
+// documented first call after a relaunch: launch, attestation, and a streaming
+// proof (10 to 30 s), then the 12 s separation window. A wait the sidecar asks
+// for through Retry-After is not counted against it; the caller's context is,
+// and on the player-context provider Timeouts.WebContext bounds the whole call.
+func WithSidecarTimeout(d time.Duration) SidecarOption {
+	return func(c *sidecarConfig) { c.timeout = d }
+}
+
 func applySidecarOptions(opts []SidecarOption) sidecarConfig {
 	var c sidecarConfig
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&c)
 		}
+	}
+	if c.timeout <= 0 {
+		c.timeout = defaultSidecarTimeout
 	}
 	return c
 }
@@ -52,15 +68,18 @@ func applySidecarOptions(opts []SidecarOption) sidecarConfig {
 // appended only when absent. A bad URL returns an error. Plug the result into
 // [Options.POTokenProvider].
 //
-// The provider uses a dedicated 30s-timeout, no-redirect client that ignores
-// [Options.HTTPClient]: a PO token is IP-bound, so the mint and the stream must
-// share egress, and no-redirect pins credentials to the endpoint.
+// The provider uses a dedicated no-redirect client bounded by
+// [WithSidecarTimeout] (60 s by default) that ignores [Options.HTTPClient]: a PO
+// token is IP-bound, so the mint and the stream must share egress, and
+// no-redirect pins credentials to the endpoint. A transient failure is retried
+// once.
 func NewSidecarPOTokenProvider(baseURL string, opts ...SidecarOption) (POTokenProvider, error) {
 	endpoint, err := buildSidecarURL(baseURL, "/get_pot")
 	if err != nil {
 		return nil, err
 	}
-	return newBgutilProvider(endpoint, applySidecarOptions(opts).apiKey), nil
+	cfg := applySidecarOptions(opts)
+	return newBgutilProvider(endpoint, cfg.apiKey, cfg.timeout), nil
 }
 
 // NewSidecarPlayerContextProvider returns a PlayerContextProvider that fetches an
@@ -70,8 +89,10 @@ func NewSidecarPOTokenProvider(baseURL string, opts ...SidecarOption) (POTokenPr
 // into [Options.PlayerContextProvider]; [New] requires a POTokenProvider alongside
 // it because the WEB stream binds a GVS PO token to the context's visitorData.
 //
-// The client imposes no timeout of its own; calls rely on [Timeouts.WebContext].
-// Like the token provider it ignores [Options.HTTPClient] and is never proxied.
+// Each request is bounded by [WithSidecarTimeout] (60 s by default) and the call
+// as a whole by [Timeouts.WebContext]. Like the token provider it ignores
+// [Options.HTTPClient] and is never proxied. A transient failure is retried once,
+// after the wait the sidecar states when it states one.
 //
 // The provider also implements [potoken.SessionInvalidator] against the /report
 // sibling of that endpoint, so a session whose attested contexts deliver capped
@@ -82,11 +103,11 @@ func NewSidecarPlayerContextProvider(baseURL string, opts ...SidecarOption) (Pla
 		return nil, err
 	}
 	cfg := applySidecarOptions(opts)
-	rep, err := newSidecarReporter(endpoint, "player-context report endpoint", cfg.apiKey)
+	rep, err := newSidecarReporter(endpoint, "player-context report endpoint", cfg.apiKey, cfg.timeout)
 	if err != nil {
 		return nil, err
 	}
-	return newPlayerContextProvider(endpoint, cfg.apiKey, rep), nil
+	return newPlayerContextProvider(endpoint, cfg.apiKey, cfg.timeout, rep), nil
 }
 
 // NewSidecarSessionProvider returns a POTokenSessionProvider that adopts a guest
@@ -95,9 +116,10 @@ func NewSidecarPlayerContextProvider(baseURL string, opts ...SidecarOption) (Pla
 // attested in. A bad URL returns an error. Plug the result into
 // [Options.SessionProvider].
 //
-// The provider uses a dedicated 30s-timeout, no-redirect client that ignores
-// [Options.HTTPClient]: full WEB validation requires the session host and the
-// downloads to share an egress IP.
+// The provider uses a dedicated no-redirect client bounded by
+// [WithSidecarTimeout] (60 s by default) that ignores [Options.HTTPClient]: full
+// WEB validation requires the session host and the downloads to share an egress
+// IP. A transient failure is retried once.
 // The provider also implements [potoken.SessionInvalidator] against the /report
 // sibling of that endpoint, so a session googlevideo has capped can be retired
 // and replaced mid-download.
@@ -107,11 +129,11 @@ func NewSidecarSessionProvider(baseURL string, opts ...SidecarOption) (POTokenSe
 		return nil, err
 	}
 	cfg := applySidecarOptions(opts)
-	rep, err := newSidecarReporter(endpoint, "session report endpoint", cfg.apiKey)
+	rep, err := newSidecarReporter(endpoint, "session report endpoint", cfg.apiKey, cfg.timeout)
 	if err != nil {
 		return nil, err
 	}
-	return newHTTPSessionProvider(endpoint, cfg.apiKey, rep), nil
+	return newHTTPSessionProvider(endpoint, cfg.apiKey, cfg.timeout, rep), nil
 }
 
 // siblingSidecarURL rewrites endpoint's last path segment to name, deriving one
@@ -139,7 +161,7 @@ type sidecarReporter struct {
 
 // newSidecarReporter derives the /report sibling of sourceEndpoint, which has
 // already been validated by buildSidecarURL.
-func newSidecarReporter(sourceEndpoint, label, apiKey string) (sidecarReporter, error) {
+func newSidecarReporter(sourceEndpoint, label, apiKey string, timeout time.Duration) (sidecarReporter, error) {
 	endpoint, err := siblingSidecarURL(sourceEndpoint, "report")
 	if err != nil {
 		return sidecarReporter{}, err
@@ -148,7 +170,7 @@ func newSidecarReporter(sourceEndpoint, label, apiKey string) (sidecarReporter, 
 		endpoint: endpoint,
 		label:    label,
 		apiKey:   apiKey,
-		http:     newSidecarClient(30 * time.Second),
+		http:     newSidecarClient(timeout),
 	}, nil
 }
 
@@ -179,9 +201,10 @@ func (r sidecarReporter) invalidate(ctx context.Context, inv potoken.SessionInva
 	}
 	if doc.RetryAfterSeconds > 0 {
 		return &SidecarResponseError{
-			Label:    r.label,
-			Endpoint: r.endpoint,
-			Reason:   fmt.Sprintf("session recycling is rate-limited; retry in %ds", doc.RetryAfterSeconds),
+			Label:      r.label,
+			Endpoint:   r.endpoint,
+			Reason:     fmt.Sprintf("session recycling is rate-limited; retry in %ds", doc.RetryAfterSeconds),
+			RetryAfter: time.Duration(doc.RetryAfterSeconds) * time.Second,
 		}
 	}
 	return nil
@@ -236,7 +259,114 @@ const (
 	sidecarSuccessBodyLimit = 1 << 20 // 1 MiB
 	sidecarErrorBodyLimit   = 8 << 10 // 8 KiB
 	sidecarReasonRunes      = 200     // cap on an extracted reason
+	sidecarCodeRunes        = 64      // cap on an extracted code
 )
+
+// SidecarCodeVideoUnavailable is the refusal code WaxTap acts on: the sidecar's
+// browser saw a non-OK playabilityStatus for the video (WaxSeal answers it with
+// HTTP 422 and the status in details). The error unwraps to the same
+// availability verdict a /player response with that status yields.
+const SidecarCodeVideoUnavailable = "video-unavailable"
+
+const (
+	// defaultSidecarTimeout bounds one sidecar request when no option says
+	// otherwise. WaxSeal's first call after a relaunch costs 10 to 30 s of launch,
+	// attestation, and a streaming proof, then a 12 s separation window.
+	defaultSidecarTimeout = 60 * time.Second
+	// sidecarRetryMaxWait is the longest stated wait WaxTap sleeps through. Past
+	// it the refusal is reported with the wait attached, so the caller (the
+	// WEB-context cool-down, the CLI hint) decides what to do with the time.
+	sidecarRetryMaxWait = 60 * time.Second
+	// sidecarTransientWait is the poke a transient failure that stated no wait
+	// earns before the single retry.
+	sidecarTransientWait = 500 * time.Millisecond
+)
+
+// sidecarSleep is httpx.Sleep; tests swap it to record waits instead of sleeping.
+var sidecarSleep = httpx.Sleep
+
+// sidecarCall is sidecarJSON with one retry.
+//
+// sidecarRetryWait decides whether the failure earns it and how long to wait. A
+// wait the sidecar stated is honoured up to sidecarRetryMaxWait; a transient
+// failure that stated none earns sidecarTransientWait. Then PauseBlocked applies
+// the deadline policy Client.Do uses: a cancelled context returns the
+// cancellation, a deadline that cannot fit the wait plus a second of headroom
+// returns the refusal (sleeping into a deadline is exactly the waste a cool-down
+// exists to avoid). The second attempt's error is returned as it is.
+//
+// /report is deliberately not routed through here: a report is sent once.
+func sidecarCall(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in, out any) error {
+	err := sidecarJSON(ctx, client, method, endpoint, label, apiKey, in, out)
+	if err == nil {
+		return nil
+	}
+	wait, retry := sidecarRetryWait(err)
+	if !retry {
+		return err
+	}
+	if berr := httpx.PauseBlocked(ctx, wait, err); berr != nil {
+		return berr
+	}
+	if serr := sidecarSleep(ctx, wait); serr != nil {
+		// A cancellation names the caller giving up; a deadline expiring mid-pause
+		// is the case the refusal itself explains.
+		if !errors.Is(serr, context.DeadlineExceeded) {
+			return serr
+		}
+		return err
+	}
+	return sidecarJSON(ctx, client, method, endpoint, label, apiKey, in, out)
+}
+
+// sidecarRetryWait reports how long to wait before retrying err, and whether a
+// retry is warranted at all.
+//
+// A transport failure or a 408/5xx is transient: the sidecar may be launching a
+// browser, mid-relaunch, or briefly wedged. A 429 earns a retry only when the
+// sidecar states a wait: a bare 429 says back off, which is what the CLI's exit
+// 5 tells the user, and a 500 ms poke would contradict it. Every other refusal
+// (another 4xx, a malformed 200, a playability verdict) will answer the same way
+// a moment later. A stated wait past sidecarRetryMaxWait earns none: that is a
+// cool-down to report, not to sleep through.
+func sidecarRetryWait(err error) (time.Duration, bool) {
+	if _, ok := errors.AsType[*SidecarError](err); ok {
+		return sidecarTransientWait, true
+	}
+	sre, ok := errors.AsType[*SidecarResponseError](err)
+	if !ok {
+		return 0, false
+	}
+	if sre.RetryAfter > 0 {
+		if sre.RetryAfter > sidecarRetryMaxWait {
+			return 0, false
+		}
+		return sre.RetryAfter, sre.StatusCode == http.StatusTooManyRequests || retryableSidecarStatus(sre.StatusCode)
+	}
+	if retryableSidecarStatus(sre.StatusCode) {
+		return sidecarTransientWait, true
+	}
+	return 0, false
+}
+
+// retryableSidecarStatus reports whether a status is the kind a second attempt
+// can clear on its own. It is deliberately the same set internal/httpx retries
+// on the YouTube path, so one status does not mean "transient" on a sidecar and
+// "final" everywhere else. A 0 status is a malformed 200, which is a contract
+// mismatch, not a transient one; a 501 or 505 names something the sidecar will
+// not do, which a retry cannot change.
+func retryableSidecarStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, // 408
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout:      // 504
+		return true
+	default:
+		return false
+	}
+}
 
 // sidecarJSON exchanges JSON with the PO-token, session, and player-context
 // providers. Connection failures return *SidecarError. Unusable responses return
@@ -270,15 +400,22 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 		// connection failure from the sentinel that may wrap it.
 		return &SidecarError{Label: label, Endpoint: endpoint, Err: err}
 	}
-	defer resp.Body.Close()
+	// Both readers below are bounded, so a larger body would leave bytes on the
+	// wire and make Close discard the connection. sidecarCall retries, and a
+	// discarded connection makes that retry pay a fresh dial and handshake.
+	defer drainSidecarBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		// Include a short reason from a known JSON field, but do not echo arbitrary
 		// response bytes that might contain tokens or cookies.
+		r := readSidecarRefusal(resp)
 		return &SidecarResponseError{
 			Label:      label,
 			Endpoint:   endpoint,
 			StatusCode: resp.StatusCode,
-			Reason:     sidecarReason(resp.Body),
+			Reason:     r.Reason,
+			Code:       r.Code,
+			Details:    r.Details,
+			RetryAfter: r.RetryAfter,
 		}
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, sidecarSuccessBodyLimit)).Decode(out); err != nil {
@@ -291,19 +428,57 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 	return nil
 }
 
-// sidecarReason extracts and truncates the error or message field from a JSON
-// response. Other response bodies produce an empty reason.
-func sidecarReason(body io.Reader) string {
+// sidecarRefusal is what a non-OK sidecar response says about itself: the short
+// reason, the machine-readable code, the code's details, and the wait the
+// sidecar asked for. Every field is optional; a body that carries none leaves
+// the zero value.
+type sidecarRefusal struct {
+	Reason, Code, Details string
+	RetryAfter            time.Duration
+}
+
+// readSidecarRefusal extracts the known fields of a refusal from a JSON response
+// body and its headers, truncating the text ones. Other response bodies produce
+// an empty refusal: raw bytes are never echoed, since they may carry tokens or
+// cookies.
+//
+// A Retry-After header wins over the body's retry_after_seconds: the header is
+// the HTTP-level statement, and a proxy or a later sidecar version can set it
+// where the body cannot be changed.
+func readSidecarRefusal(resp *http.Response) sidecarRefusal {
 	var msg struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+		Error             string `json:"error"`
+		Message           string `json:"message"`
+		Code              string `json:"code"`
+		Details           string `json:"details"`
+		RetryAfterSeconds int    `json:"retry_after_seconds"`
 	}
-	_ = json.NewDecoder(io.LimitReader(body, sidecarErrorBodyLimit)).Decode(&msg)
+	_ = json.NewDecoder(io.LimitReader(resp.Body, sidecarErrorBodyLimit)).Decode(&msg)
 	reason := strings.TrimSpace(msg.Error)
 	if reason == "" {
 		reason = strings.TrimSpace(msg.Message)
 	}
-	return capRunes(reason, sidecarReasonRunes)
+	r := sidecarRefusal{
+		Reason:  capRunes(reason, sidecarReasonRunes),
+		Code:    capRunes(strings.TrimSpace(msg.Code), sidecarCodeRunes),
+		Details: capRunes(strings.TrimSpace(msg.Details), sidecarReasonRunes),
+	}
+	if d, ok := httpx.ParseRetryAfter(resp.Header); ok {
+		r.RetryAfter = d
+	} else if msg.RetryAfterSeconds > 0 {
+		r.RetryAfter = time.Duration(msg.RetryAfterSeconds) * time.Second
+	}
+	return r
+}
+
+// drainSidecarBody reads the bounded remainder of a response body and closes it,
+// so the connection returns to the pool instead of being discarded.
+func drainSidecarBody(resp *http.Response) {
+	if resp.Body == nil {
+		return
+	}
+	_, _ = io.CopyN(io.Discard, resp.Body, sidecarSuccessBodyLimit)
+	_ = resp.Body.Close()
 }
 
 // capRunes truncates s to at most n runes, appending an ellipsis when truncated.
@@ -385,20 +560,46 @@ type SidecarResponseError struct {
 	Endpoint   string // configured endpoint (redacted in the Error string)
 	StatusCode int    // HTTP status, or 0 when a 200 carried invalid content
 	Reason     string // short, sanitized reason; never raw response bytes
+	// Code is the body's machine-readable code ("code" in WaxSeal's envelope),
+	// empty when the body carried none. It is reported verbatim; only
+	// SidecarCodeVideoUnavailable changes classification.
+	Code string
+	// Details is the body's details field: the playabilityStatus behind a
+	// video-unavailable refusal. Empty when absent.
+	Details string
+	// RetryAfter is the wait the sidecar asked for, from a Retry-After header or
+	// a retry_after_seconds field (the header wins). Zero when it sent neither.
+	RetryAfter time.Duration
 }
 
 func (e *SidecarResponseError) Error() string {
 	ep := redactURL(e.Endpoint)
-	switch {
-	case e.StatusCode > 0 && e.Reason != "":
-		return fmt.Sprintf("%s at %s returned HTTP %d: %s", e.Label, ep, e.StatusCode, e.Reason)
-	case e.StatusCode > 0:
-		return fmt.Sprintf("%s at %s returned HTTP %d", e.Label, ep, e.StatusCode)
-	case e.Reason != "":
-		return fmt.Sprintf("%s at %s returned an unusable response: %s", e.Label, ep, e.Reason)
-	default:
-		return fmt.Sprintf("%s at %s returned an unusable response", e.Label, ep)
+	// A coded 200 is the verdict a provider raised from the response body, so the
+	// code has to reach the message there too: it is what explains the exit code.
+	what := "an unusable response"
+	if e.StatusCode > 0 {
+		what = fmt.Sprintf("HTTP %d", e.StatusCode)
 	}
+	if e.Code != "" {
+		what += fmt.Sprintf(" (%s)", e.Code)
+	}
+	if e.Reason != "" {
+		return fmt.Sprintf("%s at %s returned %s: %s", e.Label, ep, what, e.Reason)
+	}
+	return fmt.Sprintf("%s at %s returned %s", e.Label, ep, what)
+}
+
+// Unwrap returns the availability verdict a video-unavailable refusal maps to,
+// so errors.Is sees ErrVideoUnavailable, ErrLoginRequired, and the rest through
+// the sidecar error. Other refusals unwrap to nothing: their status describes
+// the sidecar, not the video.
+func (e *SidecarResponseError) Unwrap() error {
+	if e.Code != SidecarCodeVideoUnavailable {
+		return nil
+	}
+	// The reason carries the browser's own phrase, so "private", "members", and
+	// "country" match here exactly as they do on a /player response.
+	return youtube.ClassifyPlayability(e.Details, e.Reason)
 }
 
 // bgutilProvider is a potoken.Provider that mints PO tokens from a bgutil-wire
@@ -420,11 +621,11 @@ type bgutilProvider struct {
 
 // newBgutilProvider builds a provider for a bgutil endpoint that has already been
 // validated by buildSidecarURL.
-func newBgutilProvider(endpoint, apiKey string) *bgutilProvider {
+func newBgutilProvider(endpoint, apiKey string, timeout time.Duration) *bgutilProvider {
 	return &bgutilProvider{
 		endpoint: endpoint,
 		apiKey:   apiKey,
-		http:     newSidecarClient(30 * time.Second),
+		http:     newSidecarClient(timeout),
 	}
 }
 
@@ -446,7 +647,7 @@ func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request
 		return potoken.Response{}, err
 	}
 	var out bgutilResponse
-	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server", p.apiKey,
+	if err := sidecarCall(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server", p.apiKey,
 		bgutilRequest{ContentBinding: binding}, &out); err != nil {
 		return potoken.Response{}, err
 	}
@@ -513,13 +714,14 @@ type playerContextProvider struct {
 }
 
 // newPlayerContextProvider builds a provider for a player-context endpoint that
-// has already been validated by buildSidecarURL. Calls rely on the library's
-// Timeouts.WebContext deadline, so the HTTP client does not impose another one.
-func newPlayerContextProvider(endpoint, apiKey string, rep sidecarReporter) *playerContextProvider {
+// has already been validated by buildSidecarURL. Each request is bounded by
+// timeout; the call as a whole still runs under the library's Timeouts.WebContext
+// deadline.
+func newPlayerContextProvider(endpoint, apiKey string, timeout time.Duration, rep sidecarReporter) *playerContextProvider {
 	return &playerContextProvider{
 		endpoint: endpoint,
 		apiKey:   apiKey,
-		http:     newSidecarClient(0),
+		http:     newSidecarClient(timeout),
 		reporter: rep,
 	}
 }
@@ -539,19 +741,32 @@ type playerContextRequest struct {
 // servers; their zero values allow a video-ID filename, unknown duration, and
 // selection without quality metadata.
 type playerContextResponse struct {
-	PlayabilityStatus            string                    `json:"playability_status"`
-	PlayerURL                    string                    `json:"player_url"`
-	ServerAbrStreamingURL        string                    `json:"server_abr_streaming_url"`
-	VideoPlaybackUstreamerConfig string                    `json:"video_playback_ustreamer_config"`
-	VisitorData                  string                    `json:"visitor_data"`
-	ClientVersion                string                    `json:"client_version"`
-	Title                        string                    `json:"title"`
-	Author                       string                    `json:"author"`
-	LengthSeconds                int                       `json:"length_seconds"`
-	AudioFormats                 []playerContextFormatJSON `json:"audio_formats"`
+	PlayabilityStatus            string                       `json:"playability_status"`
+	PlayerURL                    string                       `json:"player_url"`
+	ServerAbrStreamingURL        string                       `json:"server_abr_streaming_url"`
+	VideoPlaybackUstreamerConfig string                       `json:"video_playback_ustreamer_config"`
+	VisitorData                  string                       `json:"visitor_data"`
+	ClientVersion                string                       `json:"client_version"`
+	Title                        string                       `json:"title"`
+	Author                       string                       `json:"author"`
+	LengthSeconds                int                          `json:"length_seconds"`
+	ChannelID                    string                       `json:"channel_id"`
+	Description                  string                       `json:"description"`
+	Thumbnails                   []playerContextThumbnailJSON `json:"thumbnails"`
+	IsLiveContent                bool                         `json:"is_live_content"`
+	IsLiveNow                    bool                         `json:"is_live_now"`
+	IsUpcoming                   bool                         `json:"is_upcoming"`
+	PublishDate                  string                       `json:"publish_date"`
+	AudioFormats                 []playerContextFormatJSON    `json:"audio_formats"`
 	// SessionGeneration names the daemon session for /report; absent leaves the
 	// session unreportable.
 	SessionGeneration uint64 `json:"session_generation"`
+}
+
+type playerContextThumbnailJSON struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 type playerContextFormatJSON struct {
@@ -575,7 +790,7 @@ type playerContextFormatJSON struct {
 // sidecar.
 func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoID string) (potoken.PlayerContext, error) {
 	var out playerContextResponse
-	if err := sidecarJSON(ctx, p.http, http.MethodPost, p.endpoint, "player-context server", p.apiKey,
+	if err := sidecarCall(ctx, p.http, http.MethodPost, p.endpoint, "player-context server", p.apiKey,
 		playerContextRequest{VideoID: videoID}, &out); err != nil {
 		return potoken.PlayerContext{}, err
 	}
@@ -583,7 +798,15 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 	// error names the snake_case wire keys for comparison with the response.
 	// video_playback_ustreamer_config is also validated for non-CLI providers.
 	if out.PlayabilityStatus != "" && !strings.EqualFold(out.PlayabilityStatus, "OK") {
-		return potoken.PlayerContext{}, &SidecarResponseError{Label: "player-context server", Endpoint: p.endpoint, Reason: fmt.Sprintf("playability_status %q", out.PlayabilityStatus)}
+		// A 200 that names a non-OK status is the same verdict a 422
+		// video-unavailable carries; code it so both classify alike.
+		return potoken.PlayerContext{}, &SidecarResponseError{
+			Label:    "player-context server",
+			Endpoint: p.endpoint,
+			Code:     SidecarCodeVideoUnavailable,
+			Details:  out.PlayabilityStatus,
+			Reason:   fmt.Sprintf("playability_status %q", out.PlayabilityStatus),
+		}
 	}
 	if out.ServerAbrStreamingURL == "" || out.VisitorData == "" || out.VideoPlaybackUstreamerConfig == "" || len(out.AudioFormats) == 0 {
 		return potoken.PlayerContext{}, &SidecarResponseError{Label: "player-context server", Endpoint: p.endpoint, Reason: "missing server_abr_streaming_url, visitor_data, video_playback_ustreamer_config, or audio_formats"}
@@ -606,6 +829,15 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 			AudioTrackID:     f.AudioTrackID,
 		})
 	}
+	// Allocate the ladder only when the body carried rungs, so an absent or empty
+	// thumbnails key leaves Thumbnails nil.
+	var thumbs []potoken.PlayerContextThumbnail
+	for _, t := range out.Thumbnails {
+		if t.URL == "" {
+			continue
+		}
+		thumbs = append(thumbs, potoken.PlayerContextThumbnail{URL: t.URL, Width: t.Width, Height: t.Height})
+	}
 	return potoken.PlayerContext{
 		ServerAbrURL:    out.ServerAbrStreamingURL,
 		PlayerURL:       out.PlayerURL,
@@ -615,6 +847,13 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 		Title:           out.Title,
 		Author:          out.Author,
 		LengthSeconds:   out.LengthSeconds,
+		ChannelID:       out.ChannelID,
+		Description:     out.Description,
+		Thumbnails:      thumbs,
+		IsLiveContent:   out.IsLiveContent,
+		IsLiveNow:       out.IsLiveNow,
+		IsUpcoming:      out.IsUpcoming,
+		PublishDate:     out.PublishDate,
 		AudioFormats:    formats,
 		Generation:      out.SessionGeneration,
 	}, nil
@@ -637,11 +876,11 @@ type httpSessionProvider struct {
 
 // newHTTPSessionProvider builds a provider for a session endpoint that has already
 // been validated by buildSidecarURL.
-func newHTTPSessionProvider(endpoint, apiKey string, rep sidecarReporter) *httpSessionProvider {
+func newHTTPSessionProvider(endpoint, apiKey string, timeout time.Duration, rep sidecarReporter) *httpSessionProvider {
 	return &httpSessionProvider{
 		endpoint: endpoint,
 		apiKey:   apiKey,
-		http:     newSidecarClient(30 * time.Second),
+		http:     newSidecarClient(timeout),
 		reporter: rep,
 	}
 }
@@ -652,17 +891,41 @@ func newHTTPSessionProvider(endpoint, apiKey string, rep sidecarReporter) *httpS
 //
 //	{"visitor_data":"<exact X-Goog-Visitor-Id literal>",
 //	 "cookies":[{"name","value","domain","path","secure","http_only","expires"}],
+//	 "user_agent":"<navigator.userAgent>", "client_version":"<INNERTUBE_CLIENT_VERSION>",
 //	 "session_generation":<uint>}
 //
-// Extra keys (user_agent, client_version, cookie_header) are ignored. expires is
-// RFC3339 or unix seconds; 0/absent means a session cookie. session_generation
-// names the session for /report; absent leaves it unreportable.
+// cookie_header and same_site are ignored: the cookies array carries the same
+// information. user_agent and client_version are the attesting browser's
+// identity, adopted onto WaxTap's WEB requests when present. expires is RFC3339
+// or unix seconds; 0/absent means a session cookie. session_generation names the
+// session for /report; absent leaves it unreportable.
 type sessionDoc struct {
-	VisitorData      string          `json:"visitor_data"`
-	VisitorDataCamel string          `json:"visitorData"`
-	Cookies          []sessionCookie `json:"cookies"`
-	Generation       uint64          `json:"session_generation"`
-	GenerationCamel  uint64          `json:"sessionGeneration"`
+	VisitorData        string          `json:"visitor_data"`
+	VisitorDataCamel   string          `json:"visitorData"`
+	UserAgent          string          `json:"user_agent"`
+	UserAgentCamel     string          `json:"userAgent"`
+	ClientVersion      string          `json:"client_version"`
+	ClientVersionCamel string          `json:"clientVersion"`
+	Cookies            []sessionCookie `json:"cookies"`
+	Generation         uint64          `json:"session_generation"`
+	GenerationCamel    uint64          `json:"sessionGeneration"`
+}
+
+// userAgent returns the attesting browser's user agent, preferring snake_case.
+func (d sessionDoc) userAgent() string {
+	if ua := strings.TrimSpace(d.UserAgent); ua != "" {
+		return ua
+	}
+	return strings.TrimSpace(d.UserAgentCamel)
+}
+
+// clientVersion returns the attesting player's client version, preferring
+// snake_case.
+func (d sessionDoc) clientVersion() string {
+	if v := strings.TrimSpace(d.ClientVersion); v != "" {
+		return v
+	}
+	return strings.TrimSpace(d.ClientVersionCamel)
 }
 
 // visitorData returns the supplied literal, preferring the canonical snake_case.
@@ -694,34 +957,12 @@ type sessionCookie struct {
 
 func (c sessionCookie) httpOnly() bool { return c.HTTPOnly || c.HTTPOnlyCamel }
 
-// ProvideSession fetches the session document, retrying once on a transient
-// failure. The visitorData is taken verbatim (no escaping or unescaping), so it
-// stays byte-identical to the value the minter attests under.
+// ProvideSession fetches the session document. The visitorData is taken verbatim
+// (no escaping or unescaping), so it stays byte-identical to the value the minter
+// attests under. The one retry a transient failure earns is sidecarCall's.
 func (p *httpSessionProvider) ProvideSession(ctx context.Context) (potoken.Session, error) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return potoken.Session{}, ctx.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-		}
-		sess, err := p.fetch(ctx)
-		if err == nil {
-			return sess, nil
-		}
-		if ctx.Err() != nil {
-			return potoken.Session{}, ctx.Err()
-		}
-		lastErr = err
-	}
-	return potoken.Session{}, lastErr
-}
-
-func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error) {
 	var doc sessionDoc
-	if err := sidecarJSON(ctx, p.http, http.MethodGet, p.endpoint, "session endpoint", p.apiKey, nil, &doc); err != nil {
+	if err := sidecarCall(ctx, p.http, http.MethodGet, p.endpoint, "session endpoint", p.apiKey, nil, &doc); err != nil {
 		return potoken.Session{}, err
 	}
 	vd := doc.visitorData()
@@ -741,7 +982,13 @@ func (p *httpSessionProvider) fetch(ctx context.Context) (potoken.Session, error
 			Expires:  parseSessionExpiry(c.Expires),
 		})
 	}
-	return potoken.Session{VisitorData: vd, Cookies: cookies, Generation: doc.generation()}, nil
+	return potoken.Session{
+		VisitorData:   vd,
+		Cookies:       cookies,
+		UserAgent:     doc.userAgent(),
+		ClientVersion: doc.clientVersion(),
+		Generation:    doc.generation(),
+	}, nil
 }
 
 // InvalidateSession reports the adopted session unusable so the sidecar retires

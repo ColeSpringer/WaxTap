@@ -430,6 +430,9 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	}
 	ro := newReadOptions(opts)
 
+	if err := c.prepareExtraction(ctx); err != nil {
+		return nil, err
+	}
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
 	ext, err := c.yt.ExtractExcluding(ectx, id, watchPageSkip(ro.noFallback))
@@ -881,6 +884,9 @@ func (c *Client) Resolve(ctx context.Context, url string, sel AudioSelector, opt
 		return ResolvedStream{}, err
 	}
 	ro := newReadOptions(opts)
+	if err := c.prepareExtraction(ctx); err != nil {
+		return ResolvedStream{}, err
+	}
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
 	ext, err := c.yt.ExtractExcluding(ectx, id, watchPageSkip(ro.noFallback))

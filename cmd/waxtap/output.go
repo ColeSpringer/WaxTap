@@ -53,6 +53,9 @@ type appEnv struct {
 	// Nil means nothing collects, which is what the pre-setup paths get.
 	notes *noteCollector
 	log   *slog.Logger
+	// sidecars are the providers this run's sidecar URLs built, so doctor probes
+	// the same objects the download uses. Zero value means none are configured.
+	sidecars sidecarProviders
 	// audioStream is set when stdout carries streamed audio (download -o -). A
 	// measure-only run to a real writer sink leaves OutputPath empty just like a
 	// discarded measurement, so the renderer uses this to print "(streamed)" rather
@@ -78,13 +81,20 @@ func setup(cmd *cobra.Command) (*appEnv, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The very providers options wired into the client: sidecarProviders builds
+	// one set per run, so a probe exercises what a download would use.
+	sidecars, err := cfg.sidecarProviders()
+	if err != nil {
+		return nil, err
+	}
 	env := &appEnv{
-		client: client,
-		cfg:    cfg,
-		out:    cmd.OutOrStdout(),
-		errOut: cmd.ErrOrStderr(),
-		log:    log,
-		notes:  &noteCollector{},
+		client:   client,
+		cfg:      cfg,
+		out:      cmd.OutOrStdout(),
+		errOut:   cmd.ErrOrStderr(),
+		log:      log,
+		notes:    &noteCollector{},
+		sidecars: sidecars,
 	}
 	// An error envelope is rendered from main, which has no appEnv, so the run's
 	// collector is published for it. It is the same shape and lifetime as
@@ -515,13 +525,15 @@ func classifyArgs(err error, args []string) classifiedError {
 		c.exitCode, c.code = 130, "canceled"
 
 	// Domain sentinels keep their classification even when they wrap another cause.
-	case errors.Is(err, waxtap.ErrNeedsPOToken):
+	// A sidecar refusal that carries a playability verdict falls through to the
+	// availability cases below: the video is what failed, not the configuration.
+	case errors.Is(err, waxtap.ErrNeedsPOToken) && !(hasSidecarResp && sre.Unwrap() != nil):
 		switch {
 		case hasSidecarResp:
 			// The sidecar responded, so classify the failure by its HTTP status or
 			// response content.
-			c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
-			c.hint = sidecarAuthHint(sre.StatusCode)
+			c.exitCode, c.code = sidecarResponseExit(sre)
+			c.hint = sidecarHint(sre)
 		case isSidecarConnection(err):
 			c.exitCode, c.code, c.hint = 9, "network", "start the PO-token sidecar or correct --potoken-url"
 		default:
@@ -613,8 +625,8 @@ func classifyArgs(err error, args []string) classifiedError {
 	// Structural fallbacks apply only when no domain sentinel or timeout matched.
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
-		c.exitCode, c.code = sidecarResponseExit(sre.StatusCode)
-		c.hint = sidecarAuthHint(sre.StatusCode)
+		c.exitCode, c.code = sidecarResponseExit(sre)
+		c.hint = sidecarHint(sre)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", providerHint(err)
 	// An upstream service that answers with an error status is the same failure
@@ -730,7 +742,7 @@ func friendlyError(err error) string {
 		return "proxy connection failed (check --proxy)"
 	}
 	// The sidecar error types self-redact their endpoint, so their Error() is safe
-	// to surface directly; the 429 rate-limit advisory rides on sidecarAuthHint.
+	// to surface directly; the 429 rate-limit advisory rides on sidecarHint.
 	if se, ok := errors.AsType[*waxtap.SidecarError](err); ok {
 		return se.Error()
 	}
@@ -1008,24 +1020,33 @@ func isSidecarConnection(err error) bool {
 	return ok
 }
 
-// sidecarAuthHint returns guidance for a sidecar response status: authentication
-// help for 401/403 and a rate-limit advisory for 429. It rides the c.hint channel
-// so package main needs no redact helper for the 429 message.
-func sidecarAuthHint(status int) string {
-	switch status {
+// sidecarHint returns guidance for a sidecar refusal: authentication help for
+// 401/403, a rate-limit advisory for 429, and the wait the sidecar asked for
+// when it stated one. It rides the c.hint channel so package main needs no
+// redact helper for the 429 message.
+func sidecarHint(sre *waxtap.SidecarResponseError) string {
+	var parts []string
+	switch sre.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return "the sidecar requires authentication; set or verify --api-key"
+		parts = append(parts, "the sidecar requires authentication; set or verify --api-key")
 	case http.StatusTooManyRequests:
-		return "check the sidecar's rate limits"
+		parts = append(parts, "check the sidecar's rate limits")
 	}
-	return ""
+	if sre.RetryAfter > 0 {
+		parts = append(parts, fmt.Sprintf("the sidecar asked for a retry in %s", sre.RetryAfter.Round(time.Second)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // sidecarResponseExit maps a sidecar response to its CLI exit code and machine
 // code. Client errors indicate invalid configuration, 429 indicates rate
 // limiting, and timeouts, server errors, and invalid HTTP 200 responses indicate
 // network or provider failures.
-func sidecarResponseExit(status int) (int, string) {
+//
+// A video-unavailable refusal never reaches here: it unwraps to its availability
+// verdict, which classifyArgs matches first.
+func sidecarResponseExit(sre *waxtap.SidecarResponseError) (int, string) {
+	status := sre.StatusCode
 	switch {
 	case status == http.StatusTooManyRequests:
 		return 5, "rate-limited"

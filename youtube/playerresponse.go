@@ -188,8 +188,7 @@ func (pr *playerResponse) playabilityError() error {
 	status := pr.PlayabilityStatus.Status
 	reason := pr.PlayabilityStatus.Reason
 
-	switch status {
-	case "OK", "":
+	if status == "OK" || status == "" {
 		// Upcoming and currently-live streams are not handled by the download
 		// pipeline. A completed livestream VOD reports isLiveContent without isLiveNow
 		// or isUpcoming, so it is allowed. Upcoming ranks first: a premiere can be both.
@@ -200,9 +199,28 @@ func (pr *playerResponse) playabilityError() error {
 			return &waxerr.PlayabilityError{Status: status, Reason: "live content", Sentinel: waxerr.ErrLiveContent}
 		}
 		return nil
+	}
+
+	pe := ClassifyPlayability(status, reason)
+	// videoDetails.isPrivate is the one signal ClassifyPlayability cannot see: it
+	// lives beside the status, not in it.
+	if status == "LOGIN_REQUIRED" && pr.VideoDetails.IsPrivate {
+		pe.Sentinel = waxerr.ErrVideoRestricted
+	}
+	return pe
+}
+
+// ClassifyPlayability maps a non-OK playabilityStatus and its reason onto the
+// availability taxonomy, the rule every /player response goes through. An empty
+// status is classified as ERROR.
+//
+// Exported for the sidecar providers, which relay the same status from an
+// attesting browser's player.
+func ClassifyPlayability(status, reason string) *waxerr.PlayabilityError {
+	switch status {
 	case "LOGIN_REQUIRED":
 		// YouTube reuses this status for both private and age-gated videos.
-		if pr.VideoDetails.IsPrivate || strings.Contains(strings.ToLower(reason), "private") {
+		if strings.Contains(strings.ToLower(reason), "private") {
 			return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrVideoRestricted}
 		}
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLoginRequired}
@@ -214,6 +232,10 @@ func (pr *playerResponse) playabilityError() error {
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLoginRequired}
 	case "LIVE_STREAM_OFFLINE":
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLiveNotStarted}
+	case "":
+		// A relayed refusal can carry no status at all. It is still a refusal, so
+		// name it the way YouTube names an unexplained one.
+		return &waxerr.PlayabilityError{Status: "ERROR", Reason: reason, Sentinel: classifyUnplayableReason(reason)}
 	default: // UNPLAYABLE, ERROR, and anything unknown
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: classifyUnplayableReason(reason)}
 	}
@@ -282,12 +304,19 @@ func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 // returned Video is in practice LiveNone or LiveWasLive; the full mapping is kept
 // so the classification is correct wherever it is derived.
 func (pr *playerResponse) liveStatus() LiveStatus {
+	return liveStatusFrom(pr.VideoDetails.IsUpcoming, pr.isLiveNow(), pr.VideoDetails.IsLiveContent)
+}
+
+// liveStatusFrom applies the precedence the videoDetails flags carry: a premiere
+// is both upcoming and live content, so upcoming ranks first; a finished
+// broadcast reports only wasLive.
+func liveStatusFrom(upcoming, liveNow, wasLive bool) LiveStatus {
 	switch {
-	case pr.VideoDetails.IsUpcoming:
+	case upcoming:
 		return LiveUpcoming
-	case pr.isLiveNow():
+	case liveNow:
 		return LiveNow
-	case pr.VideoDetails.IsLiveContent:
+	case wasLive:
 		return LiveWasLive
 	default:
 		return LiveNone

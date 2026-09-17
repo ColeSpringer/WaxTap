@@ -3,6 +3,7 @@ package youtube
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/v3/internal/clientident"
 	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/potoken"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // fakeSessionProvider is a stub potoken.SessionProvider that counts calls and can
@@ -23,10 +26,28 @@ type fakeSessionProvider struct {
 	sess    potoken.Session
 	err     error
 	errOnce bool
+	// delay and block model a slow or hung sidecar: delay sleeps before
+	// answering, block holds the call until the channel closes or ctx ends.
+	delay time.Duration
+	block chan struct{}
 }
 
-func (f *fakeSessionProvider) ProvideSession(context.Context) (potoken.Session, error) {
+func (f *fakeSessionProvider) ProvideSession(ctx context.Context) (potoken.Session, error) {
 	f.calls++
+	if f.block != nil {
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return potoken.Session{}, ctx.Err()
+		}
+	}
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return potoken.Session{}, ctx.Err()
+		}
+	}
 	if f.err != nil && (!f.errOnce || f.calls == 1) {
 		return potoken.Session{}, f.err
 	}
@@ -354,3 +375,298 @@ var errProvider = errTest("provider boom")
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+// adoptWebTestClient is adoptTestClient on a WEB-only chain with a recording
+// token provider, the shape an adopted session is actually used in (adoption
+// requires a uniform chain, and only WEB-family profiles take a browser
+// identity). It returns the provider so token requests can be inspected.
+func adoptWebTestClient(t *testing.T, rt http.RoundTripper, jar http.CookieJar, cfg Config) (*Client, *recordingProvider) {
+	t.Helper()
+	prov := &recordingProvider{resp: potoken.Response{Token: "tok"}}
+	cfg.HTTP = httpx.New(httpx.Config{
+		HTTPClient:   &http.Client{Jar: jar, Transport: rt},
+		MaxRetries:   1,
+		MaxRetryWait: 50 * time.Millisecond,
+		BaseBackoff:  time.Millisecond,
+		MaxBackoff:   2 * time.Millisecond,
+	})
+	cfg.Profiles = []ClientProfile{makeProfile(profileWeb)}
+	cfg.POTokenProvider = prov
+	return New(cfg), prov
+}
+
+const adoptedUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36"
+const adoptedVersion = "2.20260901.00.00"
+
+func TestExtract_AdoptedIdentityAppliesToWEB(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var got *http.Request
+	var body []byte
+	jar, _ := cookiejar.New(nil)
+	c, prov := adoptWebTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			got = r
+			body, _ = io.ReadAll(r.Body)
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{Session: &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D", UserAgent: adoptedUA, ClientVersion: adoptedVersion}})
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Header.Get("User-Agent") != adoptedUA || got.Header.Get("X-Youtube-Client-Version") != adoptedVersion {
+		t.Errorf("/player headers UA=%q version=%q, want the adopted identity", got.Header.Get("User-Agent"), got.Header.Get("X-Youtube-Client-Version"))
+	}
+	if !strings.Contains(string(body), `"clientVersion":"`+adoptedVersion+`"`) {
+		t.Errorf("/player body = %s, want the adopted clientVersion", body)
+	}
+	if ext.profile.UserAgent != adoptedUA || ext.profile.Version != adoptedVersion {
+		t.Errorf("Extraction profile = %q/%q, want the adopted identity so streams and SABR follow", ext.profile.UserAgent, ext.profile.Version)
+	}
+	req := prov.byScope(potoken.ScopePlayer)
+	if req == nil || req.UserAgent != adoptedUA || req.ClientVersion != adoptedVersion {
+		t.Errorf("player token request = %+v, want the adopted identity", req)
+	}
+}
+
+func TestExtract_AdoptedIdentityLeavesNativeClient(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var got *http.Request
+	jar, _ := cookiejar.New(nil)
+	c := adoptTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			got = r
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{Session: &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D", UserAgent: adoptedUA, ClientVersion: adoptedVersion}})
+
+	if _, err := c.Extract(context.Background(), "dummyVideo0"); err != nil {
+		t.Fatal(err)
+	}
+	want := makeProfile(profileAndroidVR)
+	if got.Header.Get("User-Agent") != want.UserAgent || got.Header.Get("X-Youtube-Client-Version") != want.Version {
+		t.Errorf("ANDROID_VR headers = %q/%q, want its own %q/%q: a browser identity is coherent only on a browser client",
+			got.Header.Get("User-Agent"), got.Header.Get("X-Youtube-Client-Version"), want.UserAgent, want.Version)
+	}
+}
+
+func TestExtract_AdoptedIdentityOverridesChromeMajor(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var got *http.Request
+	jar, _ := cookiejar.New(nil)
+	c, _ := adoptWebTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			got = r
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{
+		ChromeMajor: 151,
+		Session:     &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D", UserAgent: adoptedUA},
+	})
+
+	if _, err := c.Extract(context.Background(), "dummyVideo0"); err != nil {
+		t.Fatal(err)
+	}
+	// Without this the assertion below proves nothing: the two identities have to
+	// differ for "the session wins" to be observable at all.
+	if clientident.UserAgent(151) == adoptedUA {
+		t.Fatal("test setup: the ChromeMajor identity must differ from the adopted one")
+	}
+	if ua := got.Header.Get("User-Agent"); ua != adoptedUA {
+		t.Errorf("UA = %q, want the session's %q rather than ChromeMajor's %q: the session is the more specific identity",
+			ua, adoptedUA, clientident.UserAgent(151))
+	}
+}
+
+func TestExtract_AdoptedIdentityFromProvider(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var uas []string
+	jar, _ := cookiejar.New(nil)
+	prov := &stubSessionProvider{userAgent: "Mozilla/5.0 provider"}
+	c, _ := adoptWebTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			uas = append(uas, r.Header.Get("User-Agent"))
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{SessionProvider: prov})
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uas) != 1 || uas[0] != "Mozilla/5.0 provider-1" {
+		t.Fatalf("user agents = %v, want the first provider identity", uas)
+	}
+	if !c.RotateIdentity(context.Background(), ext.identityGen, "dummyVideo0") {
+		t.Fatal("rotation should succeed: the provider versions its sessions")
+	}
+	if _, err := c.Extract(context.Background(), "dummyVideo0"); err != nil {
+		t.Fatal(err)
+	}
+	if len(uas) != 2 || uas[1] != "Mozilla/5.0 provider-2" {
+		t.Errorf("user agents = %v, want the replacement identity on the second extraction", uas)
+	}
+}
+
+func TestExtract_AdoptedIdentityEmptyKeepsOwn(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	var got *http.Request
+	jar, _ := cookiejar.New(nil)
+	c, _ := adoptWebTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			got = r
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{Session: &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D"}})
+
+	if _, err := c.Extract(context.Background(), "dummyVideo0"); err != nil {
+		t.Fatal(err)
+	}
+	if ua := got.Header.Get("User-Agent"); ua != clientident.UserAgent(0) {
+		t.Errorf("UA = %q, want WaxTap's own %q", ua, clientident.UserAgent(0))
+	}
+	if v := got.Header.Get("X-Youtube-Client-Version"); v != clientident.WebVersion {
+		t.Errorf("client version = %q, want WaxTap's own %q", v, clientident.WebVersion)
+	}
+}
+
+func TestExtract_AdoptedIdentityOnWatchPage(t *testing.T) {
+	watch := readFixture(t, "watch_page.html")
+	var pageUA string
+	jar, _ := cookiejar.New(nil)
+	c, _ := adoptWebTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost:
+			return fixtureResp(http.StatusInternalServerError, nil), nil
+		case r.URL.Path == "/watch":
+			pageUA = r.Header.Get("User-Agent")
+			return fixtureResp(http.StatusOK, watch), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{Session: &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D", UserAgent: adoptedUA, ClientVersion: adoptedVersion}})
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pageUA != adoptedUA {
+		t.Errorf("watch-page UA = %q, want the adopted identity: it carries the session's cookies and visitor id", pageUA)
+	}
+	if ext.profile.UserAgent != adoptedUA {
+		t.Errorf("watch-page extraction profile UA = %q, want the adopted identity", ext.profile.UserAgent)
+	}
+}
+
+func TestPrepareAdoptedSession_UsesWebContextTimeout(t *testing.T) {
+	hung := &fakeSessionProvider{block: make(chan struct{})}
+	defer close(hung.block)
+	c := adoptTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("no request expected")
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), nil, Config{SessionProvider: hung, WebContextTimeout: time.Millisecond})
+	ctx := context.Background()
+	err := c.PrepareAdoptedSession(ctx)
+	if _, ok := errors.AsType[*waxerr.ProviderError](err); !ok {
+		t.Fatalf("err = %v, want the fatal ProviderError once the handoff budget cuts the provider", err)
+	}
+	if ctx.Err() != nil {
+		t.Error("the caller's context must not be cancelled by the provider deadline")
+	}
+}
+
+func TestPrepareAdoptedSession_ThenExtractUnderTightBudget(t *testing.T) {
+	ok := readFixture(t, "player_ok.json")
+	prov := &fakeSessionProvider{sess: potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D"}, delay: 30 * time.Millisecond}
+	c := adoptTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/player") && r.Method == http.MethodPost {
+			return fixtureResp(http.StatusOK, ok), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), nil, Config{SessionProvider: prov, WebContextTimeout: 2 * time.Second})
+
+	if err := c.PrepareAdoptedSession(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	// A budget too small for the provider's own cost: the resolution was already
+	// paid, so the extraction only has the /player call left.
+	ectx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := c.Extract(ectx, "dummyVideo0"); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if prov.calls != 1 {
+		t.Errorf("provider calls = %d, want 1: the resolution is cached, not re-run under the extraction budget", prov.calls)
+	}
+}
+
+func TestPrepareAdoptedSession_NoopWithoutAdoption(t *testing.T) {
+	c := adoptTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("no request expected, got %s", r.URL)
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), nil, Config{})
+	if err := c.PrepareAdoptedSession(context.Background()); err != nil {
+		t.Errorf("PrepareAdoptedSession without adoption = %v, want nil", err)
+	}
+}
+
+func TestPrepareAdoptedSession_CallerCancellation(t *testing.T) {
+	prov := &fakeSessionProvider{block: make(chan struct{})}
+	defer close(prov.block)
+	c := adoptTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), nil, Config{SessionProvider: prov, WebContextTimeout: time.Minute})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.PrepareAdoptedSession(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the caller's cancellation unwrapped", err)
+	}
+}
+
+// TestPrepareAdoptedSession_ConfigErrorIsNotAProviderFailure covers the cached
+// permanent failure: a misconfigured adoption must not classify as a provider
+// (network) failure just because the resolution is now front-loaded.
+func TestPrepareAdoptedSession_ConfigErrorIsNotAProviderFailure(t *testing.T) {
+	c := adoptTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), nil, Config{Session: &potoken.Session{VisitorData: ""}, WebContextTimeout: time.Minute})
+	err := c.PrepareAdoptedSession(context.Background())
+	if err == nil {
+		t.Fatal("an empty adopted visitorData must fail")
+	}
+	if _, ok := errors.AsType[*waxerr.ProviderError](err); ok {
+		t.Errorf("err = %v, want the configuration error itself, not a provider failure", err)
+	}
+	if !strings.Contains(err.Error(), "visitorData") {
+		t.Errorf("err = %v, want it to name the empty visitorData", err)
+	}
+}
+
+// TestEnumerate_AdoptedIdentityAppliesToBrowse pins the browse path: it runs
+// under the adopted session's cookies and visitor id, so it must present the
+// adopted browser's identity too.
+func TestEnumerate_AdoptedIdentityAppliesToBrowse(t *testing.T) {
+	browse := readFixture(t, "playlist_browse.json")
+	var ua, version string
+	jar, _ := cookiejar.New(nil)
+	c := adoptTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/browse") {
+			ua = r.Header.Get("User-Agent")
+			version = r.Header.Get("X-Youtube-Client-Version")
+			return fixtureResp(http.StatusOK, browse), nil
+		}
+		return fixtureResp(http.StatusNotFound, nil), nil
+	}), jar, Config{Session: &potoken.Session{VisitorData: "CgtBRE9QVA%3D%3D", UserAgent: adoptedUA, ClientVersion: adoptedVersion}})
+
+	if _, err := c.Enumerate(context.Background(), "PLdummy", EnumOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if ua != adoptedUA || version != adoptedVersion {
+		t.Errorf("browse headers = %q/%q, want the adopted identity beside the adopted cookies", ua, version)
+	}
+}

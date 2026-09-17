@@ -38,6 +38,10 @@ type session struct {
 	// source records the provenance of visitorData; an adopted value is never
 	// overwritten or cleared (see learnVisitorData / resetPOBinding).
 	source visitorSource
+	// userAgent and clientVersion are the adopted browser's identity, empty
+	// unless source is visitorAdopted and the provider exported them. See
+	// adoptedProfile.
+	userAgent, clientVersion string
 	// identityGen is the rotation generation the visitorData was resolved
 	// under, captured while the resolving lock was held. Stamping extractions
 	// from it (rather than re-reading the counter later) keeps a rotation that

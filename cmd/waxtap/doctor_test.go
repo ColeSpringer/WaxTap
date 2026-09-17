@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/potoken"
 )
 
 func TestDoctorIOSBestEffortNote(t *testing.T) {
@@ -157,5 +161,232 @@ func TestDoctorFullFlagDescribesMode(t *testing.T) {
 	// An unhealthy report carries no size note; the note gates on success.
 	if doctorFullSizeNote(rep) != "" {
 		t.Error("an unhealthy report must not carry the undersized note")
+	}
+}
+
+type fakeSessionProvider struct {
+	sess potoken.Session
+	err  error
+}
+
+func (f fakeSessionProvider) ProvideSession(context.Context) (potoken.Session, error) {
+	return f.sess, f.err
+}
+
+type fakeContextProvider struct{ err error }
+
+func (f fakeContextProvider) ProvidePlayerContext(context.Context, string) (potoken.PlayerContext, error) {
+	return potoken.PlayerContext{}, f.err
+}
+
+type fakeTokenProvider struct {
+	tok string
+	err error
+	req potoken.Request // the last request, so the probe's scope and binding can be checked
+}
+
+func (f *fakeTokenProvider) ProvidePOToken(_ context.Context, req potoken.Request) (potoken.Response, error) {
+	f.req = req
+	return potoken.Response{Token: f.tok}, f.err
+}
+
+func TestProbeSidecars(t *testing.T) {
+	refusal := &waxtap.SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context", StatusCode: 502, Code: "player-context-failed", RetryAfter: 25 * time.Second, Reason: "proof cool-down"}
+	tokenFake := &fakeTokenProvider{tok: "tok"}
+	probes := probeSidecars(context.Background(), sidecarProviders{
+		session: fakeSessionProvider{sess: potoken.Session{VisitorData: "vd"}},
+		context: fakeContextProvider{err: refusal},
+		token:   tokenFake,
+	}, "dummyVideo0", time.Minute)
+	if len(probes) != 3 || probes[0].Endpoint != "session" || !probes[0].OK || probes[1].Endpoint != "po-token" || !probes[1].OK {
+		t.Fatalf("probes = %+v", probes)
+	}
+	pc := probes[2]
+	if pc.Endpoint != "player-context" || pc.OK || pc.StatusCode != 502 || pc.Code != "player-context-failed" || pc.RetryAfterSeconds != 25 || pc.Error == nil || pc.Error.Code != "network" {
+		t.Errorf("player-context probe = %+v", pc)
+	}
+	// The token probe minted the GVS token the download needs, bound to the
+	// session probe's visitorData.
+	if got := tokenFake.req; got.Scope != potoken.ScopeGVS || got.VisitorData != "vd" {
+		t.Errorf("token probe request = %+v, want GVS scope bound to the session's visitorData", got)
+	}
+	if !sidecarProbesHealthy(probes[:2]) || sidecarProbesHealthy(probes) {
+		t.Error("a failed probe must make the report unhealthy")
+	}
+	if err := firstSidecarProbeError(probes); err != refusal {
+		t.Errorf("firstSidecarProbeError = %v, want the refusal itself", err)
+	}
+
+	// Without a session sidecar the token probe falls back to a player-scope
+	// request on the video ID: there is no visitorData to bind to.
+	lone := &fakeTokenProvider{tok: "tok"}
+	probes = probeSidecars(context.Background(), sidecarProviders{token: lone}, "dummyVideo0", time.Minute)
+	if len(probes) != 1 || probes[0].Endpoint != "po-token" {
+		t.Fatalf("probes = %+v, want only the configured one", probes)
+	}
+	if lone.req.Scope != potoken.ScopePlayer || lone.req.VideoID != "dummyVideo0" {
+		t.Errorf("token probe request = %+v, want a player-scope request on the video", lone.req)
+	}
+
+	if got := probeSidecars(context.Background(), sidecarProviders{}, "dummyVideo0", time.Minute); len(got) != 0 {
+		t.Errorf("no sidecars configured, got %+v", got)
+	}
+}
+
+func TestDoctorJSONSidecars(t *testing.T) {
+	decode := func(rep *doctorReport) map[string]any {
+		t.Helper()
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
+		if err := emitDoctorJSON(env, rep, nil); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+			t.Fatalf("decode %q: %v", out.String(), err)
+		}
+		return m
+	}
+
+	refusal := &waxtap.SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context", StatusCode: 502, Code: "player-context-failed", RetryAfter: 25 * time.Second}
+	probes := probeSidecars(context.Background(), sidecarProviders{
+		session: fakeSessionProvider{sess: potoken.Session{VisitorData: "vd"}},
+		context: fakeContextProvider{err: refusal},
+	}, "dummyVideo0", time.Minute)
+	rep := &doctorReport{Delivered: true, Healthy: sidecarProbesHealthy(probes), VideoID: "jNQXAC9IVRw", Sidecars: probes}
+	m := decode(rep)
+	if rep.Healthy {
+		t.Error("a failed probe must make the report unhealthy")
+	}
+	arr, ok := m["sidecars"].([]any)
+	if !ok || len(arr) != 2 {
+		t.Fatalf("sidecars = %v, want two probes", m["sidecars"])
+	}
+	second, _ := arr[1].(map[string]any)
+	if second["endpoint"] != "player-context" || second["code"] != "player-context-failed" || second["retryAfterSeconds"] != float64(25) {
+		t.Errorf("sidecars[1] = %v, want the code and the stated wait", second)
+	}
+
+	if _, ok := decode(&doctorReport{Healthy: true, VideoID: "jNQXAC9IVRw"})["sidecars"]; ok {
+		t.Error("a report without probes must omit sidecars, keeping the key additive")
+	}
+}
+
+func TestDoctorHumanSidecarLines(t *testing.T) {
+	var out bytes.Buffer
+	env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+	rep := &doctorReport{
+		Formats: []string{"opus"},
+		Sidecars: []doctorSidecarProbe{
+			{Endpoint: "session", OK: true, LatencyMs: 312},
+			{Endpoint: "po-token", OK: true, LatencyMs: 12400},
+			{Endpoint: "player-context", StatusCode: 502, Code: "player-context-failed", RetryAfterSeconds: 25,
+				Error: &errorJSON{Code: "network", Message: "player-context server at http://127.0.0.1:4416/player-context returned HTTP 502 (player-context-failed)"}},
+		},
+	}
+	renderDoctorHuman(env, rep, errors.New("player-context refused"))
+	got := out.String()
+	for _, want := range []string{
+		"sidecar:  session ok (312 ms)",
+		"sidecar:  po-token ok (12.4 s)",
+		"sidecar:  player-context FAILED:",
+		"retry in 25s",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// TestProbeSidecarsVerdictIsNotASidecarFailure covers a probed video that is
+// simply dead: the sidecar answered, so the probe passes and the run stays
+// healthy while the delivery check moves to the next candidate.
+func TestProbeSidecarsVerdictIsNotASidecarFailure(t *testing.T) {
+	verdict := &waxtap.SidecarResponseError{
+		Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+		StatusCode: 422, Code: waxtap.SidecarCodeVideoUnavailable, Details: "ERROR",
+		Reason: "video unplayable: Video unavailable",
+	}
+	probes := probeSidecars(context.Background(), sidecarProviders{
+		context: fakeContextProvider{err: verdict},
+	}, "dummyVideo0", time.Minute)
+	if len(probes) != 1 {
+		t.Fatalf("probes = %+v, want one", probes)
+	}
+	p := probes[0]
+	if !p.OK {
+		t.Error("a relayed playability verdict is the sidecar working, not failing")
+	}
+	if p.Verdict != "video-unavailable" || p.StatusCode != 422 || p.Code != waxtap.SidecarCodeVideoUnavailable {
+		t.Errorf("probe = %+v, want the verdict recorded beside the code", p)
+	}
+	if p.Error != nil {
+		t.Errorf("probe.Error = %+v, want none: the sidecar did not fail", p.Error)
+	}
+	if !sidecarProbesHealthy(probes) || firstSidecarProbeError(probes) != nil {
+		t.Error("a verdict must not make the run unhealthy: one dead demo video is not a sick sidecar")
+	}
+}
+
+// TestProbeSidecarsBounded pins the probe budget: a hung sidecar cannot hold the
+// command open past the run's web-context timeout.
+func TestProbeSidecarsBounded(t *testing.T) {
+	hung := hangingContextProvider{}
+	start := time.Now()
+	probes := probeSidecars(context.Background(), sidecarProviders{context: hung}, "dummyVideo0", 20*time.Millisecond)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("probe took %v, want it cut by the 20ms budget", d)
+	}
+	if len(probes) != 1 || probes[0].OK {
+		t.Fatalf("probes = %+v, want one failure", probes)
+	}
+}
+
+type hangingContextProvider struct{}
+
+func (hangingContextProvider) ProvidePlayerContext(ctx context.Context, _ string) (potoken.PlayerContext, error) {
+	<-ctx.Done()
+	return potoken.PlayerContext{}, ctx.Err()
+}
+
+func TestCeilSeconds(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want int
+	}{
+		{0, 0},
+		{-time.Second, 0},
+		{400 * time.Millisecond, 1}, // a sub-second wait must not read as "none stated"
+		{time.Second, 1},
+		{1500 * time.Millisecond, 2},
+		{25 * time.Second, 25},
+	}
+	for _, tc := range cases {
+		if got := ceilSeconds(tc.in); got != tc.want {
+			t.Errorf("ceilSeconds(%v) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDoctorHumanKeepsDeliveryEvidence covers a refusing sidecar beside a
+// delivery check that passed: the run is unhealthy, but the extract/resolve/
+// download lines still say what did work.
+func TestDoctorHumanKeepsDeliveryEvidence(t *testing.T) {
+	var out bytes.Buffer
+	env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+	rep := &doctorReport{
+		Formats: []string{"opus"}, Delivered: true, Healthy: false,
+		VideoID: "jNQXAC9IVRw", Itag: 251, Bytes: 65536,
+		Sidecars: []doctorSidecarProbe{
+			{Endpoint: "player-context", StatusCode: 502, Code: "player-context-failed",
+				Error: &errorJSON{Code: "network", Message: "player-context server refused"}},
+		},
+	}
+	renderDoctorHuman(env, rep, errors.New("player-context server refused"))
+	got := out.String()
+	for _, want := range []string{"extract:  ok (jNQXAC9IVRw)", "resolve:  ok (itag 251)", "download: ok", "UNHEALTHY"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
 	}
 }

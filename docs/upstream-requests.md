@@ -12,25 +12,41 @@ upstream lands it, do the follow-up and remove both entries.
 
 ## WaxSeal
 
-- **The player context carries only a title, an author, and a length.**
-  `/player-context` answers `title`, `author` and `length_seconds` from
-  the browser's `videoDetails` and nothing else, so the `Video` WaxTap
-  builds on the WEB_CONTEXT path (`youtube/web_context.go`) has no channel
-  ID, description, thumbnail ladder, publish date, or live state, where
-  every `/player` path fills them from the same `videoDetails`. A download
-  delivered over WEB_CONTEXT therefore reports `Result.Metadata` with an
-  empty `ChannelID` and `Description`, and `--write-info-json` omits
-  `channelId` and `description` on that path alone, while `Video.ChannelID`
-  is documented as the canonical identity anchor. Wanted: `channel_id`,
-  `description`, the `thumbnails` ladder (url, width, height), the live
-  flags (`is_live_content`, `is_live_now`, `is_upcoming`) and
-  `publish_date` on the response, copied from the `videoDetails` and
-  microformat the attesting browser already holds. Shipped workaround:
-  none is needed for `Info` and `Enumerate`, which never take that path;
-  cover art on that path comes from WaxTap's own ID-keyed thumbnail
-  probes, and the watch-page pass backfills the publish date, chapters,
-  and availability when a request asks for full metadata. The WaxTap-side
-  mapping is in deferred-work.md.
+- **The retryable refusals carry no `Retry-After`.** `player-context-failed`
+  (502, the 30 s proof cool-down) and `no-session` (503, session
+  re-establishment) are documented retryable, but the header is sent only
+  on `/report` today, so a consumer has to guess how long the cool-down
+  has left. WaxTap now honours `Retry-After` and the body's
+  `retry_after_seconds` on both refusals: one retry after the stated wait,
+  capped at 60 s, and the wait also sets the WEB-context skip window.
+  Wanted: send the remaining cool-down on both, which WaxSeal's own
+  deferred item already gates on a consumer honouring it. Shipped
+  workaround: one 500 ms retry, then the fallback chain, and the default
+  30 s skip window.
+
+- **`/player-context` carries `client_version` but no `user_agent`.** The
+  context arm streams under WaxTap's own Chrome user agent with the
+  context's client version and visitor id, so the identity the URL was
+  minted under and the identity the stream presents differ in the one
+  header a browser is most recognisable by. The `/session` contract now
+  exports both and WaxTap adopts them; `webContextProfile`
+  (`youtube/web_context.go`) would apply a `user_agent` the same way.
+  Wanted: `user_agent` beside `client_version` on the response. Shipped
+  workaround: none needed, delivery is full length under WaxTap's
+  identity.
+
+- **A bot check is answered as a per-video verdict.** `confirmTerminal`
+  turns any non-OK playability status into `video-unavailable`, so a
+  browser hit by "Sign in to confirm you're not a bot" refuses every video
+  with `LOGIN_REQUIRED`, which WaxTap classifies as login-required per
+  item with no cool-down: a batch pays one context call per item until the
+  chain delivers. The verdict is dropped once another client reaches the
+  stream, so it misreports an item only when nothing delivered. WaxSeal
+  holds the reason text and knows the difference.
+  Wanted: answer a bot check as `player-context-failed` with a
+  `Retry-After` and relaunch the session, as it does for a failed proof.
+  Shipped workaround: the chain delivers through a native client and each
+  item pays one context call.
 
 ## WaxFlow
 

@@ -157,6 +157,10 @@ func (s *refreshStats) String() string {
 // per window during batch downloads.
 const webContextCooldown = 30 * time.Second
 
+// webContextCooldownMax caps a wait the sidecar states, so a mistaken
+// Retry-After cannot park a long-running process off WEB for a day.
+const webContextCooldownMax = 5 * time.Minute
+
 // isIncompleteDelivery reports whether another client may be able to complete a
 // download that ended early.
 func isIncompleteDelivery(err error) bool {
@@ -193,6 +197,7 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	// Try the optional WEB player context before the configured client chain.
 	// Caller cancellation and NoFallback stop before the chain is attempted.
 	webCtxReason := c.initialWebContextReason()
+	var webCtxErr error
 	if c.yt.WebContextConfigured() && !c.webContextCoolingDown() {
 		a, err := c.acquireWebContext(ctx, req, id, target, em, 0)
 		if err == nil {
@@ -205,23 +210,38 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 			return nil, err
 		}
 		webCtxReason = "failed: " + err.Error()
+		webCtxErr = err
 	}
 
 	em.stage(StageExtracting)
+	// extractionFailed reports the error for a chain failure that happened before
+	// the video was extracted: the context arm's verdict can outrank it, since
+	// nothing yet proved the video is there. The caller's own context is checked
+	// the way acquireAndDownload checks it, so a cancelled or expired request
+	// stays what it is.
+	extractionFailed := func(err error) error {
+		if ctx.Err() != nil {
+			return err
+		}
+		c.warnWebContextEndpointFailed(em, webCtxReason, webCtxErr)
+		return preferContextVerdict(err, webCtxErr)
+	}
+	if err := c.prepareExtraction(ctx); err != nil {
+		return nil, extractionFailed(err)
+	}
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	defer ecancel()
 	ext, err := c.yt.ExtractExcluding(ectx, id, baseSkip(req))
 	if err != nil {
-		// Don't blame the player-context endpoint when the request was canceled.
-		if ctx.Err() == nil {
-			c.warnWebContextEndpointFailed(em, webCtxReason)
-		}
-		return nil, err
+		return nil, extractionFailed(err)
 	}
 	a, err := c.buildTransfer(ctx, req, id, target, ext, em, 0)
 	if err != nil {
+		// Extraction succeeded, so the video is demonstrably there and the context
+		// arm's verdict is already disproved. Only the endpoint failure is still
+		// worth reporting beside the selection or resolution error that follows.
 		if ctx.Err() == nil {
-			c.warnWebContextEndpointFailed(em, webCtxReason)
+			c.warnWebContextEndpointFailed(em, webCtxReason, webCtxErr)
 		}
 		return nil, err
 	}
@@ -231,6 +251,14 @@ func (c *Client) acquire(ctx context.Context, req Request, id string, em *emitte
 	c.warnClientSubstitution(em, a)
 	c.applyFullMetadata(ctx, req, a)
 	return a, nil
+}
+
+// prepareExtraction resolves a configured adopted session before the extraction
+// budget starts, so a /session call that pays a sidecar relaunch is charged to
+// the handoff budget (Timeouts.WebContext) rather than to the budget the player
+// token mint and the /player call share. It is a no-op without adoption.
+func (c *Client) prepareExtraction(ctx context.Context) error {
+	return c.yt.PrepareAdoptedSession(ctx)
 }
 
 // initialWebContextReason reports why a configured player-context was skipped
@@ -262,7 +290,13 @@ func (c *Client) warnWebContextFallback(em *emitter, delivered *acquired, reason
 // when the final error is a generic downstream aggregate, such as an incomplete
 // stream after every client is exhausted. It fires only for the "failed: " reason
 // form, not for a cooldown skip or a delivered stream that was later capped.
-func (c *Client) warnWebContextEndpointFailed(em *emitter, reason string) {
+//
+// A relayed availability verdict is not an unexpected response, and the warning
+// would sit beside an exit-3 error in --json, so webCtxErr silences it.
+func (c *Client) warnWebContextEndpointFailed(em *emitter, reason string, webCtxErr error) {
+	if isAvailabilityError(webCtxErr) {
+		return
+	}
 	cause, ok := strings.CutPrefix(reason, "failed: ")
 	if !ok {
 		return
@@ -396,6 +430,13 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 			stats.recordRotation()
 		}
 		rext, rerr := func() (*youtube.Extraction, error) {
+			// Resolve outside the re-extract budget, as every other extraction
+			// site does. It is a no-op unless the rotation above discarded the
+			// adopted session, in which case the replacement is resolved here
+			// rather than out of the budget the re-extract needs.
+			if err := c.prepareExtraction(fctx); err != nil {
+				return nil, err
+			}
 			fectx, cancel := withTimeout(fctx, c.opts.Timeouts.Extraction)
 			defer cancel()
 			return c.yt.ExtractAttempt(fectx, id, attempt)
@@ -481,7 +522,7 @@ func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, 
 	ext, err := c.yt.ExtractWebContext(ctx, id)
 	if err != nil {
 		if ctx.Err() == nil {
-			c.noteWebContextFailure()
+			c.noteWebContextFailure(err)
 		}
 		return nil, err
 	}
@@ -560,6 +601,9 @@ func (c *Client) acquireNext(ctx context.Context, req Request, id string, target
 	}
 
 	em.stage(StageExtracting)
+	if err := c.prepareExtraction(ctx); err != nil {
+		return nil, "", err
+	}
 	ectx, ecancel := withTimeout(ctx, c.opts.Timeouts.Extraction)
 	ext, err := c.yt.ExtractExcluding(ectx, id, skip)
 	ecancel()
@@ -600,6 +644,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	firstFromWebContext := false
 	webContextRetried := false
 	webCtxReason := c.initialWebContextReason()
+	var webCtxErr error
 	progress := func(p download.Progress) { em.progress(p.BytesWritten, p.Total) }
 	// lastIdentityGen is the guest identity behind the most recent delivery
 	// attempt, which is the one a whole-chain retry has to discard.
@@ -643,6 +688,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			}
 			if attempt == youtube.AttemptWebContext {
 				webCtxReason = "failed: " + err.Error()
+				webCtxErr = err
 			}
 			if attempt == "" {
 				// ErrChainExhausted only marks the end of the chain. The recorded
@@ -770,7 +816,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 	// to the aggregate. Under --no-fallback no fallback was attempted, so the
 	// endpoint failure is already the returned error.
 	if !req.NoFallback {
-		c.warnWebContextEndpointFailed(em, webCtxReason)
+		c.warnWebContextEndpointFailed(em, webCtxReason, webCtxErr)
 	}
 	// A cancellation that ended the loop needs no check here: both callers run
 	// under Download or Stream, whose defers reclassify the aggregate and keep it
@@ -847,14 +893,55 @@ func (a *attemptErrors) allDeliveriesIncomplete() bool {
 	return seen
 }
 
+// reachedDelivery reports whether any attempt got as far as the transfer.
+//
+// Getting there is the video answering for itself: a /player response carried
+// playable formats and a signed stream URL resolved for them. Nothing about a
+// private, removed, members-only, or bot-checked video produces that.
+func (a *attemptErrors) reachedDelivery() bool {
+	for _, c := range a.causes {
+		if c.delivered {
+			return true
+		}
+	}
+	return false
+}
+
+// preferred picks the cause to classify by.
+//
+// [waxerr.PreferErr] ranks one error against another on what it means in
+// isolation, which is all a pair of errors can say. The chain knows one thing a
+// pair cannot: whether some other attempt reached the stream. Once one has, an
+// availability verdict from an attempt that never got there is a statement about
+// that client, not about the video, and letting it win would report a video that
+// demonstrably streams as unavailable, skip-class and past the point where the
+// CLI still suggests a second WEB source. Measured live, this is the shape a
+// bot-checked sidecar or a token-less WEB attempt takes beside a native client
+// whose delivery ran short.
+//
+// A verdict recorded on an attempt that was itself delivering keeps its rank:
+// that is the video refusing mid-download, which no other attempt disproves. The
+// demoted causes stay in [attemptErrors.rendered], so nothing is lost for
+// diagnosis.
+func (a *attemptErrors) preferred() error {
+	disproved := a.reachedDelivery()
+	var best error
+	for _, c := range a.causes {
+		if disproved && !c.delivered && isAvailabilityError(c.err) {
+			continue
+		}
+		best = waxerr.PreferErr(best, c.err)
+	}
+	// Unreachable with causes present: disproved implies a delivered cause, which
+	// is never skipped, and without it nothing is.
+	return best
+}
+
 func (a *attemptErrors) aggregate() error {
 	if len(a.causes) == 0 {
 		return ErrIncompleteStream
 	}
-	best := a.causes[0].err
-	for _, cause := range a.causes[1:] {
-		best = waxerr.PreferErr(best, cause.err)
-	}
+	best := a.preferred()
 	var tried []string
 	for _, cause := range a.causes {
 		if cause.id != "" {
@@ -944,10 +1031,43 @@ func (c *Client) webContextCoolingDown() bool {
 }
 
 // noteWebContextFailure starts the provider cooldown window.
-func (c *Client) noteWebContextFailure() {
+//
+// An availability verdict arms nothing: it describes the video, not the
+// provider, so skipping the next 30 s of a batch over one dead item would cost
+// every following item its WEB delivery. Otherwise the window is
+// webContextCooldown, or the wait the sidecar states when it states one, capped
+// at webContextCooldownMax.
+func (c *Client) noteWebContextFailure(err error) {
+	if isAvailabilityError(err) {
+		return
+	}
+	window := webContextCooldown
+	if sre, ok := errors.AsType[*SidecarResponseError](err); ok && sre.RetryAfter > 0 {
+		window = min(sre.RetryAfter, webContextCooldownMax)
+	}
 	c.webCtxMu.Lock()
-	c.webCtxDownUntil = time.Now().Add(webContextCooldown)
+	c.webCtxDownUntil = time.Now().Add(window)
 	c.webCtxMu.Unlock()
+}
+
+// preferContextVerdict returns the error to report when the web-context arm and
+// the client chain both failed.
+//
+// A verdict the context arm relayed describes the video, so it outranks a
+// lower-ranked chain failure exactly as attemptErrors.aggregate already prefers
+// one in acquireAndDownload. A rate-limited or cancelled chain error is never
+// replaced: both name something the caller must act on before anything else. A
+// deadline is deliberately not on that list, so the two download paths agree:
+// aggregate lets a verdict outrank an expired sub-budget too, and the caller's
+// own context is checked at the call site.
+func preferContextVerdict(chainErr, webCtxErr error) error {
+	if !isAvailabilityError(webCtxErr) {
+		return chainErr
+	}
+	if errors.Is(chainErr, ErrRateLimited) || errors.Is(chainErr, context.Canceled) {
+		return chainErr
+	}
+	return waxerr.PreferErr(chainErr, webCtxErr)
 }
 
 // noteWebContextSuccess clears any cooldown.

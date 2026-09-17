@@ -879,6 +879,11 @@ func webOutcomeActionable(res *waxtap.Result, err error) bool {
 			}
 		}
 	}
+	// An availability verdict is not something a second WEB source would change,
+	// whichever provider relayed it.
+	if exitCodeFor(err) == 3 {
+		return false
+	}
 	// SponsorBlock is a ProviderError too, but a WEB session would not have
 	// changed anything it does; the nudge is for delivery-side providers.
 	return errors.Is(err, waxtap.ErrIncompleteStream) ||

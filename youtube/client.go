@@ -61,6 +61,8 @@ type Client struct {
 	sessionProvider potoken.SessionProvider
 	adoptMu         sync.Mutex
 	adoptVD         string   // resolved adopted visitorData
+	adoptUA         string   // attesting browser's user agent, empty when the session carried none
+	adoptVersion    string   // attesting player's INNERTUBE_CLIENT_VERSION, empty when absent
 	adoptGen        uint64   // provider-assigned generation of the adopted session, for invalidation
 	adoptHosts      []string // hosts the adopted cookies were seeded on, for rotation
 	adoptResolved   bool     // adoptVD is valid
@@ -93,9 +95,10 @@ type Config struct {
 	// enabling the opt-in WEB SABR audio path (see Client.ExtractWebContext). Nil
 	// leaves WaxTap on its default extraction chain.
 	PlayerContextProvider potoken.PlayerContextProvider
-	// WebContextTimeout bounds each PlayerContextProvider call, both the initial
-	// extraction and a mid-stream reload's re-fetch, so a hung provider cannot
-	// hang a download. Zero adds no bound.
+	// WebContextTimeout bounds each attested handoff: a PlayerContextProvider
+	// call (both the initial extraction and a mid-stream reload's re-fetch) and a
+	// SessionProvider resolution through PrepareAdoptedSession, so a hung sidecar
+	// cannot hang a download or eat the extraction budget. Zero adds no bound.
 	WebContextTimeout time.Duration
 	// Session is an externally supplied guest identity the Client adopts verbatim,
 	// skipping its own homepage bootstrap. It is pre-resolved: its cookies are
@@ -210,6 +213,8 @@ func New(cfg Config) *Client {
 				c.adoptErr = err
 			} else {
 				c.adoptVD = c.staticSession.VisitorData
+				c.adoptUA = c.staticSession.UserAgent
+				c.adoptVersion = c.staticSession.ClientVersion
 				c.adoptResolved = true
 			}
 		}
@@ -222,44 +227,103 @@ func (c *Client) adoptionConfigured() bool {
 	return c.staticSession != nil || c.sessionProvider != nil
 }
 
-// resolveAdoptedSession returns the adopted visitorData and the rotation
-// generation it belongs to (read under adoptMu, which rotations also hold, so
-// the pair stays coherent), resolving a SessionProvider at most once per
-// generation. The provider runs under the first caller's context while adoptMu
-// is held, so concurrent extractions share one resolution; the result is cached
-// only on success, so a transient provider failure is retried on the next call.
-// A static session is already resolved at New.
-func (c *Client) resolveAdoptedSession(ctx context.Context) (string, uint64, error) {
+// adoptedIdentity is the adopted session as one extraction sees it, read as a
+// unit under adoptMu so a rotation cannot split the visitorData from the browser
+// identity it was issued to.
+type adoptedIdentity struct {
+	visitorData   string
+	rotationGen   uint64 // resetSeq at resolution (not the provider's Generation)
+	userAgent     string
+	clientVersion string
+}
+
+// resolveAdoptedSession returns the adopted identity and the rotation generation
+// it belongs to (read under adoptMu, which rotations also hold, so they stay
+// coherent), resolving a SessionProvider at most once per generation. The
+// provider runs under the first caller's context while adoptMu is held, so
+// concurrent extractions share one resolution; the result is cached only on
+// success, so a transient provider failure is retried on the next call. A static
+// session is already resolved at New.
+func (c *Client) resolveAdoptedSession(ctx context.Context) (adoptedIdentity, error) {
 	c.adoptMu.Lock()
 	defer c.adoptMu.Unlock()
 	if c.adoptErr != nil {
-		return "", 0, c.adoptErr
+		return adoptedIdentity{}, c.adoptErr
 	}
 	if c.adoptResolved {
-		return c.adoptVD, c.resetSeq.Load(), nil
+		return c.adoptedIdentityLocked(), nil
 	}
 	sess, err := c.sessionProvider.ProvideSession(ctx)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", 0, ctxErr
+			return adoptedIdentity{}, ctxErr
 		}
 		// Preserve provider failures so callers can classify their causes.
-		return "", 0, &waxerr.ProviderError{Endpoint: "session", Cause: err}
+		return adoptedIdentity{}, &waxerr.ProviderError{Endpoint: "session", Cause: err}
 	}
 	if sess.VisitorData == "" {
-		return "", 0, errors.New("adopted session provider returned an empty visitorData")
+		return adoptedIdentity{}, errors.New("adopted session provider returned an empty visitorData")
 	}
 	if err := c.seedAdoptedCookies(sess.Cookies); err != nil {
 		// Cookies + no jar is a permanent configuration error, not a transient
 		// provider failure: cache it so later Extracts short-circuit instead of
 		// re-running the remote provider on every call.
 		c.adoptErr = err
-		return "", 0, err
+		return adoptedIdentity{}, err
 	}
 	c.adoptVD = sess.VisitorData
+	c.adoptUA = sess.UserAgent
+	c.adoptVersion = sess.ClientVersion
 	c.adoptGen = sess.Generation
 	c.adoptResolved = true
-	return c.adoptVD, c.resetSeq.Load(), nil
+	return c.adoptedIdentityLocked(), nil
+}
+
+// PrepareAdoptedSession resolves a configured SessionProvider ahead of an
+// extraction, under Config.WebContextTimeout as a /player-context fetch is, so
+// the /session call and any wait the sidecar asks for are not charged to the
+// extraction budget the player token mint and the /player call share.
+//
+// It is a no-op without adoption or once the session is resolved, and after a
+// rotation it resolves the replacement. A failure is the fatal ProviderError
+// Extract would return; the caller's own cancellation is returned unwrapped.
+func (c *Client) PrepareAdoptedSession(ctx context.Context) error {
+	if !c.adoptionConfigured() {
+		return nil
+	}
+	rctx := ctx
+	if c.webCtxTO > 0 {
+		var cancel context.CancelFunc
+		rctx, cancel = context.WithTimeout(ctx, c.webCtxTO)
+		defer cancel()
+	}
+	_, err := c.resolveAdoptedSession(rctx)
+	if err == nil {
+		return nil
+	}
+	if perr := ctx.Err(); perr != nil {
+		return perr // caller cancellation, not a provider failure
+	}
+	// Only the handoff budget cutting the provider needs naming here: it reads as
+	// a bare deadline otherwise. Everything else already says what it is, a
+	// ProviderError from the provider itself or the cached configuration error
+	// (an empty visitorData, cookies with no jar), and calling those a provider
+	// failure would classify a misconfiguration as a network one.
+	if errors.Is(err, context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &waxerr.ProviderError{Endpoint: "session", Cause: err}
+	}
+	return err
+}
+
+// adoptedIdentityLocked snapshots the resolved adoption fields. Caller holds
+// adoptMu.
+func (c *Client) adoptedIdentityLocked() adoptedIdentity {
+	return adoptedIdentity{
+		visitorData:   c.adoptVD,
+		rotationGen:   c.resetSeq.Load(),
+		userAgent:     c.adoptUA,
+		clientVersion: c.adoptVersion,
+	}
 }
 
 // invalidationReasonDeliveryCap is the cause reported to a session provider
@@ -331,6 +395,8 @@ func (c *Client) rotateAdoptedSession(ctx context.Context, gen uint64, videoID s
 	}
 	c.clearAdoptedCookies()
 	c.adoptVD = ""
+	c.adoptUA = ""
+	c.adoptVersion = ""
 	c.adoptGen = 0
 	c.adoptResolved = false
 	c.adoptSeeded = false
@@ -520,6 +586,10 @@ func explainBareDeadline(err error, sess *session) error {
 // extractProfile performs one profile's /player extraction. The caller resets the
 // session PO binding and decides whether to continue the profile chain.
 func (c *Client) extractProfile(ctx context.Context, sess *session, profile ClientProfile, videoID string, i int) (*Extraction, error) {
+	// Derive before anything reads the profile, so the /player call, the token
+	// requests, the stream headers, and the SABR client_info all follow.
+	profile = adoptedProfile(profile, sess)
+
 	// WEB-family profiles need a player-scope PO token in the /player body before
 	// YouTube returns usable stream URLs. Profiles that do not list ScopePlayer
 	// skip the provider lookup.
@@ -648,7 +718,7 @@ func (c *Client) fetchWatchPage(ctx context.Context, videoID string) ([]byte, *s
 	if err != nil {
 		return nil, nil, err
 	}
-	body, err := c.httpGet(ctx, c.webFallback, sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
+	body, err := c.httpGet(ctx, adoptedProfile(c.webFallback, sess), sess, "https://www.youtube.com/watch?v="+videoID+"&bpctr=9999999999&has_verified=1")
 	if err != nil {
 		return nil, nil, explainBareDeadline(err, sess)
 	}
@@ -658,11 +728,11 @@ func (c *Client) fetchWatchPage(ctx context.Context, videoID string) ([]byte, *s
 // extractFromWatchPage fetches the watch page and parses the embedded
 // ytInitialPlayerResponse, as a fallback when the InnerTube clients fail.
 func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Extraction, error) {
-	profile := c.webFallback
 	body, sess, err := c.fetchWatchPage(ctx, videoID)
 	if err != nil {
 		return nil, err
 	}
+	profile := adoptedProfile(c.webFallback, sess)
 	pr, err := parseWatchPage(body)
 	if err != nil {
 		c.dumpArtifact(ctx, "watchpage-"+videoID+".html", body)
@@ -775,11 +845,11 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 	if o.MaxItems < 0 {
 		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, o.MaxItems)
 	}
-	profile := c.playlistProfile()
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
 		return nil, err
 	}
+	profile := adoptedProfile(c.playlistProfile(), sess)
 	pl := &Playlist{ID: playlistID}
 
 	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)

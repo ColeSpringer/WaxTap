@@ -33,12 +33,13 @@ const highResArea = 1280 * 720
 // placeholder guard goes inert exactly where the probes are pure guesses: an
 // empty ladder makes the best listed area 0, and every image beats 0.
 //
-// That is a live path, not a hypothetical. A WEB player-context extraction builds
-// its Video with an ID, title, author, duration, and formats and no Thumbnails at
-// all, and the full-metadata watch-page pass backfills the publish date,
-// chapters, and availability but never the ladder. Before the probes existed that
-// path reported "the video carries no thumbnail" and embedded nothing, which
-// beats embedding a grey tile.
+// That is a live path, not a hypothetical. A WEB player-context extraction carries
+// the ladder only when the provider sends one; a provider that omits it (an older
+// WaxSeal, a non-WaxSeal sidecar) still yields a Video with an ID, title, author,
+// duration, and formats and no Thumbnails at all, and the full-metadata watch-page
+// pass backfills the publish date, chapters, and availability but never the
+// ladder. Before the probes existed that path reported "the video carries no
+// thumbnail" and embedded nothing, which beats embedding a grey tile.
 //
 // 640x480 is the sddefault rung, the smallest image worth replacing a ladder
 // with. It clears the 120x90 placeholder by a wide margin and sits far under a
@@ -204,7 +205,8 @@ func upgradeToHighRes(v *youtube.Video, listedArea int) []coverCandidate {
 //
 // Falling back to v.ID matters most where the probe is most valuable: an empty
 // ladder otherwise yields "the video carries no thumbnail" and a guessed
-// maxresdefault is pure upside. The "do not guess for a foreign ladder" worry
+// maxresdefault is pure upside. The context path fills the ladder when its
+// provider sends one, so this covers the providers that do not. The "do not guess for a foreign ladder" worry
 // only applies to a caller-fabricated Video, which cannot reach here, since the
 // embed pass is called only from the YouTube source with its own extracted video.
 func coverVideoID(v *youtube.Video) string {

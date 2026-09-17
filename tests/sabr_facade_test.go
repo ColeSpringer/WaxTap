@@ -746,6 +746,9 @@ func iosPlayerContext() potoken.PlayerContext {
 		VisitorData:     "CgtWSVNJVE9SXzAh",
 		ClientVersion:   "2.20260606.02.00",
 		Title:           "Forced iOS via WEB context", Author: "T", LengthSeconds: 1,
+		ChannelID:   "UCdummy",
+		Description: "desc",
+		PublishDate: "2021-05-20",
 		AudioFormats: []potoken.PlayerContextFormat{
 			{Itag: 251, LMT: "1700000000000001", MimeType: `audio/webm; codecs="opus"`, Bitrate: 130000, AudioChannels: 2, AudioSampleRate: 48000, ContentLength: 27, ApproxDurationMs: 1000},
 		},
@@ -778,13 +781,23 @@ func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "track.webm")
 	res, err := c.Download(context.Background(), waxtap.Request{
 		URL:         "dummyVideo0",
-		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out), IncludeMetadata: true},
 	})
 	if err != nil {
 		t.Fatalf("forced iOS + delivering player-context should stream via WEB_CONTEXT: %v", err)
 	}
 	if res.Client != "WEB_CONTEXT" {
 		t.Errorf("Result.Client = %q, want WEB_CONTEXT (player-context should take precedence over iOS)", res.Client)
+	}
+	// The context's metadata reaches Result.Metadata as every other path's does.
+	if res.Metadata == nil {
+		t.Fatal("Result.Metadata = nil, want the context's metadata")
+	}
+	if res.Metadata.ChannelID != "UCdummy" || res.Metadata.Description != "desc" {
+		t.Errorf("Metadata = %+v, want the context's channel and description", res.Metadata)
+	}
+	if res.Metadata.PublishDate.Year() != 2021 {
+		t.Errorf("Metadata.PublishDate = %v, want the context's 2021 date", res.Metadata.PublishDate)
 	}
 	want := append(append([]byte{}, initBytes...), mediaBytes...)
 	if got, _ := os.ReadFile(out); !bytes.Equal(got, want) {
@@ -1435,5 +1448,213 @@ func TestFacade_WebContextSecondCapReportsUnderNoFallback(t *testing.T) {
 	}
 	if reports[0].Generation != 7 {
 		t.Errorf("reported generation = %d, want 7", reports[0].Generation)
+	}
+}
+
+// TestFacade_WebContextVerdictIsNotAnEndpointFailure covers a sidecar relaying
+// the video's own playability verdict: it is the returned error, it arms no
+// cooldown, and it is not reported as an unexpected endpoint response.
+func TestFacade_WebContextVerdictIsNotAnEndpointFailure(t *testing.T) {
+	verdict := &waxtap.SidecarResponseError{
+		Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+		StatusCode: 422, Code: waxtap.SidecarCodeVideoUnavailable, Details: "ERROR",
+		Reason: "video unplayable: Video unavailable",
+	}
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil // every client unavailable
+		}
+		return resp(http.StatusNotFound, nil), nil
+	})
+	var calls atomic.Int64
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		calls.Add(1)
+		return potoken.PlayerContext{}, verdict
+	})
+	newClient := func(t *testing.T) *waxtap.Client {
+		t.Helper()
+		c, err := waxtap.New(waxtap.Options{
+			HTTPClient:            &http.Client{Transport: rt},
+			POTokenProvider:       fProvider{},
+			PlayerContextProvider: pc,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	c := newClient(t)
+	var warnings int
+	download := func(noFallback bool) error {
+		out := filepath.Join(t.TempDir(), "track.webm")
+		_, err := c.Download(context.Background(), waxtap.Request{
+			URL:        "dummyVideo0",
+			NoFallback: noFallback,
+			ProcessSpec: waxtap.ProcessSpec{
+				Output: waxtap.ToFile(out),
+				Events: func(e waxtap.Event) {
+					if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+						warnings++
+					}
+				},
+			},
+		})
+		return err
+	}
+
+	err := download(false)
+	if !errors.Is(err, waxtap.ErrVideoUnavailable) {
+		t.Fatalf("download error = %v, want the relayed verdict", err)
+	}
+	if warnings != 0 {
+		t.Errorf("web-context warnings = %d, want none: a verdict is not an unexpected response", warnings)
+	}
+	// The cooldown was not armed, so the next item in a batch still asks.
+	if err := download(false); !errors.Is(err, waxtap.ErrVideoUnavailable) {
+		t.Fatalf("second download error = %v, want the relayed verdict", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("player-context calls = %d, want 2 (no cooldown armed)", got)
+	}
+
+	err = download(true)
+	sre, ok := errors.AsType[*waxtap.SidecarResponseError](err)
+	if !ok || sre.Code != waxtap.SidecarCodeVideoUnavailable {
+		t.Errorf("--no-fallback error = %v, want the sidecar error itself", err)
+	}
+	if !errors.Is(err, waxtap.ErrVideoUnavailable) {
+		t.Errorf("--no-fallback error = %v, want the verdict", err)
+	}
+}
+
+// TestFacade_WebContextVerdictStillWarnsWhenAnotherClientDelivers pins the other
+// half: after a verdict the native chain delivering is exactly what the fallback
+// warning should report.
+func TestFacade_WebContextVerdictStillWarnsWhenAnotherClientDelivers(t *testing.T) {
+	initBytes, mediaBytes := []byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA")
+	umpBody := fSabrHappyBody(initBytes, mediaBytes)
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			// Every native client delivers; only the built-in WEB one does not.
+			if r.Header.Get("X-Youtube-Client-Name") == "1" {
+				return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+			}
+			return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			return resp(http.StatusOK, umpBody), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, &waxtap.SidecarResponseError{
+			Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+			StatusCode: 422, Code: waxtap.SidecarCodeVideoUnavailable, Details: "ERROR",
+			Reason: "video unplayable: Video unavailable",
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		POTokenProvider:       fProvider{},
+		PlayerContextProvider: pc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details []string
+	out := filepath.Join(t.TempDir(), "track.webm")
+	res, derr := c.Download(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Output: waxtap.ToFile(out),
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageWarning && e.Warning != nil && e.Warning.Code == waxtap.WarnWebContextFallback {
+					details = append(details, e.Warning.Detail)
+				}
+			},
+		},
+	})
+	if derr != nil {
+		t.Fatalf("download: %v", derr)
+	}
+	if len(details) != 1 {
+		t.Fatalf("web-context warnings = %v, want exactly one", details)
+	}
+	if !strings.Contains(details[0], "did not deliver") || !strings.Contains(details[0], res.Client) {
+		t.Errorf("warning detail = %q, want it to name the delivering client %q", details[0], res.Client)
+	}
+}
+
+// TestFacade_DeliveredStreamDisprovesRelayedVerdict is the end-to-end shape of
+// the precedence rule: the sidecar relays a bot check as a per-video verdict
+// while a native client reaches the stream and ends short. Reporting the verdict
+// would call a video that demonstrably streams unavailable, which is skip-class
+// and tells the user to stop retrying; the incomplete delivery is the honest
+// answer and is retryable.
+func TestFacade_DeliveredStreamDisprovesRelayedVerdict(t *testing.T) {
+	capped := fSabrBody([]byte("INIT"), []byte("MEDIA"), 2) // declares 2 segments, sends 1
+
+	var mu sync.Mutex
+	rounds := map[string]int{}
+	firstRound := func(c string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		rounds[c]++
+		return rounds[c] == 1
+	}
+
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "28" { // ANDROID_VR, token-free
+				return resp(http.StatusOK, []byte(sabrPlayerJSONFor("android"))), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			// First round per client delivers a partial; later rounds deliver
+			// nothing, so the stream caps instead of looping forever.
+			if firstRound(r.URL.Query().Get("c")) {
+				return resp(http.StatusOK, capped), nil
+			}
+			return resp(http.StatusOK, nil), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	pc := potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) {
+		return potoken.PlayerContext{}, &waxtap.SidecarResponseError{
+			Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+			StatusCode: 422, Code: waxtap.SidecarCodeVideoUnavailable, Details: "LOGIN_REQUIRED",
+			Reason: "video unplayable: Sign in to confirm you're not a bot",
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:            &http.Client{Transport: rt},
+		PlayerContextProvider: pc,
+		POTokenProvider:       fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "track.webm")
+	_, derr := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if derr == nil {
+		t.Fatal("a short delivery should fail")
+	}
+	if !errors.Is(derr, waxtap.ErrIncompleteStream) {
+		t.Errorf("err = %v, want ErrIncompleteStream: a client streamed bytes from this video", derr)
+	}
+	if errors.Is(derr, waxtap.ErrLoginRequired) || errors.Is(derr, waxtap.ErrVideoUnavailable) {
+		t.Errorf("err = %v, want the relayed verdict disproved by the delivery", derr)
+	}
+	// The verdict is still on the record for diagnosis.
+	if !strings.Contains(derr.Error(), "not a bot") {
+		t.Errorf("err = %v, want the demoted verdict kept in the per-attempt detail", derr)
 	}
 }

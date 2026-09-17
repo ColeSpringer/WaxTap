@@ -403,3 +403,13 @@ func TestNoteKeptItem(t *testing.T) {
 		}
 	})
 }
+
+func TestWebOutcomeActionable_VerdictIsNot(t *testing.T) {
+	verdict := &waxtap.ProviderError{Endpoint: "player-context", Cause: &waxtap.SidecarResponseError{StatusCode: 422, Code: waxtap.SidecarCodeVideoUnavailable, Details: "ERROR"}}
+	if webOutcomeActionable(nil, verdict) {
+		t.Error("an availability verdict relayed by the sidecar must not trigger the two-sources nudge")
+	}
+	if !webOutcomeActionable(nil, &waxtap.ProviderError{Endpoint: "player-context", Cause: &waxtap.SidecarResponseError{StatusCode: 502}}) {
+		t.Error("a provider failure still is")
+	}
+}

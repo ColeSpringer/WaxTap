@@ -294,6 +294,12 @@ func hostOr(host string) string {
 //
 // A non-nil error wins over nil, and ties preserve a. Callers must handle
 // cancellation and rate limiting before calling PreferErr.
+//
+// The ranking is what each error means on its own, which is all a pair of them
+// can say. A caller holding evidence a single error cannot carry must apply it
+// before ranking: WaxTap's download chain, for one, drops an availability
+// verdict from a client that never reached the stream once another client did
+// reach it, because that verdict described the client rather than the video.
 func PreferErr(a, b error) error {
 	switch {
 	case a == nil:

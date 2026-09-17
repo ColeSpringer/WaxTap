@@ -345,8 +345,18 @@ config/environment only.
 | `extractionTimeoutSeconds` | `WAXTAP_EXTRACTION_TIMEOUT` | - |
 | `resolveTimeoutSeconds` | `WAXTAP_RESOLVE_TIMEOUT` | - |
 | `webContextTimeoutSeconds` | `WAXTAP_WEB_CONTEXT_TIMEOUT` | - |
+| `sidecarTimeoutSeconds` | `WAXTAP_SIDECAR_TIMEOUT` | - |
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
 | `chunkTimeoutSeconds` | `WAXTAP_CHUNK_TIMEOUT` | - |
+
+Timeouts default to 45 s extraction, 30 s resolve, 60 s web context, 60 s per
+sidecar request, 10 s SponsorBlock, 120 s per chunk. The web-context timeout
+bounds one attested handoff as a whole, a `/player-context` call or a `/session`
+resolution together with the wait the sidecar asks for and the one retry; the
+sidecar timeout bounds each request inside it. Setting
+`sidecarTimeoutSeconds` to 0 selects its default rather than "no deadline",
+unlike the other timeout keys: the handoff budget already bounds the call, and
+the retry needs a per-request bound to be reachable.
 
 `procs` bounds the concurrent audio-processing operations. Zero, the default,
 follows `GOMAXPROCS`; a negative value disables the limit entirely. Both are
@@ -370,7 +380,19 @@ waxtap download <url> --client web \
 ```
 
 WaxTap tries the attested player context first; if it fails or caps, the WEB
-chain can use the adopted session. Static adoption is also available with
+chain can use the adopted session.
+
+A refusal the sidecar codes is read: `video-unavailable` is the video's
+playability verdict (exit 3, skip-class, the chain still tries the native
+clients), and a refusal that states a wait (`Retry-After` or
+`retry_after_seconds`) is retried once after it, up to 60 s. A `/session` that
+exports `user_agent` and `client_version` has WaxTap's WEB requests carry that
+browser's identity. A context that carries the video's channel, description,
+thumbnail ladder, live flags, and publish date fills `Result.Metadata`,
+`--write-info-json`, and the cover-art ladder on that path as every other path
+does.
+
+Static adoption is also available with
 `--visitor-data` and optional `--cookies`. Library callers get the same handoff
 via the `NewSidecar*` providers, each taking a base URL or full endpoint plus an
 optional `WithSidecarAPIKey`; `ParseNetscapeCookies` loads a static session from
@@ -380,7 +402,12 @@ contracts and SABR diagnostics.
 ## Maintenance
 
 `waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
-check; `waxtap doctor --full` verifies complete delivery. The
+check; `waxtap doctor --full` verifies complete delivery. With sidecar URLs
+configured, each is probed once first (session, PO token, player-context), so a
+cold daemon's first-call cost and any refusal code are visible; the token and
+context probe latencies include WaxSeal's separation waits, which is the cost a
+first download pays, not a relaunch. A probe that relays the video's own
+playability verdict still counts as a healthy sidecar. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
 failures, SABR changes, fixtures, and releases. Work cut from a change is
 tracked in [docs/deferred-work.md](docs/deferred-work.md), and what WaxTap

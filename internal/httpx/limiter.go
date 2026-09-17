@@ -53,13 +53,13 @@ func (l *HostLimiter) Wait(ctx context.Context, host string) error {
 		if wait <= 0 {
 			return nil
 		}
-		// pauseBlocked applies the same precedence Client.Do uses: cancellation
+		// PauseBlocked applies the same precedence Client.Do uses: cancellation
 		// outranks the cooldown report so Ctrl-C stays exit 130, while an expired
 		// deadline still gets the typed rate limit rather than a bare timeout. With no
 		// cooldown in force there is nothing to report, so the wait falls through to
 		// the timer and cancellation comes back from its Done branch.
 		if cooldown > 0 {
-			if berr := pauseBlocked(ctx, cooldown, &waxerr.RateLimitError{Host: host, RetryAfter: cooldown}); berr != nil {
+			if berr := PauseBlocked(ctx, cooldown, &waxerr.RateLimitError{Host: host, RetryAfter: cooldown}); berr != nil {
 				b.rollback(reserved, l.interval)
 				return berr
 			}
