@@ -1,0 +1,51 @@
+name: vulncheck
+
+# govulncheck reports known vulnerabilities in the dependencies and the
+# standard library, limited to the functions the binary actually reaches. It
+# runs on every change and once a week, so a report published between pushes
+# still surfaces within days. A finding means a dependency bump or a newer Go
+# patch release; there is no automated update to accept.
+#
+# The analysis follows GOOS/GOARCH, so each release target is scanned: the
+# Windows-only code in the shipped binaries has had standard-library
+# advisories of its own.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "37 6 * * 1" # weekly, Monday ~06:37 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # A standard-library finding clears with the newest patch release.
+          # The release workflow builds with the same choice, so a scan that
+          # is clean here is clean for what ships.
+          check-latest: true
+
+      - name: govulncheck, each release target
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # The .goreleaser.yaml build matrix.
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "::group::$target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" "$(go env GOPATH)/bin/govulncheck" ./...
+            echo "::endgroup::"
+          done

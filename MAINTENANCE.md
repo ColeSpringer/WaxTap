@@ -83,8 +83,8 @@ Update this runbook when a recovery path or runtime control changes.
 go test ./...
 go test -race ./...
 go test -tags=integration ./...
-GOOS=windows GOARCH=amd64 go build ./...
-GOOS=darwin GOARCH=arm64 go build ./...
+go mod tidy -diff
+goreleaser release --snapshot --clean
 ```
 
 Live tests can be rate-limited or bot-walled from CI or datacenter IPs. A skip is
@@ -98,11 +98,18 @@ something else on the box is already consuming the pool, and the retry tests in
 `internal/httpx` and `download` amplify it once dials start failing. Confirm with
 `netstat -an | grep -c TIME_WAIT`, work around it with `go test -p 1 ./...`, and
 remove the ceiling with `netsh int ipv4 set dynamicport tcp start=16384
-num=49151` (admin). Linux CI is unaffected.
+num=49151` (admin). Linux and macOS CI are unaffected, and the Windows leg
+starts on a fresh runner with an empty pool.
 
-CI runs formatting, vet, builds, race tests, and cross-compiles. The daily
-`doctor` workflow fails only on exit 4; availability and rate-limit failures
-remain warnings.
+CI runs gofmt, vet, and a `go mod tidy` check, the race tests on Linux, macOS,
+and Windows, and a GoReleaser snapshot of every release target. `vulncheck`
+runs govulncheck against each release target on every change and weekly. The
+daily `doctor` workflow fails only on an extraction failure (exit 4, on any
+candidate of any attempt); login-required, availability, and rate-limit
+failures remain warnings, and each run's summary page carries the verdict and
+the report. A manual dispatch with `full` set runs the whole-track check.
+GitHub switches a schedule off after 60 days without a commit and emails the
+owner; re-enable it from the Actions tab.
 
 ## Client identity
 
@@ -405,9 +412,14 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The release workflow runs GoReleaser and creates a draft GitHub release. Use
-`goreleaser release --snapshot --clean` for a local dry run or
-`goreleaser check` for configuration validation.
+The release workflow runs GoReleaser, creates a draft GitHub release, and
+attests the archives; for a release cut after 2026-09-17, `gh attestation
+verify <archive> --repo ColeSpringer/WaxTap` ties a download to the workflow
+run and the tagged commit. A re-run for the same tag fills the existing draft
+and replaces its assets, keeping the notes. CI runs the same GoReleaser
+configuration as a snapshot on every push. Use `goreleaser release --snapshot
+--clean` for a local dry run or `goreleaser check` for configuration
+validation.
 
 Every archive carries `THIRD-PARTY-NOTICES.md` beside `LICENSE`: the license
 and notice files of each module compiled into the binary, at the module root
@@ -420,8 +432,8 @@ go run ./internal/notices/gen
 ```
 
 `TestCheckedInFileIsCurrent` in `internal/notices` fails while the file is
-stale. It reads `go.mod` and `go.sum`, so a bump invalidates its cached result,
-and the GoReleaser before-hook runs it, so a stale file fails the release
-instead of shipping under the tag. The generator runs `go list` with
+stale. It reads `go.mod` and `go.sum`, so a bump invalidates its cached result;
+CI runs it, and the GoReleaser before-hook runs it again, so a stale file fails
+the release instead of shipping under the tag. The generator runs `go list` with
 `GOWORK=off`: a local workspace over the Wax repos does not change what the
 release build links.

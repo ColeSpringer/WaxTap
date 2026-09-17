@@ -67,3 +67,8 @@ changelog:
 release:
   draft: true
   prerelease: auto
+  # A re-run for the same tag (after a failed upload, or a tag moved before
+  # publishing) fills the existing draft and replaces its assets instead of
+  # leaving a second draft beside it; the notes written on it stay.
+  use_existing_draft: true
+  replace_existing_artifacts: true

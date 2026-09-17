@@ -2,7 +2,9 @@ name: release
 
 # Publishes release binaries (Linux/macOS/Windows, amd64/arm64) with GoReleaser
 # when a version tag is pushed. The GitHub release is created as a draft (see
-# .goreleaser.yaml) for a final review before publishing.
+# .goreleaser.yaml) for a final review before publishing. The archives are then
+# attested, so a download can be tied back to this workflow run and the tagged
+# commit with `gh attestation verify <archive> --repo ColeSpringer/WaxTap`.
 
 on:
   push:
@@ -10,24 +12,34 @@ on:
       - "v*"
 
 permissions:
-  contents: write # create the GitHub release and upload assets
+  contents: read
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the draft release and upload its assets
+      id-token: write # sign the provenance attestation
+      attestations: write # store it
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0 # GoReleaser needs full history and tags for the changelog
+          fetch-depth: 0 # GoReleaser reads the tag history to version the build
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # Build with the newest patch release of the go.mod line, the same
+          # one vulncheck scans against.
+          check-latest: true
 
       - uses: goreleaser/goreleaser-action@v7
         with:
-          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/checksums.txt

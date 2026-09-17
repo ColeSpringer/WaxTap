@@ -96,3 +96,32 @@ Gate tags:
   fills a still-zero `Video.Duration` from the probed row after
   `applyProbe`; only the live `TestLive_InfoProbe` reaches it, because
   probing stages a real stream.
+
+- `[in-repo]` **The `cmd/waxtap` suite depends on test order.** `go test
+  -shuffle=on ./cmd/waxtap` fails on a different test each run (seen:
+  `TestBatchTranscodeCommandIntegration`, `TestBatchDownmixIsDecidedPerFile`,
+  each on which batch item was copied rather than encoded), so some state
+  one test sets outlives it. CI runs the suite in source order until it is
+  found; add `-shuffle=on` to the test job's `go test` once a shuffled run
+  passes. Found reworking the workflows on 2026-09-17.
+
+## CI
+
+- `[in-repo]` **The daily `doctor` run has never seen past the bot wall.**
+  Not one of the 105 runs of `.github/workflows/doctor-cron.yml` since its
+  first on 2026-06-04 has passed: each ran to the end of its retry loop (199
+  to 289 s, where a first-attempt pass returns within a minute), and every
+  log that survives, 2026-06-20 on, shows `login-required` on all three
+  candidates from the GitHub-hosted runner's address, classed as
+  environmental, so the job stayed green throughout. The refusal arrives in
+  the player response, before there is anything to descramble, so the
+  workflow's one hard signal, an exit 4 from the extraction or cipher path,
+  has had nothing to observe. The 2026-09-17 rework puts each run's verdict
+  on its summary page and reads every candidate of every attempt for that
+  class, which shows the streak but does not end it. Ending it means running
+  from an address YouTube serves: a self-hosted runner, `--proxy` to one, or
+  the sidecar URLs (`--session-url`, `--potoken-url`,
+  `--player-context-url`) from repository secrets, which is what `doctor`
+  probes for. Undecided: which, and whether a run that never reaches YouTube
+  should keep counting as green. Found reworking the workflows on
+  2026-09-17.
