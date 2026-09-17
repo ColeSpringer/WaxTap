@@ -96,6 +96,8 @@ type CutResult struct {
 // staged and atomically renamed on success. When CopyCut is set and no downmix,
 // gain, or crossfade is requested, Render tries a lossless cut-remux first and
 // re-encodes only if WaxFlow declines the source codec.
+//
+// input and output must name different files, for the reason Transcode gives.
 func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec) (CutResult, error) {
 	if len(spec.Keeps) == 0 {
 		return CutResult{}, fmt.Errorf("%w: cut would remove the entire track", waxerr.ErrIncompatibleSpec)

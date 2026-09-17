@@ -308,7 +308,10 @@ func TestDecodeOnlyCodecsInsideWritableContainers(t *testing.T) {
 			if !errors.Is(err, waxerr.ErrIncompatibleSpec) || !strings.Contains(err.Error(), tc.display) || !strings.Contains(err.Error(), "--format") {
 				t.Errorf("copy = %v, want ErrIncompatibleSpec naming %s and the --format escape", err, tc.display)
 			}
-			res, err := r.Transcode(ctx, in, filepath.Join(dir, tc.codec+".wav"), Spec{Codec: CodecWAV})
+			// -decoded, not tc.codec+".wav": that collides with the alaw fixture's
+			// own name, and a transcode onto its open source is refused outright on
+			// Windows (and by Process everywhere).
+			res, err := r.Transcode(ctx, in, filepath.Join(dir, tc.codec+"-decoded.wav"), Spec{Codec: CodecWAV})
 			if err != nil {
 				t.Fatalf("transcode: %v", err)
 			}

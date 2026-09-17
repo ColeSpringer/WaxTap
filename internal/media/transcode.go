@@ -91,6 +91,11 @@ func levelsOf(r *waxflow.TranscodeResult) Levels {
 //
 // CodecCopy is a whole-file container remux (no re-encode); it rejects a channel
 // or gain change, which require decoding.
+//
+// input and output must name different files. The source stays open across the
+// commit, and Windows refuses a rename onto a file something still holds open;
+// Process rejects a same-path request before it reaches here. RemuxContainer is
+// the exception: it closes the source first, so it can write in place.
 func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec) (Result, error) {
 	if spec.Codec == CodecCopy && (spec.Channels > 0 || spec.GainDB != 0) {
 		return Result{}, fmt.Errorf("%w: a container copy cannot change channels or loudness", waxerr.ErrIncompatibleSpec)
