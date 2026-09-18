@@ -63,6 +63,93 @@ upstream lands it, do the follow-up and remove both entries.
   WaxTap-side fix that avoids the refusal for the common case (measuring
   the input before a cut) is in deferred-work.md.
 
+- **A probe of a WebM Opus track reads the whole file.** `mka.finalizeTrack`
+  (`container/mka/demux.go:600`) calls `ensureWalk`
+  (`container/mka/read.go:311-314`) at open for a track with a nonzero
+  CodecDelay, which every Opus rendition YouTube serves carries (and for
+  Vorbis, `needsGaplessWalk`, `demux.go:641-643`), once the first cluster is
+  seen. The walk frame-counts every cluster through the 128 KiB read-ahead
+  window (`container/internal/srcwin/srcwin.go:31`). `Engine.Probe` on
+  YouTube's default Opus rendition is therefore a linear read of the stream,
+  and a ranged-HTTP `container.Source` cannot make `info --probe` cheap: it
+  would fetch the same bytes in `size/128 KiB` requests. Only an m4a row
+  probes from its `moov`. Wanted: a probe option that reports the advisory
+  `Info` Duration for such a track without the walk, with the count marked
+  `SamplesAdvisory`, so a header-only probe is a header-sized read. Shipped
+  workaround: `probeRemote` (`waxtap.go`) stages the whole stream to a temp
+  file and probes that.
+
+- **A Concat cannot conform a narrower member into a surround envelope.**
+  `concatLayout` promises to mix a member up to
+  `audio.DefaultLayout(env.Channels)` (`timeline.go:716-718`), but
+  `dsp/mix.For` builds mono to stereo, anything to stereo, and anything to
+  mono only (`dsp/mix/mix.go:71-113`), and `concat.buildChain` asks it for
+  the envelope layout when the timeline reaches the member
+  (`timeline.go:1486-1500`), so a stereo track queued with a 5.1 one fails
+  there with unsupported-format, and the error comes back bare, with no
+  member number to name the track by. WaxTap's album measurement runs over a
+  Concat, so an album mixing widths cannot be measured. Wanted: either an
+  up-mix to the conventional wider layouts (zero-filled positions, no
+  normalization), or a `ConcatOptions` fold that conforms and measures every
+  member at one width, which is also what an album encode into a lossy
+  target needs measured. Shipped workaround: WaxTap reads every member's
+  width first and refuses the set before measuring, naming the narrower
+  track.
+
+- **A walk that comes up short keeps the Xing count.** `mpa.Walk`
+  (`container/mpa/index.go:22-31`) adopts the walked frame count only for a
+  track that stated none or an advisory one; a count a Xing or Info frame
+  stated stands even when the walk found fewer frames, so a strict probe of
+  a truncated MP3 reports the declared length beside a "truncated final
+  frame dropped" warning, and the length a cut can trust is only learned by
+  decoding to EOF. ADTS, MP3 in a WAV or AIFF-C, and non-Opus Matroska are
+  settled by the walk alone. Wanted: a walk that ends short of the stated
+  count replaces it, marked as damage, so the walk is the measurement for
+  MP3 too. Shipped workaround: WaxTap walks a lazily walked input before
+  resolving a cut and decodes it only when the walk could not settle the
+  count, which is the Xing case; a normalizing cut of such a file then
+  decodes twice (the count, then the measurement of the composed cut), and a
+  copy cut of ADTS walks once more than the packet grid already does.
+
+- **A truncated ADTS frame can be walked in as if it were whole.**
+  `adts.Demuxer.extend` (`container/adts/demux.go:294-322`) resyncs to a
+  candidate frame and appends it to the index (`:324`) without confirming
+  its declared span (`candidate + frameLen`) actually fits inside
+  `DataEnd()`. Only the *following* call re-derives that same frame as
+  `last` and finds `next >= DataEnd()` (`:290`), by which point it is
+  already indexed and there is nothing left to flag: no warning, no count
+  correction. `adts.Demuxer.Walk` (`demux.go:342`) then reports
+  `len(idx)*spf` as the exact sample count, one frame too many. Measured
+  over 1200 truncation offsets on a synthetic fixture: the walked count and
+  an independent decode differ by exactly 1024 samples (one AAC-LC frame)
+  in 1179 cases, and agree in the other 21 (a cut landing on a real frame
+  boundary, or inside a following frame's own header, both of which the
+  resync path does catch). `mpegframes.Walker.extend`
+  (`container/internal/mpegframes/walker.go:335`, shared by mpa/riff/aiff -
+  bare MP3, MP3 in a WAV, MP3 in an AIFF-C) already carries the check ADTS
+  lacks, `if cand+nh.Size() > DataEnd() { ...warn... }` before its own
+  `idx = append` (`walker.go:379-383`), and `Begin` guards the first frame
+  the same way, so this is an ADTS-only gap: over the same 1200 offsets on
+  an MP3 fixture, 1198 warn and `MeasureLength` matches an independent
+  decode at all 1200 (see the entry above for the one MP3 case that does
+  mismeasure, a stale Xing count, unrelated to this walk). Wanted: `extend`
+  confirming a resynced candidate's declared span is inside `DataEnd()`
+  before appending it, the check `mpegframes` already makes. Shipped
+  workaround: none functional; WaxTap's own test for
+  `media.Runner.MeasureLength` (`TestMeasureLengthOfTruncatedPayloads`)
+  tolerates a one-frame gap against an independent decode on the walked
+  path rather than asserting equality, since `MeasureLength` has no signal
+  to detect or correct this (the walked `Info`'s own Warnings are empty
+  too). A cut's own bound (`CutSpec.SourceSamples`) can therefore still be
+  a frame too generous for a bounded (non-open-ended) span on a truncated
+  ADTS file. The open-ended form a span takes when it reaches the measured
+  total (`openComposed`'s `openEnded`) is unaffected only for a single-keep
+  composition, which opens through `Slice`: its open-ended form makes no
+  length promise at all. A multi-keep composition opens through `Concat`
+  instead, and WaxFlow's `SpanTrack` (`timeline.go:259-267`) still declares
+  the open-ended final member's length as `SourceSamples - from`, so
+  `Concat`'s seam check refuses it by the same one frame.
+
 ## WaxLabel
 
 No open requests.

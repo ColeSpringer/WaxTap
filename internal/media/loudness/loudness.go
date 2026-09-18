@@ -116,14 +116,16 @@ func Measure(ctx context.Context, r *media.Runner, input string, channels int) (
 // MeasureCut measures the loudness of the cut-composed audio, so the gain matches
 // the bytes a fused cut+encode will produce. keeps are the retained spans on the
 // source timeline; total is the source duration; channels folds the measurement
-// to a downmix target (0 keeps the source layout).
-func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutrange.Range, total, crossfade time.Duration, channels int) (Loudness, error) {
-	med, closer, err := r.OpenComposed(input, keeps, total, crossfade)
+// to a downmix target (0 keeps the source layout). sourceSamples is 0 or the
+// count a prior media.Runner.MeasureLength(input) delivered, when the source's
+// headers only claim a length; see media.CutSpec.SourceSamples.
+func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutrange.Range, total, crossfade time.Duration, channels int, sourceSamples int64) (Loudness, error) {
+	med, closer, err := r.OpenComposed(input, keeps, total, crossfade, sourceSamples)
 	if err != nil {
 		return Loudness{}, err
 	}
 	defer closer()
-	res, err := r.AnalyzeMedia(ctx, med, channels)
+	res, err := r.AnalyzeMedia(ctx, med, input, channels)
 	if err != nil {
 		return Loudness{}, err
 	}
@@ -161,7 +163,9 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 	defer closer()
 	// The group read's own damage list is the members' again, each under a
 	// member index; the per-track measurements above already carry them.
-	ares, merr := r.AnalyzeMedia(ctx, med, 0)
+	//
+	// "" names no single file: a concatenated album has several.
+	ares, merr := r.AnalyzeMedia(ctx, med, "", 0)
 	if merr != nil {
 		return Loudness{}, nil, merr
 	}

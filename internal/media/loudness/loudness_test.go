@@ -2,6 +2,8 @@ package loudness
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -170,12 +172,50 @@ func TestMeasureCut(t *testing.T) {
 	in := filepath.Join(t.TempDir(), "s.wav")
 	os.WriteFile(in, mediatest.SineWAV(3, 2), 0o644)
 	// Measuring a 1s slice of a steady tone yields the same loudness as the whole.
-	l, err := MeasureCut(context.Background(), r, in, []cutrange.Range{{Start: 0, End: time.Second}}, 3*time.Second, 0, 0)
+	l, err := MeasureCut(context.Background(), r, in, []cutrange.Range{{Start: 0, End: time.Second}}, 3*time.Second, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("measure cut: %v", err)
 	}
 	if !l.Finite() {
 		t.Errorf("cut measurement not finite: %+v", l)
+	}
+}
+
+// A measurement that fails mid-read names the file, so the failure exits as
+// I/O (10) the way the write path's does, instead of as unsupported input
+// (2). The bounded span declares more than the truncated file holds and the
+// header is trusted (sourceSamples 0), which is the refusal that used to
+// arrive nameless.
+func TestMeasureCutNamesTheFileOnAReadFailure(t *testing.T) {
+	r := media.NewRunner(media.RunnerConfig{})
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	wavPath := filepath.Join(dir, "in.wav")
+	if err := os.WriteFile(wavPath, mediatest.SineWAV(2, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	intact := filepath.Join(dir, "intact.mp3")
+	if _, err := r.Transcode(ctx, wavPath, intact, media.Spec{Codec: media.CodecMP3}); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := filepath.Join(dir, "cut.mp3")
+	if err := os.WriteFile(cut, whole[:len(whole)*6/10], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := r.Probe(ctx, cut) // declares 2 s
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	keeps := []cutrange.Range{{Start: 0, End: 1900 * time.Millisecond}}
+	_, err = MeasureCut(ctx, r, cut, keeps, pr.Format.Duration, 0, 0, 0)
+	if pe, ok := errors.AsType[*fs.PathError](err); !ok || pe.Path != cut {
+		t.Fatalf("got %v, want a PathError naming %s", err, cut)
 	}
 }
 

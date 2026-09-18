@@ -379,7 +379,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// Fold the measurement to the downmix target so the gain is computed on the
 		// audio the encode will meter (fold is 0 when no downmix applies).
 		if effectiveCut {
-			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, fold)
+			// sourceSamples is 0: nothing here measures the source yet, so a
+			// bounded final span still trusts the header (Task 3 wires this).
+			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, fold, 0)
 		} else {
 			measured, err = loudness.Measure(ctx, r, input, fold)
 		}
@@ -444,6 +446,8 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				RequireCopyCutMode: spec.CutMode == media.ModeCopy,
 				RequireCopyFormat:  remux,
 				Encode:             fallback,
+				// SourceSamples is left 0 (headers trusted) until Task 3
+				// wires a measurement through.
 			})
 			if err != nil {
 				return err

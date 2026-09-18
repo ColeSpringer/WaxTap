@@ -80,15 +80,65 @@ Gate tags:
   ended N samples into a span that declared M; its cut points do not
   describe this file", which WaxTap reports as an I/O failure, exit 10),
   where a truncated FLAC clamps at the probe and the cut runs against the
-  real length. Fix: for a cut, walk such an input first (`format.Walker`,
-  which a strict probe runs) so the total is measured, and resolve the
-  ranges against that. Found by the 2026-09-16 review round.
+  real length. `internal/media` now has the tool: `Runner.MeasureLength`
+  measures such an input (a walk where it settles the count, a decode where
+  only a decode can), and `CutSpec.SourceSamples` holds the composed
+  timeline's spans to it (`Runner.OpenComposed` and `loudness.MeasureCut`
+  both take a `sourceSamples` parameter that does the same for a
+  measure-only run; `OpenAlbumConcat` already calls `MeasureLength`, for
+  its own unrelated reason, an unmeasured album member). Still open: the
+  cut pipeline never calls `MeasureLength` or sets `SourceSamples`, so
+  every pipeline call site passes 0. `openComposed`'s open-ended form
+  already stops the common single-keep, reaches-the-end shape from
+  refusing at `sourceSamples` 0 on an ordinary (non-advisory) header, so
+  what is still reachable is an interior span, a final span that does not
+  itself reach the declared total, or a multi-keep composition (its
+  open-ended final span still carries the untouched, too-large declared
+  length to Concat's seam check). Fix: when the probe's `LengthClaimed` is
+  set, measure before resolving cut ranges and thread the count through
+  `CutSpec`/`MeasureCut`. Found by the 2026-09-16 review round; the
+  `internal/media` half landed with the 2026-09-17 MeasureLength work.
 
-- `[in-repo]` **`info --probe` stages the whole stream.** `probeRemote`
-  (`waxtap.go`) downloads the audio once to probe a header locally, which
-  sidesteps ranged-HTTP probing and header-size cliffs. A lazy
-  ranged-HTTP source is the optimization if the cost ever bites. An
-  accepted tradeoff since v3.0.
+- `[upstream]` **`info --probe` stages the whole stream.** `probeRemote`
+  (`waxtap.go`) downloads the audio once to probe a header locally. A lazy
+  ranged-HTTP `container.Source` (WaxFlow's `container.Contextual` and
+  `BindContext` exist for exactly that; the googlevideo dialect is
+  `download.QueryRange`) would not save the read for the row YouTube serves
+  by default: WaxFlow walks every cluster of a WebM Opus track at open, so a
+  probe reads the file either way, and only an m4a row would benefit. Waits
+  on the WaxFlow header-only probe ask in upstream-requests.md; the
+  follow-up is a ranged source bound with `BindContext` in
+  `media.Runner.probeSource`, once a probe is header-sized. An accepted
+  tradeoff since v3.0.
+
+- `[upstream]` **An album mixing a surround member with a stereo one cannot
+  be measured as a group.** `loudness.MeasureAlbum` measures the group over
+  a WaxFlow Concat, which conforms every member to the widest layout through
+  `dsp/mix`, and that mixer builds no target wider than stereo, so the
+  timeline fails when it reaches the narrower member, with an error that
+  names no track. WaxTap therefore reads every member's width first and
+  refuses such a set before measuring, naming the narrower track
+  (`normalize --album` and `--album --measure-loudness` both). The
+  per-member fold (this sweep) covers the uniform case, every member the
+  same width. Waits on the WaxFlow Concat ask in upstream-requests.md; the
+  follow-up is a group pass over per-member folded media once one exists.
+
+- `[upstream]` **A truncated ADTS's walked count can overstate a genuinely
+  truncated final frame.** `adts.Demuxer.extend` indexes a resynced frame
+  from its header alone and only discovers, one call later, that its
+  declared span runs past the data end, by which point it is already
+  counted, with no warning attached (the ADTS walker ask in
+  upstream-requests.md). `Runner.MeasureLength`'s walk path has no signal
+  to detect or correct this, so `TestMeasureLengthOfTruncatedPayloads`
+  tolerates a one-frame gap against an independent decode instead of
+  asserting equality, and `CutSpec.SourceSamples` can be a frame too
+  generous for a bounded (non-open-ended) span on such a file, or for a
+  multi-keep composition's open-ended final span, which still declares
+  `SourceSamples - from` at `Concat`'s seam (a single-keep open-ended span
+  opens through `Slice` instead and is genuinely unaffected). Waits on
+  the WaxFlow ADTS walker ask in upstream-requests.md; the follow-up is
+  tightening that test back to strict equality and dropping the one-frame
+  slack the `SourceSamples` bound carries for it.
 
 ## Tests
 

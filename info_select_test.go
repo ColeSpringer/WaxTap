@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/internal/media"
@@ -106,21 +107,28 @@ func TestFacadeDefaultsToStereo(t *testing.T) {
 // mutated slice can land on a different near-tie row. The probed numbers live on
 // the originally selected row, so a re-selection would label an unprobed row.
 func TestProbeMutationShiftsSelection(t *testing.T) {
-	// Two near-tie stereo Opus rows differing only by manifest bitrate; itag 251
-	// wins before the probe.
+	// Two rows tied on every ranked field, both claiming stereo with unknown
+	// bitrate; itag 251 wins the tie by coming first.
 	formats := []Format{
-		{Itag: 251, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, Bitrate: 200000, IsOriginal: Yes},
-		{Itag: 250, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, Bitrate: 190000, IsOriginal: Yes},
+		{Itag: 251, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, IsOriginal: Yes},
+		{Itag: 250, Codec: "opus", Extension: "webm", MIMEType: "audio/webm", Channels: 2, IsOriginal: Yes},
 	}
 	sel := BestAudio().WithChannels(LayoutStereo)
 	idx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, formats)
 	if err != nil {
 		t.Fatalf("selectIndex: %v", err)
 	}
+	if formats[idx].Itag != 251 {
+		t.Fatalf("selectIndex chose itag %d, want 251 (first on the tie)", formats[idx].Itag)
+	}
 
-	// A probe of the selected row corrects its bitrate below the runner-up's.
+	// A probe of the selected row corrects the manifest's channel claim to the
+	// true 6-channel layout, which outranks bitrate and so drops the row's
+	// stereo-layout match; it also fills the size-derived content length and
+	// bitrate estimate (the audio stream itself reports neither).
 	applyProbe(&formats[idx], media.ProbeResult{
-		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 48000, Channels: 2, BitRate: 180000}},
+		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 225000},
+		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 48000, Channels: 6}},
 	})
 
 	reIdx, err := selectIndex(sel, MinimizeLoss(), format.Target{}, formats)
@@ -132,11 +140,17 @@ func TestProbeMutationShiftsSelection(t *testing.T) {
 	}
 	// The probed numbers are on idx, not reIdx: re-selecting would display an
 	// unprobed row labeled (probed). InfoResult.BestIndex returns idx to prevent that.
-	if formats[idx].Bitrate != 180000 {
-		t.Errorf("probed row (idx %d) bitrate = %d, want 180000", idx, formats[idx].Bitrate)
+	if formats[idx].Channels != 6 {
+		t.Errorf("probed row (idx %d) Channels = %d, want the corrected 6", idx, formats[idx].Channels)
 	}
-	if formats[reIdx].Bitrate == 180000 {
-		t.Errorf("re-selected row (idx %d) should not carry the probed bitrate", reIdx)
+	if formats[idx].ContentLength != 225000 {
+		t.Errorf("probed row (idx %d) ContentLength = %d, want the probed size 225000", idx, formats[idx].ContentLength)
+	}
+	if want := int(float64(225000) * 8 / 10); formats[idx].Bitrate != want {
+		t.Errorf("probed row (idx %d) Bitrate = %d, want the size/duration estimate %d", idx, formats[idx].Bitrate, want)
+	}
+	if formats[reIdx].Channels != 2 {
+		t.Errorf("re-selected row (idx %d) Channels = %d, want the still-stereo 2", reIdx, formats[reIdx].Channels)
 	}
 }
 

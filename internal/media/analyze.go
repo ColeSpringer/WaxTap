@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
@@ -50,9 +51,14 @@ func (r *Runner) AnalyzeFile(ctx context.Context, input string, channels int) (*
 }
 
 // AnalyzeMedia measures the loudness of an already-open Media, so a cut/downmix
-// composition is measured as it will be encoded. channels folds the measurement
-// to a downmix target (0 keeps the source layout). The caller owns med.
-func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, channels int) (*waxflow.AnalyzeResult, error) {
+// composition is measured as it will be encoded. input names the file for error
+// classification, the way AnalyzeFile's does: a mid-read failure (a bounded span
+// that asks for more than a truncated file holds) then reports as *fs.PathError
+// instead of bad input. Pass "" when med has no single file to name, a
+// concatenated timeline with several members (an album's group pass). channels
+// folds the measurement to a downmix target (0 keeps the source layout). The
+// caller owns med.
+func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input string, channels int) (*waxflow.AnalyzeResult, error) {
 	if err := r.acquire(ctx); err != nil {
 		return nil, err
 	}
@@ -62,9 +68,8 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, channels in
 		return nil, ctx.Err()
 	}
 	// Analysis only ever fails on the media it is reading, so it takes the
-	// input-side classification; the Media is already open, so there is no path to
-	// name an I/O failure with.
-	return res, classifyInputError(err, "")
+	// input-side classification.
+	return res, classifyInputError(err, input)
 }
 
 // OpenAlbumConcat opens the gapless concatenation of inputs as one Media, for a
@@ -76,19 +81,20 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, channels in
 //
 // measured is what a full decode of each input delivered, one frame count per
 // input in order; an entry below zero, or a slice too short to reach the
-// input, has this function decode and count the member itself. The timeline
+// input, has this function measure the member itself (MeasureLength: a walk
+// when the container allows it, a decode otherwise). The timeline
 // holds every member to its declared length (it counts what the member
 // delivers and refuses a mismatch at the seam), so it refuses at plan time a
 // member whose headers state no length (raw ADTS) or only an advisory one: a
 // duration rounded to a time unit (ASF, a Matroska falling back to its Info
 // Duration) or a count exact about the wrong thing (a WAV carrying MP3
-// frames). A decode read to its end is the measurement the engine asks for,
-// and the per-track analysis that precedes the group measurement is exactly
-// that, so its count stands in for what such a member declared; a member
-// whose own length is countable keeps it. The seam check then holds the run
-// to the measurement rather than to the header, which is the engine's
-// design (see waxflow.ConcatSource.Track): the header was never a number
-// the decode could be held to.
+// frames). A walk or a decode read to its end is the measurement the engine
+// asks for, and the per-track analysis that precedes the group measurement
+// is exactly that, so its count stands in for what such a member declared;
+// a member whose own length is countable keeps it. The seam check then
+// holds the run to the measurement rather than to the header, which is the
+// engine's design (see waxflow.ConcatSource.Track): the header was never a
+// number the decode could be held to.
 func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured []int64) (format.Media, func() error, error) {
 	members := make([]waxflow.ConcatSource, len(inputs))
 	for i, in := range inputs {
@@ -103,9 +109,16 @@ func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured 
 				n = measured[i]
 			}
 			if n < 0 {
-				if n, err = r.countFrames(ctx, path, hint); err != nil {
+				// Hazard: a truncated ADTS can walk one frame long, and Concat
+				// enforces that count at the seam (ADTS-walker entry,
+				// docs/upstream-requests.md). Every caller here is spared by
+				// pre-filling measured or naming a freshly written output; an
+				// unmeasured, possibly-truncated member would hit it.
+				length, err := r.MeasureLength(ctx, path)
+				if err != nil {
 					return nil, nil, err
 				}
+				n = length.Samples
 			}
 			track.Samples, track.SamplesAdvisory = n, false
 		}
@@ -135,39 +148,121 @@ func (r *Runner) albumTrack(input string) (container.Track, error) {
 	return info.Default(), nil
 }
 
+// Length is what a decode of a file delivers: the frame count, its duration
+// at the source rate, and the damage the read found on the way.
+type Length struct {
+	Samples  int64
+	Duration time.Duration
+	Warnings []string
+}
+
+// MeasureLength is the length input really has: the measurement a timeline
+// asks for of a member whose headers only estimate its length, and the one
+// a cut needs of a payload the demuxer walks lazily. The walk is the cheap
+// measurement, frame headers only, and it settles a count the container
+// stated as unknown or advisory (ADTS, MP3 in a WAV or AIFF-C, a Matroska
+// on its Info Duration). It leaves a Xing count alone even when it found
+// fewer frames (WaxFlow: "a count a metadata frame stated stands"), and
+// an ASF has no walk at all, so those decode to EOF and count what the
+// decode delivers. A fallback to the decode path opens and demuxes the
+// file a second time: countFrames needs its own format.Open, not the
+// demuxer this function already held for the walk attempt. Either way
+// the answer is what a read of the file yields, with the damage the read
+// found. A decode takes a concurrency slot like every other one here and
+// stops at a cancellation.
+func (r *Runner) MeasureLength(ctx context.Context, input string) (Length, error) {
+	src, closeSrc, err := openSource(input)
+	if err != nil {
+		return Length{}, err
+	}
+	hint := hintFor(input)
+	walked, ok, err := func() (Length, bool, error) {
+		defer closeSrc()
+		// A walk is a full header scan, real work like any decode, so it takes
+		// a concurrency slot too. The slot is scoped to this closure and
+		// released before the caller falls through to countFrames, which
+		// acquires its own: held past that point, a concurrency-1 Runner
+		// would deadlock against itself.
+		if err := r.acquire(ctx); err != nil {
+			return Length{}, false, err
+		}
+		defer r.release()
+		demux, info, err := format.OpenDemuxer(src, hint, nil)
+		if err != nil {
+			return Length{}, false, classifyInputError(err, input)
+		}
+		before := info.Default()
+		w, isWalker := demux.(container.Walker)
+		if !isWalker || w.Walked() || !(before.Samples < 0 || before.SamplesAdvisory) {
+			return Length{}, false, nil
+		}
+		// container.Walker.Walk takes no ctx and cannot be interrupted mid-scan;
+		// checking on either side is all that bounds it.
+		if err := ctx.Err(); err != nil {
+			return Length{}, false, err
+		}
+		if err := w.Walk(); err != nil {
+			return Length{}, false, classifyInputError(err, input)
+		}
+		if err := ctx.Err(); err != nil {
+			return Length{}, false, err
+		}
+		format.RefreshWarnings(info, demux)
+		for _, t := range demux.Tracks() {
+			if t.ID == before.ID && t.Samples >= 0 && !t.SamplesAdvisory {
+				return Length{Samples: t.Samples, Duration: trackDuration(t.Samples, t.Fmt.Rate), Warnings: sourceWarnings(info.Warnings)}, true, nil
+			}
+		}
+		return Length{}, false, nil
+	}()
+	if err != nil || ok {
+		return walked, err
+	}
+	n, rate, warnings, err := r.countFrames(ctx, input, hint)
+	if err != nil {
+		return Length{}, err
+	}
+	return Length{Samples: n, Duration: trackDuration(n, rate), Warnings: warnings}, nil
+}
+
 // countFrames reads path to its end and counts the frames the decode
 // delivers, the measurement a timeline asks for of a member whose headers
-// only estimate its length. It is a full decode, so it takes a concurrency
-// slot like every other one here and stops at a cancellation; a caller that
-// has already made the decode hands its count to OpenAlbumConcat instead.
-func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, error) {
+// only estimate its length; it is MeasureLength's fallback for a payload no
+// walk can settle (a Xing MP3, an ASF). It is a full decode, so it takes a
+// concurrency slot like every other one here and stops at a cancellation; a
+// caller that has already made the decode hands its count to OpenAlbumConcat
+// instead. Besides the count it returns the rate the file was read at and the
+// damage the read found (InputWarnings), which MeasureLength reports as its
+// own.
+func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, int, []string, error) {
 	if err := r.acquire(ctx); err != nil {
-		return 0, err
+		return 0, 0, nil, err
 	}
 	defer r.release()
 	src, closeSrc, err := openSource(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, nil, err
 	}
 	defer closeSrc()
 	m, err := format.Open(src, hint, nil)
 	if err != nil {
-		return 0, classifyInputError(err, path)
+		return 0, 0, nil, classifyInputError(err, path)
 	}
 	defer m.Close()
+	rate := m.Info().Default().Fmt.Rate
 	buf := audio.Get(m.Info().Default().Fmt, 4096)
 	defer audio.Put(buf)
 	var n int64
 	for {
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return 0, 0, nil, err
 		}
 		err := m.ReadChunk(buf)
 		if err == io.EOF {
-			return n, nil
+			return n, rate, InputWarnings(m), nil
 		}
 		if err != nil {
-			return 0, classifyInputError(err, path)
+			return 0, 0, nil, classifyInputError(err, path)
 		}
 		n += int64(buf.N)
 	}

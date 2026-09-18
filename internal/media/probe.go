@@ -43,6 +43,16 @@ type ProbeResult struct {
 	// keeps them apart, so a caller reporting damage reports Warnings alone.
 	// Nil when the engine had nothing to say.
 	Notes []string
+	// LengthClaimed says the default track's length is a claim the headers
+	// make, not a count a read confirmed: the demuxer walks its payload
+	// lazily and has not reached the end (container.Walker: MP3, bare or in
+	// a WAV or AIFF-C; ADTS; any Matroska whose open did not walk it, which
+	// is every non-Opus track), or it states an advisory total (ASF), or
+	// none at all. A cut resolved against such a length can declare a span
+	// the file does not hold, so the pipeline measures the file first
+	// (Runner.MeasureLength), at the cost of a decode on those cut runs when
+	// the walk cannot settle the count itself.
+	LengthClaimed bool
 }
 
 // ProbeFormat describes the container.
@@ -50,9 +60,6 @@ type ProbeFormat struct {
 	Container string        // identified container name ("webm", "mka", "flac", ...)
 	Duration  time.Duration // container duration, or 0 when unknown
 	Size      int64         // bytes, or 0 when unknown
-	// BitRate is always 0: WaxFlow does not report a container bit rate, so
-	// callers fall back to a size/duration estimate (mapping.applyProbe).
-	BitRate int
 }
 
 // ProbeStream describes one audio track.
@@ -61,7 +68,6 @@ type ProbeStream struct {
 	CodecName  string        // codecName-mapped: "opus", "aac", "flac", "pcm", ...
 	SampleRate int           // Hz
 	Channels   int           // channel count
-	BitRate    int           // always 0 (WaxFlow reports none)
 	Duration   time.Duration // track duration, or 0 when unknown
 	// Samples is WaxFlow's raw frame count after gapless trimming (its
 	// Track.Samples): -1 when the container does not state one (raw ADTS), 0
@@ -75,6 +81,13 @@ type ProbeStream struct {
 	// facts, and the difference between guessing at a cut and knowing there is
 	// nothing to cut.
 	Samples int64
+	// SamplesExact and SamplesAdvisory are WaxFlow's own qualifiers on
+	// Samples: exact marks a hard length the decoder is trimmed to (Ogg
+	// Opus and Vorbis); advisory marks a total a decode is not expected to
+	// match (ASF, a Matroska on its Info Duration, a WAV carrying MP3
+	// frames). Both false is a counted total whose mismatch would be damage.
+	SamplesExact    bool
+	SamplesAdvisory bool
 }
 
 // AudioStream returns the first audio track and true, or a zero stream and false
@@ -112,14 +125,22 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, input, h
 	}
 	defer r.release()
 
-	info, err := r.engine.Probe(src, hint, nil)
+	// OpenDemuxer runs the same resolve, open, and trackless check a non-strict
+	// Probe does (format/format.go:200-217); it also hands back the demuxer, so
+	// its Walker state can inform LengthClaimed below.
+	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ProbeResult{}, ctxErr
 		}
 		return ProbeResult{}, classifyInputError(err, input)
 	}
-	return mapProbe(info, src.Size()), nil
+	pr := mapProbe(info, src.Size())
+	def := info.Default()
+	if w, ok := demux.(container.Walker); (ok && !w.Walked()) || def.SamplesAdvisory || def.Samples < 0 {
+		pr.LengthClaimed = true
+	}
+	return pr, nil
 }
 
 // mapProbe converts a WaxFlow probe into a ProbeResult. It never errors; the
@@ -133,12 +154,14 @@ func mapProbe(info *format.Info, size int64) ProbeResult {
 	pr := ProbeResult{Format: ProbeFormat{Container: info.Container, Size: size}, Tags: info.Tags, Warnings: info.Warnings, Notes: info.Notes}
 	stream := func(t container.Track) ProbeStream {
 		return ProbeStream{
-			CodecType:  "audio",
-			CodecName:  codecName(t.Codec),
-			SampleRate: t.Fmt.Rate,
-			Channels:   t.Fmt.Channels,
-			Duration:   trackDuration(t.Samples, t.Fmt.Rate),
-			Samples:    t.Samples,
+			CodecType:       "audio",
+			CodecName:       codecName(t.Codec),
+			SampleRate:      t.Fmt.Rate,
+			Channels:        t.Fmt.Channels,
+			Duration:        trackDuration(t.Samples, t.Fmt.Rate),
+			Samples:         t.Samples,
+			SamplesExact:    t.SamplesExact,
+			SamplesAdvisory: t.SamplesAdvisory,
 		}
 	}
 	if len(info.Tracks) == 0 {

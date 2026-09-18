@@ -726,16 +726,16 @@ func albumDelivered(ctx context.Context, runner *media.Runner, outputs []string,
 	// Best-effort, like the pipeline's post-measure: every track is already
 	// written, so a failed measurement must not fail the album. No lengths
 	// are handed over: the outputs were just encoded, so all but a raw ADTS
-	// or a Matroska state a countable length, and the opener decodes and
+	// or a Matroska state a countable length, and the opener walks and
 	// counts those two itself. The write loop's Levels.Samples is not that
-	// number for ADTS, whose container carries no gapless trim, so a decode
-	// of the file delivers the encoder's priming and padding on top of it.
+	// number for ADTS, whose container carries no gapless trim, so the walk
+	// delivers the encoder's priming and padding on top of it.
 	med, closer, err := runner.OpenAlbumConcat(ctx, outputs, nil)
 	if err != nil {
 		return nil
 	}
 	defer closer()
-	out, err := runner.AnalyzeMedia(ctx, med, 0)
+	out, err := runner.AnalyzeMedia(ctx, med, "", 0)
 	if err != nil {
 		return nil
 	}

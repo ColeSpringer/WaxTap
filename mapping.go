@@ -943,11 +943,9 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 		res.OutputFormat.ContentLength = 0
 	}
 	if p.OutputProbe != nil {
-		// Overlay authoritative rate/channels/bitrate/duration from the written file.
+		// Overlay authoritative rate/channels/bitrate/duration/size from the
+		// written file.
 		applyProbe(&res.OutputFormat, *p.OutputProbe)
-		if sz := p.OutputProbe.Format.Size; sz > 0 {
-			res.OutputFormat.ContentLength = sz
-		}
 	}
 	if p.LoudnessMeasured {
 		res.Loudness = &LoudnessResult{
@@ -971,9 +969,6 @@ func applyProbe(f *Format, pr media.ProbeResult) {
 		if a.Channels > 0 {
 			f.Channels = a.Channels
 		}
-		if a.BitRate > 0 {
-			f.Bitrate = a.BitRate
-		}
 		if a.Duration > 0 {
 			f.Duration = a.Duration
 		}
@@ -981,14 +976,14 @@ func applyProbe(f *Format, pr media.ProbeResult) {
 	if pr.Format.Duration > 0 {
 		f.Duration = pr.Format.Duration
 	}
-	// A probe often leaves the audio-stream bitrate zero for VBR/lossless. Fall back
-	// to the container bitrate, then a size/duration estimate, so both the
-	// info --probe row and a download's OutputFormat report a usable bitrate.
+	if pr.Format.Size > 0 {
+		f.ContentLength = pr.Format.Size
+	}
+	// A probe often leaves the audio-stream bitrate zero for VBR/lossless. Fall
+	// back to a size/duration estimate, so both the info --probe row and a
+	// download's OutputFormat report a usable bitrate.
 	if f.Bitrate == 0 {
-		switch secs := f.Duration.Seconds(); {
-		case pr.Format.BitRate > 0:
-			f.Bitrate = pr.Format.BitRate
-		case secs > 0 && pr.Format.Size > 0:
+		if secs := f.Duration.Seconds(); secs > 0 && pr.Format.Size > 0 {
 			f.Bitrate = int(float64(pr.Format.Size) * 8 / secs)
 		}
 	}

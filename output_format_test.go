@@ -32,13 +32,14 @@ func TestNewProcessResultCopyCutDurationBaseline(t *testing.T) {
 }
 
 // TestNewProcessResultProbeOverlay covers the authoritative overlay: the output
-// probe's rate/channels/duration/size supersede the baseline and the source.
+// probe's rate/channels/duration/size supersede the baseline and the source, and
+// the bitrate the audio stream itself does not carry is estimated from them.
 func TestNewProcessResultProbeOverlay(t *testing.T) {
 	src := Format{Codec: "opus", Extension: "webm", Duration: 600 * time.Second}
 	probe := &media.ProbeResult{
-		Format: media.ProbeFormat{Duration: 505 * time.Second, Size: 8_000_000, BitRate: 126000},
+		Format: media.ProbeFormat{Duration: 500 * time.Second, Size: 8_000_000},
 		Streams: []media.ProbeStream{
-			{CodecType: "audio", SampleRate: 48000, Channels: 2, BitRate: 126000, Duration: 505 * time.Second},
+			{CodecType: "audio", SampleRate: 48000, Channels: 2, Duration: 500 * time.Second},
 		},
 	}
 	p := pipeline.Result{
@@ -49,11 +50,12 @@ func TestNewProcessResultProbeOverlay(t *testing.T) {
 		OutputProbe:    probe,
 	}
 	res := newProcessResult(SourceYouTube, p, src, 0)
-	if res.OutputFormat.Duration != 505*time.Second {
-		t.Errorf("OutputFormat.Duration = %s, want the probe's 505s (supersedes the baseline)", res.OutputFormat.Duration)
+	if res.OutputFormat.Duration != 500*time.Second {
+		t.Errorf("OutputFormat.Duration = %s, want the probe's 500s (supersedes the baseline)", res.OutputFormat.Duration)
 	}
-	if res.OutputFormat.SampleRate != 48000 || res.OutputFormat.Channels != 2 || res.OutputFormat.Bitrate != 126000 {
-		t.Errorf("OutputFormat overlay = %+v, want 48000Hz/2ch/126000bps", res.OutputFormat)
+	wantBitrate := int(float64(8_000_000) * 8 / 500)
+	if res.OutputFormat.SampleRate != 48000 || res.OutputFormat.Channels != 2 || res.OutputFormat.Bitrate != wantBitrate {
+		t.Errorf("OutputFormat overlay = %+v, want 48000Hz/2ch/%dbps (size/duration estimate)", res.OutputFormat, wantBitrate)
 	}
 	if res.OutputFormat.ContentLength != 8_000_000 {
 		t.Errorf("OutputFormat.ContentLength = %d, want the probe size 8000000", res.OutputFormat.ContentLength)
@@ -61,26 +63,16 @@ func TestNewProcessResultProbeOverlay(t *testing.T) {
 }
 
 // TestNewProcessResultBitrateFallback covers VBR/lossless outputs whose audio
-// stream reports no bitrate: the result falls back to the container bitrate, then
-// to a size*8/duration estimate.
+// stream reports no bitrate: the result falls back to a size*8/duration estimate.
 func TestNewProcessResultBitrateFallback(t *testing.T) {
 	src := Format{Codec: "opus", Extension: "webm", Duration: 10 * time.Second}
 
-	containerOnly := &media.ProbeResult{
-		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000, BitRate: 705000},
-		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2 /* BitRate 0 */}},
-	}
-	res := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: media.CodecFLAC, OutputProbe: containerOnly}, src, 0)
-	if res.OutputFormat.Bitrate != 705000 {
-		t.Errorf("Bitrate = %d, want the container fallback 705000", res.OutputFormat.Bitrate)
-	}
-
-	noBitrate := &media.ProbeResult{
-		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000 /* BitRate 0 */},
+	probe := &media.ProbeResult{
+		Format:  media.ProbeFormat{Duration: 10 * time.Second, Size: 1_000_000},
 		Streams: []media.ProbeStream{{CodecType: "audio", SampleRate: 44100, Channels: 2}},
 	}
-	res2 := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: media.CodecFLAC, OutputProbe: noBitrate}, src, 0)
-	if want := int(float64(1_000_000) * 8 / 10); res2.OutputFormat.Bitrate != want {
-		t.Errorf("Bitrate = %d, want the size/duration estimate %d", res2.OutputFormat.Bitrate, want)
+	res := newProcessResult(SourceYouTube, pipeline.Result{Transcoded: true, OutputCodec: media.CodecFLAC, OutputProbe: probe}, src, 0)
+	if want := int(float64(1_000_000) * 8 / 10); res.OutputFormat.Bitrate != want {
+		t.Errorf("Bitrate = %d, want the size/duration estimate %d", res.OutputFormat.Bitrate, want)
 	}
 }

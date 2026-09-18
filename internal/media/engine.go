@@ -106,7 +106,15 @@ func OutputFormats() []string { return waxflow.OutputFormats() }
 // tests instead of drifting apart by hand.
 func LossyFormat(name string) (lossy, known bool) { return waxflow.LossyFormat(name) }
 
+// acquire takes a concurrency slot, or returns the context's error. A dead
+// context never gets a slot: select picks at random among ready cases, so a
+// cancelled context racing a free slot would otherwise start work half the
+// time, and the caller would read the failure as bad input rather than as the
+// cancellation it is.
 func (r *Runner) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if r.sem == nil {
 		return nil
 	}

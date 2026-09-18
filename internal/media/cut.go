@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -59,6 +60,11 @@ type CutSpec struct {
 	RequireCopyCutMode bool // --cut-mode copy
 	RequireCopyFormat  bool // --format copy
 	Encode             Spec
+	// SourceSamples is the frame count a decode of the source delivers, when
+	// the caller measured it (Runner.MeasureLength) because the headers only
+	// claim a length; 0 trusts the headers. The composed timeline holds each
+	// span to it, so a span reaching the end asks for what the file has.
+	SourceSamples int64
 }
 
 // requireCopy reports whether either explicit copy request is in force.
@@ -140,7 +146,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
 			if spec.requireCopy() {
-				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (Opus and AAC support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, spec.copyFlags())
+				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (%s support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"), spec.copyFlags())
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless
 			// source. A copy spec whose source has no same-family encoder (WMA,
@@ -220,7 +226,7 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 // the encode's level measurement and the damage the read found alongside; see
 // Result.Levels and Result.InputWarnings.
 func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, []string, error) {
-	med, err := r.openComposed(src, hint, spec.Keeps, spec.Total, spec.Crossfade)
+	med, err := r.openComposed(src, hint, spec.Keeps, spec.Total, spec.Crossfade, spec.SourceSamples)
 	if err != nil {
 		return Levels{}, nil, err
 	}
@@ -240,17 +246,39 @@ func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, ou
 // one span, or a Concat of per-span slices (with an optional crossfade) for
 // several. The caller closes the returned Media.
 //
-// It probes the source's rate to convert the time-domain keeps to sample spans.
-func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration) (format.Media, error) {
+// It probes the source's rate to convert the time-domain keeps to sample
+// spans. sourceSamples is 0 or the count a caller's Runner.MeasureLength
+// delivered; see CutSpec.SourceSamples.
+func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration, sourceSamples int64) (format.Media, error) {
 	_, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	track := info.Default()
+	// bound is what a bounded span is clamped under: the media a span opens
+	// refuses a bound past its own declared total (Slice checks it up front
+	// through SpanTrack), and the track handed to a timeline refuses one
+	// past the measured count, so the smaller of the two it is.
+	bound := track.Samples
+	if sourceSamples > 0 {
+		// The caller measured the source (MeasureLength), which is the
+		// length the timeline holds each span to; the declaration is only
+		// what the spans are still clamped under.
+		if bound <= 0 || sourceSamples < bound {
+			bound = sourceSamples
+		}
+		track.Samples, track.SamplesAdvisory = sourceSamples, false
+	}
+	// An open-ended final span inherits the track's own claim about its
+	// length, and a Concat refuses one that is advisory (a WMA nobody
+	// measured) or absent altogether (raw ADTS, MP3 in an AIFF-C, both
+	// SamplesAdvisory false with no claim at all), so the open form is used
+	// only where the count is trusted or measured.
+	openEnded := !track.SamplesAdvisory && track.Samples >= 0
 	rate := track.Fmt.Rate
 
 	if len(keeps) == 1 {
-		from, to := sampleBounds(keeps[0], total, rate, track.Samples)
+		from, to := sampleBounds(keeps[0], total, rate, bound, openEnded)
 		med, err := format.Open(src, hint, nil)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
@@ -265,7 +293,7 @@ func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrang
 
 	members := make([]waxflow.ConcatSource, len(keeps))
 	for i, k := range keeps {
-		from, to := sampleBounds(k, total, rate, track.Samples)
+		from, to := sampleBounds(k, total, rate, bound, openEnded)
 		st, err := waxflow.SpanTrack(track, from, to)
 		if err != nil {
 			return nil, err
@@ -286,13 +314,14 @@ func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrang
 }
 
 // OpenComposed opens the cut-composed Media for measurement (loudness), without
-// re-encoding. The caller closes it.
-func (r *Runner) OpenComposed(input string, keeps []cutrange.Range, total, crossfade time.Duration) (format.Media, func() error, error) {
+// re-encoding. The caller closes it. sourceSamples is 0 or the count a
+// caller's Runner.MeasureLength delivered; see CutSpec.SourceSamples.
+func (r *Runner) OpenComposed(input string, keeps []cutrange.Range, total, crossfade time.Duration, sourceSamples int64) (format.Media, func() error, error) {
 	src, closeSrc, err := openSource(input)
 	if err != nil {
 		return nil, nil, err
 	}
-	med, err := r.openComposed(src, hintFor(input), keeps, total, crossfade)
+	med, err := r.openComposed(src, hintFor(input), keeps, total, crossfade, sourceSamples)
 	if err != nil {
 		_ = closeSrc()
 		return nil, nil, err
@@ -322,21 +351,26 @@ func toSpans(keeps []cutrange.Range, total time.Duration, rate int) []waxflow.Sp
 	return spans
 }
 
-// sampleBounds returns the [from, to) sample bounds of a kept range. Unlike
-// toSpans it never uses ToEnd, because Slice/SpanTrack take explicit bounds. Both
-// bounds are clamped to trackSamples (when known) so a range derived from a
-// longer sibling track's duration cannot ask Slice/SpanTrack for samples the
-// default track does not have.
-func sampleBounds(k cutrange.Range, total time.Duration, rate int, trackSamples int64) (from, to int64) {
+// sampleBounds returns the [from, to) sample bounds of a kept range. A range
+// reaching total takes ToEnd when openEnded, as toSpans does: an open-ended
+// slice runs to whatever the source holds and declares no limit a short
+// source can fall foul of, where a bounded one is held to its declaration
+// (Slice refuses a source that ends inside a declared span). An interior
+// bound, and a final one on a track whose claim cannot be trusted open, is
+// clamped to bound, the count the opened media and the timeline both
+// refuse to be asked past.
+func sampleBounds(k cutrange.Range, total time.Duration, rate int, bound int64, openEnded bool) (from, to int64) {
 	from = samplesOf(k.Start, rate)
-	to = samplesOf(min(k.End, total), rate)
-	if trackSamples > 0 {
-		if to > trackSamples {
-			to = trackSamples
+	if k.End >= total && openEnded {
+		to = waxflow.ToEnd
+	} else {
+		to = samplesOf(min(k.End, total), rate)
+		if bound > 0 && to > bound {
+			to = bound
 		}
-		if from > trackSamples {
-			from = trackSamples
-		}
+	}
+	if bound > 0 && from > bound {
+		from = bound
 	}
 	return from, to
 }

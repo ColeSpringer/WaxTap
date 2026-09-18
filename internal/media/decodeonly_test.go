@@ -421,10 +421,11 @@ func TestAnalyzeFileReportsReadDamage(t *testing.T) {
 	}
 }
 
-// The album opener decodes and counts a member whose headers only estimate
-// its length when no count is handed over, on a concurrency slot and under
-// the caller's context, so a cancellation stops the count where it stops
-// every other decode.
+// The album opener measures a member whose headers only estimate its length
+// when no count is handed over (MeasureLength: a walk when the container
+// allows it, a decode otherwise; this WMA fixture has no walk, so it
+// decodes), on a concurrency slot and under the caller's context, so a
+// cancellation stops the count where it stops every other decode.
 func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
 	r := NewRunner(RunnerConfig{MaxProcs: 1})
 	ctx := context.Background()
@@ -437,7 +438,7 @@ func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			defer closer()
-			res, err := r.AnalyzeMedia(ctx, med, 0)
+			res, err := r.AnalyzeMedia(ctx, med, "", 0)
 			if err != nil {
 				t.Fatalf("analyze the timeline: %v", err)
 			}
