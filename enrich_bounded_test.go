@@ -89,6 +89,7 @@ type enrichWorld struct {
 	window         int               // player answers per identity before the throttle; 0 = unlimited
 	verdicts       map[string]string // videoID -> player JSON that overrides the OK answer
 	serveWatchPage bool              // answer /watch with enrichWatchPage rather than a 404
+	browse         string            // the first browse page; "" serves enrichBrowseJSON
 
 	homepageHits int
 	askedByVD    map[string]int
@@ -109,6 +110,9 @@ func (w *enrichWorld) roundTrip(t *testing.T) rotationRT {
 			body, _ := io.ReadAll(r.Body)
 			if strings.Contains(string(body), "ENRICH_CONT_1") {
 				return rotResp(http.StatusOK, enrichContinuationJSON), nil
+			}
+			if w.browse != "" {
+				return rotResp(http.StatusOK, w.browse), nil
 			}
 			return rotResp(http.StatusOK, enrichBrowseJSON), nil
 		case strings.HasSuffix(r.URL.Path, "/player"):
@@ -438,5 +442,47 @@ func TestEnumerateEnrich_KeepsListingDurationTheFetchLacks(t *testing.T) {
 	}
 	if e.Video.Duration != 0 || e.Video.LiveStatus != LiveWasLive {
 		t.Errorf("Video = %+v, want the fetch verbatim: no length, was live", e.Video)
+	}
+}
+
+// A live listing entry is a listing that already answered the question: Info
+// refuses it with ErrLiveContent, so the budget skips it rather than spending a
+// request, and a slot, on learning what the badge said.
+const enrichLiveBrowseJSON = `{
+	"metadata": {"playlistMetadataRenderer": {"title": "Live Enrich Test"}},
+	"header": {"playlistHeaderRenderer": {"ownerText": {"runs": [{"text": "Owner"}]}}},
+	"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [{"playlistVideoListRenderer": {"contents": [
+		{"playlistVideoRenderer": {"videoId": "dummyVideo0", "title": {"runs": [{"text": "Stream"}]}, "shortBylineText": {"runs": [{"text": "Artist A"}]}, "thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"text": {"runs": [{"text": "LIVE"}]}, "style": "LIVE"}}]}},
+		{"playlistVideoRenderer": {"videoId": "dummyVideo1", "title": {"runs": [{"text": "Song B"}]}, "shortBylineText": {"runs": [{"text": "Artist B"}]}, "lengthSeconds": "240"}},
+		{"playlistVideoRenderer": {"videoId": "dummyVideo2", "title": {"runs": [{"text": "Song C"}]}, "shortBylineText": {"runs": [{"text": "Artist C"}]}, "lengthSeconds": "300"}}
+	]}}]}}]}}}}]}}
+}`
+
+func TestEnumerateEnrich_SkipsLiveEntries(t *testing.T) {
+	w := &enrichWorld{browse: enrichLiveBrowseJSON}
+	c := enrichClient(t, w)
+
+	var progress [][2]int
+	pl, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{
+		Enrich: true, MaxEnrich: 2,
+		OnEnrichProgress: func(done, total int) { progress = append(progress, [2]int{done, total}) },
+	})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if slices.Contains(w.playerAsked, "dummyVideo0") {
+		t.Errorf("the live entry was asked about: %v", w.playerAsked)
+	}
+	if got := enrichedIDs(pl); !slices.Equal(got, []string{"dummyVideo1", "dummyVideo2"}) {
+		t.Errorf("enriched %v, want the two fetchable entries", got)
+	}
+	if e := pl.Entries[0]; e.Video != nil || e.LiveStatus != LiveNow {
+		t.Errorf("entry 0 = %+v, want a live marker and no Video", e)
+	}
+	if len(pl.Errors) != 0 {
+		t.Errorf("errors = %v, want none: a skipped live entry is not a failure", pl.Errors)
+	}
+	if len(progress) == 0 || progress[len(progress)-1] != [2]int{2, 2} {
+		t.Errorf("progress = %v, want it to end at (2, 2)", progress)
 	}
 }

@@ -148,7 +148,9 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 			})
 		}
 		outcomes := runBatchJobs(ctx, measureJobs(inputs), concurrency, measureFn, batchProgress(env, len(inputs)))
-		emitBatchMeasure(env, outcomes, ignored)
+		if err := emitBatchMeasure(env, outcomes, ignored); err != nil {
+			return err
+		}
 		return batchExit(ctx, outcomes)
 	}
 

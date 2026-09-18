@@ -57,10 +57,17 @@ func newNormalizeCmd() *cobra.Command {
 			"aims at the target and the per-track limiter gives part of it back on the\n" +
 			"loudest tracks, which compresses the track-to-track spacing; --peak-mode\n" +
 			"cap instead clamps the one gain by the album's least true-peak headroom,\n" +
-			"which leaves the limiter idle and reproduces that spacing exactly on a\n" +
-			"lossless output, at the cost of landing short of the target; a lossy\n" +
-			"encoder can overshoot the source peak and re-engage the limiter. One hot\n" +
-			"master sets the headroom for every track, so the miss can be large.\n" +
+			"which leaves the limiter idle and reproduces that spacing exactly, at the\n" +
+			"cost of landing short of the target. Every track is measured at the width\n" +
+			"its own encode delivers, so a lossy encoder's fold of a surround master is\n" +
+			"in the peaks the clamp holds. One hot master sets the headroom for every\n" +
+			"track, so the miss can be large.\n" +
+			"On an Opus source that stays Opus, cap writes the gain into the Opus header\n" +
+			"(the OpusHead output gain, which every compliant player applies) and copies\n" +
+			"the packets untouched, in whichever container the output names, so the run\n" +
+			"costs no generation of loss; --json reports loudness.headerGain. limit, an\n" +
+			"explicit --bitrate, a cut, or a downmix re-encode as before, and --album\n" +
+			"takes the same path under cap when every member is Opus.\n\n" +
 			"Neither mode has anything to give back when the gain attenuates, so a loud\n" +
 			"album lands on target either way. cap reports loudness-target-missed when\n" +
 			"the clamp holds it more than 1 LU short; limit reports it when the measured\n" +
@@ -305,6 +312,9 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 	if p.dir == "" {
 		return usagef("--album writes one file per track; pass --dir")
 	}
+	if err := rejectDirIsFile(p.dir); err != nil {
+		return err
+	}
 	tf, err := parseTranscodeFormat(p.format)
 	if err != nil {
 		return err
@@ -321,12 +331,22 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 	}
 
 	tracks := make([]waxtap.AlbumTrack, len(inputs))
+	// Album outputs are named after their inputs' stems, so two tracks from
+	// different folders can land on one path. The library refuses that by track
+	// number; naming the inputs is what tells the user which two, before
+	// anything is written.
+	seen := map[string]int{}
 	for i, in := range inputs {
 		stem := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 		outPath, _, err := resolveCollision(filepath.Join(p.dir, stem+"."+transcodeExt(tf)), mc)
 		if err != nil {
 			return err
 		}
+		if prev, dup := seen[outPath]; dup {
+			return usagef("inputs %q and %q both map to output %q; rename one or choose a different --dir",
+				displayPath(inputs[prev]), displayPath(in), displayPath(outPath))
+		}
+		seen[outPath] = i
 		tracks[i] = waxtap.AlbumTrack{Input: in, Output: outPath}
 	}
 	warnBitrateIgnored(env, tf, p.bitrate)
@@ -342,11 +362,22 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 
 func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessResult) error {
 	if env.jsonMode() {
+		warns := make([]warningJSON, len(res.Warnings))
+		for i, w := range res.Warnings {
+			warns[i] = warningJSON{Code: w.Code.String(), Detail: w.Detail}
+		}
 		return env.emitJSON(struct {
 			SchemaVersion int              `json:"schemaVersion"`
 			Album         loudnessInfoJSON `json:"album"`
 			Tracks        []albumTrackJSON `json:"tracks"`
-		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil, nil)})
+			Warnings      []warningJSON    `json:"warnings,omitempty"`
+			Notes         []noteJSON       `json:"notes,omitempty"`
+		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil, nil), warns, env.notesJSON()})
+	}
+	// A measurement runs without an event stream, so its warnings surface here
+	// rather than through the progress renderer, as the processing path's do.
+	for _, w := range res.Warnings {
+		env.info("warning: [%s] %s\n", w.Code, w.Detail)
 	}
 	env.printf("Album:  %s LUFS, LRA %s\n\n", humanLUFS(res.Album.IntegratedLUFS), humanLUFS(res.Album.LRA))
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
@@ -354,8 +385,7 @@ func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessRes
 	for i, l := range res.PerTrack {
 		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(l.IntegratedLUFS), filepath.Base(inputs[i]))
 	}
-	tw.Flush()
-	return nil
+	return tw.Flush()
 }
 
 func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResult) error {
@@ -374,11 +404,12 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 			Album           loudnessInfoJSON  `json:"album"`
 			GainDB          jsonFloat         `json:"gainDb"`
 			LoudnessApplied bool              `json:"loudnessApplied"`
+			HeaderGain      bool              `json:"headerGain,omitempty"`
 			Delivered       *loudnessInfoJSON `json:"delivered,omitempty"`
 			Tracks          []albumTrackJSON  `json:"tracks"`
 			Warnings        []warningJSON     `json:"warnings,omitempty"`
 			Notes           []noteJSON        `json:"notes,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs, res.TagCarry), warns, env.notesJSON()})
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, res.HeaderGain, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs, res.TagCarry), warns, env.notesJSON()})
 	}
 	// Album processing runs without an event stream, so carry warnings surface
 	// here rather than through the progress renderer.
@@ -389,6 +420,9 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 		env.printf("Album:  %s LUFS; applied %+.1f dB to each track", humanLUFS(res.Album.IntegratedLUFS), res.GainDB)
 		if res.Delivered != nil {
 			env.printf("; delivered %s LUFS", humanLUFS(res.Delivered.IntegratedLUFS))
+		}
+		if res.HeaderGain {
+			env.printf("; gain written to the Opus headers, packets copied untouched")
 		}
 	} else {
 		// No album loudness to derive a gain from, so the tracks were re-encoded
@@ -403,8 +437,7 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 	for i := range res.Outputs {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
 	}
-	tw.Flush()
-	return nil
+	return tw.Flush()
 }
 
 // albumCarryCell is a track's metadata receipt for the album table, "-" for a

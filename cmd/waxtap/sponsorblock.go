@@ -41,8 +41,7 @@ func newSponsorBlockCmd() *cobra.Command {
 				id, _ := youtube.ExtractVideoID(args[0]) // already validated by the fetch above
 				return emitSponsorBlockJSON(env, id, segs)
 			}
-			renderSponsorBlockHuman(env, segs)
-			return nil
+			return renderSponsorBlockHuman(env, segs)
 		},
 	}
 	bindSponsorBlockFlag(cmd.Flags(), &categories, "categories to preview (comma-separated; bare flag selects music_offtopic)")
@@ -92,10 +91,10 @@ func parseCategories(csv string) ([]sponsorblock.Category, error) {
 	return cats, nil
 }
 
-func renderSponsorBlockHuman(env *appEnv, segs []sponsorblock.Segment) {
+func renderSponsorBlockHuman(env *appEnv, segs []sponsorblock.Segment) error {
 	if len(segs) == 0 {
 		env.printf("no SponsorBlock segments\n")
-		return
+		return nil
 	}
 	var total time.Duration
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
@@ -105,8 +104,11 @@ func renderSponsorBlockHuman(env *appEnv, segs []sponsorblock.Segment) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%d\n",
 			s.Category, humanDuration(s.Start), humanDuration(s.End), humanDuration(s.End-s.Start), s.Locked, s.Votes)
 	}
-	tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 	env.printf("\n%d segment(s), %s would be removed\n", len(segs), humanDuration(total))
+	return nil
 }
 
 func emitSponsorBlockJSON(env *appEnv, videoID string, segs []sponsorblock.Segment) error {

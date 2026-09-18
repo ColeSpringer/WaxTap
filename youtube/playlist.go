@@ -12,6 +12,17 @@ type PlaylistEntry struct {
 	Duration  time.Duration // video duration, or 0 when unknown
 	Index     int           // 0-based position within the playlist
 
+	// LiveStatus is what the listing said about the entry's broadcast state:
+	// LiveNow or LiveUpcoming from the thumbnail badge or overlay, else
+	// LiveNone. A finished stream lists as an ordinary video, so LiveWasLive
+	// appears here only after Enrich overlays it from the fetched Video. It is
+	// the one signal that tells a live item from a video of unknown length
+	// without a fetch, and Enrich does not fetch live or upcoming entries,
+	// which Info would refuse. A download still attempts them: the listing
+	// badge can lag a stream that just ended, and /player stays the authority
+	// for a delivery.
+	LiveStatus LiveStatus
+
 	// Video is the full metadata a per-entry Info call fetched for this entry:
 	// description, thumbnails, formats, and with a watch-page pass the publish
 	// date and chapters. Enumeration never sets it; the waxtap facade's Enrich

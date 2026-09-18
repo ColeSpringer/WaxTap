@@ -490,7 +490,10 @@ func TestAnalyzeFileCancellationNotBadInput(t *testing.T) {
 	cancel()
 	_, _, err := r.AnalyzeFile(ctx, in, 0)
 	if err == nil {
-		t.Skip("engine completed before observing cancellation")
+		// WaxFlow's AnalyzeMedia checks ctx.Err() per chunk, so a context
+		// canceled before the call fails on the first chunk. Skipping here
+		// would hide the classification this test exists to pin.
+		t.Fatal("a canceled analysis returned no error")
 	}
 	if errors.Is(err, waxerr.ErrUnsupportedInput) {
 		t.Errorf("canceled analyze classified as bad input: %v", err)
@@ -1476,6 +1479,34 @@ func TestOpenComposedNoDeclaredLengthFallsBackToBounded(t *testing.T) {
 				return
 			}
 			t.Fatalf("ReadChunk: %v", err)
+		}
+	}
+}
+
+// The plan is the encoder's own: the lossy rows fold a source wider than
+// stereo to stereo themselves, the lossless ones keep every channel, and a
+// copy keeps the source layout.
+func TestPlanOutputChannelsFollowsTheEncoder(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	in := wavFixture(t, 1, 6)
+	for _, tc := range []struct {
+		codec Codec
+		ext   string
+		want  int
+	}{
+		{CodecOpus, "opus", 2},
+		{CodecMP3, "mp3", 2},
+		{CodecAAC, "aac", 2},
+		{CodecFLAC, "flac", 6},
+		{CodecWAV, "wav", 6},
+		{CodecCopy, "wav", 6},
+	} {
+		got, err := r.PlanOutputChannels(context.Background(), in, filepath.Join(t.TempDir(), "out."+tc.ext), Spec{Codec: tc.codec})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.codec, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: PlanOutputChannels = %d, want %d", tc.codec, got, tc.want)
 		}
 	}
 }

@@ -250,6 +250,12 @@ func doctorNote(rep *doctorReport) string {
 }
 
 func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
+	// The caveat is recorded as a note as well as kept under its own key: note
+	// is schema 3 and consumers read it, and notes[] is what every other
+	// document carries, so a reader of notes[] needs no special case here.
+	if note := doctorNote(rep); note != "" {
+		env.note(noteDoctorCaveat, "%s", note)
+	}
 	out := struct {
 		SchemaVersion int                  `json:"schemaVersion"`
 		Healthy       bool                 `json:"healthy"`
@@ -263,6 +269,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		Attempts      []doctorAttempt      `json:"attempts,omitempty"`
 		Sidecars      []doctorSidecarProbe `json:"sidecars,omitempty"`
 		Error         *errorJSON           `json:"error,omitempty"`
+		Notes         []noteJSON           `json:"notes,omitempty"`
 	}{
 		SchemaVersion: schemaVersion,
 		Healthy:       rep.Healthy,
@@ -275,6 +282,7 @@ func emitDoctorJSON(env *appEnv, rep *doctorReport, lastErr error) error {
 		Note:          doctorNote(rep),
 		Attempts:      rep.Attempts,
 		Sidecars:      rep.Sidecars,
+		Notes:         env.notesJSON(),
 	}
 	if lastErr != nil {
 		out.Error = errorObject(lastErr)

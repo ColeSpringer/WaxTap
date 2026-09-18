@@ -77,3 +77,47 @@ func TestEmitInfoJSONOverlaysProbedBest(t *testing.T) {
 		t.Errorf("want the probed best row's numbers in formats[], got:\n%s", got)
 	}
 }
+
+// A SABR-only pick cannot be staged, so --probe read nothing and the row still
+// carries the manifest's numbers. Saying so is the difference between a probe
+// that agreed and a probe that never ran.
+func TestInfoNotesProbeSkippedOnSABR(t *testing.T) {
+	env := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{}, notes: &noteCollector{}}
+	info := probedInfo()
+	info.Probed = false
+	info.BestIndex = 0
+
+	if info.Probed || info.BestIndex < 0 {
+		t.Fatal("fixture should describe a resolved row that was not probed")
+	}
+	noteProbeSkippedIfUnread(env, true, info)
+	notes := env.notesJSON()
+	if len(notes) != 1 || notes[0].Code != string(noteProbeSkipped) {
+		t.Fatalf("notes = %+v, want one %s", notes, noteProbeSkipped)
+	}
+	if !strings.Contains(notes[0].Detail, "SABR-only") {
+		t.Errorf("detail = %q, want it to name the cause", notes[0].Detail)
+	}
+
+	// A probe that ran, and a run that did not ask for one, say nothing.
+	for _, tc := range []struct {
+		name  string
+		probe bool
+		setup func(*waxtap.InfoResult)
+	}{
+		{"probed", true, func(i *waxtap.InfoResult) { i.Probed = true }},
+		{"not asked", false, func(*waxtap.InfoResult) {}},
+		{"nothing resolved", true, func(i *waxtap.InfoResult) { i.BestIndex = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quiet := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{}, notes: &noteCollector{}}
+			i := probedInfo()
+			i.Probed, i.BestIndex = false, 0
+			tc.setup(i)
+			noteProbeSkippedIfUnread(quiet, tc.probe, i)
+			if notes := quiet.notesJSON(); len(notes) != 0 {
+				t.Errorf("notes = %+v, want none", notes)
+			}
+		})
+	}
+}

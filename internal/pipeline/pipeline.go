@@ -175,6 +175,18 @@ type Result struct {
 	// failed, so a caller reporting it never has to wonder whether it matches
 	// the delivered file.
 	OutputLoudness *loudness.Loudness
+	// GainDB is the gain this run applied, in dB: the encode's scalar (the
+	// last pass's, under the PeakLimit search), or under GainInHeader the
+	// amount the Opus header's output gain was moved by, quantized to its Q7.8
+	// step. It is a change, not a total: a source whose head already stated a
+	// gain keeps it, and the head the file leaves with states the sum. 0 when
+	// no normalization ran or none could be derived.
+	GainDB float64
+	// GainInHeader says the gain rode in the OpusHead output gain and the
+	// packets were copied untouched, rather than being applied to the samples
+	// by a re-encode. Every compliant decoder applies it, WaxFlow's included,
+	// so OutputLoudness reads the normalized loudness off the file.
+	GainInHeader bool
 	// LoudnessPasses counts the output writes normalization took: 1 for PeakCap and
 	// for a PeakLimit pass that landed inside tolerance, more when the limiter-backed
 	// gain needed correcting. It is 0 when no normalization ran. Only completed
@@ -229,10 +241,27 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// re-encode supersedes it, so it only matters in the pure-copy case.
 	remux := spec.Remux && !transcoding
 
-	// Loudness apply rewrites samples, so it needs a real encode. Copy and a
-	// missing transcode target are both invalid.
-	if apply && !transcoding {
-		return Result{}, fmt.Errorf("%w: loudness apply requires a transcode target, not copy", waxerr.ErrIncompatibleSpec)
+	// sourceSamples is the count a read of the source delivers, measured only
+	// when the headers merely claim a length.
+	sourceSamples := int64(0)
+	if len(spec.Remove) > 0 && probe.LengthClaimed {
+		// The header's length is a claim (a payload the demuxer walks lazily,
+		// an advisory total, or none), and a cut resolved against it can
+		// declare a span the file does not hold: a truncated MP3 still states
+		// its Xing count, and the engine refuses a span the source ends
+		// inside. So the source is measured first and the ranges resolve
+		// against what a read delivers, the way a truncated FLAC's clamped
+		// probe already behaves. A walk settles most of these inputs; a Xing
+		// MP3 and a WMA cost a decode. A download never reaches here: WebM
+		// Opus is walked at open and m4a states an exact count.
+		send(StageAnalyzing)
+		length, lerr := r.MeasureLength(ctx, input)
+		if lerr != nil {
+			return Result{}, lerr
+		}
+		total, sourceSamples = length.Duration, length.Samples
+		sourceEmpty = length.Samples == 0
+		probe.Warnings = mergeSourceWarnings(probe.Warnings, length.Warnings)
 	}
 
 	// Resolve the cut against the real duration. A cut is only "effective" when it
@@ -366,24 +395,59 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			waxerr.ErrIncompatibleSpec, spec.Codec)
 	}
 
+	// Loudness apply rewrites samples, so it needs a real encode. Checked after
+	// container resolution and the downmix promotion, both of which turn a copy
+	// into one: --downmix on a copy spec really does encode, and refusing it
+	// earlier rejected a request the pipeline was about to satisfy.
+	if apply && !transcoding {
+		return Result{}, fmt.Errorf("%w: loudness apply requires a transcode target, not copy", waxerr.ErrIncompatibleSpec)
+	}
+
 	// A copy cut that survived container resolution stays lossless: WaxTap
 	// cut-remuxes it (kept codec, byte-identical packets) and re-encodes only if
 	// WaxFlow declines the source codec.
 	copyCut := effectiveCut && spec.Codec == media.CodecCopy
 
+	// A gain the Opus header can carry: cap mode's one scalar, on an Opus
+	// source staying Opus, with no cut, no fold, and no bitrate asked for.
+	// limit cannot take it (the limiter reshapes samples), and a bitrate asks
+	// for an encode. The container is whichever the output names; the facade
+	// validated it for Opus, and every one of them carries the head.
+	//
+	// A source wider than stereo is excluded for the same reason an explicit
+	// fold is: the Opus encoder folds it, so the measurement below is taken at
+	// the fold, and writing that gain into the head of a copy that still
+	// carries every channel would state a gain for audio the file does not
+	// deliver. Such a source takes the encode path, which really does fold.
+	// It has no fixture here: WaxFlow's Opus encoder folds every wide source,
+	// so a surround Opus file can only come from another tool.
+	headerGain := apply && !spec.Loudness.PeakLimit && !effectiveCut && fold == 0 && srcChannels <= 2 &&
+		res.SourceCodec == "opus" && spec.Codec == media.CodecOpus && spec.Bitrate == 0
+
 	// Measure after resolving the cut. The composed cut audio is measured, so the
 	// gain matches the encoded bytes.
 	var measured loudness.Loudness
 	if measure {
+		// The measurement folds to the width the encode delivers. An explicit
+		// Downmix is one fold; a lossy row folding a wide source on its own is
+		// the other, and the gain has to be computed on the audio the encoder
+		// meters either way, since a fold moves the integrated loudness and the
+		// true peak both. The plan is WaxFlow's own, so the two cannot disagree.
+		measureFold := fold
+		if transcoding && fold == 0 && srcChannels > 2 {
+			n, perr := r.PlanOutputChannels(ctx, input, output, media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth})
+			if perr != nil {
+				return Result{}, perr
+			}
+			if n > 0 && n < srcChannels {
+				measureFold = n
+			}
+		}
 		send(StageAnalyzing)
-		// Fold the measurement to the downmix target so the gain is computed on the
-		// audio the encode will meter (fold is 0 when no downmix applies).
 		if effectiveCut {
-			// sourceSamples is 0: nothing here measures the source yet, so a
-			// bounded final span still trusts the header (Task 3 wires this).
-			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, fold, 0)
+			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, measureFold, sourceSamples)
 		} else {
-			measured, err = loudness.Measure(ctx, r, input, fold)
+			measured, err = loudness.Measure(ctx, r, input, measureFold)
 		}
 		if err != nil {
 			return Result{}, err
@@ -394,6 +458,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, measured.Warnings)
 		m := measured
 		res.InputLoudness = &m
+	}
+
+	if headerGain {
+		return writeHeaderGain(ctx, r, input, output, spec.Loudness.Target, total, measured, res, send)
 	}
 
 	// Nothing to write: a measure-only or fully no-op spec. The caller delivers
@@ -446,8 +514,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				RequireCopyCutMode: spec.CutMode == media.ModeCopy,
 				RequireCopyFormat:  remux,
 				Encode:             fallback,
-				// SourceSamples is left 0 (headers trusted) until Task 3
-				// wires a measurement through.
+				SourceSamples:      sourceSamples,
 			})
 			if err != nil {
 				return err
@@ -506,7 +573,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// that depends on the material, so one pass cannot hit the target. Measure
 		// the encode and correct.
 		var cerr error
-		res.OutputLoudness, res.LoudnessPasses, cerr = converge(ctx, spec.Loudness.Target, enc, measureOutput, write, send)
+		res.OutputLoudness, res.LoudnessPasses, res.GainDB, cerr = converge(ctx, spec.Loudness.Target, enc, measureOutput, write, send)
 		if cerr != nil {
 			// Only cancellation reaches here; everything else the search can hit is
 			// non-fatal by design. It must not be swallowed: the file at output is a
@@ -526,6 +593,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			res.OutputLoudness = &out
 		}
 		res.LoudnessPasses = 1
+		res.GainDB = enc.GainDB
 	}
 
 	// Probe the written output so callers can report authoritative output numbers.
@@ -547,6 +615,66 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				res.SourceWarnings = append(res.SourceWarnings, note)
 			}
 		}
+	}
+	return res, nil
+}
+
+// writeHeaderGain delivers a cap-mode Opus normalization as a packet copy
+// whose head carries the gain. The copy carries the source's own header gain
+// across, and the measurement above already heard that gain, so the head is
+// moved by the change rather than set to a total. An input with no measurable
+// loudness derives no gain and is delivered as a plain copy.
+func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string, target float64, total time.Duration, measured loudness.Loudness, res Result, send func(Stage)) (Result, error) {
+	res.LoudnessApplied = loudness.Gainable(measured.IntegratedLUFS)
+	q := 0
+	if res.LoudnessApplied {
+		send(StageNormalizing)
+		q = media.OpusGainQ78(loudness.GainFor(target, measured))
+	}
+	// The packets are copied, so the output probe cannot reveal a decode that
+	// ended early; the measurement above is the only read of the audio, and its
+	// own length is what says the file does not decode to what it declares.
+	// The encode path learns the same thing from its output probe.
+	if note := media.ShortMeasureNote(measured.Duration, total); note != "" {
+		res.SourceWarnings = append(res.SourceWarnings, note)
+	}
+	send(StageRemuxing)
+	var tres media.Result
+	var err error
+	if res.LoudnessApplied {
+		tres, _, err = r.RemuxWithOpusGain(ctx, input, output, q)
+	} else {
+		tres, err = r.Transcode(ctx, input, output, media.Spec{Codec: media.CodecCopy})
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, tres.InputWarnings)
+	res.OutputPath = output
+	res.OutputCodec = media.CodecOpus
+	// Only a head that actually moved: a source already on target quantizes to
+	// a zero step, and the file that leaves is a plain copy whose own
+	// ReplayGain and R128 tags still describe it exactly. Claiming the header
+	// carried a gain would drop them for nothing.
+	res.GainInHeader = q != 0
+	res.GainDB = media.OpusGainDB(q)
+	res.LoudnessPasses = 1
+	send(StageAnalyzing)
+	// Measured, not derived from the input plus the gain, although a header
+	// gain is a pure scalar and the arithmetic would be exact: this is the one
+	// read that confirms the head survived the mux and the decoder applies it,
+	// and OutputLoudness is documented as the file's own measurement. It costs
+	// one decode of a file this path did not re-encode, where the encode path
+	// it replaces pays an encode and this measurement both. An album derives
+	// instead, because there the same check would decode every track twice.
+	//
+	// Best-effort on both, like every other post-write measurement here: the
+	// file is already delivered, so neither failure fails the job.
+	if out, merr := loudness.Measure(ctx, r, output, 0); merr == nil {
+		res.OutputLoudness = &out
+	}
+	if op, perr := r.Probe(ctx, output); perr == nil {
+		res.OutputProbe = &op
 	}
 	return res, nil
 }
@@ -621,7 +749,7 @@ func converge(
 	measure func() (loudness.Loudness, error),
 	write func(media.Spec) error,
 	send func(Stage),
-) (*loudness.Loudness, int, error) {
+) (*loudness.Loudness, int, float64, error) {
 	gain := enc.GainDB // gain that produced the file currently at output
 	var cur *loudness.Loudness
 	bestGain, bestMiss := gain, math.Inf(1)
@@ -635,7 +763,7 @@ func converge(
 		out, merr := measure()
 		if merr != nil {
 			if ctx.Err() != nil {
-				return nil, writes, ctx.Err()
+				return nil, writes, gain, ctx.Err()
 			}
 			break
 		}
@@ -662,7 +790,7 @@ func converge(
 			bestGain, bestMiss, best = gain, math.Abs(miss), &b
 		}
 		if bestMiss <= loudness.ConvergeToleranceDB {
-			return cur, writes, nil
+			return cur, writes, gain, nil
 		}
 		// A pass that did not improve on an earlier one ends the search; so does a
 		// spent write budget.
@@ -688,7 +816,7 @@ func converge(
 		enc.GainDB = next
 		if err := write(enc); err != nil {
 			if ctx.Err() != nil {
-				return nil, writes, err
+				return nil, writes, gain, err
 			}
 			// The failed pass left the previous file at output, so gain and cur still
 			// describe what is there.
@@ -705,16 +833,16 @@ func converge(
 		enc.GainDB = bestGain
 		if err := write(enc); err != nil {
 			if ctx.Err() != nil {
-				return nil, writes, err
+				return nil, writes, gain, err
 			}
 			// The rewrite failed, so the previous pass is still at output and cur still
 			// describes it. Nothing to correct.
 		} else {
 			writes++
-			cur = best
+			cur, gain = best, bestGain
 		}
 	}
-	return cur, writes, nil
+	return cur, writes, gain, nil
 }
 
 // clampFloat bounds v to [lo, hi].

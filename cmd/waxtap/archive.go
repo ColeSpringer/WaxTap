@@ -66,7 +66,12 @@ func (a *downloadArchive) Add(id string) error {
 	if err != nil {
 		return fmt.Errorf("open download archive %s: %w", a.path, err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	if err := lockFile(f); err != nil {
 		return fmt.Errorf("lock download archive %s: %w", a.path, err)
@@ -76,6 +81,14 @@ func (a *downloadArchive) Add(id string) error {
 	// Write yt-dlp-compatible entries. archiveID also accepts bare IDs from older
 	// WaxTap archives.
 	if _, err := fmt.Fprintf(f, "youtube %s\n", id); err != nil {
+		return fmt.Errorf("append to download archive %s: %w", a.path, err)
+	}
+	// The close is the write: a deferred one would discard the error that says
+	// the line never reached the file, and seen would then remember an entry
+	// the archive does not hold, so the next run would skip a video nothing
+	// recorded.
+	closed = true
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("append to download archive %s: %w", a.path, err)
 	}
 	a.seen[id] = true

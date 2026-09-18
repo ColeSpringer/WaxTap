@@ -54,6 +54,7 @@ type playerResponse struct {
 		ShortDescription string `json:"shortDescription"`
 		ViewCount        string `json:"viewCount"`
 		IsPrivate        bool   `json:"isPrivate"`
+		IsLive           bool   `json:"isLive"`
 		IsLiveContent    bool   `json:"isLiveContent"`
 		IsUpcoming       bool   `json:"isUpcoming"`
 		Thumbnail        struct {
@@ -130,7 +131,11 @@ func parseWatchPage(body []byte) (*playerResponse, error) {
 }
 
 func (pr *playerResponse) isLiveNow() bool {
-	return pr.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
+	// Both signals, because the microformat is WEB-only and the native clients
+	// that lead the chain set videoDetails.isLive instead. Without it a live
+	// stream extracted by VISIONOS or ANDROID_VR slipped past the refusal and
+	// was handled as an ordinary video.
+	return pr.VideoDetails.IsLive || pr.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
 }
 
 // duration returns the video length, preferring videoDetails over the microformat

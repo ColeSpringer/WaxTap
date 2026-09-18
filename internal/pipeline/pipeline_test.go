@@ -1299,3 +1299,80 @@ func TestRunMusepackSource(t *testing.T) {
 		}
 	}
 }
+
+// A downmix promotes a copy spec to a real encode, so a normalization asking
+// for both is a request the pipeline can satisfy; refusing it as "copy" read as
+// a contradiction the user had not written.
+func TestNormalizeWithDownmixPromotesTheCopy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "surround.wav")
+	if err := os.WriteFile(in, mediatest.SineWAV(2, 6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.wav")
+
+	res, err := Run(ctx, media.NewRunner(media.RunnerConfig{}), in, out, Spec{
+		Codec:    media.CodecCopy,
+		Downmix:  2,
+		Loudness: &Loudness{Apply: true, Target: -18},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Transcoded || !res.LoudnessApplied {
+		t.Errorf("Transcoded=%v LoudnessApplied=%v, want the promoted encode", res.Transcoded, res.LoudnessApplied)
+	}
+	if res.OutputProbe == nil {
+		t.Fatal("no output probe")
+	}
+	if a, ok := res.OutputProbe.AudioStream(); !ok || a.Channels != 2 {
+		t.Errorf("output channels = %+v, want the stereo fold", a)
+	}
+
+	// A copy with nothing to promote it is still refused.
+	if _, err := Run(ctx, media.NewRunner(media.RunnerConfig{}), in, filepath.Join(dir, "copy.wav"), Spec{
+		Codec:    media.CodecCopy,
+		Loudness: &Loudness{Apply: true, Target: -18},
+	}, nil); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Errorf("err = %v, want ErrIncompatibleSpec", err)
+	}
+}
+
+// A loudness apply that names no encoder, into a container the source codec
+// cannot enter, takes the encoder the container implies rather than being
+// refused for naming no target. The promotion is not silent: it is a lossless
+// source landing in a lossy codec nothing asked for, which the caller reports
+// as implicit-lossy, and OutputCodec names what was written.
+func TestNormalizeIntoAForeignContainerPromotesAndSaysSo(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	r := media.NewRunner(media.RunnerConfig{})
+	wav := filepath.Join(dir, "in.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(2, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Transcode(ctx, wav, in, media.Spec{Codec: media.CodecFLAC}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(ctx, r, in, filepath.Join(dir, "out.opus"), Spec{
+		Codec:    media.CodecCopy,
+		Remove:   []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}},
+		Loudness: &Loudness{Apply: true, Target: -18},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecOpus {
+		t.Errorf("Transcoded=%v OutputCodec=%v, want the container's encoder", res.Transcoded, res.OutputCodec)
+	}
+	if !res.LoudnessApplied {
+		t.Error("LoudnessApplied = false, want the gain the promoted encode carried")
+	}
+	// The source codec is what the caller's implicit-lossy warning reads.
+	if res.SourceCodec != "flac" {
+		t.Errorf("SourceCodec = %q, want flac", res.SourceCodec)
+	}
+}

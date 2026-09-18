@@ -27,7 +27,10 @@ type Video struct {
 	// LiveStatus reports the broadcast state. On a Video returned by extraction it
 	// is LiveNone or LiveWasLive (a completed VOD): currently-live and upcoming
 	// videos are rejected earlier and surface as ErrLiveContent / ErrLiveNotStarted
-	// sentinels instead of a Video.
+	// sentinels instead of a Video. A listing entry is the other way round: it
+	// carries LiveNow or LiveUpcoming where the badge said so, and never
+	// LiveWasLive, since a finished stream lists as an ordinary video (see
+	// PlaylistEntry.LiveStatus).
 	LiveStatus LiveStatus
 	// Availability reports whether the video is publicly listed. It is set to
 	// AvailabilityPublic or AvailabilityUnlisted only on a watch-page metadata pass

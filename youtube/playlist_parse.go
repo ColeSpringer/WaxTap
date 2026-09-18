@@ -113,15 +113,10 @@ func (l playlistVideoList) legacyToken() string {
 // continuation marker (legacy or view-model form), the legacy single-wrapper
 // list (only on initial pages), or a "no videos" notice.
 type playlistItem struct {
-	PlaylistVideoRenderer *struct {
-		VideoID       string     `json:"videoId"`
-		Title         textRuns   `json:"title"`
-		ShortByline   bylineText `json:"shortBylineText"`
-		LengthSeconds string     `json:"lengthSeconds"`
-	} `json:"playlistVideoRenderer"`
-	LockupViewModel           *lockupViewModel    `json:"lockupViewModel"`
-	ContinuationItemRenderer  *continuationMarker `json:"continuationItemRenderer"`
-	ContinuationItemViewModel *continuationMarker `json:"continuationItemViewModel"`
+	PlaylistVideoRenderer     *playlistVideoRenderer `json:"playlistVideoRenderer"`
+	LockupViewModel           *lockupViewModel       `json:"lockupViewModel"`
+	ContinuationItemRenderer  *continuationMarker    `json:"continuationItemRenderer"`
+	ContinuationItemViewModel *continuationMarker    `json:"continuationItemViewModel"`
 	// PlaylistVideoListRenderer is the legacy wrapper that nests the items one
 	// level deeper; it appears only among an initial page's section contents.
 	PlaylistVideoListRenderer *playlistVideoList `json:"playlistVideoListRenderer"`
@@ -206,12 +201,13 @@ func (it playlistItem) itemVideoID() string {
 func (it playlistItem) toEntry(index int) (PlaylistEntry, error) {
 	if r := it.PlaylistVideoRenderer; r != nil && r.VideoID != "" {
 		return PlaylistEntry{
-			VideoID:   r.VideoID,
-			Title:     r.Title.String(),
-			Author:    r.ShortByline.String(),
-			ChannelID: r.ShortByline.channelID(),
-			Duration:  time.Duration(max(0, atoi(r.LengthSeconds))) * time.Second,
-			Index:     index,
+			VideoID:    r.VideoID,
+			Title:      r.Title.String(),
+			Author:     r.ShortByline.String(),
+			ChannelID:  r.ShortByline.channelID(),
+			Duration:   time.Duration(max(0, atoi(r.LengthSeconds))) * time.Second,
+			Index:      index,
+			LiveStatus: r.liveStatus(),
 		}, nil
 	}
 	if l := it.LockupViewModel; l != nil && l.ContentID != "" {
@@ -228,14 +224,62 @@ func (it playlistItem) toEntry(index int) (PlaylistEntry, error) {
 		// the channel, and the thumbnail badge carries a clock string. Missing
 		// values are left zero for the opt-in Enrich pass to fill.
 		return PlaylistEntry{
-			VideoID:  l.ContentID,
-			Title:    title,
-			Author:   l.author(),
-			Duration: l.duration(),
-			Index:    index,
+			VideoID:    l.ContentID,
+			Title:      title,
+			Author:     l.author(),
+			Duration:   l.duration(),
+			Index:      index,
+			LiveStatus: l.liveStatus(),
 		}, nil
 	}
 	return PlaylistEntry{}, fmt.Errorf("playlist item %d has no video", index)
+}
+
+// playlistVideoRenderer is the legacy playlist item. lengthSeconds names a
+// length; a live or upcoming item has none, and says so through its thumbnail
+// overlay style, its badge, or its scheduled start.
+type playlistVideoRenderer struct {
+	VideoID           string     `json:"videoId"`
+	Title             textRuns   `json:"title"`
+	ShortByline       bylineText `json:"shortBylineText"`
+	LengthSeconds     string     `json:"lengthSeconds"`
+	ThumbnailOverlays []struct {
+		TimeStatus *struct {
+			Style string `json:"style"` // LIVE, UPCOMING, DEFAULT, SHORTS
+		} `json:"thumbnailOverlayTimeStatusRenderer"`
+	} `json:"thumbnailOverlays"`
+	Badges []struct {
+		MetadataBadgeRenderer struct {
+			Style string `json:"style"` // BADGE_STYLE_TYPE_LIVE_NOW on a live item
+		} `json:"metadataBadgeRenderer"`
+	} `json:"badges"`
+	UpcomingEventData *struct {
+		StartTime string `json:"startTime"`
+	} `json:"upcomingEventData"`
+}
+
+// liveStatus classifies the item the way the player response would
+// (liveStatusFrom): scheduled first, since a premiere is both.
+func (r *playlistVideoRenderer) liveStatus() LiveStatus {
+	upcoming := r.UpcomingEventData != nil
+	live := false
+	for _, ov := range r.ThumbnailOverlays {
+		if ov.TimeStatus == nil {
+			continue
+		}
+		switch ov.TimeStatus.Style {
+		case "UPCOMING":
+			upcoming = true
+		case "LIVE":
+			live = true
+		}
+	}
+	for _, b := range r.Badges {
+		if b.MetadataBadgeRenderer.Style == "BADGE_STYLE_TYPE_LIVE_NOW" {
+			live = true
+		}
+	}
+	return liveStatusFrom(upcoming, live, false)
 }
 
 // lockupViewModel is the view-model item shape YouTube A/B-serves in place of
@@ -283,6 +327,9 @@ type lockupViewModel struct {
 type thumbnailBadge struct {
 	ThumbnailBadgeViewModel struct {
 		Text string `json:"text"`
+		// BadgeStyle names what the badge is: a duration badge is DEFAULT, a
+		// live one THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE.
+		BadgeStyle string `json:"badgeStyle"`
 	} `json:"thumbnailBadgeViewModel"`
 }
 
@@ -313,22 +360,49 @@ func (l *lockupViewModel) author() string {
 	return ""
 }
 
+// eachBadge visits every thumbnail badge in either overlay form, the walk
+// duration and liveStatus share.
+func (l *lockupViewModel) eachBadge(visit func(thumbnailBadge)) {
+	for _, ov := range l.ContentImage.ThumbnailViewModel.Overlays {
+		for _, b := range ov.ThumbnailOverlayBadgeViewModel.ThumbnailBadges {
+			visit(b)
+		}
+		for _, b := range ov.ThumbnailBottomOverlayViewModel.Badges {
+			visit(b)
+		}
+	}
+}
+
 // duration returns the clock duration from the thumbnail overlay badge, the
 // only place a lockup carries one. Best-effort: no parseable badge yields 0.
 func (l *lockupViewModel) duration() time.Duration {
-	for _, ov := range l.ContentImage.ThumbnailViewModel.Overlays {
-		for _, badge := range ov.ThumbnailOverlayBadgeViewModel.ThumbnailBadges {
-			if d, ok := parseBadgeDuration(badge.ThumbnailBadgeViewModel.Text); ok {
-				return d
-			}
+	var d time.Duration
+	l.eachBadge(func(b thumbnailBadge) {
+		if d > 0 {
+			return
 		}
-		for _, badge := range ov.ThumbnailBottomOverlayViewModel.Badges {
-			if d, ok := parseBadgeDuration(badge.ThumbnailBadgeViewModel.Text); ok {
-				return d
-			}
+		if parsed, ok := parseBadgeDuration(b.ThumbnailBadgeViewModel.Text); ok {
+			d = parsed
 		}
-	}
-	return 0
+	})
+	return d
+}
+
+// liveStatus reads the badge the duration would have come from: a live item
+// carries the LIVE badge style, an upcoming one the text UPCOMING (yt-dlp
+// reads the same two signals).
+func (l *lockupViewModel) liveStatus() LiveStatus {
+	upcoming, live := false, false
+	l.eachBadge(func(b thumbnailBadge) {
+		v := b.ThumbnailBadgeViewModel
+		if strings.EqualFold(strings.TrimSpace(v.Text), "UPCOMING") {
+			upcoming = true
+		}
+		if v.BadgeStyle == "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" || strings.EqualFold(strings.TrimSpace(v.Text), "LIVE") {
+			live = true
+		}
+	})
+	return liveStatusFrom(upcoming, live, false)
 }
 
 // parseBadgeDuration parses a thumbnail badge clock string ("3:05" or
@@ -339,9 +413,12 @@ func parseBadgeDuration(s string) (time.Duration, bool) {
 		return 0, false
 	}
 	total := 0
-	for _, p := range parts {
+	for i, p := range parts {
 		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
+		// Every part after the first is a sexagesimal digit: "99:99" and
+		// "1:200:03" are not clocks, and reading them as one would report a
+		// duration for a badge that says something else.
+		if err != nil || n < 0 || (i > 0 && n > 59) {
 			return 0, false
 		}
 		total = total*60 + n
@@ -480,6 +557,10 @@ func parseBrowseContinuation(body []byte) ([]playlistItem, string, error) {
 	var entries []playlistItem
 	var token string
 	if len(cr.OnResponseReceivedActions) > 0 {
+		// The first action only. Every continuation observed carries its items
+		// there, and an action of another shape leaves entries and token empty,
+		// which reports as ErrPlaylistParse below: a page WaxTap cannot read is
+		// a parser change to make deliberately, not a shape to guess at.
 		entries, token = splitItems(cr.OnResponseReceivedActions[0].AppendContinuationItemsAction.ContinuationItems)
 	} else {
 		// Legacy shape.

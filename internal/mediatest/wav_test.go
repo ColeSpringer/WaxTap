@@ -51,3 +51,25 @@ func TestToneWAVDistinctFrequencies(t *testing.T) {
 		t.Error("220 Hz and 880 Hz tones produced identical bytes")
 	}
 }
+
+func TestFrontsOnlyWAVLeavesTheRearSilent(t *testing.T) {
+	b := FrontsOnlyWAV(1, 6)
+	if want := 44 + 44100*6*2; len(b) != want {
+		t.Fatalf("len = %d, want %d", len(b), want)
+	}
+	front, rear := false, false
+	for off := 44; off+12 <= len(b); off += 12 {
+		for ch := range 6 {
+			s := int16(binary.LittleEndian.Uint16(b[off+ch*2:]))
+			switch {
+			case ch < 2 && s != 0:
+				front = true
+			case ch >= 2 && s != 0:
+				rear = true
+			}
+		}
+	}
+	if !front || rear {
+		t.Errorf("front carries signal = %v, rear carries signal = %v; want true/false", front, rear)
+	}
+}

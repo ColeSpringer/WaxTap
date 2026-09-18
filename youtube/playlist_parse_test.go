@@ -272,6 +272,8 @@ func TestParseBadgeDuration(t *testing.T) {
 		{"SHORTS", 0, false},
 		{"12", 0, false},
 		{"1:2:3:4", 0, false},
+		{"99:99", 0, false},
+		{"1:200:03", 0, false},
 		{"1:-2", 0, false},
 		{"", 0, false},
 	}
@@ -314,5 +316,34 @@ func TestShortsOrParseError(t *testing.T) {
 	other := fmt.Errorf("boom: %w", waxerr.ErrPlaylistUnavailable)
 	if got := shortsOrParseError(shortsID, other); !errors.Is(got, waxerr.ErrPlaylistUnavailable) || errors.Is(got, waxerr.ErrShortsPlaylist) {
 		t.Errorf("shortsOrParseError(shorts, unavailable) = %v, want unchanged", got)
+	}
+}
+
+// A listing says whether an entry is live or scheduled, in both item shapes:
+// the legacy time-status overlay and badge, and the lockup's thumbnail badge.
+// Neither carries a length, which is what makes the marker the only way to
+// tell such an entry from a video of unknown duration without a fetch.
+func TestParseBrowseInitial_LiveMarkers(t *testing.T) {
+	for _, fixture := range []string{"playlist_browse_live.json", "playlist_browse_lockup_live.json"} {
+		_, items, _, err := parseBrowseInitial(readFixture(t, fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []LiveStatus{LiveNow, LiveUpcoming, LiveNone}
+		for i, w := range want {
+			e, err := items[i].toEntry(i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.LiveStatus != w {
+				t.Errorf("%s item %d LiveStatus = %v, want %v", fixture, i, e.LiveStatus, w)
+			}
+			if w != LiveNone && e.Duration != 0 {
+				t.Errorf("%s item %d Duration = %v, want 0 on a live/upcoming item", fixture, i, e.Duration)
+			}
+			if w == LiveNone && e.Duration != 3*time.Minute {
+				t.Errorf("%s item %d Duration = %v, want the listed 3m", fixture, i, e.Duration)
+			}
+		}
 	}
 }

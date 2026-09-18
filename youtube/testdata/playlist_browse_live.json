@@ -1,0 +1,72 @@
+{
+  "responseContext": { "visitorData": "Cgtwb..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Live Playlist" } },
+  "header": {
+    "playlistHeaderRenderer": {
+      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "playlistVideoListRenderer": {
+                            "contents": [
+                              {
+                                "playlistVideoRenderer": {
+                                  "videoId": "aaaaaaaaaaa",
+                                  "title": { "runs": [{ "text": "Song A" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist A" }] },
+                                  "thumbnailOverlays": [
+                                    { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "LIVE" }] }, "style": "LIVE" } }
+                                  ],
+                                  "badges": [
+                                    { "metadataBadgeRenderer": { "style": "BADGE_STYLE_TYPE_LIVE_NOW", "label": "LIVE" } }
+                                  ]
+                                }
+                              },
+                              {
+                                "playlistVideoRenderer": {
+                                  "videoId": "bbbbbbbbbbb",
+                                  "title": { "runs": [{ "text": "Song B" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist B" }] },
+                                  "thumbnailOverlays": [
+                                    { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "UPCOMING" }] }, "style": "UPCOMING" } }
+                                  ],
+                                  "upcomingEventData": { "startTime": "1800000000" }
+                                }
+                              },
+                              {
+                                "playlistVideoRenderer": {
+                                  "videoId": "ccccccccccc",
+                                  "title": { "runs": [{ "text": "Song C" }] },
+                                  "shortBylineText": { "runs": [{ "text": "Artist C" }] },
+                                  "lengthSeconds": "180",
+                                  "thumbnailOverlays": [
+                                    { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "3:00" }] }, "style": "DEFAULT" } }
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

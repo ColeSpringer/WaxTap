@@ -300,11 +300,15 @@ func (f *File) Discard() error {
 // Path returns the final destination path (valid only after Commit).
 func (f *File) Path() string { return f.finalPath }
 
-// External stages output written by another process, such as ffmpeg. It reserves
-// a temp path in the destination directory, then renames that path into place on
-// Commit. Unlike File, External does not keep the file open for writing.
+// External stages output written through a path rather than through this
+// package's own handle: the caller names a temp file in the destination
+// directory, something else writes it, and Commit renames it into place.
+// Unlike File, External does not keep the file open for writing, which is what
+// makes it usable by a writer that opens the path itself. WaxTap's own
+// exclusive publish is that writer (see stageExclusive): the pipeline writes
+// the staged path and the publish claims the destination.
 //
-// Reserve a name with NewExternal, pass Path to the process, then call Commit to
+// Reserve a name with NewExternal, hand Path to the writer, then call Commit to
 // publish or Discard to remove the temp.
 type External struct {
 	finalPath string
@@ -312,11 +316,12 @@ type External struct {
 	committed bool
 }
 
-// NewExternal reserves a temp path next to finalPath for an external writer.
+// NewExternal reserves a temp path next to finalPath for a writer that opens
+// the path itself.
 //
-// The temp name carries a container extension because tools such as ffmpeg infer
-// the output container from it. By default the extension comes from finalPath.
-// A non-empty ext, with or without a leading dot, overrides the staged extension
+// The temp name carries a container extension because a writer can infer the
+// output container from it. By default the extension comes from finalPath. A
+// non-empty ext, with or without a leading dot, overrides the staged extension
 // without changing the path used by Commit.
 func NewExternal(finalPath, ext string) (*External, error) {
 	dir := filepath.Dir(finalPath)
@@ -408,8 +413,8 @@ func (e *External) Final() string { return e.finalPath }
 
 // Scratch creates an unnamed temporary file in dir (or the OS temp dir if dir
 // is "") and returns it with a cleanup func that closes and removes it. Use it
-// for staging input that has no final destination (e.g. a downloaded source
-// staged for ffmpeg). The cleanup is idempotent.
+// for staging input that has no final destination, such as a downloaded source
+// staged for a local probe. The cleanup is idempotent.
 func Scratch(dir, pattern string) (f *os.File, cleanup func() error, err error) {
 	if pattern == "" {
 		pattern = "waxtap-*.tmp"

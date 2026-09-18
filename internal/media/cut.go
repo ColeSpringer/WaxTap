@@ -233,8 +233,8 @@ func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, ou
 	defer med.Close()
 
 	opts := encodeOptions(spec.Encode)
-	format, _ := codecFormat(spec.Encode.Codec)
-	opts.Container = containerFor(format, outExt)
+	name, _ := codecFormat(spec.Encode.Codec)
+	opts.Container = containerFor(name, outExt)
 	tres, err := r.engine.TranscodeMedia(ctx, med, dst, opts)
 	if err != nil {
 		return Levels{}, nil, err

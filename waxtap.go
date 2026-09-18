@@ -300,6 +300,9 @@ type InfoResult struct {
 	// audio could be selected. A probe mutates that row, so callers should display
 	// BestIndex rather than re-running selection on the mutated slice.
 	BestIndex int
+	// Warnings are what the probe's download raised (a re-resolved URL, a
+	// rotated session); nil when no probe ran.
+	Warnings []Warning
 }
 
 // ReadOption configures Info, InfoResult, and Resolve. WithNoFallback and
@@ -484,7 +487,12 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	// have no direct URL and cannot be staged.
 	if depth >= InfoProbe && rs.Probeable() {
 		runner := c.engine()
-		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx])
+		// The probe reads the whole stream, so it outlives a signed URL as
+		// readily as a download does and refreshes the same way.
+		em := newEmitter(nil, "")
+		refresh := c.directRefresh(Request{SourcePolicy: ro.policy}, id, format.Target{}, ext, video.Formats[idx].Itag, rs.ExpiresAt, em, &refreshStats{})
+		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx], refresh)
+		res.Warnings = em.collected()
 		if perr != nil {
 			return nil, perr
 		}
@@ -499,20 +507,24 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	return res, nil
 }
 
-// probeRemote stages a resolved stream to a temp file and probes it locally,
-// which sidesteps ranged-HTTP probing and any container header-size cliff (a
-// moov-at-end MP4 or a large Matroska SeekHead just works on a full local file).
-// The cost is that it downloads the whole audio stream once (tens of MB) to read
-// a header, which the info --probe diagnostic accepts; a lazy ranged-HTTP Source
-// is the future optimization if that cost ever bites.
-func (c *Client) probeRemote(ctx context.Context, runner *media.Runner, rs youtube.ResolvedStream, f Format) (media.ProbeResult, error) {
+// probeRemote stages a resolved stream to a temp file and probes it locally.
+// It downloads the whole audio stream once (tens of MB) to read a header. A
+// lazy ranged-HTTP Source would not save that read for the row YouTube serves
+// by default: WaxFlow frame-counts every cluster of a WebM Opus track at open
+// (the CodecDelay walk), so a probe reads the file either way. It would pay
+// for an m4a row only. The ask for a header-only probe mode is in
+// docs/upstream-requests.md; until then staging is the design. Staging also
+// sidesteps any container header-size cliff: a moov-at-end MP4 or a large
+// Matroska SeekHead just works on a full local file. The download refreshes an
+// expired or capped URL like any other transfer.
+func (c *Client) probeRemote(ctx context.Context, runner *media.Runner, rs youtube.ResolvedStream, f Format, refresh download.RefreshFunc) (media.ProbeResult, error) {
 	dir, err := c.makeJobDir()
 	if err != nil {
 		return media.ProbeResult{}, err
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "probe"+sourceExt(f))
-	if _, err := c.dl.ToFile(ctx, toSource(rs), path, nil, nil); err != nil {
+	if _, err := c.dl.ToFile(ctx, toSource(rs), path, refresh, nil); err != nil {
 		return media.ProbeResult{}, err
 	}
 	return runner.Probe(ctx, path)
@@ -677,10 +689,22 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 	if limit <= 0 {
 		limit = 4
 	}
-	total := len(pl.Entries)
-	if opts.MaxEnrich > 0 && opts.MaxEnrich < total {
-		total = opts.MaxEnrich
+	// Live and upcoming entries are not asked about: Info refuses them with
+	// ErrLiveContent / ErrLiveNotStarted, so the call would spend a request,
+	// and under MaxEnrich a budget slot, to learn what the listing already
+	// says. They keep a nil Video and are not in Errors; the entry's
+	// LiveStatus is the reason.
+	var all []int
+	for i := range pl.Entries {
+		if opts.MaxEnrich > 0 && len(all) == opts.MaxEnrich {
+			break
+		}
+		if s := pl.Entries[i].LiveStatus; s == LiveNow || s == LiveUpcoming {
+			continue
+		}
+		all = append(all, i)
 	}
+	total := len(all)
 	onProgress := opts.OnEnrichProgress
 
 	var progressMu sync.Mutex
@@ -751,10 +775,6 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 		return failed, causes
 	}
 
-	all := make([]int, total)
-	for i := range all {
-		all[i] = i
-	}
 	rotate := func(seed int) bool {
 		return c.yt.RotateIdentity(ctx, passGen, pl.Entries[seed].VideoID)
 	}
@@ -785,6 +805,10 @@ func refreshEntry(e *PlaylistEntry, v *Video) {
 	e.Author = cmp.Or(v.Author, e.Author)
 	e.Duration = cmp.Or(v.Duration, e.Duration)
 	e.ChannelID = cmp.Or(e.ChannelID, v.ChannelID)
+	// A fetch reaches only entries the listing did not mark, so this can add
+	// LiveWasLive (a completed stream lists as an ordinary video) and never
+	// contradicts a marker: LiveNone leaves the listing's value alone.
+	e.LiveStatus = cmp.Or(v.LiveStatus, e.LiveStatus)
 }
 
 // throttleShaped reports whether an enrichment failure has the metadata

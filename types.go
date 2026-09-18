@@ -500,6 +500,19 @@ type LoudnessResult struct {
 	Input  *LoudnessInfo // measured input loudness (post-cut)
 	Output *LoudnessInfo // post-apply loudness; set only when Mode == LoudnessApply
 	Target float64       // requested integrated loudness in LUFS
+	// GainDB is the gain normalization applied, in dB: the encode's scalar, or
+	// under HeaderGain the amount the Opus header's output gain was moved by,
+	// quantized to its Q7.8 step. It is a change, not a total: a source whose
+	// head already stated a gain keeps it, and the head the file leaves with
+	// states the sum. 0 unless LoudnessApplied.
+	GainDB float64
+	// HeaderGain says the gain rode in the Opus header (OpusHead output gain)
+	// with the packets copied untouched, rather than being applied to the
+	// samples by a re-encode. Every compliant decoder applies it, so Output
+	// reads the normalized loudness and Transcoded stays false. A run whose
+	// gain quantized to nothing leaves it false: the head did not move, and
+	// the file is a plain copy.
+	HeaderGain bool
 }
 
 // TimeRange is a half-open [Start, End) span. End must be greater than Start.
@@ -671,10 +684,16 @@ type EnumerateOptions struct {
 	// potoken.SessionInvalidator. A jarless HTTPClient, a static Session, or a
 	// provider without one gets no rotation, and a throttled entry is then
 	// reported as it came, ErrVideoUnavailable.
+	//
+	// Entries the listing marked live or upcoming are passed over: Info
+	// refuses them, so the call would spend a request to learn what
+	// PlaylistEntry.LiveStatus already says. They keep a nil Video and are
+	// not in Playlist.Errors.
 	Enrich bool
-	// MaxEnrich caps how many entries Enrich refreshes: the first n entries
-	// returned, after Skip, Stop, and MaxItems (0 = every entry). Entries past
-	// the cap are returned as listed, with a nil Video. It requires Enrich.
+	// MaxEnrich caps how many entries Enrich refreshes: the first n fetchable
+	// entries returned, after Skip, Stop, and MaxItems (0 = every entry; live
+	// and upcoming ones are passed over and do not count). Entries past the
+	// cap are returned as listed, with a nil Video. It requires Enrich.
 	MaxEnrich int
 	// EnrichOptions apply to each enrichment's Info call, as the same options
 	// do on Info at InfoBasic: WithFullMetadata adds the watch-page pass
@@ -705,7 +724,8 @@ type EnumerateOptions struct {
 	OnProgress func(items int)
 	// OnEnrichProgress reports each completed InfoBasic refresh when Enrich is set.
 	// Calls are serialized in increasing done-count order. total counts the
-	// entries enrichment attempts, which MaxEnrich can hold below len(Entries).
+	// entries enrichment attempts, which MaxEnrich, and the live and upcoming
+	// entries it passes over, can hold below len(Entries).
 	// The final call reaches (total, total) unless context cancellation stops
 	// enrichment early. Without Enrich it is never called.
 	OnEnrichProgress func(done, total int)

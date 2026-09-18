@@ -76,8 +76,10 @@ waxtap download <video-url> --format flac -o track.flac
 waxtap download <video-url> --sponsorblock --normalize --format mp3 -o track.mp3
 
 waxtap transcode song.flac song.mp3
+waxtap cut song.flac --cut-range 0:00-0:12 --cut-range 3:40-4:05 -o song-cut.flac
 waxtap normalize song.wav --loudness-target -14 --format flac -o song.flac
 waxtap normalize --album --format flac --dir ./normalized ./album/*.flac
+waxtap split rip.flac --cue rip.cue -d ./tracks
 
 waxtap download <playlist-url> -d ./music --download-archive archive.txt
 waxtap download <channel-url> -d ./music        # channel uploads, newest first
@@ -93,12 +95,32 @@ and chapters via a token-free watch-page fetch.
 an output directory, and `--force` re-encodes files already in the target
 codec. Album normalization applies one gain to every track: `--peak-mode cap`
 leaves the true-peak limiter idle and reproduces the input's track-to-track
-spacing exactly on a lossless target, at the cost of landing short; the default
-`limit` reaches for the target and lets the per-track limiter compress that
-spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
+spacing exactly, at the cost of landing short; the default `limit` reaches for
+the target and lets the per-track limiter compress that spacing. Every track is
+measured at the width its own encode delivers, so a lossy target's fold of a
+surround master is in the figures the gain comes from. An album mixing a
+surround member with a stereo one is refused: the group measurement mixes only
+to mono or stereo. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
 
+- `--cut-range START-END` removes a span, repeatable or several comma-separated
+  in one flag. Times are `[HH:]MM:SS[.frac]`, a Go duration (`90s`, `1m30s`), or
+  bare seconds, never signed. `--cut-mode smart|copy|accurate` picks how the
+  cut is rendered: `smart` (the default) stream-copies when it can, `copy`
+  refuses anything that would need a decode, `accurate` always decodes.
+  `--crossfade` blends each join and forces a decode. Ranges are clamped to the
+  media and merged; ranges that fall entirely outside it are a request error.
+- `split` cuts a single-file rip into one file per track at the sheet's
+  `INDEX 01` positions, exact to the CD frame (1/75 s). Pieces are named
+  `NN - Title.ext` and tagged from the sheet (title, performer, track numbers,
+  disc title as album, `REM DATE`/`GENRE`, `CATALOG`, `ISRC`), with the rip's
+  own tags and cover art carried underneath. Audio before the first track's
+  `INDEX 01` becomes `00 - Hidden Track` rather than being folded into track 1
+  or dropped. `--cue` defaults to a sheet beside the rip with the rip's stem. A
+  split always decodes, so `--format` names the encoder; it is inferred from the
+  rip's extension only when that is a lossless one. A sheet indexing several
+  files is refused: its tracks are already separate.
 - `--channels mono|stereo|surround|any` picks a native layout, defaulting to
   stereo. It selects among a video's source streams, so it needs a URL input: on
   a local file or a directory it exits 2, unless `--downmix` is set too, where it
@@ -151,6 +173,19 @@ spacing. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   any miss past the 0.3 LU it converges to, while the single-pass policies
   (`cap`, and `--album` in either mode) report a miss over 1 LU, below which the
   clamp they can name is inside the noise of the encode.
+- On an Opus source that stays Opus, `--peak-mode cap` writes the gain into the
+  Opus header (the `OpusHead` output gain, which every compliant player applies)
+  and copies the packets untouched, in whichever container the output names, so
+  the run costs no generation of loss; `--json` reports `loudness.headerGain`
+  beside `loudness.gainDb`, and the result is a remux (`transcoded: false`),
+  which like every other local copy omits `outputFormat`: the delivered codec
+  is the source's, under `sourceFormat`. `loudness.gainDb` is the amount the
+  header moved by, so a source whose head already stated a gain keeps it and
+  the file leaves with the sum.
+  `--peak-mode limit`, an explicit `--bitrate`, a cut, or a downmix re-encode as
+  before, and `--album` takes the same path under `cap` when every member is
+  Opus. The ReplayGain and R128 tags are dropped on that path: the header now
+  carries the gain they would restate.
 - Decoding runs in float, so output depth follows the decoded stream: a lossy
   source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
   AIFF. That is lossless but larger, and some older DAWs and hardware players
@@ -241,6 +276,63 @@ as `error.code`. Run `waxtap exit-codes` for the built-in table.
 Malformed targets exit 2; a well-formed but nonexistent or private video can
 only be classified after a network request and exits 3.
 
+### Warnings and notes
+
+A run that succeeds can still have something to say. Warnings are conditions
+the library observed; notes are decisions the command line made. Both carry a
+stable code and a human detail, both go to stderr in human mode, and both
+appear in `--json` as `warnings[]` and `notes[]`.
+
+| Warning | Meaning |
+|---|---|
+| `proceed-uncut` | the SponsorBlock fetch failed; the audio was delivered uncut |
+| `fallback-profile` | a fallback client profile delivered the stream |
+| `url-re-resolved` | an expired stream URL was re-resolved mid-transfer |
+| `playlist-entry-failed` | one playlist entry failed; the others were returned |
+| `rate-limited-retried` | a request was retried after a 429 |
+| `sponsorblock-empty` | SponsorBlock matched no segments |
+| `ranges-empty` | every SponsorBlock segment fell outside the media |
+| `throttled` | a rate limiter or cooldown delayed the run |
+| `web-context-fallback` | the WEB player context failed; the configured chain took over |
+| `incomplete-fallback` | a client returned an incomplete stream; another client was tried |
+| `web-context-retry` | the WEB player context was capped; it was retried once with a fresh one |
+| `metadata-embed-failed` | `--embed-thumbnail`/`--embed-metadata` could not write everything asked for |
+| `loudness-target-missed` | the loudness target was not reached; the detail says what held it back |
+| `session-rotated` | a fresh guest session replaced one whose URLs the server kept rejecting |
+| `tag-carry-incomplete` | some of the input's embedded metadata did not reach the output |
+| `implicit-downmix` | the encoder folded channels the request never asked to lose |
+| `output-clipping` | the delivered file's level is past full scale |
+| `implicit-lossy` | a lossless source was re-encoded to a lossy codec the request never named |
+| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered |
+| `loudness-unmeasurable` | an integrated loudness came back non-finite; the detail names the side and the cause |
+| `source-policy-unmatched` | `--source-policy prefer:<codec>` named a family this video does not offer |
+| `empty-input` | the input's audio track holds no frames |
+| `input-note` | the engine's own remarks on an undamaged input |
+
+| Note | Meaning |
+|---|---|
+| `alac-mp4-container` | `.alac` output is an MP4 container; `.m4a` is the conventional name |
+| `archive-not-recorded` | a finished file was not added to the download archive; a re-run fetches it again |
+| `channels-ignored` | `--itag` names an exact encoding, so `--channels` did not affect selection |
+| `channels-unavailable` | the requested layout was not available; the delivered one is named |
+| `concurrency-clamped` | `--concurrency` exceeded the maximum and was clamped |
+| `container-ext-mismatch` | the output extension does not match the source container, which was copied unchanged |
+| `cue-file-mismatch` | the CUE sheet names another file than the rip being split |
+| `doctor-caveat` | a `doctor` check passed with a caveat; the detail says what it did not prove |
+| `enumeration-error` | a playlist page failed to enumerate; the run continued |
+| `flag-inert` | a flag had no effect on this run |
+| `forced-client-risky` | a forced `--client` is known to deliver unreliably |
+| `kept-output` | a finished file was kept after a failure elsewhere in the run |
+| `playlist-ignored` | a playlist URL was passed to a video command; the video was used |
+| `probe-skipped` | `--probe` read nothing: the selected stream is SABR-only |
+| `same-format-copied` | the input is already the target format and was copied; `--force` re-encodes |
+| `selection-unmatched` | no audio format matched the requested selection |
+| `sidecar-write-failed` | the `--write-info-json` sidecar could not be written |
+| `unaltered-copy` | the output is a byte-for-byte copy of the source |
+| `watch-page-formats` | the format list came from the watch-page fallback |
+| `watch-page-metadata` | WEB metadata came from the watch-page fallback, with no PO token |
+| `web-sources` | the run used WEB-family sources, which need a PO token |
+
 ## Library
 
 ```go
@@ -283,7 +375,9 @@ only fills in one that named none. `Resolve` takes its selector as a parameter,
 so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist or
 channel URL with `Skip`/`Stop` predicates for an archive cursor, and
 `WithFullMetadata()` adds publish date and chapters to `Info`, or through
-`EnrichOptions` to each enriched entry.
+`EnrichOptions` to each enriched entry. `Client.PlanSplit` reads a CUE sheet
+against a local rip and reports where the pieces fall, and `Client.Split` writes
+them, tagged from the sheet; the `split` subcommand is that pair.
 
 Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
 throttle starts refusing entries, because the refusal is worded exactly like a
@@ -292,9 +386,13 @@ after the rotation budget report `ErrTemporarilyUnavailable`, which means retry
 rather than skip. `Enrich` attaches what each call fetched as
 `PlaylistEntry.Video` and overlays the entry's title, author, and duration with
 it, keeping a listing value where the fetch had none, `MaxEnrich` caps the pass
-at the first n entries so a per-entry budget is spent inside the loop that
-rotates, `EnrichOptions` pass `WithFullMetadata()` or `WithNoFallback()` to
-each call, and a failed entry is an `EnrichError` naming it.
+at the first n fetchable entries so a per-entry budget is spent inside the loop
+that rotates, `EnrichOptions` pass `WithFullMetadata()` or `WithNoFallback()` to
+each call, and a failed entry is an `EnrichError` naming it. Entries the listing
+marked live or upcoming (`PlaylistEntry.LiveStatus`) are passed over: `Info`
+refuses them, so the call would spend a request, and a budget slot, on what the
+badge already said. `--list` shows the marker in the duration column and as
+`liveStatus` in `--json`.
 
 Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
 `ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and

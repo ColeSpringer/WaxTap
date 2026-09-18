@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 )
 
@@ -396,4 +397,234 @@ func TestMeasureAlbumNamesUnreadableTrack(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "track bad.flac") {
 		t.Errorf("MeasureAlbum = %v, want ErrUnsupportedInput naming track bad.flac", err)
 	}
+}
+
+// An album into a lossy format is measured at the width the encoder delivers,
+// the same fold a single file gets: without it every track's figure, and the
+// album gain derived from them, describes audio the encoder never meters, and
+// a surround album lands a fold's worth off target.
+func TestProcessAlbumMeasuresAtTheEncodersWidth(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	var tracks []AlbumTrack
+	for i, n := range []string{"a", "b"} {
+		in := filepath.Join(dir, n+".wav")
+		// One fronts-only member and one with the tone in every channel: a
+		// coherent fold reads back at the source loudness, a fronts-only one
+		// loses the fold's normalization, so the album needs both to show the
+		// per-track figure is the folded one.
+		body := mediatest.FrontsOnlyWAV(2, 6)
+		if i == 1 {
+			body = mediatest.SineWAV(2, 6)
+		}
+		if err := os.WriteFile(in, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tracks = append(tracks, AlbumTrack{Input: in, Output: filepath.Join(dir, "out", n+".opus")})
+	}
+
+	const target = -18.0
+	res, err := c.ProcessAlbum(ctx, tracks, target, TranscodeSpec{Format: FormatOpus}, WithAlbumPeakMode(PeakCap))
+	if err != nil {
+		t.Fatalf("ProcessAlbum: %v", err)
+	}
+	for i, tr := range tracks {
+		single, err := c.Process(ctx, ProcessRequest{Input: tr.Input, ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "single", filepath.Base(tr.Output))),
+			Transcode: &TranscodeSpec{Format: FormatOpus},
+			Loudness:  &LoudnessSpec{Mode: LoudnessMeasureOnly},
+			Channels:  LayoutStereo,
+			Downmix:   true,
+		}})
+		if err != nil {
+			t.Fatalf("Process track %d: %v", i, err)
+		}
+		if got, want := res.PerTrack[i].IntegratedLUFS, single.Loudness.Input.IntegratedLUFS; math.Abs(got-want) > 0.05 {
+			t.Errorf("track %d measured %.2f LUFS, the same fold alone measures %.2f", i, got, want)
+		}
+	}
+	// The written files, not the arithmetic: a cap-mode Delivered is derived
+	// from the album figure, so it lands on the target whatever the encoder
+	// then did to the samples.
+	written, err := c.MeasureAlbum(ctx, res.Outputs)
+	if err != nil {
+		t.Fatalf("MeasureAlbum of the outputs: %v", err)
+	}
+	if got := written.Album.IntegratedLUFS; math.Abs(got-target) > 0.5 {
+		t.Errorf("the written album measures %.2f LUFS, want %g within 0.5", got, target)
+	}
+	if res.Delivered == nil {
+		t.Fatal("no delivered measurement")
+	}
+	if math.Abs(res.Delivered.IntegratedLUFS-written.Album.IntegratedLUFS) > 0.5 {
+		t.Errorf("Delivered says %.2f LUFS, the files measure %.2f", res.Delivered.IntegratedLUFS, written.Album.IntegratedLUFS)
+	}
+}
+
+// An album mixing a surround member with a stereo one is refused up front,
+// naming the narrower track: the group timeline conforms every member to the
+// widest layout and WaxFlow's mixer builds no target wider than stereo, so
+// the measurement fails when it reaches the stereo member, with an error that
+// names nothing, after every track was already measured.
+func TestAlbumRefusesMixedWidthsNamingTheTrack(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	wide := filepath.Join(dir, "wide.wav")
+	narrow := filepath.Join(dir, "narrow.wav")
+	if err := os.WriteFile(wide, mediatest.SineWAV(2, 6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(narrow, mediatest.SineWAV(2, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newOfflineClient(t)
+
+	out := filepath.Join(dir, "out")
+	_, err := c.ProcessAlbum(ctx, []AlbumTrack{
+		{Input: wide, Output: filepath.Join(out, "a.flac")},
+		{Input: narrow, Output: filepath.Join(out, "b.flac")},
+	}, -14, TranscodeSpec{Format: FormatFLAC})
+	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "narrow.wav") {
+		t.Errorf("ProcessAlbum = %v, want ErrUnsupportedInput naming narrow.wav", err)
+	}
+	if _, serr := os.Stat(filepath.Join(out, "a.flac")); serr == nil {
+		t.Error("the refusal came after a track was written; it must precede the work")
+	}
+
+	_, err = c.MeasureAlbum(ctx, []string{wide, narrow})
+	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "narrow.wav") {
+		t.Errorf("MeasureAlbum = %v, want ErrUnsupportedInput naming narrow.wav", err)
+	}
+}
+
+// An all-Opus album under cap takes the header path too: every track is a
+// packet copy whose head states the one album gain.
+func TestProcessAlbumWritesHeaderGain(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	opus := func(name string) string {
+		wav := filepath.Join(dir, name+".wav")
+		if err := os.WriteFile(wav, mediatest.SineWAV(2, 2), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(dir, name+".opus")
+		if _, err := c.Process(ctx, ProcessRequest{Input: wav, ProcessSpec: ProcessSpec{
+			Output: ToFile(out), Transcode: &TranscodeSpec{Format: FormatOpus},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	tracks := []AlbumTrack{
+		{Input: opus("a"), Output: filepath.Join(dir, "out", "a.opus")},
+		{Input: opus("b"), Output: filepath.Join(dir, "out", "b.opus")},
+	}
+
+	res, err := c.ProcessAlbum(ctx, tracks, -20, TranscodeSpec{Format: FormatOpus}, WithAlbumPeakMode(PeakCap))
+	if err != nil {
+		t.Fatalf("ProcessAlbum: %v", err)
+	}
+	if !res.HeaderGain || !res.LoudnessApplied {
+		t.Fatalf("HeaderGain=%v LoudnessApplied=%v, want the header path", res.HeaderGain, res.LoudnessApplied)
+	}
+	for _, out := range res.Outputs {
+		q, qerr := media.OpusHeaderGain(ctx, out)
+		if qerr != nil || q != media.OpusGainQ78(res.GainDB) {
+			t.Errorf("%s: header gain %d (%v), want the album's %d", filepath.Base(out), q, qerr, media.OpusGainQ78(res.GainDB))
+		}
+	}
+	if res.Delivered == nil || math.Abs(res.Delivered.IntegratedLUFS-(res.Album.IntegratedLUFS+res.GainDB)) > 1e-9 {
+		t.Errorf("Delivered = %+v, want the derived album + gain", res.Delivered)
+	}
+
+	// Anything that needs an encode takes the encode path, as a single file does.
+	for _, tc := range []struct {
+		name string
+		run  func() (*AlbumProcessResult, error)
+	}{
+		{"limit", func() (*AlbumProcessResult, error) {
+			return c.ProcessAlbum(ctx, retarget(tracks, filepath.Join(dir, "limit")), -20, TranscodeSpec{Format: FormatOpus}, WithAlbumPeakMode(PeakLimit))
+		}},
+		{"bitrate", func() (*AlbumProcessResult, error) {
+			return c.ProcessAlbum(ctx, retarget(tracks, filepath.Join(dir, "bitrate")), -20, TranscodeSpec{Format: FormatOpus, Bitrate: 96000}, WithAlbumPeakMode(PeakCap))
+		}},
+		{"flac member", func() (*AlbumProcessResult, error) {
+			mixed := retarget(tracks, filepath.Join(dir, "mixed"))
+			mixed[1].Input = synthSine(t, dir, "member.flac", 2, "flac")
+			return c.ProcessAlbum(ctx, mixed, -20, TranscodeSpec{Format: FormatOpus}, WithAlbumPeakMode(PeakCap))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.HeaderGain {
+				t.Error("HeaderGain set on a run that has to re-encode")
+			}
+		})
+	}
+}
+
+// retarget copies tracks with their outputs moved into dir.
+func retarget(tracks []AlbumTrack, dir string) []AlbumTrack {
+	out := make([]AlbumTrack, len(tracks))
+	for i, t := range tracks {
+		out[i] = AlbumTrack{Input: t.Input, Output: filepath.Join(dir, filepath.Base(t.Output))}
+	}
+	return out
+}
+
+// A measurement reports what it found in the inputs, the way a processing run
+// does: a listener told an album measures -23 LUFS deserves to know one track
+// stopped decoding halfway.
+func TestMeasureAlbumReportsInputWarnings(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	intact, truncated := damagedFixture(t, dir, "track.flac", FormatFLAC)
+
+	res, err := c.MeasureAlbum(ctx, []string{intact, truncated})
+	if err != nil {
+		t.Fatalf("MeasureAlbum: %v", err)
+	}
+	var damage []Warning
+	for _, w := range res.Warnings {
+		if w.Code == WarnInputDamage {
+			damage = append(damage, w)
+		}
+	}
+	if len(damage) != 1 {
+		t.Fatalf("damage warnings = %+v, want one folded warning", res.Warnings)
+	}
+	if !strings.Contains(damage[0].Detail, filepath.Base(truncated)) {
+		t.Errorf("detail = %q, want it to name %s", damage[0].Detail, filepath.Base(truncated))
+	}
+
+	// An album with nothing to measure says so rather than reporting -Inf bare.
+	silent := make([]string, 2)
+	for i := range silent {
+		silent[i] = filepath.Join(dir, "silent"+string(rune('a'+i))+".wav")
+		if err := os.WriteFile(silent[i], mediatest.SilenceWAV(2, 2), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quiet, err := c.MeasureAlbum(ctx, silent)
+	if err != nil {
+		t.Fatalf("MeasureAlbum (silent): %v", err)
+	}
+	if !albumHasWarning(quiet.Warnings, WarnLoudnessUnmeasurable) {
+		t.Errorf("warnings = %+v, want loudness-unmeasurable", quiet.Warnings)
+	}
+}
+
+func albumHasWarning(ws []Warning, code WarningCode) bool {
+	for _, w := range ws {
+		if w.Code == code {
+			return true
+		}
+	}
+	return false
 }

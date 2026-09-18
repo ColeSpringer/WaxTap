@@ -324,3 +324,81 @@ func TestAlbumTracksJSONTagCarry(t *testing.T) {
 		}
 	}
 }
+
+// An album --dir that names a file, and two inputs whose names collide in the
+// output directory, are both request errors: the first used to fail per track
+// as an I/O error, the second wrote one track over another.
+func TestNormalizeAlbumPreflightRejectsBadOutputs(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.flac")
+	b := filepath.Join(dir, "b.flac")
+	synthAudio(t, a, "flac")
+	synthAudio(t, b, "flac")
+
+	notDir := filepath.Join(dir, "not-a-dir.txt")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := runMain(t, "normalize", "--album", "--format", "flac", "--dir", notDir, a, b)
+	if code != 2 || !strings.Contains(stderr, "not a directory") {
+		t.Errorf("exit %d, stderr %q; want exit 2 saying --dir is not a directory", code, stderr)
+	}
+
+	// Two tracks with the same base name in different folders.
+	nested := filepath.Join(dir, "one", "01.flac")
+	other := filepath.Join(dir, "two", "01.flac")
+	for _, p := range []string{nested, other} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		synthAudio(t, p, "flac")
+	}
+	out := filepath.Join(dir, "out")
+	_, stderr, code = runMain(t, "normalize", "--album", "--format", "flac", "--dir", out, nested, other)
+	if code != 2 || !strings.Contains(stderr, "both map to") {
+		t.Errorf("exit %d, stderr %q; want exit 2 naming the collision", code, stderr)
+	}
+	if entries, _ := os.ReadDir(out); len(entries) != 0 {
+		t.Errorf("the refusal came after a write: %v", entries)
+	}
+}
+
+// A measurement reports what it found, in both modes.
+func TestNormalizeAlbumMeasureRendersWarnings(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "a.flac")
+	synthAudio(t, good, "flac")
+	truncated := filepath.Join(dir, "b.flac")
+	whole, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(truncated, whole[:len(whole)*6/10], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runMain(t, "normalize", "--album", "--measure-loudness", good, truncated)
+	if code != 0 {
+		t.Fatalf("exit %d\nstderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "input-damage") {
+		t.Errorf("stderr = %q, want the damage warning", stderr)
+	}
+	if !strings.Contains(stdout, "Album:") {
+		t.Errorf("stdout = %q, want the album summary", stdout)
+	}
+
+	stdout, stderr, code = runMain(t, "normalize", "--album", "--measure-loudness", "--json", good, truncated)
+	if code != 0 {
+		t.Fatalf("exit %d\nstderr:\n%s", code, stderr)
+	}
+	doc := oneJSONDoc(t, stdout)
+	warns, ok := doc["warnings"].([]any)
+	if !ok || len(warns) == 0 {
+		t.Fatalf("warnings = %v, want the damage warning", doc["warnings"])
+	}
+	first, _ := warns[0].(map[string]any)
+	if first["code"] != "input-damage" {
+		t.Errorf("warnings[0] = %v, want input-damage", warns[0])
+	}
+}

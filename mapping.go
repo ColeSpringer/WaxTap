@@ -376,8 +376,8 @@ const loudnessMissWarnDB = 1.0
 // the post-measure fails, and a lossy encode can miss by more than a LU for
 // reasons that have nothing to do with the ceiling, which would make the detail
 // text a lie. Asking the loudness package what its clamp held back, on the
-// InputLoudness that fed it (downmix fold included), is deterministic and correctly
-// attributed.
+// InputLoudness that fed it (folded the way the encode folds, explicit downmix
+// or the encoder's own), is deterministic and correctly attributed.
 //
 // For PeakLimit there is no clamp to attribute anything to: the gain aims at the
 // target and the limiter gives back an amount only a measurement can reveal. So
@@ -949,9 +949,11 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 	}
 	if p.LoudnessMeasured {
 		res.Loudness = &LoudnessResult{
-			Input:  toLoudnessInfo(p.InputLoudness),
-			Output: toLoudnessInfo(p.OutputLoudness),
-			Target: target,
+			Input:      toLoudnessInfo(p.InputLoudness),
+			Output:     toLoudnessInfo(p.OutputLoudness),
+			Target:     target,
+			GainDB:     p.GainDB,
+			HeaderGain: p.GainInHeader,
 		}
 	}
 	return res

@@ -53,8 +53,7 @@ func newFormatsCmd() *cobra.Command {
 				env.printf("no audio formats found\n")
 				return nil
 			}
-			renderFormatsTable(env, formats)
-			return nil
+			return renderFormatsTable(env, formats)
 		},
 	}
 	cmd.Flags().BoolVar(&noFallback, "no-fallback", false, "disable the watch-page extraction fallback")
@@ -114,7 +113,7 @@ func dedupFormats(formats []waxtap.Format) []waxtap.Format {
 }
 
 // renderFormatsTable writes an aligned table of formats to stdout.
-func renderFormatsTable(env *appEnv, formats []waxtap.Format) {
+func renderFormatsTable(env *appEnv, formats []waxtap.Format) error {
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "ITAG\tCODEC\tEXT\tKBPS\tTIER\tHZ\tCH\tLANG\tORIG\tDRC\tSIZE")
 	for _, f := range formats {
@@ -132,13 +131,16 @@ func renderFormatsTable(env *appEnv, formats []waxtap.Format) {
 			sizeOrDash(f.ContentLength),
 		)
 	}
-	tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 
 	// An itag may appear once for each DRC variant.
 	if hasDRCVariant(formats) {
 		env.printf("\nDRC=yes marks the dynamic-range-compressed variant; the same itag may also appear with DRC=no.\n")
 		env.printf("Best-audio selection and --itag both prefer the original track and the full-range (DRC=no) variant when present.\n")
 	}
+	return nil
 }
 
 // hasDRCVariant reports whether the format list includes a DRC variant.

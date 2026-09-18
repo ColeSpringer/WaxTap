@@ -1627,6 +1627,43 @@ func TestProcessWarnsImplicitDownmix(t *testing.T) {
 	}
 }
 
+// A lossy encoder folds a wide source to stereo on its own, and the gain is
+// computed on that fold: the input figure of a 5.1 normalize to opus equals
+// the figure an explicit stereo downmix measures, and the delivered loudness
+// lands on the target rather than the source-width estimate.
+func TestNormalizeMeasuresAtTheEncodersWidth(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "surround.wav")
+	// A fixture whose energy sits in the front pair: every channel carrying
+	// the same tone folds coherently back to the same loudness, so it would
+	// read the same measured either way and pin nothing.
+	if err := os.WriteFile(in, mediatest.FrontsOnlyWAV(3, 6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newOfflineClient(t)
+	run := func(name string, spec ProcessSpec) *Result {
+		t.Helper()
+		spec.Output = ToFile(filepath.Join(dir, name))
+		res, err := c.Process(ctx, ProcessRequest{Input: in, ProcessSpec: spec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	implicit := run("implicit.opus", ProcessSpec{Transcode: &TranscodeSpec{Format: FormatOpus}, Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: -18}})
+	explicit := run("explicit.opus", ProcessSpec{Transcode: &TranscodeSpec{Format: FormatOpus}, Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: -18}, Channels: LayoutStereo, Downmix: true})
+	if math.Abs(implicit.Loudness.Input.IntegratedLUFS-explicit.Loudness.Input.IntegratedLUFS) > 0.05 {
+		t.Errorf("implicit fold measured %.2f LUFS, explicit %.2f; want the same fold", implicit.Loudness.Input.IntegratedLUFS, explicit.Loudness.Input.IntegratedLUFS)
+	}
+	if got := implicit.Loudness.Output.IntegratedLUFS; math.Abs(got+18) > 0.5 {
+		t.Errorf("delivered %.2f LUFS, want -18 within 0.5", got)
+	}
+	if _, ok := findWarning(implicit.Warnings, WarnImplicitDownmix); !ok {
+		t.Error("the fold is still reported")
+	}
+}
+
 func findWarning(ws []Warning, code WarningCode) (Warning, bool) {
 	for _, w := range ws {
 		if w.Code == code {

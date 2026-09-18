@@ -390,3 +390,50 @@ func TestDoctorHumanKeepsDeliveryEvidence(t *testing.T) {
 		}
 	}
 }
+
+// The doctor document carries its caveat as a note too, so a consumer reading
+// notes[] across commands does not have to special-case one string key.
+func TestDoctorJSONNotes(t *testing.T) {
+	var out bytes.Buffer
+	env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}, notes: &noteCollector{}}
+	env.note(noteWebSources, "a run note")
+	rep := &doctorReport{Healthy: true, ForcedIOS: true, VideoID: "jNQXAC9IVRw", Bytes: 1 << 20}
+	if err := emitDoctorJSON(env, rep, nil); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	// note stays what it was: the key is schema 3 and consumers read it.
+	if s, _ := doc["note"].(string); !strings.Contains(s, "iOS media delivery") {
+		t.Errorf("note = %v, want the caveat kept", doc["note"])
+	}
+	notes, ok := doc["notes"].([]any)
+	if !ok || len(notes) != 2 {
+		t.Fatalf("notes = %v, want the run note and the caveat", doc["notes"])
+	}
+	var codes []string
+	for _, n := range notes {
+		m, _ := n.(map[string]any)
+		s, _ := m["code"].(string)
+		codes = append(codes, s)
+	}
+	if !slices.Contains(codes, string(noteDoctorCaveat)) || !slices.Contains(codes, string(noteWebSources)) {
+		t.Errorf("notes codes = %v, want both", codes)
+	}
+
+	// A clean report has no caveat, so the key stays absent.
+	out.Reset()
+	clean := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}, notes: &noteCollector{}}
+	if err := emitDoctorJSON(clean, &doctorReport{Healthy: true, Full: true, VideoID: "jNQXAC9IVRw", Bytes: 8 << 20}, nil); err != nil {
+		t.Fatal(err)
+	}
+	doc = nil
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc["notes"]; ok {
+		t.Errorf("notes = %v, want the key omitted on a clean run", doc["notes"])
+	}
+}

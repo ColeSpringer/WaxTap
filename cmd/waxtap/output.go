@@ -15,6 +15,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,10 +166,13 @@ const (
 	noteChannelsUnavailable  noteCode = "channels-unavailable"
 	noteConcurrencyClamped   noteCode = "concurrency-clamped"
 	noteContainerExtMismatch noteCode = "container-ext-mismatch"
+	noteCueFileMismatch      noteCode = "cue-file-mismatch"
+	noteDoctorCaveat         noteCode = "doctor-caveat"
 	noteFlagInert            noteCode = "flag-inert"
 	noteForcedClientRisky    noteCode = "forced-client-risky"
 	noteKeptOutput           noteCode = "kept-output"
 	notePlaylistIgnored      noteCode = "playlist-ignored"
+	noteProbeSkipped         noteCode = "probe-skipped"
 	noteEnumerationError     noteCode = "enumeration-error"
 	noteSameFormatCopied     noteCode = "same-format-copied"
 	noteSidecarWriteFailed   noteCode = "sidecar-write-failed"
@@ -178,6 +182,33 @@ const (
 	noteWatchPageMetadata    noteCode = "watch-page-metadata"
 	noteWebSources           noteCode = "web-sources"
 )
+
+// allNoteCodes is every note the CLI can record. A new code is added here as
+// well as above; TestNoteCodesDocumented reads this list to check that README
+// documents the vocabulary a --json consumer matches on.
+var allNoteCodes = []noteCode{
+	noteALACContainer,
+	noteArchiveNotRecorded,
+	noteChannelsIgnored,
+	noteChannelsUnavailable,
+	noteConcurrencyClamped,
+	noteContainerExtMismatch,
+	noteCueFileMismatch,
+	noteDoctorCaveat,
+	noteFlagInert,
+	noteForcedClientRisky,
+	noteKeptOutput,
+	notePlaylistIgnored,
+	noteProbeSkipped,
+	noteEnumerationError,
+	noteSameFormatCopied,
+	noteSidecarWriteFailed,
+	noteSelectionUnmatched,
+	noteUnalteredCopy,
+	noteWatchPageFormats,
+	noteWatchPageMetadata,
+	noteWebSources,
+}
 
 // noteJSON is one note in a JSON document, the same {code, detail} shape
 // warnings use.
@@ -400,6 +431,27 @@ func finalError(ctx context.Context, err error) error {
 type errorJSON struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// writeRecord writes one compact NDJSON record followed by a newline. A record
+// the encoder refuses is replaced by an error envelope rather than dropped: an
+// NDJSON stream promises one record per item, and a consumer counting a shorter
+// stream has no way to learn that something went missing.
+func writeRecord(w io.Writer, rec any) {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		b, err = json.Marshal(struct {
+			SchemaVersion int       `json:"schemaVersion"`
+			Type          string    `json:"type"`
+			Error         errorJSON `json:"error"`
+		}{schemaVersion, "error", errorJSON{Code: "error", Message: "encode record: " + err.Error()}})
+		if err != nil {
+			// Unreachable: the envelope is three strings and an int. A bare
+			// line still keeps the record count honest.
+			b = []byte(`{"schemaVersion":` + strconv.Itoa(schemaVersion) + `,"type":"error","error":{"code":"error","message":"encode record"}}`)
+		}
+	}
+	fmt.Fprintf(w, "%s\n", b)
 }
 
 // errorObject renders err as an errorJSON, or nil for no error, so the item
@@ -1170,7 +1222,7 @@ func flagOrderHint(err error, args []string) string {
 // command tree.
 var rootSubcommandNames = map[string]bool{
 	"info": true, "formats": true, "download": true, "cut": true,
-	"transcode": true, "normalize": true, "sponsorblock": true, "sb": true,
+	"transcode": true, "normalize": true, "split": true, "sponsorblock": true, "sb": true,
 	"cache": true, "doctor": true, "version": true, "exit-codes": true,
 	"help": true, "completion": true,
 }

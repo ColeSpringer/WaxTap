@@ -6,7 +6,12 @@
 // is the closed form of ffmpeg's linear-mode loudnorm, a single gain clamped so
 // the true peak stays under the ceiling, and [RawGain] is the same gain
 // unclamped, leaving the peaks to WaxFlow's limiter. The gain is handed to the
-// media package as TranscodeOptions.GainDB, fused into the encode.
+// media package as Spec.GainDB, fused into the encode.
+//
+// A measurement is taken at the width the encode delivers: the caller passes
+// the fold (see the channels parameter on [Measure] and [MeasureCut]), since a
+// lossy encoder folds a source wider than stereo itself and a fold moves both
+// the integrated loudness and the true peak.
 package loudness
 
 import (
@@ -138,15 +143,35 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 // value is the EBU R128 result for the concatenated tracks, including gating and
 // energy weighting; it is not a mean of per-track LUFS. perTrack follows input
 // order.
-func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album Loudness, perTrack []Loudness, err error) {
-	// Album measurement never downmixes; each track is measured at its own layout.
+//
+// folds[i], when 1 or 2, folds track i's measurement to that width, the width
+// the album's encode delivers for it (media.Runner.PlanOutputChannels); 0, or a
+// nil slice, keeps the source layout. The group pass folds only when every
+// track folds to one width: the timeline conforms every member to the widest
+// layout, and a fold applied after that conversion is not the fold the encoder
+// applies to the member itself. A surround album's members share one width in
+// every case the timeline opens at all (the mixer builds no up-mix wider than
+// stereo, so a surround member beside a stereo one is refused at the stereo
+// member's open), which is why the rule is all-or-nothing rather than per
+// member.
+func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds []int) (album Loudness, perTrack []Loudness, err error) {
 	perTrack = make([]Loudness, len(inputs))
 	// The per-track pass reads every file to its end, which is the measurement
 	// the group timeline needs for a member whose headers state its length
 	// only approximately; see media.Runner.OpenAlbumConcat.
 	measured := make([]int64, len(inputs))
+	groupFold := 0
+	uniform := len(folds) == len(inputs) && len(inputs) > 0
 	for i, in := range inputs {
-		res, found, aerr := r.AnalyzeFile(ctx, in, 0)
+		fold := 0
+		if i < len(folds) {
+			fold = folds[i]
+		}
+		if fold == 0 || (groupFold != 0 && fold != groupFold) {
+			uniform = false
+		}
+		groupFold = max(groupFold, fold)
+		res, found, aerr := r.AnalyzeFile(ctx, in, fold)
 		if aerr != nil {
 			// The album has many inputs, so the failure names its file, the way
 			// a timeline error is named after its member.
@@ -155,6 +180,9 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 		perTrack[i] = fromResult(res)
 		perTrack[i].Warnings = found
 		measured[i] = res.Samples
+	}
+	if !uniform {
+		groupFold = 0
 	}
 	med, closer, oerr := r.OpenAlbumConcat(ctx, inputs, measured)
 	if oerr != nil {
@@ -165,7 +193,7 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string) (album 
 	// member index; the per-track measurements above already carry them.
 	//
 	// "" names no single file: a concatenated album has several.
-	ares, merr := r.AnalyzeMedia(ctx, med, "", 0)
+	ares, merr := r.AnalyzeMedia(ctx, med, "", groupFold)
 	if merr != nil {
 		return Loudness{}, nil, merr
 	}
@@ -241,11 +269,12 @@ func PeakShortfall(target float64, m Loudness) float64 {
 // policy applied album-wide, and it is why the mode is opt-in.
 //
 // The clamp is only as good as the peaks it is given. [MeasureAlbum] measures
-// each track at its source layout, so an album that the encoder then folds to
-// stereo can peak higher than was clamped for and re-engage the limiter, which is
-// the spacing drift the clamp exists to avoid. The fold is reported separately
-// (waxtap's implicit-downmix warning), and the exactness claim is scoped to
-// lossless outputs, which is where no fold happens.
+// each track at the width its own encode delivers when the caller passes the
+// folds, so the peaks a lossy encoder's fold produces are the peaks clamped
+// for; with no folds the measurement is at the source layout and an album the
+// encoder then folds can peak higher than was clamped for and re-engage the
+// limiter, which is the spacing drift the clamp exists to avoid. The fold is
+// reported separately either way (waxtap's implicit-downmix warning).
 func AlbumGain(target float64, album Loudness, perTrack []Loudness, clampPeaks bool) float64 {
 	// Silence is a no-op in both modes, and the guard has to come before the clamp,
 	// not after RawGain alone: a gated-silent album whose tracks still carry a peak

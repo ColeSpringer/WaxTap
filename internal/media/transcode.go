@@ -129,8 +129,8 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		}
 	} else {
 		opts := encodeOptions(spec)
-		format, _ := codecFormat(spec.Codec)
-		opts.Container = containerFor(format, hintFor(output))
+		name, _ := codecFormat(spec.Codec)
+		opts.Container = containerFor(name, hintFor(output))
 		tres, err := r.engine.Transcode(ctx, src, hintFor(input), staged, opts)
 		if err != nil {
 			return Result{}, classifyEngineError(err, input, output)

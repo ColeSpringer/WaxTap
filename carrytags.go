@@ -9,6 +9,17 @@ import (
 	"github.com/colespringer/waxlabel/tag"
 )
 
+// ownAudio says what a carry does with the tags that describe the source's own
+// audio (ReplayGain and R128 gains, encoder stamps, an AcoustID fingerprint),
+// which WaxLabel's transfer excludes.
+type ownAudio uint8
+
+const (
+	ownAudioDrop           ownAudio = iota // a re-encode or cut: the audio changed, the values no longer hold
+	ownAudioRestore                        // a whole-file packet copy: every value still holds
+	ownAudioRestoreButGain                 // packets copied, loudness moved by the Opus header gain: the gain tags are stale, the rest hold
+)
+
 // carryTags copies the input file's embedded metadata (tags, pictures,
 // chapters, synced lyrics) onto a freshly written local output. WaxFlow
 // rewrites carry no tags, so without this pass every local transcode, remux,
@@ -20,11 +31,15 @@ import (
 // it: shifted by the audio removed before them, dropped when their content was
 // removed. Carrying them unmapped would point at removed audio.
 //
-// remuxed marks an output whose packets are a byte-identical whole-file copy
-// of the input. WaxLabel's transfer excludes tags that describe the source's
-// own audio (ReplayGain, encoder stamps, an AcoustID fingerprint), which is
-// right for a re-encode or cut; a remux leaves the audio untouched, so those
-// values still hold and are restored.
+// own says what to do with the tags that describe the source's own audio,
+// which WaxLabel's transfer excludes (ReplayGain and R128 gains, encoder
+// stamps, an AcoustID fingerprint). Dropping them is right for a re-encode or
+// a cut; a whole-file packet copy leaves the audio untouched, so those values
+// still hold and are restored. The third case is a copy whose loudness moved
+// anyway, through the Opus header gain: the gain family is dropped, since
+// those values state a gain relative to a loudness the head no longer
+// delivers and a player honoring them would land off target, and everything
+// else is restored, since it describes packets that did not change.
 //
 // dest is the path warnings name. It differs from outPath when the output is
 // staged for an exclusive publish, where outPath is a temp name the user never
@@ -37,7 +52,7 @@ import (
 //
 // It returns the itemized report Result.TagCarry exposes, nil when no carry
 // ran: the same facts the warning tells, one item per field and per set.
-func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, remuxed bool, em *emitter) *TagCarry {
+func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, cut *appliedCut, own ownAudio, em *emitter) *TagCarry {
 	src, err := waxlabel.ParseFile(ctx, srcPath)
 	if err != nil {
 		// An unreadable source carried nothing before either, so there is no
@@ -114,11 +129,11 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 				notes = append(notes, lyricsDropNote(lyrics.removed, lyrics.input-lyrics.kept, lyrics.input))
 			}
 		}
-	case remuxed:
+	case own != ownAudioDrop:
 		// The one post-transfer fix-up left re-edits the document the
 		// transfer returned, the blessed path for writing after an in-place
 		// commit (and a no-op plan still returns the unchanged document).
-		restored, fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report)
+		restored, fixNote, ferr := restoreOwnAudio(ctx, postDoc, outPath, src, report, own == ownAudioRestoreButGain)
 		if ferr != nil {
 			notes = append(notes, fmt.Sprintf("own-audio tags (ReplayGain and similar) could not be restored: %v", ferr))
 		} else {
@@ -296,15 +311,23 @@ func lyricsDropNote(dropped, setsDropped, origSets int) string {
 }
 
 // restoreOwnAudio writes back the own-audio tags the transfer excluded. It
-// exists for the whole-file remux case only, where the output's packets are
-// the input's and the excluded values still describe them exactly. It returns
-// the keys it put back.
-func restoreOwnAudio(ctx context.Context, doc *waxlabel.Document, path string, src *waxlabel.Document, report waxlabel.TransferReport) ([]string, string, error) {
+// exists for the whole-file packet copy, where the output's packets are the
+// input's and the excluded values still describe them exactly. dropGains
+// leaves the ReplayGain and R128 families out, for a copy whose loudness the
+// Opus header gain moved. It returns the keys it put back.
+func restoreOwnAudio(ctx context.Context, doc *waxlabel.Document, path string, src *waxlabel.Document, report waxlabel.TransferReport, dropGains bool) ([]string, string, error) {
 	var keys []tag.Key
 	for _, it := range report.Items {
-		if it.Kind == waxlabel.TransferField && it.Disposition == waxlabel.Excluded {
-			keys = append(keys, it.Key)
+		if it.Kind != waxlabel.TransferField || it.Disposition != waxlabel.Excluded {
+			continue
 		}
+		// WaxLabel's own predicates, the ones DescribesOwnAudio is built
+		// from, so the gain family cannot drift apart from the set the
+		// transfer excluded.
+		if dropGains && (tag.IsReplayGainKey(it.Key) || tag.IsR128GainKey(it.Key)) {
+			continue
+		}
+		keys = append(keys, it.Key)
 	}
 	if len(keys) == 0 {
 		return nil, "", nil

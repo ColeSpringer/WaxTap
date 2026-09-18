@@ -434,3 +434,128 @@ func TestScopedNotesConcurrent(t *testing.T) {
 		t.Errorf("run collected %d notes, want 8", len(got))
 	}
 }
+
+// An Opus source normalized under cap is delivered as a packet copy whose head
+// carries the gain, so the document is a remux document: no re-encode, no
+// output format, and the gain reported under loudness.
+func TestOpusHeaderGainDocument(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.opus")
+	synthAudio(t, in, "libopus")
+	out := filepath.Join(dir, "out.opus")
+
+	stdout, stderr, code := runMain(t, "normalize", in, "-o", out, "--json")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	doc := oneJSONDoc(t, stdout)
+	if doc["schemaVersion"] != float64(schemaVersion) {
+		t.Errorf("schemaVersion = %v, want %d", doc["schemaVersion"], schemaVersion)
+	}
+	if doc["transcoded"] != false {
+		t.Errorf("transcoded = %v, want false: the packets were copied", doc["transcoded"])
+	}
+	if _, ok := doc["outputFormat"]; ok {
+		t.Errorf("outputFormat = %v, want the key omitted for a local result that was not transcoded", doc["outputFormat"])
+	}
+	if doc["outputPath"] == nil {
+		t.Error("outputPath missing")
+	}
+	l, ok := doc["loudness"].(map[string]any)
+	if !ok {
+		t.Fatalf("loudness = %v, want an object", doc["loudness"])
+	}
+	if l["headerGain"] != true {
+		t.Errorf("loudness.headerGain = %v, want true", l["headerGain"])
+	}
+	if g, ok := l["gainDb"].(float64); !ok || g == 0 {
+		t.Errorf("loudness.gainDb = %v, want the applied gain", l["gainDb"])
+	}
+
+	// A measurement applies nothing, so neither key is there to mislead.
+	stdout, stderr, code = runMain(t, "normalize", in, "--measure-loudness", "--json")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	l, _ = oneJSONDoc(t, stdout)["loudness"].(map[string]any)
+	if _, ok := l["gainDb"]; ok {
+		t.Errorf("measure-only carries gainDb = %v", l["gainDb"])
+	}
+	if _, ok := l["headerGain"]; ok {
+		t.Errorf("measure-only carries headerGain = %v", l["headerGain"])
+	}
+}
+
+// split takes neither -o nor --collision skip, so it pins the one-document
+// invariant on its own shapes: a written set, a refusal inside RunE, and one
+// the flag parser makes before --json is ever read.
+func TestJSONContractOneDocumentSplit(t *testing.T) {
+	dir := t.TempDir()
+	rip := filepath.Join(dir, "rip.wav")
+	synthAudio(t, rip, "wav")
+	cue := filepath.Join(dir, "rip.cue")
+	if err := os.WriteFile(cue, []byte("FILE \"rip.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:37\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		outcome  string
+		args     []string
+		wantCode int
+	}{
+		{"success", []string{"split", rip, "--cue", cue, "-f", "flac", "-d", filepath.Join(dir, "ok"), "--json"}, 0},
+		{"usage error", []string{"split", rip, "--cue", cue, "-f", "copy", "--json"}, 2},
+		{"flag-parse error", []string{"split", rip, "--nope", "--json"}, 2},
+	} {
+		t.Run(c.outcome, func(t *testing.T) {
+			stdout, stderr, code := runMain(t, c.args...)
+			if code != c.wantCode {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, c.wantCode, stderr)
+			}
+			oneJSONDoc(t, stdout)
+			if strings.Contains(stderr, "schemaVersion") {
+				t.Errorf("a JSON document reached stderr:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// badRecord marshals as a failure, standing in for a record whose contents the
+// encoder refuses (a non-finite float reached through an any field).
+type badRecord struct{}
+
+func (badRecord) MarshalJSON() ([]byte, error) { return nil, errors.New("boom") }
+
+// An NDJSON stream promises one record per item. A record the encoder refuses
+// used to vanish, leaving a consumer counting a shorter stream with no sign
+// anything was lost.
+func TestWriteRecordKeepsTheCountHonest(t *testing.T) {
+	var out bytes.Buffer
+	writeRecord(&out, struct {
+		SchemaVersion int `json:"schemaVersion"`
+		Payload       any `json:"payload"`
+	}{schemaVersion, badRecord{}})
+
+	line := strings.TrimRight(out.String(), "\n")
+	if line == "" || strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("output = %q, want exactly one line", out.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(line), &doc); err != nil {
+		t.Fatalf("the replacement record is not JSON: %v (%q)", err, line)
+	}
+	if doc["schemaVersion"] != float64(schemaVersion) || doc["type"] != "error" {
+		t.Errorf("record = %v, want the error envelope", doc)
+	}
+	e, _ := doc["error"].(map[string]any)
+	if msg, _ := e["message"].(string); !strings.Contains(msg, "encode record") {
+		t.Errorf("error = %v, want it to name the encode failure", doc["error"])
+	}
+
+	// A record that marshals is written as itself.
+	out.Reset()
+	writeRecord(&out, map[string]any{"ok": true})
+	if got := strings.TrimRight(out.String(), "\n"); got != `{"ok":true}` {
+		t.Errorf("record = %q", got)
+	}
+}

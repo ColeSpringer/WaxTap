@@ -1,0 +1,110 @@
+{
+  "responseContext": { "visitorData": "Cgtsb..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Live Lockup Playlist" } },
+  "header": {
+    "playlistHeaderRenderer": {
+      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo0",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailOverlayBadgeViewModel": {
+                                      "thumbnailBadges": [
+                                        { "thumbnailBadgeViewModel": { "text": "LIVE", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" } }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": { "content": "Song A" },
+                                "metadata": {
+                                  "contentMetadataViewModel": {
+                                    "metadataRows": [
+                                      { "metadataParts": [{ "text": { "content": "Artist A" } }] }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo1",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailOverlayBadgeViewModel": {
+                                      "thumbnailBadges": [
+                                        { "thumbnailBadgeViewModel": { "text": "UPCOMING" } }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": { "content": "Song B" }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo2",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailBottomOverlayViewModel": {
+                                      "badges": [
+                                        { "thumbnailBadgeViewModel": { "text": "3:00", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT" } }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": { "content": "Song C" }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"text/tabwriter"
@@ -171,10 +170,10 @@ func emitBatchWarningsHuman(env *appEnv, outcomes []batchOutcome) {
 }
 
 // emitBatchMeasure writes a loudness table or NDJSON item records and a summary.
-func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) {
+func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) error {
 	if env.jsonMode() {
 		emitBatchJSON(env, outcomes, ignored, true)
-		return
+		return nil
 	}
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tLUFS\tFILE")
@@ -188,13 +187,16 @@ func emitBatchMeasure(env *appEnv, outcomes []batchOutcome, ignored int) {
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\n", o.index+1, lufs, filepath.Base(o.input))
 	}
-	tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 	for _, o := range outcomes {
 		if o.status == statusError {
 			env.printf("FAIL: %s: %s\n", displayPath(o.input), friendlyError(o.err))
 		}
 	}
 	emitBatchSummaryHuman(env, countBatch(outcomes, ignored), "measured")
+	return nil
 }
 
 // emitBatchSummaryHuman prints one summary line. The leading total includes every
@@ -248,11 +250,7 @@ func emitBatchSummaryJSON(env *appEnv, c batchCounts) {
 }
 
 // writeBatchJSON writes one compact NDJSON record followed by a newline.
-func writeBatchJSON(env *appEnv, rec any) {
-	if b, err := json.Marshal(rec); err == nil {
-		fmt.Fprintf(env.out, "%s\n", b)
-	}
-}
+func writeBatchJSON(env *appEnv, rec any) { writeRecord(env.out, rec) }
 
 // batchProgress returns a per-item progress reporter that writes to stderr and
 // honors --quiet, leaving stdout for final results.

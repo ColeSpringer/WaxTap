@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -279,5 +280,32 @@ func TestClassifyPlayability(t *testing.T) {
 		if tc.status == "" && pe.Status != "ERROR" {
 			t.Errorf("empty status classified as %q, want ERROR", pe.Status)
 		}
+	}
+}
+
+// A currently-live stream is refused whichever client extracted it. The
+// microformat that carries liveBroadcastDetails is WEB-only, so a native
+// client says so through videoDetails.isLive alone.
+func TestPlayabilityRefusesNativeClientLiveFlag(t *testing.T) {
+	var doc map[string]any
+	if err := json.Unmarshal(readFixture(t, "player_ok.json"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "microformat")
+	doc["videoDetails"].(map[string]any)["isLive"] = true
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := parsePlayerResponse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perr := pr.playabilityError()
+	if perr == nil || !errors.Is(perr, waxerr.ErrLiveContent) {
+		t.Fatalf("playabilityError = %v, want ErrLiveContent", perr)
+	}
+	if got := pr.liveStatus(); got != LiveNow {
+		t.Errorf("liveStatus = %v, want LiveNow", got)
 	}
 }

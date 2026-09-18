@@ -38,9 +38,14 @@ func (s *searchFake) write(enc media.Spec) error {
 // 0, and returns what the caller would report.
 func (s *searchFake) run(t *testing.T, target float64) (*loudness.Loudness, int) {
 	t.Helper()
-	out, passes, err := converge(context.Background(), target, media.Spec{}, s.measure, s.write, func(Stage) {})
+	out, passes, gain, err := converge(context.Background(), target, media.Spec{}, s.measure, s.write, func(Stage) {})
 	if err != nil {
 		t.Fatalf("converge: %v", err)
+	}
+	// The gain reported is the one behind the file on disk, which is the last
+	// gain written (the search restores a better pass by writing it again).
+	if len(s.gains) > 0 && gain != s.gains[len(s.gains)-1] {
+		t.Errorf("converge reported gain %.3f, last written %.3f", gain, s.gains[len(s.gains)-1])
 	}
 	return out, passes
 }
@@ -167,7 +172,7 @@ func TestConvergeCanceledMidSearchReturnsError(t *testing.T) {
 		return out, err
 	}
 
-	_, _, err := converge(ctx, -14, media.Spec{}, measure, s.write, func(Stage) {})
+	_, _, _, err := converge(ctx, -14, media.Spec{}, measure, s.write, func(Stage) {})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

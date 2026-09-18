@@ -104,6 +104,7 @@ func newRootCmd() *cobra.Command {
 		newCutCmd(),
 		newTranscodeCmd(),
 		newNormalizeCmd(),
+		newSplitCmd(),
 		newSponsorBlockCmd(),
 		newCacheCmd(),
 		newDoctorCmd(),

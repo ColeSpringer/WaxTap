@@ -117,9 +117,17 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		// metadata onto the output before delivery (both sinks read deliver).
 		// Measure-only runs deliver the input itself and must not edit it. No
 		// re-encode and no cut means the output is a whole-file packet copy, the
-		// one case where own-audio tags still hold.
-		remuxed := !pres.Transcoded && !pres.Cut
-		res.TagCarry = c.carryTags(ctx, req.Input, deliver, req.Output.path, appliedCutFrom(pres), remuxed, em)
+		// one case where own-audio tags still hold; under the Opus header gain
+		// the packets are a copy too, but the loudness the gain tags describe
+		// moved, so that family goes and the rest stays.
+		own := ownAudioDrop
+		switch {
+		case pres.GainInHeader:
+			own = ownAudioRestoreButGain
+		case !pres.Transcoded && !pres.Cut:
+			own = ownAudioRestore
+		}
+		res.TagCarry = c.carryTags(ctx, req.Input, deliver, req.Output.path, appliedCutFrom(pres), own, em)
 	}
 
 	em.stage(StageFinalizing)
@@ -207,6 +215,11 @@ func (c *Client) ProbeAudio(ctx context.Context, path string) (AudioProbe, error
 type AlbumLoudnessResult struct {
 	Album    LoudnessInfo   // loudness measured across the complete album
 	PerTrack []LoudnessInfo // measurements in input order
+	// Warnings are what the measurement found in the inputs: damage, the
+	// engine's remarks, an empty track, and a figure no gain could be derived
+	// from. The same set a processing run reports, since the reading is the
+	// same reading.
+	Warnings []Warning
 }
 
 // Measure reports EBU R128 integrated loudness for a single local audio file. It
@@ -239,18 +252,70 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 		return nil, fmt.Errorf("waxtap.MeasureAlbum: no inputs")
 	}
 	runner := c.engine()
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths)
+	probes := make([]albumProbe, len(paths))
+	widths := make([]int, len(paths))
+	for i, in := range paths {
+		probes[i] = probeAudio(ctx, runner, in)
+		widths[i] = probes[i].channels
+	}
+	if err := refuseMixedSurround(paths, widths); err != nil {
+		return nil, err
+	}
+	// No folds: a measurement written to nothing is reported at the layout the
+	// files carry, and the caller chooses an encode later.
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths, nil)
 	if err != nil {
 		return nil, albumTrackError(err, paths)
 	}
 	res := &AlbumLoudnessResult{
 		Album:    loudnessInfo(album),
 		PerTrack: make([]LoudnessInfo, len(perTrack)),
+		Warnings: albumInputWarnings(paths, probes, perTrack, album),
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
 	}
 	return res, nil
+}
+
+// albumInputWarnings folds what a read of an album's inputs found into the
+// album's warnings: damage and remarks per track, an empty track, and a group
+// figure no gain could be derived from. ProcessAlbum raises the same set from
+// the same facts, plus what its own writes found.
+//
+// extra, when given, is each track's additional damage notes, the ones only a
+// write's read reaches; a measurement has none.
+func albumInputWarnings(inputs []string, probes []albumProbe, perTrack []loudness.Loudness, album loudness.Loudness, extra ...[]string) []Warning {
+	em := newEmitter(nil, "")
+	damaged := albumInputRemarks{code: WarnInputDamage}
+	noted := albumInputRemarks{code: WarnInputNote}
+	var empty albumEmptyWarns
+	for i, in := range inputs {
+		var p albumProbe
+		if i < len(probes) {
+			p = probes[i]
+		}
+		var measured []string
+		if i < len(perTrack) {
+			measured = perTrack[i].Warnings
+		}
+		var found []string
+		if i < len(extra) {
+			found = extra[i]
+		}
+		empty.observe(in, p.empty)
+		damaged.observe(in, inputDamageNote(mergeRemarks(p.damage, measured, found)))
+		noted.observe(in, inputNote(p.notes))
+	}
+	damaged.warn(em)
+	noted.warn(em)
+	empty.warn(em)
+	// The album figure has no frames behind it only when every track was empty;
+	// one empty track among full ones leaves a measurable album.
+	if cause := unmeasurableLoudnessCause(album.Duration, empty.all(len(inputs)), &album); cause != "" {
+		em.warn(WarnLoudnessUnmeasurable, "album integrated loudness could not be measured: "+cause)
+	}
+	return em.collected()
 }
 
 // AlbumTrack names one album input and where its processed output should be
@@ -291,6 +356,11 @@ type AlbumProcessResult struct {
 	// failed.
 	Delivered *LoudnessInfo
 	Warnings  []Warning // non-fatal signals (loudness miss, metadata carry), across all tracks
+	// HeaderGain says the gain rode in each track's Opus header (OpusHead
+	// output gain) with the packets copied untouched, rather than being
+	// applied to the samples by a re-encode. Every compliant decoder applies
+	// it, so the delivered loudness is the normalized one.
+	HeaderGain bool
 }
 
 // AlbumOption configures [Client.ProcessAlbum].
@@ -382,7 +452,34 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	for i, t := range tracks {
 		inputs[i] = t.Input
 	}
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs)
+	// Every input is probed before any measurement: the widths settle whether
+	// the group timeline can open at all, and the per-track fold is planned
+	// off them. The probes are kept for the write loop, which reads the same
+	// facts (damage, notes, emptiness, the source width the fold warning
+	// names).
+	probes := make([]albumProbe, len(tracks))
+	widths := make([]int, len(tracks))
+	for i, t := range tracks {
+		probes[i] = probeAudio(ctx, runner, t.Input)
+		widths[i] = probes[i].channels
+	}
+	if err := refuseMixedSurround(inputs, widths); err != nil {
+		return nil, err
+	}
+	// Each track is measured at the width its own encode delivers: a lossy row
+	// folds a source wider than stereo itself, and a gain derived from
+	// unfolded figures describes audio the encoder never meters.
+	folds := make([]int, len(tracks))
+	for i, t := range tracks {
+		n, perr := runner.PlanOutputChannels(ctx, t.Input, t.Output, media.Spec{Codec: codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth})
+		if perr != nil {
+			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, perr)
+		}
+		if n > 0 && widths[i] > 0 && n < widths[i] {
+			folds[i] = n
+		}
+	}
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs, folds)
 	if err != nil {
 		return nil, albumTrackError(err, inputs)
 	}
@@ -403,6 +500,23 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		GainDB:   loudness.AlbumGain(target, album, perTrack, ao.peakMode == PeakCap),
 	}
 
+	// The album takes the Opus header-gain path on the same terms a single
+	// file does: cap mode's one scalar, every member already Opus, staying
+	// Opus, with no bitrate asked for. A fold cannot arise here, since a fold
+	// needs an encode and every member would need the same one.
+	headerGain := ao.peakMode == PeakCap && codec == media.CodecOpus && spec.Bitrate == 0
+	for _, pr := range probes {
+		if pr.codec != "opus" {
+			headerGain = false
+			break
+		}
+	}
+	if headerGain {
+		// The heads state the quantized gain, so that is the gain the result
+		// names: a reader comparing it against the file finds what is there.
+		tspec.GainDB = media.OpusGainDB(media.OpusGainQ78(tspec.GainDB))
+	}
+
 	res := &AlbumProcessResult{
 		Album:  loudnessInfo(album),
 		GainDB: tspec.GainDB,
@@ -420,9 +534,10 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	var fold albumFold
 	var levels albumLevels
 	var carry albumCarryWarns
-	damaged := albumInputRemarks{code: WarnInputDamage}
-	noted := albumInputRemarks{code: WarnInputNote}
-	var empty albumEmptyWarns
+	// Each write's own read finds damage past the headers that the probe and
+	// the measurement did not; the rest of the input-side warnings are the
+	// ones a measurement raises too, folded by the shared helper below.
+	written := make([][]string, len(tracks))
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -430,44 +545,64 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		// Album mode writes through runner.Transcode rather than the pipeline, so
 		// nothing here computes the probes warnImplicitDownmix reads. Without this
 		// the fold is doubly silent, since the engine's own log line is demoted.
-		in := probeAudio(ctx, runner, t.Input)
-		empty.observe(t.Input, in.empty)
-		tres, err := runner.Transcode(ctx, t.Input, t.Output, tspec)
+		in := probes[i]
+		var tres media.Result
+		var err error
+		switch {
+		case headerGain && res.LoudnessApplied:
+			tres, _, err = runner.RemuxWithOpusGain(ctx, t.Input, t.Output, media.OpusGainQ78(tspec.GainDB))
+		case headerGain:
+			// No measurable loudness, so no gain to write: the album is
+			// delivered as the copies it would have been anyway.
+			tres, err = runner.Transcode(ctx, t.Input, t.Output, media.Spec{Codec: media.CodecCopy})
+		default:
+			tres, err = runner.Transcode(ctx, t.Input, t.Output, tspec)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
 		}
 		// The probe's damage list covers the headers; the measurement's and
 		// the encode's cover the whole read, the probe's entries included.
-		damaged.observe(t.Input, inputDamageNote(mergeRemarks(in.damage, perTrack[i].Warnings, tres.InputWarnings)))
-		noted.observe(t.Input, inputNote(in.notes))
-		levels.observe(t.Output, in.codec, tres.Levels)
-		fold.observe(in.channels, probeAudio(ctx, runner, t.Output).channels)
-		// Album tracks are always re-encoded, so no cut remap and no own-audio
-		// restore apply. Carried ReplayGain would be wrong twice over here: the
-		// gain just changed the loudness it describes.
+		written[i] = tres.InputWarnings
+		if !headerGain {
+			// A packet copy encodes nothing, so there are no output levels to
+			// read and no fold to find; both would cost a probe to learn what
+			// the copy already guarantees.
+			levels.observe(t.Output, in.codec, tres.Levels)
+			fold.observe(in.channels, probeAudio(ctx, runner, t.Output).channels)
+		}
+		// An encoded album track changed its own audio, so no cut remap and no
+		// own-audio restore apply: carried ReplayGain would be wrong twice
+		// over, since the gain just changed the loudness it describes. A
+		// header-gain album copied its packets, so everything but the gain
+		// family still holds.
 		// Album tracks are written straight to their destinations, so the file
 		// warnings name is the file that was written. The carry warnings run
 		// through a per-track emitter so the album can fold them into one.
 		tem := newEmitter(nil, "")
-		res.TagCarry[i] = c.carryTags(ctx, t.Input, t.Output, t.Output, nil, false, tem)
+		// The same condition the write switch above used: an album that copied
+		// its packets with no gain to write changed nothing, so every own-audio
+		// value still holds.
+		own := ownAudioDrop
+		switch {
+		case headerGain && res.LoudnessApplied:
+			own = ownAudioRestoreButGain
+		case headerGain:
+			own = ownAudioRestore
+		}
+		res.TagCarry[i] = c.carryTags(ctx, t.Input, t.Output, t.Output, nil, own, tem)
 		carry.observe(em, tem.collected())
 		res.Outputs[i] = t.Output
 	}
 	fold.warn(em, codec)
 	levels.warn(em, ao.peakMode)
 	carry.warn(em)
-	damaged.warn(em)
-	noted.warn(em)
-	empty.warn(em)
+	for _, w := range albumInputWarnings(inputs, probes, perTrack, album, written...) {
+		em.warn(w.Code, w.Detail)
+	}
+	res.HeaderGain = headerGain && res.LoudnessApplied
 	res.Delivered = albumDelivered(ctx, runner, res.Outputs, album, tspec.GainDB, ao.peakMode)
 	warnAlbumTargetMissed(em, target, ao.peakMode, album, perTrack, res.Delivered)
-	// The album figure is one measurement over the whole timeline, and the
-	// meter reports how much of it it read.
-	// The album measurement has no frames behind it only when every track was
-	// empty; one empty track among full ones leaves a measurable album.
-	if cause := unmeasurableLoudnessCause(album.Duration, empty.all(len(tracks)), &album); cause != "" {
-		em.warn(WarnLoudnessUnmeasurable, "album integrated loudness could not be measured: "+cause)
-	}
 	res.Warnings = em.collected()
 	return res, nil
 }
@@ -697,6 +832,32 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 		p.channels, p.codec, p.empty = a.Channels, a.CodecName, a.Samples == 0
 	}
 	return p
+}
+
+// refuseMixedSurround rejects an album the group timeline cannot open:
+// WaxFlow's Concat conforms every member to the widest layout, and its mixer
+// builds no target wider than stereo, so a stereo track beside a 5.1 one
+// fails when the timeline reaches it, with an error that names no track.
+// Refusing here names it, and spares the per-track pass that would have
+// preceded the failure. A width of 0 is a track the probe could not read;
+// the measurement reports that failure itself, with its own message.
+func refuseMixedSurround(inputs []string, widths []int) error {
+	widest, at := 0, 0
+	for i, w := range widths {
+		if w > widest {
+			widest, at = w, i
+		}
+	}
+	if widest <= 2 {
+		return nil
+	}
+	for i, w := range widths {
+		if w > 0 && w < widest {
+			return fmt.Errorf("%w: track %s has %d channels while %s has %d; an album with a surround member needs every member at that width (the group measurement mixes only to mono or stereo)",
+				waxerr.ErrUnsupportedInput, filepath.Base(inputs[i]), w, filepath.Base(inputs[at]), widest)
+		}
+	}
+	return nil
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only

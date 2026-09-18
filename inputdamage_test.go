@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/internal/pipeline"
@@ -414,5 +415,102 @@ func TestProcessAlbumRefusesShortDecodeNamingTrack(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "delivered") {
 		t.Errorf("err = %q, want the delivered-vs-declared cause kept", err)
+	}
+}
+
+// A cut of a lazily walked payload resolves against the length a decode
+// delivers, not the header's claim: inside it the cut runs, past it the spec
+// is rejected before the engine reads a sample, as a truncated FLAC's clamped
+// probe already behaves. Before this the engine refused the run as "the source
+// ended N samples into a span that declared M" and the CLI called it an I/O
+// failure.
+func TestCutOnTruncatedLazyPayloadMeasuresFirst(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		format TranscodeFormat
+		ext    string
+		// interior says an interior span of the truncated file can be cut.
+		// A truncated ADTS's walked count is one frame too generous
+		// (WaxFlow's adts.Demuxer.extend indexes a frame before finding its
+		// span runs past the data end), and a composition's seam check holds
+		// the member to that count, so the run is refused. The ask is in
+		// docs/upstream-requests.md and the residual in
+		// docs/deferred-work.md; a span reaching the end is open-ended and
+		// unaffected, which is the shape the entry is about.
+		interior bool
+	}{{"mp3", FormatMP3, ".mp3", true}, {"adts", FormatAAC, ".aac", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, truncated := damagedFixture(t, dir, "in"+tc.ext, tc.format) // 3 s declared, ~1.8 s real
+			c := newOfflineClient(t)
+
+			// Remove the head: the kept span runs to the real end.
+			res, err := c.Process(ctx, ProcessRequest{Input: truncated, ProcessSpec: ProcessSpec{
+				Output:    ToFile(filepath.Join(dir, "tail.flac")),
+				Transcode: &TranscodeSpec{Format: FormatFLAC},
+				Cut:       &CutSpec{Ranges: []TimeRange{{Start: 0, End: 500 * time.Millisecond}}},
+			}})
+			if err != nil {
+				t.Fatalf("cut to the real end: %v", err)
+			}
+			if d := res.OutputFormat.Duration; d <= 0 || d > 1800*time.Millisecond {
+				t.Errorf("output duration %v, want the readable remainder (about 1.3 s)", d)
+			}
+			if got := warningDetail(res, WarnInputDamage); got == "" {
+				t.Error("no input-damage warning for the truncated source")
+			}
+
+			// A span past the real end is rejected up front, naming the damage.
+			_, err = c.Process(ctx, ProcessRequest{Input: truncated, ProcessSpec: ProcessSpec{
+				Output:    ToFile(filepath.Join(dir, "past.flac")),
+				Transcode: &TranscodeSpec{Format: FormatFLAC},
+				Cut:       &CutSpec{Ranges: []TimeRange{{Start: 2500 * time.Millisecond, End: 2900 * time.Millisecond}}},
+			}})
+			if err == nil || !strings.Contains(err.Error(), "do not intersect") || !errors.Is(err, ErrIncompatibleSpec) {
+				t.Fatalf("err = %v, want the pre-engine rejection", err)
+			}
+
+			if !tc.interior {
+				return
+			}
+			// A normalizing cut takes the same path and no longer flips to exit 2.
+			if _, err := c.Process(ctx, ProcessRequest{Input: truncated, ProcessSpec: ProcessSpec{
+				Output:    ToFile(filepath.Join(dir, "norm.flac")),
+				Transcode: &TranscodeSpec{Format: FormatFLAC},
+				Loudness:  &LoudnessSpec{Mode: LoudnessApply, Target: -16},
+				Cut:       &CutSpec{Ranges: []TimeRange{{Start: 200 * time.Millisecond, End: 400 * time.Millisecond}}},
+			}}); err != nil {
+				t.Fatalf("normalizing cut: %v", err)
+			}
+		})
+	}
+}
+
+// The numbers the run reports describe the file it read, not the length the
+// header claimed: a truncated source's declared total would put a 3 s source
+// duration and a 500 ms removal beside a 1.3 s output.
+func TestCutOnTruncatedLazyPayloadReportsMeasuredNumbers(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, truncated := damagedFixture(t, dir, "in.mp3", FormatMP3)
+
+	pres, err := pipeline.Run(ctx, media.NewRunner(media.RunnerConfig{}), truncated, filepath.Join(dir, "tail.flac"), pipeline.Spec{
+		Remove: []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}},
+		Codec:  media.CodecFLAC,
+	}, nil)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+	if pres.SourceDuration <= 0 || pres.SourceDuration > 2*time.Second {
+		t.Errorf("SourceDuration = %v, want the measured length (about 1.8 s), not the declared 3 s", pres.SourceDuration)
+	}
+	kept := pres.SourceDuration - pres.Removed
+	out, err := media.NewRunner(media.RunnerConfig{}).Probe(ctx, pres.OutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := (kept - out.Format.Duration).Abs(); d > 60*time.Millisecond {
+		t.Errorf("source %v less removed %v = %v, want the delivered %v", pres.SourceDuration, pres.Removed, kept, out.Format.Duration)
 	}
 }

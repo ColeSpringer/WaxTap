@@ -45,6 +45,23 @@ func ToneWAVMs(freqHz float64, ms, channels, rate int) []byte {
 	})
 }
 
+// FrontsOnlyWAV returns a 16-bit PCM WAV whose first two channels carry the
+// SineWAV tone and whose remaining channels are silent: seconds long,
+// channels wide, 44100 Hz. Every other fixture here puts the same signal in
+// every channel, which a stereo fold sums coherently back to the same
+// loudness, so only a file whose energy sits in one pair shows what folding
+// a wide source does to a measurement.
+func FrontsOnlyWAV(seconds, channels int) []byte {
+	const amp = 0.5 // ~-6 dBFS, SineWAV's level
+	const rate = 44100
+	return pcmWAVPerChannel(seconds*rate, channels, rate, func(i, ch int) float64 {
+		if ch > 1 {
+			return 0
+		}
+		return amp * math.Sin(2*math.Pi*440.0*float64(i)/float64(rate))
+	})
+}
+
 // SilenceWAV returns a 16-bit PCM WAV of digital silence: every sample zero,
 // seconds long, channels wide, 44100 Hz. Its integrated loudness and peaks are
 // -Inf, which is the other way a measurement comes back unusable.
@@ -193,14 +210,20 @@ func floatWAV(frames, channels, rate int, sampleAt func(i int) float64) []byte {
 // pcmWAV builds a 16-bit WAV from a per-frame sample function in [-1, 1]. Every
 // channel carries the same signal.
 func pcmWAV(frames, channels, rate int, sampleAt func(i int) float64) []byte {
+	return pcmWAVPerChannel(frames, channels, rate, func(i, _ int) float64 { return sampleAt(i) })
+}
+
+// pcmWAVPerChannel builds a 16-bit WAV from a per-frame, per-channel sample
+// function in [-1, 1], for a fixture whose channels differ.
+func pcmWAVPerChannel(frames, channels, rate int, sampleAt func(i, ch int) float64) []byte {
 	if channels < 1 {
 		channels = 1
 	}
 	data := make([]byte, frames*channels*2)
 	off := 0
 	for i := range frames {
-		s := int16(math.Round(sampleAt(i) * math.MaxInt16))
-		for range channels {
+		for ch := range channels {
+			s := int16(math.Round(sampleAt(i, ch) * math.MaxInt16))
 			binary.LittleEndian.PutUint16(data[off:], uint16(s))
 			off += 2
 		}

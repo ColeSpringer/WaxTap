@@ -93,10 +93,15 @@ func guestHomepage(vd string) *http.Response {
 // flaggedVD answer empty-body 403 (the delivery cap); any other visitorData is
 // served in full.
 type rotationWorld struct {
-	mu           sync.Mutex
-	media        string
-	extraQuery   string
-	flaggedVD    string // visitorData googlevideo caps; "*" caps every identity; defaults to the first
+	mu         sync.Mutex
+	media      string
+	extraQuery string
+	flaggedVD  string // visitorData googlevideo caps; "*" caps every identity; defaults to the first
+	// uncapped serves every identity in full. flaggedVD has no spelling for
+	// "cap nobody": its zero value caps the first identity.
+	uncapped bool
+	// player builds the /player answer; nil uses rotationPlayerJSON.
+	player       func(vd string, clen int, extraQuery string) string
 	homepageHits int
 	vdServed     []string // visitorData observed on media requests, in order
 	mediaCodes   []int    // status answered for each media request
@@ -112,6 +117,9 @@ func (w *rotationWorld) flagged() string {
 // capped reports whether googlevideo rejects this identity. "*" caps all of them,
 // for the case where no amount of rotating helps.
 func (w *rotationWorld) capped(vd string) bool {
+	if w.uncapped {
+		return false
+	}
 	return w.flaggedVD == "*" || vd == w.flagged()
 }
 
@@ -131,7 +139,11 @@ func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
 				t.Errorf("player request without visitorData:\n%s", body)
 				return rotResp(http.StatusBadRequest, ""), nil
 			}
-			return rotResp(http.StatusOK, rotationPlayerJSON(string(m[1]), len(w.media), w.extraQuery)), nil
+			p := w.player
+			if p == nil {
+				p = rotationPlayerJSON
+			}
+			return rotResp(http.StatusOK, p(string(m[1]), len(w.media), w.extraQuery)), nil
 		case strings.Contains(r.URL.Path, "/videoplayback"):
 			vd := r.URL.Query().Get("vd")
 			w.vdServed = append(w.vdServed, vd)

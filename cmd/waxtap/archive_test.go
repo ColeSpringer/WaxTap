@@ -81,3 +81,33 @@ func TestArchiveConcurrentAdd(t *testing.T) {
 		}
 	}
 }
+
+// The archive is the record of what not to download again, so a failed append
+// must not be remembered as a success: the next run would skip a video it never
+// wrote down.
+func TestArchiveAddReportsAWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "archive.txt") // no such directory
+	a, err := openArchive(path)
+	if err != nil {
+		t.Fatalf("openArchive: %v", err)
+	}
+	if err := a.Add("dummyVideo0"); err == nil {
+		t.Fatal("Add on an unwritable path returned no error")
+	}
+	if a.seen["dummyVideo0"] {
+		t.Error("a failed append was remembered; the next run would skip the video")
+	}
+	// The failure is not sticky: a working path records as usual.
+	ok := filepath.Join(dir, "archive.txt")
+	b, err := openArchive(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Add("dummyVideo1"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !b.seen["dummyVideo1"] {
+		t.Error("a successful append was not remembered")
+	}
+}

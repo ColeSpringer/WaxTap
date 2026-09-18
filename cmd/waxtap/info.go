@@ -67,6 +67,10 @@ func newInfoCmd() *cobra.Command {
 				return err
 			}
 			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
+			noteProbeSkippedIfUnread(env, probe, info)
+			for _, w := range info.Warnings {
+				env.info("warning: [%s] %s\n", w.Code, w.Detail)
+			}
 			video := info.Video
 
 			var resolved *waxtap.ResolvedStream
@@ -211,6 +215,15 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	}
 }
 
+// noteProbeSkippedIfUnread records that --probe read nothing. A SABR-only pick
+// has no direct URL to stage, so the row still carries the manifest's numbers,
+// and silence there reads as a probe that agreed with the manifest.
+func noteProbeSkippedIfUnread(env *appEnv, asked bool, info *waxtap.InfoResult) {
+	if asked && !info.Probed && info.BestIndex >= 0 {
+		env.note(noteProbeSkipped, "the selected stream is SABR-only (no direct URL), so --probe read nothing; the row's numbers are the manifest's")
+	}
+}
+
 func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr error, rs *waxtap.ResolvedStream) error {
 	v := info.Video
 	// Match the human display without changing the selection indexed by bestIdx.
@@ -253,6 +266,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		Formats         []formatJSON  `json:"formats"`
 		BestAudioItag   *int          `json:"bestAudioItag,omitempty"`
 		Resolved        *resolvedJSON `json:"resolved,omitempty"`
+		Warnings        []warningJSON `json:"warnings,omitempty"`
 		Notes           []noteJSON    `json:"notes,omitempty"`
 	}{
 		SchemaVersion:   schemaVersion,
@@ -280,6 +294,9 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		FullMetadata: info.FullMetadata,
 		Chapters:     chaptersToJSON(v.Chapters),
 		Formats:      formats,
+	}
+	for _, w := range info.Warnings {
+		out.Warnings = append(out.Warnings, warningJSON{Code: w.Code.String(), Detail: w.Detail})
 	}
 	// chapterCount is a pointer so it can be absent rather than 0. Without the
 	// full pass no chapters were ever fetched, and reporting 0 asserted a video

@@ -228,7 +228,7 @@ func TestMeasureAlbum(t *testing.T) {
 		os.WriteFile(p, mediatest.SineWAV(2, 2), 0o644)
 		inputs = append(inputs, p)
 	}
-	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs)
+	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs, nil)
 	if err != nil {
 		t.Fatalf("measure album: %v", err)
 	}
@@ -237,6 +237,27 @@ func TestMeasureAlbum(t *testing.T) {
 	}
 	if !album.Finite() || !perTrack[0].Finite() {
 		t.Errorf("album/track measurements not finite: album=%+v track0=%+v", album, perTrack[0])
+	}
+
+	// A uniform fold moves both the tracks and the group: a stereo source
+	// folded to mono is the audio a mono encode of the album would meter.
+	mono, monoTracks, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 1})
+	if err != nil {
+		t.Fatalf("measure album folded: %v", err)
+	}
+	if mono.IntegratedLUFS == album.IntegratedLUFS || monoTracks[0].IntegratedLUFS == perTrack[0].IntegratedLUFS {
+		t.Errorf("folded album %+v / track %+v match the unfolded figures; the fold did not reach the measurement", mono, monoTracks[0])
+	}
+
+	// A fold only some members take leaves the group at the source layout:
+	// the timeline conforms every member to the widest one first, so a fold
+	// after that is not the fold the encoder applies.
+	mixed, _, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 0})
+	if err != nil {
+		t.Fatalf("measure album part-folded: %v", err)
+	}
+	if mixed.IntegratedLUFS != album.IntegratedLUFS {
+		t.Errorf("part-folded album = %.3f, want the unfolded %.3f", mixed.IntegratedLUFS, album.IntegratedLUFS)
 	}
 }
 

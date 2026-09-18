@@ -59,9 +59,10 @@ upstream lands it, do the follow-up and remove both entries.
   a source that ended early is damage, not a fetch that failed). WaxTap maps
   the unreadable code to an I/O failure (exit 10), so a cut of a truncated
   MP3 reports a bad disk. Wanted: `CodeMalformedInput` on that refusal.
-  Shipped workaround: none; the message names the cause, and the
-  WaxTap-side fix that avoids the refusal for the common case (measuring
-  the input before a cut) is in deferred-work.md.
+  Shipped workaround: WaxTap measures an input whose length is only claimed
+  before resolving a cut (a walk, or a decode for a Xing MP3 and a WMA; see
+  the walk entry below), so the refusal is unreachable for the common case;
+  the code is still wrong for the rest.
 
 - **A probe of a WebM Opus track reads the whole file.** `mka.finalizeTrack`
   (`container/mka/demux.go:600`) calls `ensureWalk`
@@ -109,7 +110,15 @@ upstream lands it, do the follow-up and remove both entries.
   resolving a cut and decodes it only when the walk could not settle the
   count, which is the Xing case; a normalizing cut of such a file then
   decodes twice (the count, then the measurement of the composed cut), and a
-  copy cut of ADTS walks once more than the packet grid already does.
+  copy cut of ADTS walks once more than the packet grid already does. The
+  decode is paid on a healthy file too, which is the part this ask removes:
+  the walk's damage warning cannot gate it, since a Xing MP3 truncated
+  exactly on a frame boundary walks clean while still declaring its full
+  count (measured: an 803525-byte fixture cut to 481697 bytes walks with no
+  warning, declares 882000 samples, and decodes 528863), so the only way to
+  tell that file from an intact one is to decode it. Cost: about 36 ms per
+  20 s of audio on a warm cache, on every cut of every Xing MP3, copy cuts
+  included.
 
 - **A truncated ADTS frame can be walked in as if it were whole.**
   `adts.Demuxer.extend` (`container/adts/demux.go:294-322`) resyncs to a

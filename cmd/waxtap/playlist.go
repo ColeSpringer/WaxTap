@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"text/tabwriter"
@@ -58,9 +59,7 @@ func (s *syncWriter) emitItem(entry youtube.PlaylistEntry, res *waxtap.Result, s
 				}
 			}
 		}
-		if b, mErr := json.Marshal(rec); mErr == nil {
-			fmt.Fprintf(s.env.out, "%s\n", b)
-		}
+		writeRecord(s.env.out, rec)
 		return
 	}
 
@@ -168,9 +167,7 @@ func (s *syncWriter) emitSummary(sum playlistSummary) error {
 			Remaining: sum.remaining, CapReached: sum.capReached, EnumerationErrors: sum.enumErrors,
 			Notes: s.env.notesJSON(),
 		}
-		if b, err := json.Marshal(rec); err == nil {
-			fmt.Fprintf(s.env.out, "%s\n", b)
-		}
+		writeRecord(s.env.out, rec)
 	} else {
 		line := fmt.Sprintf("done: %d ok, %d skipped, %d failed (of %d)", sum.ok, sum.skipped, failed, sum.total)
 		if sum.remaining > 0 {
@@ -209,6 +206,27 @@ func countOf(n int, unit string) string {
 	return fmt.Sprintf("%d %ss", n, unit)
 }
 
+// listErrorJSON is one entry of the list document's errors. An enrichment
+// failure names the entry it happened to, so a consumer can pair it with
+// entries[] instead of re-reading the message.
+type listErrorJSON struct {
+	errorJSON
+	VideoID string `json:"videoId,omitempty"`
+	Index   int    `json:"index,omitempty"`
+}
+
+// listDuration is the DURATION cell: the listing's live marker where it has
+// one, else the length or a dash.
+func listDuration(e waxtap.PlaylistEntry) string {
+	switch e.LiveStatus {
+	case waxtap.LiveNow:
+		return "live"
+	case waxtap.LiveUpcoming:
+		return "upcoming"
+	}
+	return durationOrDash(e.Duration)
+}
+
 // emitPlaylistList prints enumerated entries without downloading (the --list flag).
 func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	if env.jsonMode() {
@@ -218,31 +236,51 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 			Title           string  `json:"title"`
 			Author          string  `json:"author,omitempty"`
 			DurationSeconds float64 `json:"durationSeconds,omitempty"`
+			// LiveStatus is the listing's own marker ("live" or "upcoming"),
+			// absent for an ordinary video. It is why such an entry carries no
+			// duration and was not enriched.
+			LiveStatus string `json:"liveStatus,omitempty"`
 		}
 		entries := make([]entryJSON, len(pl.Entries))
 		for i, e := range pl.Entries {
-			entries[i] = entryJSON{e.Index + 1, e.VideoID, e.Title, e.Author, e.Duration.Seconds()}
+			entries[i] = entryJSON{
+				Index:           e.Index + 1,
+				VideoID:         e.VideoID,
+				Title:           e.Title,
+				Author:          e.Author,
+				DurationSeconds: e.Duration.Seconds(),
+				LiveStatus:      infoLiveStatus(e.LiveStatus),
+			}
 		}
 		// Enumeration errors reach the human listing as warning lines and used to
 		// reach the JSON one not at all, so a --json consumer could not tell a
 		// complete listing from one missing entries it was never told about.
-		errs := make([]errorJSON, 0, len(pl.Errors))
+		errs := make([]listErrorJSON, 0, len(pl.Errors))
 		for _, perr := range pl.Errors {
 			// Playlist.Errors never holds a nil, but errorObject documents nil
 			// for nil, and a guard is cheaper than a dereference resting on a
 			// slice invariant defined two packages away.
-			if o := errorObject(perr); o != nil {
-				errs = append(errs, *o)
+			o := errorObject(perr)
+			if o == nil {
+				continue
 			}
+			row := listErrorJSON{errorJSON: *o}
+			// An enrichment failure knows which entry it belongs to; the index
+			// is 1-based, matching entries[].index.
+			if ee, ok := errors.AsType[*waxtap.EnrichError](perr); ok {
+				row.VideoID, row.Index = ee.VideoID, ee.Index+1
+			}
+			errs = append(errs, row)
 		}
 		return env.emitJSON(struct {
-			SchemaVersion int         `json:"schemaVersion"`
-			PlaylistID    string      `json:"playlistId"`
-			Title         string      `json:"title,omitempty"`
-			Count         int         `json:"count"`
-			Entries       []entryJSON `json:"entries"`
-			Errors        []errorJSON `json:"errors,omitempty"`
-		}{schemaVersion, pl.ID, pl.Title, len(pl.Entries), entries, errs})
+			SchemaVersion int             `json:"schemaVersion"`
+			PlaylistID    string          `json:"playlistId"`
+			Title         string          `json:"title,omitempty"`
+			Count         int             `json:"count"`
+			Entries       []entryJSON     `json:"entries"`
+			Errors        []listErrorJSON `json:"errors,omitempty"`
+			Notes         []noteJSON      `json:"notes,omitempty"`
+		}{schemaVersion, pl.ID, pl.Title, len(pl.Entries), entries, errs, env.notesJSON()})
 	}
 
 	if pl.Title != "" {
@@ -251,13 +289,16 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tID\tDURATION\tTITLE")
 	for _, e := range pl.Entries {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.Index+1, e.VideoID, durationOrDash(e.Duration), e.Title)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.Index+1, e.VideoID, listDuration(e), e.Title)
 	}
-	tw.Flush()
+	// The warnings go out whatever the table did: they are the only signal
+	// that the listing is incomplete, and they are on stderr, which a broken
+	// stdout says nothing about.
+	ferr := tw.Flush()
 	for _, perr := range pl.Errors {
 		env.info("warning: %v\n", perr)
 	}
-	return nil
+	return ferr
 }
 
 // infoSidecarJSON extends a result document with metadata requested by

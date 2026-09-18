@@ -175,7 +175,14 @@ func renderLoudness(env *appEnv, res *waxtap.Result) {
 		}
 	}
 	if l.Output != nil {
-		env.printf("          output %s LUFS (target %s)\n", humanLUFS(l.Output.IntegratedLUFS), humanLUFS(l.Target))
+		if res.LoudnessApplied {
+			env.printf("          output %s LUFS (target %s, gain %+.1f dB)\n", humanLUFS(l.Output.IntegratedLUFS), humanLUFS(l.Target), l.GainDB)
+		} else {
+			env.printf("          output %s LUFS (target %s)\n", humanLUFS(l.Output.IntegratedLUFS), humanLUFS(l.Target))
+		}
+		if l.HeaderGain {
+			env.printf("          gain written to the Opus header; packets copied untouched\n")
+		}
 		if nonFinite(l.Output.IntegratedLUFS) {
 			env.printf("          (%s)\n", unmeasurableNote(res, "output"))
 		}
@@ -339,6 +346,11 @@ type loudnessJSON struct {
 	Input  *loudnessInfoJSON `json:"input,omitempty"`
 	Output *loudnessInfoJSON `json:"output,omitempty"`
 	Target jsonFloat         `json:"target"`
+	// GainDB is the gain the delivered file carries, present when the run
+	// applied one. HeaderGain says it rode in the Opus header with the
+	// packets copied untouched.
+	GainDB     *jsonFloat `json:"gainDb,omitempty"`
+	HeaderGain bool       `json:"headerGain,omitempty"`
 }
 
 type warningJSON struct {
@@ -441,6 +453,10 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		lj := &loudnessJSON{Target: jsonFloat(res.Loudness.Target)}
 		lj.Input = loudnessInfoToJSON(res.Loudness.Input)
 		lj.Output = loudnessInfoToJSON(res.Loudness.Output)
+		if res.LoudnessApplied {
+			g := jsonFloat(res.Loudness.GainDB)
+			lj.GainDB, lj.HeaderGain = &g, res.Loudness.HeaderGain
+		}
 		out.Loudness = lj
 	}
 	for _, w := range res.Warnings {

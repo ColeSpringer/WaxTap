@@ -157,7 +157,7 @@ func isCategoryList(s string) bool {
 
 // bindCutFlags registers the time-range cut flags shared by download and cut.
 func bindCutFlags(f *pflag.FlagSet, ranges *[]string, cutMode *string, crossfade *time.Duration, sbOnError *string) {
-	f.StringArrayVar(ranges, "cut-range", nil, "remove a time range start-end, each SS[.sss], MM:SS, HH:MM:SS, or a Go duration like 1m30s (repeatable)")
+	f.StringArrayVar(ranges, "cut-range", nil, "remove a time range start-end, each SS[.sss], MM:SS, HH:MM:SS, or a Go duration like 1m30s (repeatable, or several comma-separated)")
 	f.StringVar(cutMode, "cut-mode", "smart", "cut rendering: smart|copy (rejects --format/--downmix, which re-encode)|accurate")
 	f.DurationVar(crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
 	f.StringVar(sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")

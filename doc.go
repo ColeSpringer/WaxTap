@@ -11,6 +11,11 @@
 // optional pacing, and an optional limit on download attempts. [Options]
 // configures per-host request rates and post-rate-limit cooldowns.
 //
+// On local files, [Client.Process] runs one file through the same stages, and
+// [Client.PlanSplit] and [Client.Split] divide a single-file rip by its CUE
+// sheet: PlanSplit reads the sheet against the rip and reports where the
+// pieces fall, Split writes them and tags each from the sheet.
+//
 // The default client chain returns playable audio for public videos with no PO
 // token. WEB-family clients need a [POTokenProvider] and remain experimental. For
 // byte-exact session coherence with a token minter, [Options.Session] /
