@@ -10,20 +10,34 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// rootFlags holds values for the persistent output flags. The package-level
-// value also lets main read --json after Execute returns, before an appEnv exists.
+// rootFlags holds the values of the persistent output flags, read back from the
+// command that ran.
 type rootFlags struct {
 	json    bool
 	quiet   bool
 	verbose bool
 }
 
-var rootFlagsValue rootFlags
+// outputFlags reads the persistent output flags off cmd's root. pflag shares one
+// *Flag between the root's persistent set and a subcommand's merged set, so the
+// parsed value is there whichever command ran, and main can read it after
+// Execute returns, before an appEnv exists. A command built without a root, which
+// is how tests reach one subcommand, has no such flags and gets the defaults:
+// its output mode is its own, not whatever the last root run asked for.
+func outputFlags(cmd *cobra.Command) rootFlags {
+	pf := cmd.Root().PersistentFlags()
+	set := func(name string) bool {
+		v, err := pf.GetBool(name)
+		return err == nil && v
+	}
+	return rootFlags{json: set("json"), quiet: set("quiet"), verbose: set("verbose")}
+}
 
 // runNotes holds the current run's note collector so report can attach notes to
 // an error envelope, which is rendered from main after the appEnv is gone. It is
-// the rootFlagsValue pattern, with a mutex because playlist items collect
-// concurrently; newRootCmd resets it so one test cannot color the next.
+// process state rather than per-run state: newRootCmd resets it and every appEnv
+// replaces it, with a mutex because playlist items collect concurrently. Two runs
+// in one process share it, which only tests do.
 var (
 	runNotesMu sync.Mutex
 	runNotes   *noteCollector
@@ -47,10 +61,10 @@ func currentRunNotes() []noteJSON {
 }
 
 // jsonRequested reports whether --json survives a parse of args. Flag parsing
-// aborts at the first bad flag, so a --json after one never reaches
-// rootFlagsValue, and the error still has to honor the contract. An allowlisted
-// parse gives real parser semantics: -- terminates, --json=false wins, and an
-// unknown flag's value is stripped without swallowing a following --json.
+// aborts at the first bad flag, so a --json after one never reaches the flag set,
+// and the error still has to honor the contract. An allowlisted parse gives real
+// parser semantics: -- terminates, --json=false wins, and an unknown flag's value
+// is stripped without swallowing a following --json.
 //
 // A flag value that is literally "--json" is a benign false positive: a JSON
 // error document instead of a human one, on a path that is already failing.
@@ -92,10 +106,12 @@ func newRootCmd() *cobra.Command {
 
 	// Keep only output flags persistent. Other flags belong to the commands that
 	// use them, so extraction flags follow the subcommand.
+	// The parsed values are read back through outputFlags, so these need no
+	// binding of their own; a bound variable would be state outliving the command.
 	pf := root.PersistentFlags()
-	pf.BoolVar(&rootFlagsValue.json, "json", false, "emit machine-readable JSON instead of human output")
-	pf.BoolVarP(&rootFlagsValue.quiet, "quiet", "q", false, "suppress progress and informational output (on success, print only the output path)")
-	pf.BoolVarP(&rootFlagsValue.verbose, "verbose", "v", false, "enable verbose (debug) logging on stderr")
+	pf.Bool("json", false, "emit machine-readable JSON instead of human output")
+	pf.BoolP("quiet", "q", false, "suppress progress and informational output (on success, print only the output path)")
+	pf.BoolP("verbose", "v", false, "enable verbose (debug) logging on stderr")
 
 	root.AddCommand(
 		newInfoCmd(),
@@ -123,7 +139,7 @@ func wrapUsageErrors(cmd *cobra.Command) {
 	cmd.SilenceUsage = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		// Parsing stopped at the offending token, so anything after it (--json
-		// included) never landed in rootFlagsValue.
+		// included) never landed in the flag set.
 		return unparsedFlagsError(err.Error())
 	})
 	if inner := cmd.Args; inner != nil {

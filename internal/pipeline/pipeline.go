@@ -251,9 +251,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// its Xing count, and the engine refuses a span the source ends
 		// inside. So the source is measured first and the ranges resolve
 		// against what a read delivers, the way a truncated FLAC's clamped
-		// probe already behaves. A walk settles most of these inputs; a Xing
-		// MP3 and a WMA cost a decode. A download never reaches here: WebM
-		// Opus is walked at open and m4a states an exact count.
+		// probe already behaves. A walk settles every input that has one, a
+		// Xing MP3 included; only a WMA costs a decode. A download reaches
+		// here for a WebM Opus row, whose Matroska open is lazy and states
+		// the Info Duration; an m4a states an exact count and does not.
 		send(StageAnalyzing)
 		length, lerr := r.MeasureLength(ctx, input)
 		if lerr != nil {
@@ -262,6 +263,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		total, sourceSamples = length.Duration, length.Samples
 		sourceEmpty = length.Samples == 0
 		probe.Warnings = mergeSourceWarnings(probe.Warnings, length.Warnings)
+		// The walk's own remarks arrive here too: a count off by one clean frame
+		// is not damage, and the note is what says the measurement moved.
+		probe.Notes = mergeSourceWarnings(probe.Notes, length.Notes)
 	}
 
 	// Resolve the cut against the real duration. A cut is only "effective" when it
@@ -318,9 +322,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	}
 	res.SourceChannels = srcChannels
 	// Both lists are cloned: the warnings grow below and the notes go out
-	// to the caller, and the probe's backing arrays are its own. The notes
-	// are complete as probed, since the engine raises every note at open;
-	// only damage is found past the headers by a read.
+	// to the caller, and the probe's backing arrays are its own. A probe's
+	// notes are the ones the engine raises at open; a measurement above has
+	// already merged in the walk's, and only damage is found past there.
 	res.SourceWarnings = slices.Clone(probe.Warnings)
 	res.SourceNotes = slices.Clone(probe.Notes)
 	res.SourceEmpty = sourceEmpty

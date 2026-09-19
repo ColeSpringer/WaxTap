@@ -258,12 +258,9 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 		probes[i] = probeAudio(ctx, runner, in)
 		widths[i] = probes[i].channels
 	}
-	if err := refuseMixedSurround(paths, widths); err != nil {
-		return nil, err
-	}
 	// No folds: a measurement written to nothing is reported at the layout the
 	// files carry, and the caller chooses an encode later.
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths, nil)
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths, nil, widths)
 	if err != nil {
 		return nil, albumTrackError(err, paths)
 	}
@@ -452,19 +449,15 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	for i, t := range tracks {
 		inputs[i] = t.Input
 	}
-	// Every input is probed before any measurement: the widths settle whether
-	// the group timeline can open at all, and the per-track fold is planned
-	// off them. The probes are kept for the write loop, which reads the same
-	// facts (damage, notes, emptiness, the source width the fold warning
-	// names).
+	// Every input is probed before any measurement: the per-track fold is
+	// planned off the widths. The probes are kept for the write loop, which
+	// reads the same facts (damage, notes, emptiness, the source width the
+	// fold warning names).
 	probes := make([]albumProbe, len(tracks))
 	widths := make([]int, len(tracks))
 	for i, t := range tracks {
 		probes[i] = probeAudio(ctx, runner, t.Input)
 		widths[i] = probes[i].channels
-	}
-	if err := refuseMixedSurround(inputs, widths); err != nil {
-		return nil, err
 	}
 	// Each track is measured at the width its own encode delivers: a lossy row
 	// folds a source wider than stereo itself, and a gain derived from
@@ -479,7 +472,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 			folds[i] = n
 		}
 	}
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs, folds)
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs, folds, widths)
 	if err != nil {
 		return nil, albumTrackError(err, inputs)
 	}
@@ -788,10 +781,16 @@ func (a *albumLevels) warn(em *emitter, mode PeakMode) {
 // probeChannels reports a file's channel count, or 0 when it cannot be probed.
 // It is best-effort on purpose: it exists to describe a fold, and failing to
 // describe one must not fail the album.
-// timelineMemberRe matches the index in WaxFlow's "timeline member N" album
-// errors. Kept deliberately narrow: a non-match only means the error goes out
-// without a filename, never that it goes missing.
-var timelineMemberRe = regexp.MustCompile(`timeline member (\d+)`)
+// timelineMemberRe matches the index in WaxFlow's album errors, which name a
+// member three ways: "timeline member N cannot be mixed into..." at plan time,
+// "timeline member N could not be positioned" at the seam, and a bare
+// "member N: " prefix from waxerr.Annotate at run time, which arrives after the
+// classifier has prepended its own text. Dropping the "timeline" word matches
+// all three; the word boundary keeps it from finding one inside another word
+// ("remember 3", a file named "dismember 2.flac"), which would relabel an
+// unrelated failure with the wrong track. A non-match only means the error goes
+// out without a filename, never that it goes missing.
+var timelineMemberRe = regexp.MustCompile(`\bmember (\d+)`)
 
 // albumTrackError names the track file behind a WaxFlow timeline error, which
 // reports members by index. An album error that says "member 1" makes the user
@@ -834,38 +833,17 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 	return p
 }
 
-// refuseMixedSurround rejects an album the group timeline cannot open:
-// WaxFlow's Concat conforms every member to the widest layout, and its mixer
-// builds no target wider than stereo, so a stereo track beside a 5.1 one
-// fails when the timeline reaches it, with an error that names no track.
-// Refusing here names it, and spares the per-track pass that would have
-// preceded the failure. A width of 0 is a track the probe could not read;
-// the measurement reports that failure itself, with its own message.
-func refuseMixedSurround(inputs []string, widths []int) error {
-	widest, at := 0, 0
-	for i, w := range widths {
-		if w > widest {
-			widest, at = w, i
-		}
-	}
-	if widest <= 2 {
-		return nil
-	}
-	for i, w := range widths {
-		if w > 0 && w < widest {
-			return fmt.Errorf("%w: track %s has %d channels while %s has %d; an album with a surround member needs every member at that width (the group measurement mixes only to mono or stereo)",
-				waxerr.ErrUnsupportedInput, filepath.Base(inputs[i]), w, filepath.Base(inputs[at]), widest)
-		}
-	}
-	return nil
-}
-
 // albumDelivered reports the loudness of the normalized album, measuring it only
 // where measurement is the only way to know it: a boosting gain that the
 // true-peak limiter is free to give part of back. A capping gain holds every
 // track under the ceiling, and no gain at or below zero engages the limiter at
 // all, so both land analytically at album + gain. See
 // AlbumProcessResult.Delivered.
+//
+// The analytic shift is correct only because the group figure was measured at
+// the widths the encode delivers: loudness.MeasureAlbum renders a folding
+// member at its own fold before the group pass, so album + gain describes the
+// files that were written rather than a wider mix of their sources.
 //
 // Deriving the analytic cases is not a shortcut: the measurement is a second
 // decode of every track in the album, and running it to confirm an answer that is

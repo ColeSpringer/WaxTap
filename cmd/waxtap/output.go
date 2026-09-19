@@ -98,9 +98,8 @@ func setup(cmd *cobra.Command) (*appEnv, error) {
 		sidecars: sidecars,
 	}
 	// An error envelope is rendered from main, which has no appEnv, so the run's
-	// collector is published for it. It is the same shape and lifetime as
-	// rootFlagsValue and exists for the same reason: a failure has to honor the
-	// document contract after the command that could describe it is gone. Notes
+	// collector is published for it: a failure has to honor the document contract
+	// after the command that could describe it is gone. Notes
 	// from a failed run matter most of all, since some of them (the file kept but
 	// not recorded in the archive) only ever fire on a failure path.
 	setRunNotes(env.notes)
@@ -363,7 +362,7 @@ func humanLUFS(v float64) string {
 // flagsUnparsed marks the subset raised before the persistent flags were read: a
 // bad flag aborts the parse at that token, and an unknown command never reaches
 // parsing at all. Only those may re-read the command line for --json; after a
-// successful parse rootFlagsValue is the answer, and a second look would misread
+// successful parse the parsed flag is the answer, and a second look would misread
 // `--format --json`, where --json is a flag's value rather than a request.
 //
 // cause is optional and never rendered: it lets a usage error carry the sentinel
@@ -1176,7 +1175,7 @@ func normalizeExecuteError(err error, args []string) error {
 		return err
 	}
 	// Cobra rejects an unknown command before parsing any flags, so a --json on
-	// that line never reached rootFlagsValue.
+	// that line was never parsed.
 	msg := err.Error()
 	if !strings.HasPrefix(msg, "unknown command") && !strings.HasPrefix(msg, "unknown subcommand") {
 		return err

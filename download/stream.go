@@ -172,23 +172,42 @@ func (r *resumableReader) guardStall(cause error) error {
 
 // openNext issues an open-ended ranged GET from the current offset, retrying
 // transient failures and refreshing an expired Source. On success it sets
-// r.body. attempt counts transient retries only; a refresh does not advance it.
+// r.body.
 func (r *resumableReader) openNext() error {
+	resp, err := r.d.fetchRetrying(r.ctx, r.shared, r.offset, -1)
+	if err != nil {
+		return err
+	}
+	r.learn(resp)
+	r.body = resp.Body
+	return nil
+}
+
+// fetchRetrying is the request ladder every fetch of a Source climbs: a 403 or
+// 410 renews the Source through handleRefresh without spending an attempt, a
+// declined refresh drops into the transient ladder, and everything else backs
+// off up to maxChunkRetries. On success the caller owns resp.Body.
+//
+// end < 0 asks for start to the end of the resource; a bounded request asks for
+// [start, end]. An origin that answered a bounded request by ignoring the range
+// fails terminally whatever the budget says: it will ignore the retry too, and
+// the caller already knows it needs another route. An open-ended resume keeps
+// its retries, since there a 200 says the origin served from zero rather than
+// that it refuses ranges, and the next attempt may land on a node that does.
+func (d *Downloader) fetchRetrying(ctx context.Context, shared *sharedSource, start, end int64) (*http.Response, error) {
 	attempt := 0
 	for {
-		if r.ctx.Err() != nil {
-			return r.ctx.Err()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		src, gen := r.shared.current()
-		resp, err := r.d.fetch(r.ctx, src, r.offset, -1)
+		src, gen := shared.current()
+		resp, err := d.fetch(ctx, src, start, end)
 		if err == nil {
-			r.learn(resp)
-			r.body = resp.Body
-			return nil
+			return resp, nil
 		}
 
 		if nr, ok := errors.AsType[*needRefreshError](err); ok {
-			rerr := handleRefresh(r.ctx, r.shared, gen, nr.failure)
+			rerr := handleRefresh(ctx, shared, gen, nr.failure)
 			if rerr == nil {
 				continue // refreshed: retry without spending an attempt
 			}
@@ -196,15 +215,15 @@ func (r *resumableReader) openNext() error {
 			// which it never used to reach. Every other refresh outcome is
 			// terminal, and so is a 410 whatever the budget says.
 			if !refreshDeclined(rerr) || gone(nr.failure) {
-				return rerr
+				return nil, rerr
 			}
 			err = rerr
 		}
-		if attempt >= r.d.maxChunkRetries || !retryable(r.ctx, err) {
-			return err
+		if (end >= 0 && errors.Is(err, errRangeIgnored)) || attempt >= d.maxChunkRetries || !retryable(ctx, err) {
+			return nil, err
 		}
-		if berr := r.d.backoff(r.ctx, attempt); berr != nil {
-			return berr
+		if berr := d.backoff(ctx, attempt); berr != nil {
+			return nil, berr
 		}
 		attempt++
 	}

@@ -287,7 +287,7 @@ var sidecarSleep = httpx.Sleep
 
 // sidecarCall is sidecarJSON with one retry.
 //
-// sidecarRetryWait decides whether the failure earns it and how long to wait. A
+// SidecarRetryWait decides whether the failure earns it and how long to wait. A
 // wait the sidecar stated is honoured up to sidecarRetryMaxWait; a transient
 // failure that stated none earns sidecarTransientWait. Then PauseBlocked applies
 // the deadline policy Client.Do uses: a cancelled context returns the
@@ -301,7 +301,7 @@ func sidecarCall(ctx context.Context, client *http.Client, method, endpoint, lab
 	if err == nil {
 		return nil
 	}
-	wait, retry := sidecarRetryWait(err)
+	wait, retry := SidecarRetryWait(err)
 	if !retry {
 		return err
 	}
@@ -319,17 +319,20 @@ func sidecarCall(ctx context.Context, client *http.Client, method, endpoint, lab
 	return sidecarJSON(ctx, client, method, endpoint, label, apiKey, in, out)
 }
 
-// sidecarRetryWait reports how long to wait before retrying err, and whether a
-// retry is warranted at all.
+// SidecarRetryWait reports how long to wait before retrying err, and whether a
+// retry is warranted at all. It reads [SidecarError] and [SidecarResponseError],
+// so an adapter that translates another client's failures into those two types
+// gets WaxTap's own rule rather than a second one that drifts from it. WaxTap
+// allows one retry per sidecar request on this rule.
 //
 // A transport failure or a 408/5xx is transient: the sidecar may be launching a
 // browser, mid-relaunch, or briefly wedged. A 429 earns a retry only when the
 // sidecar states a wait: a bare 429 says back off, which is what the CLI's exit
 // 5 tells the user, and a 500 ms poke would contradict it. Every other refusal
 // (another 4xx, a malformed 200, a playability verdict) will answer the same way
-// a moment later. A stated wait past sidecarRetryMaxWait earns none: that is a
-// cool-down to report, not to sleep through.
-func sidecarRetryWait(err error) (time.Duration, bool) {
+// a moment later. A stated wait past 60 s earns none: that is a cool-down to
+// report, not to sleep through.
+func SidecarRetryWait(err error) (time.Duration, bool) {
 	if _, ok := errors.AsType[*SidecarError](err); ok {
 		return sidecarTransientWait, true
 	}
@@ -423,7 +426,7 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 		// delimiter, or a field name and type), not a dump of raw response bytes, so
 		// including it stays clear of tokens/cookies while making a custom sidecar
 		// integration debuggable.
-		return &SidecarResponseError{Label: label, Endpoint: endpoint, Reason: fmt.Sprintf("malformed JSON response: %v", err)}
+		return &SidecarResponseError{Label: label, Endpoint: endpoint, Reason: fmt.Sprintf("malformed JSON response: %v", err), Cause: err}
 	}
 	return nil
 }
@@ -570,6 +573,14 @@ type SidecarResponseError struct {
 	// RetryAfter is the wait the sidecar asked for, from a Retry-After header or
 	// a retry_after_seconds field (the header wins). Zero when it sent neither.
 	RetryAfter time.Duration
+	// Cause is the provider's own underlying error, for a caller that knows the
+	// provider: an in-process adapter translating another client's failures into
+	// this type carries that client's error here (WaxSeal's carries its
+	// *client.APIError). It is neither unwrapped nor printed, so classification
+	// (Unwrap stays the playability verdict) and redaction are unchanged, and a
+	// caller reaches it by reading the field. WaxTap sets it in one place of its
+	// own: a 200 whose body would not decode carries the decode error.
+	Cause error
 }
 
 func (e *SidecarResponseError) Error() string {
@@ -746,6 +757,7 @@ type playerContextResponse struct {
 	ServerAbrStreamingURL        string                       `json:"server_abr_streaming_url"`
 	VideoPlaybackUstreamerConfig string                       `json:"video_playback_ustreamer_config"`
 	VisitorData                  string                       `json:"visitor_data"`
+	UserAgent                    string                       `json:"user_agent"`
 	ClientVersion                string                       `json:"client_version"`
 	Title                        string                       `json:"title"`
 	Author                       string                       `json:"author"`
@@ -843,6 +855,7 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 		PlayerURL:       out.PlayerURL,
 		UstreamerConfig: out.VideoPlaybackUstreamerConfig,
 		VisitorData:     out.VisitorData,
+		UserAgent:       strings.TrimSpace(out.UserAgent),
 		ClientVersion:   out.ClientVersion,
 		Title:           out.Title,
 		Author:          out.Author,

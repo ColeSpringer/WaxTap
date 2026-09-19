@@ -11,12 +11,18 @@ import (
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
+// sampleContextUserAgent is the attesting browser's navigator.userAgent, a
+// different Chrome major from the one WaxTap builds for itself so a test can
+// tell which identity a request presented.
+const sampleContextUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
 func sampleContext() potoken.PlayerContext {
 	return potoken.PlayerContext{
 		ServerAbrURL:    "https://rr3.googlevideo.com/videoplayback?expire=1781138473&n=SCRAMBLED&sabr=1",
 		PlayerURL:       "https://www.youtube.com/s/player/444511ca/player_es6.vflset/en_US/base.js",
 		UstreamerConfig: "dXN0cmVhbWVy",
 		VisitorData:     "CgtVQ19WSVNJVE9SXzEhqA",
+		UserAgent:       sampleContextUserAgent,
 		ClientVersion:   "2.20260606.02.00",
 		Title:           "Big Buck Bunny",
 		Author:          "Blender",
@@ -83,6 +89,9 @@ func TestExtractWebContextMapping(t *testing.T) {
 	if p.Version != "2.20260606.02.00" {
 		t.Errorf("profile.Version = %q, want the context client_version", p.Version)
 	}
+	if p.UserAgent != sampleContextUserAgent {
+		t.Errorf("profile.UserAgent = %q, want the context's own %q", p.UserAgent, sampleContextUserAgent)
+	}
 	if !p.requiresPOToken(potoken.ScopeGVS) {
 		t.Error("WEB_CONTEXT must require a GVS PO token")
 	}
@@ -125,6 +134,31 @@ func TestExtractWebContextMapping(t *testing.T) {
 	}
 	if v.LiveStatus != LiveWasLive {
 		t.Errorf("liveStatus = %v, want was_live from is_live_content", v.LiveStatus)
+	}
+
+	// The GVS mint presents the same identity, since a token service that binds
+	// its token to request headers has to bind it to the ones SABR will send.
+	rp := &recordingProvider{resp: potoken.Response{Token: "TOK"}}
+	withToken := New(Config{
+		GL:              "US",
+		POTokenProvider: rp,
+		PlayerContextProvider: potoken.PlayerContextProviderFunc(
+			func(context.Context, string) (potoken.PlayerContext, error) { return sampleContext(), nil },
+		),
+	})
+	tokenExt, err := withToken.ExtractWebContext(context.Background(), "aqz-KE-bpKQ")
+	if err != nil {
+		t.Fatalf("ExtractWebContext: %v", err)
+	}
+	if _, err := withToken.resolveToken(context.Background(), tokenExt, nil); err != nil {
+		t.Fatalf("resolveToken: %v", err)
+	}
+	req := rp.byScope(potoken.ScopeGVS)
+	if req == nil {
+		t.Fatal("no GVS token request reached the provider")
+	}
+	if req.UserAgent != sampleContextUserAgent {
+		t.Errorf("GVS Request.UserAgent = %q, want the context's own %q", req.UserAgent, sampleContextUserAgent)
 	}
 }
 
@@ -283,11 +317,15 @@ func TestExtractWebContextErrors(t *testing.T) {
 // built for byte-level session coherence must not be the one path that ignores
 // the override.
 func TestWebContextProfileHonorsChromeMajor(t *testing.T) {
+	// A context that states no user agent, which is what a provider older than
+	// the user_agent key sends; the override has nothing to defer to.
+	pc := sampleContext()
+	pc.UserAgent = ""
 	c := New(Config{
 		GL:          "US",
 		ChromeMajor: 142,
 		PlayerContextProvider: potoken.PlayerContextProviderFunc(
-			func(context.Context, string) (potoken.PlayerContext, error) { return sampleContext(), nil },
+			func(context.Context, string) (potoken.PlayerContext, error) { return pc, nil },
 		),
 	})
 	ext, err := c.ExtractWebContext(context.Background(), "v")

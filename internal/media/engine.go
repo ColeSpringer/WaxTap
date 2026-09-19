@@ -26,14 +26,21 @@ type RunnerConfig struct {
 	MaxProcs int
 	// Logger receives debug logs. Nil discards them.
 	Logger *slog.Logger
+	// TempDir is where an operation that needs a scratch file of its own
+	// writes it (the album group pass renders a folding member to PCM there).
+	// Empty uses the OS default. It is not where an output is staged: that
+	// goes beside the output file, so the commit is a rename on one
+	// filesystem.
+	TempDir string
 }
 
 // Runner drives WaxFlow's engine for local audio files. It bounds concurrency,
 // and it is safe for concurrent use.
 type Runner struct {
-	engine *waxflow.Engine
-	sem    chan struct{}
-	log    *slog.Logger
+	engine  *waxflow.Engine
+	sem     chan struct{}
+	log     *slog.Logger
+	tempDir string
 }
 
 // NewRunner builds a Runner. WaxFlow's engine construction cannot fail, so there
@@ -48,10 +55,27 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		sem = make(chan struct{}, cfg.MaxProcs)
 	}
 	return &Runner{
-		engine: waxflow.New(waxflow.WithLogger(slog.New(demoteImplicitDownmix{log.Handler()}))),
-		sem:    sem,
-		log:    log,
+		engine:  waxflow.New(waxflow.WithLogger(slog.New(demoteImplicitDownmix{log.Handler()}))),
+		sem:     sem,
+		log:     log,
+		tempDir: cfg.TempDir,
 	}
+}
+
+// ScratchDir creates a directory for one operation's intermediate files under
+// the configured temp root, and returns it with the func that removes it. The
+// caller removes it when the operation returns; nothing here outlives a call.
+func (r *Runner) ScratchDir(pattern string) (string, func(), error) {
+	if r.tempDir != "" {
+		if err := os.MkdirAll(r.tempDir, 0o777); err != nil {
+			return "", nil, err
+		}
+	}
+	dir, err := os.MkdirTemp(r.tempDir, pattern)
+	if err != nil {
+		return "", nil, err
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // implicitDownmixMsg is WaxFlow's log record for a channel fold the caller did

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,6 +170,24 @@ func TestSidecarResponseErrorVerdict(t *testing.T) {
 	if !errors.Is(coded200, ErrVideoUnavailable) {
 		t.Errorf("a coded 200 verdict must still unwrap: %v", coded200)
 	}
+	// Cause is a provider's own error for a caller that knows the provider. It is
+	// neither unwrapped nor printed, so it cannot reclassify the refusal or
+	// redirect an errors.Is that reads it as the playability verdict.
+	cause := &fs.PathError{Op: "read", Path: "/tmp/socket", Err: context.DeadlineExceeded}
+	withCause := &SidecarResponseError{Label: "player-context server", Endpoint: "http://127.0.0.1:4416/player-context",
+		StatusCode: 502, Code: "player-context-failed", Cause: cause}
+	if errors.Is(withCause, context.DeadlineExceeded) {
+		t.Error("Cause must stay invisible to errors.Is")
+	}
+	if _, ok := errors.AsType[*fs.PathError](withCause); ok {
+		t.Error("errors.AsType must not reach through a Cause")
+	}
+	if withCause.Unwrap() != nil {
+		t.Error("a non-verdict refusal unwraps to nothing, Cause or not")
+	}
+	if got := withCause.Error(); !strings.Contains(got, "HTTP 502 (player-context-failed)") || strings.Contains(got, "deadline") {
+		t.Errorf("Error() = %q, want the refusal alone: Cause is never printed", got)
+	}
 }
 
 func TestSidecarRetryWait(t *testing.T) {
@@ -199,9 +218,9 @@ func TestSidecarRetryWait(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, retry := sidecarRetryWait(tc.err)
+			got, retry := SidecarRetryWait(tc.err)
 			if retry != tc.retry || (retry && got != tc.want) {
-				t.Errorf("sidecarRetryWait = %v, %v; want %v, %v", got, retry, tc.want, tc.retry)
+				t.Errorf("SidecarRetryWait = %v, %v; want %v, %v", got, retry, tc.want, tc.retry)
 			}
 		})
 	}
@@ -351,6 +370,17 @@ func TestBgutilProviderMalformedJSONReason(t *testing.T) {
 	if !strings.HasPrefix(sre.Reason, "malformed JSON response:") {
 		t.Errorf("Reason = %q, want the malformed-JSON prefix with the decode detail", sre.Reason)
 	}
+	// The decode error itself rides along in Cause, where a caller that wants the
+	// offset or the offending field can read it without parsing the Reason text.
+	if _, ok := errors.AsType[*json.SyntaxError](sre.Cause); !ok {
+		t.Errorf("Cause = %#v, want the *json.SyntaxError the decode returned", sre.Cause)
+	}
+	// Error() is unchanged by the addition: the decode detail reaches it through
+	// Reason, as it always did, and Cause adds nothing to the text.
+	bare := &SidecarResponseError{Label: sre.Label, Endpoint: sre.Endpoint, StatusCode: sre.StatusCode, Reason: sre.Reason}
+	if sre.Error() != bare.Error() {
+		t.Errorf("Error() = %q, want the same line as without a Cause (%q)", sre.Error(), bare.Error())
+	}
 }
 
 func TestBgutilProviderBindingErrorsBeforeRequest(t *testing.T) {
@@ -412,6 +442,7 @@ const validPlayerContextJSON = `{
   "server_abr_streaming_url": "https://rr3.googlevideo.com/videoplayback?n=SCRAMBLED&sabr=1",
   "video_playback_ustreamer_config": "dXN0cmVhbWVy",
   "visitor_data": "CgtWSVNJVE9S",
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
   "client_version": "2.20260606.02.00",
   "title": "Big Buck Bunny",
   "author": "Blender",
@@ -458,6 +489,11 @@ func TestPlayerContextProviderDecode(t *testing.T) {
 	}
 	if pc.ServerAbrURL == "" || pc.VisitorData != "CgtWSVNJVE9S" || pc.ClientVersion != "2.20260606.02.00" {
 		t.Errorf("decoded context = %+v", pc)
+	}
+	// The browser identity travels with the context, so the WEB requests under it
+	// present the browser the URL was minted on rather than WaxTap's own Chrome.
+	if !strings.Contains(pc.UserAgent, "Chrome/141.0.0.0") {
+		t.Errorf("user_agent = %q, want the attesting browser's navigator.userAgent", pc.UserAgent)
 	}
 	if pc.PlayerURL != "https://www.youtube.com/s/player/444511ca/player_es6.vflset/en_US/base.js" {
 		t.Errorf("player_url = %q", pc.PlayerURL)

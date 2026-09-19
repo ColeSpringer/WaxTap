@@ -462,17 +462,18 @@ func TestProcessAlbumMeasuresAtTheEncodersWidth(t *testing.T) {
 	}
 }
 
-// An album mixing a surround member with a stereo one is refused up front,
-// naming the narrower track: the group timeline conforms every member to the
-// widest layout and WaxFlow's mixer builds no target wider than stereo, so
-// the measurement fails when it reaches the stereo member, with an error that
-// names nothing, after every track was already measured.
-func TestAlbumRefusesMixedWidthsNamingTheTrack(t *testing.T) {
+// An album mixing a surround member with a stereo one is measured as a group:
+// the timeline places the narrower member into the widest layout with its
+// missing positions silent, which is loudness-neutral, so the group figure is
+// what every member contributes at its own width. What is still refused is a
+// member whose positions have no home in that layout, and that refusal names
+// the track.
+func TestAlbumMeasuresMixedWidthsAsAGroup(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	wide := filepath.Join(dir, "wide.wav")
 	narrow := filepath.Join(dir, "narrow.wav")
-	if err := os.WriteFile(wide, mediatest.SineWAV(2, 6), 0o644); err != nil {
+	if err := os.WriteFile(wide, mediatest.FrontsOnlyWAV(2, 6), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(narrow, mediatest.SineWAV(2, 2), 0o644); err != nil {
@@ -480,21 +481,120 @@ func TestAlbumRefusesMixedWidthsNamingTheTrack(t *testing.T) {
 	}
 	c := newOfflineClient(t)
 
+	res, err := c.MeasureAlbum(ctx, []string{wide, narrow})
+	if err != nil {
+		t.Fatalf("MeasureAlbum: %v", err)
+	}
+	if math.IsInf(res.Album.IntegratedLUFS, 0) || math.IsNaN(res.Album.IntegratedLUFS) {
+		t.Errorf("group figure = %v, want a finite measurement", res.Album.IntegratedLUFS)
+	}
+	// The narrower member contributes what it is, not what widening made of it.
+	solo, err := c.MeasureAlbum(ctx, []string{narrow})
+	if err != nil {
+		t.Fatalf("MeasureAlbum(narrow): %v", err)
+	}
+	if d := math.Abs(res.PerTrack[1].IntegratedLUFS - solo.PerTrack[0].IntegratedLUFS); d > 0.01 {
+		t.Errorf("stereo member measured %.3f in the mixed album, %.3f alone: off by %.3f LU",
+			res.PerTrack[1].IntegratedLUFS, solo.PerTrack[0].IntegratedLUFS, d)
+	}
+
 	out := filepath.Join(dir, "out")
-	_, err := c.ProcessAlbum(ctx, []AlbumTrack{
+	pres, err := c.ProcessAlbum(ctx, []AlbumTrack{
 		{Input: wide, Output: filepath.Join(out, "a.flac")},
 		{Input: narrow, Output: filepath.Join(out, "b.flac")},
 	}, -14, TranscodeSpec{Format: FormatFLAC})
-	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "narrow.wav") {
-		t.Errorf("ProcessAlbum = %v, want ErrUnsupportedInput naming narrow.wav", err)
+	if err != nil {
+		t.Fatalf("ProcessAlbum: %v", err)
 	}
-	if _, serr := os.Stat(filepath.Join(out, "a.flac")); serr == nil {
-		t.Error("the refusal came after a track was written; it must precede the work")
+	if math.IsInf(pres.Album.IntegratedLUFS, 0) || math.IsNaN(pres.Album.IntegratedLUFS) {
+		t.Errorf("ProcessAlbum group figure = %v, want a finite measurement", pres.Album.IntegratedLUFS)
+	}
+	for _, n := range []string{"a.flac", "b.flac"} {
+		if _, serr := os.Stat(filepath.Join(out, n)); serr != nil {
+			t.Errorf("%s was not written: %v", n, serr)
+		}
+	}
+}
+
+// A member the timeline cannot place is still refused, naming the track: two
+// 6-channel files whose rear pairs sit in different places (WaxFlow's
+// conventional 6-channel layout puts them at the back) carry the same count
+// with positions the envelope has no home for.
+func TestAlbumRefusesAnUnplaceableMemberNamingTheTrack(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	// FL|FR|FC|LFE|BL|BR, which is audio.DefaultLayout(6).
+	back := filepath.Join(dir, "back.wav")
+	// FL|FR|FC|LFE|SL|SR: the same count, a pair the back layout cannot place.
+	side := filepath.Join(dir, "side.wav")
+	if err := os.WriteFile(back, mediatest.MaskedWAV(2, 6, 0x3F), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(side, mediatest.MaskedWAV(2, 6, 0x60F), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newOfflineClient(t)
+
+	_, err := c.MeasureAlbum(ctx, []string{back, side})
+	if !errors.Is(err, ErrUnsupportedInput) {
+		t.Fatalf("MeasureAlbum = %v, want ErrUnsupportedInput (exit 2)", err)
+	}
+	if !strings.Contains(err.Error(), "side.wav") {
+		t.Errorf("err = %v, want it to name side.wav rather than a member index", err)
 	}
 
-	_, err = c.MeasureAlbum(ctx, []string{wide, narrow})
-	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "narrow.wav") {
-		t.Errorf("MeasureAlbum = %v, want ErrUnsupportedInput naming narrow.wav", err)
+	// The refusal reaches ProcessAlbum too, and it arrives before any track is
+	// written: the group measurement runs ahead of the write loop, so a set the
+	// timeline cannot open leaves no half-normalized album behind. The target is
+	// WAV because FLAC refuses this layout at its own encoder, one layer earlier,
+	// which would pin a different refusal than the one under test.
+	out := filepath.Join(dir, "out")
+	_, perr := c.ProcessAlbum(ctx, []AlbumTrack{
+		{Input: back, Output: filepath.Join(out, "a.wav")},
+		{Input: side, Output: filepath.Join(out, "b.wav")},
+	}, -14, TranscodeSpec{Format: FormatWAV})
+	if !errors.Is(perr, ErrUnsupportedInput) || !strings.Contains(perr.Error(), "side.wav") {
+		t.Fatalf("ProcessAlbum = %v, want ErrUnsupportedInput naming side.wav", perr)
+	}
+	if _, serr := os.Stat(filepath.Join(out, "a.wav")); serr == nil {
+		t.Error("the refusal came after a track was written; it must precede the work")
+	}
+}
+
+// albumTrackError names the track behind every shape WaxFlow words a member
+// refusal in: the plan-time "timeline member N", the seam refusal, and the
+// run-time "member N: " prefix waxerr.Annotate adds, which arrives after a
+// classifier has already prepended its own text.
+func TestAlbumTrackErrorNamesEveryMemberShape(t *testing.T) {
+	inputs := []string{"/tmp/first.flac", "/tmp/second.flac"}
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"plan time", "waxflow: timeline member 1 cannot be mixed into 6 channels", "second.flac"},
+		{"seam", "waxflow: timeline member 0 could not be positioned", "first.flac"},
+		{"run time", "waxtap: unsupported or unreadable input: member 1: short read", "second.flac"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := albumTrackError(errors.New(tc.text), inputs)
+			if !strings.Contains(got.Error(), tc.want) {
+				t.Errorf("albumTrackError(%q) = %v, want it to name %s", tc.text, got, tc.want)
+			}
+		})
+	}
+	// A message with no member index of its own passes through untouched, and
+	// "member" inside another word is not one: relabelling an unrelated failure
+	// with a track name is worse than leaving it unnamed.
+	for _, text := range []string{
+		"waxflow: no output format requested",
+		"open /music/remember 1.flac: no such file or directory",
+		"open /music/dismember 0.flac: permission denied",
+	} {
+		plain := errors.New(text)
+		if got := albumTrackError(plain, inputs); got != plain {
+			t.Errorf("albumTrackError(%q) = %v, want it unchanged", text, got)
+		}
 	}
 }
 

@@ -16,7 +16,7 @@ stale. Every license and notice text is reproduced verbatim.
 | Component | Version | License |
 |---|---|---|
 | Go runtime and standard library | go 1.26 | BSD-3-Clause |
-| github.com/colespringer/waxflow | v0.0.0-20260914172240-dc7ff3fe670a | MIT (see also THIRD-PARTY-NOTICES.md) |
+| github.com/colespringer/waxflow | v0.0.0-20260919042230-ad58eb8d9ef1 | MIT (see also THIRD-PARTY-NOTICES.md) |
 | github.com/colespringer/waxlabel | v1.8.0 | MIT |
 | github.com/dlclark/regexp2/v2 | v2.5.2 | MIT |
 | github.com/dop251/goja | v0.0.0-20260723142020-b4aef50fa347 | MIT / see text / BSD-3-Clause |
@@ -62,7 +62,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/colespringer/waxflow v0.0.0-20260914172240-dc7ff3fe670a
+## github.com/colespringer/waxflow v0.0.0-20260919042230-ad58eb8d9ef1
 
 License: MIT (LICENSE)
 

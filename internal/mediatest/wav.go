@@ -52,14 +52,20 @@ func ToneWAVMs(freqHz float64, ms, channels, rate int) []byte {
 // loudness, so only a file whose energy sits in one pair shows what folding
 // a wide source does to a measurement.
 func FrontsOnlyWAV(seconds, channels int) []byte {
-	const amp = 0.5 // ~-6 dBFS, SineWAV's level
 	const rate = 44100
-	return pcmWAVPerChannel(seconds*rate, channels, rate, func(i, ch int) float64 {
+	return pcmWAVPerChannel(seconds*rate, channels, rate, frontsOnly(rate))
+}
+
+// frontsOnly is the sample function both fronts-only fixtures share: the
+// SineWAV tone in the first two channels, silence in the rest.
+func frontsOnly(rate int) func(i, ch int) float64 {
+	const amp = 0.5 // ~-6 dBFS, SineWAV's level
+	return func(i, ch int) float64 {
 		if ch > 1 {
 			return 0
 		}
 		return amp * math.Sin(2*math.Pi*440.0*float64(i)/float64(rate))
-	})
+	}
 }
 
 // SilenceWAV returns a 16-bit PCM WAV of digital silence: every sample zero,
@@ -219,6 +225,15 @@ func pcmWAVPerChannel(frames, channels, rate int, sampleAt func(i, ch int) float
 	if channels < 1 {
 		channels = 1
 	}
+	return wavContainer(interleave16(frames, channels, sampleAt), channels, rate, 16)
+}
+
+// interleave16 renders a per-frame, per-channel sample function in [-1, 1] as
+// interleaved 16-bit little-endian PCM, the payload both WAV headers wrap.
+func interleave16(frames, channels int, sampleAt func(i, ch int) float64) []byte {
+	if channels < 1 {
+		channels = 1
+	}
 	data := make([]byte, frames*channels*2)
 	off := 0
 	for i := range frames {
@@ -228,7 +243,58 @@ func pcmWAVPerChannel(frames, channels, rate int, sampleAt func(i, ch int) float
 			off += 2
 		}
 	}
-	return wavContainer(data, channels, rate, 16)
+	return data
+}
+
+// MaskedWAV returns FrontsOnlyWAV's signal in a WAVE_FORMAT_EXTENSIBLE file
+// whose dwChannelMask states mask, so a fixture can name positions rather than
+// take the conventional layout for its channel count.
+//
+// It exists for the album member a timeline cannot place: WaxFlow's
+// conventional 6-channel layout puts its rear pair at the back
+// (audio.DefaultLayout), so a 6-channel file that states a side pair carries
+// the same count with positions the envelope has no home for.
+//
+// mask is the WAVE dwChannelMask, whose bits are audio.ChannelMask's: front
+// left is bit 0, and a side pair is bits 9 and 10.
+func MaskedWAV(seconds, channels int, mask uint32) []byte {
+	const rate = 44100
+	return extensibleWAVContainer(interleave16(seconds*rate, channels, frontsOnly(rate)), channels, rate, 16, mask)
+}
+
+// extensibleWAVContainer is wavContainer with a 40-byte WAVE_FORMAT_EXTENSIBLE
+// fmt chunk instead of the canonical 16-byte one: the tag is 0xFFFE, and the
+// extension carries the valid bit depth, the channel mask, and the PCM
+// sub-format GUID. The two headers differ only in that chunk, which is the
+// whole reason this fixture exists, so they stay separate writers.
+func extensibleWAVContainer(pcm []byte, channels, rate, bits int, mask uint32) []byte {
+	// KSDATAFORMAT_SUBTYPE_PCM: 00000001-0000-0010-8000-00AA00389B71.
+	subformat := []byte{
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+		0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+	}
+	const fmtSize = 40
+	blockAlign := channels * bits / 8
+	buf := make([]byte, 20+fmtSize+8+len(pcm))
+	copy(buf[0:], "RIFF")
+	binary.LittleEndian.PutUint32(buf[4:], uint32(len(buf)-8))
+	copy(buf[8:], "WAVE")
+	copy(buf[12:], "fmt ")
+	binary.LittleEndian.PutUint32(buf[16:], fmtSize)
+	binary.LittleEndian.PutUint16(buf[20:], 0xFFFE) // WAVE_FORMAT_EXTENSIBLE
+	binary.LittleEndian.PutUint16(buf[22:], uint16(channels))
+	binary.LittleEndian.PutUint32(buf[24:], uint32(rate))
+	binary.LittleEndian.PutUint32(buf[28:], uint32(rate*blockAlign))
+	binary.LittleEndian.PutUint16(buf[32:], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(buf[34:], uint16(bits))
+	binary.LittleEndian.PutUint16(buf[36:], 22) // cbSize
+	binary.LittleEndian.PutUint16(buf[38:], uint16(bits))
+	binary.LittleEndian.PutUint32(buf[40:], mask)
+	copy(buf[44:], subformat)
+	copy(buf[60:], "data")
+	binary.LittleEndian.PutUint32(buf[64:], uint32(len(pcm)))
+	copy(buf[68:], pcm)
+	return buf
 }
 
 // wavContainer wraps raw interleaved PCM in a canonical 44-byte RIFF/WAVE

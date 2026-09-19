@@ -20,79 +20,36 @@ Gate tags:
 
 ## Processing
 
-- `[upstream]` **`info --probe` stages the whole stream.** `probeRemote`
-  (`waxtap.go`) downloads the audio once to probe a header locally. A lazy
-  ranged-HTTP `container.Source` (WaxFlow's `container.Contextual` and
-  `BindContext` exist for exactly that; the googlevideo dialect is
-  `download.QueryRange`) would not save the read for the row YouTube serves
-  by default: WaxFlow walks every cluster of a WebM Opus track at open, so a
-  probe reads the file either way, and only an m4a row would benefit. Waits
-  on the WaxFlow header-only probe ask in upstream-requests.md; the
-  follow-up is a ranged source bound with `BindContext` in
-  `media.Runner.probeSource`, once a probe is header-sized. An accepted
-  tradeoff since v3.0.
+- `[upstream]` **A mixed-fold album renders temporary PCM copies to measure
+  its group.** WaxFlow took the up-mix half of the Concat ask and not the
+  per-member fold, so `loudness.MeasureAlbum` cannot ask a Concat to fold each
+  member at its own width: the timeline conforms every member to the widest
+  layout first, and `dsp/mix` normalizes each output row by the energy of every
+  source coefficient, silent positions included, so a fold applied after that
+  widening is about 1 dB off the member's own fold. When a set's folds or
+  source widths differ (a surround member folded to stereo for a lossy target
+  beside a stereo one), WaxTap therefore renders every folding member to a
+  temporary PCM WAV at its fold and runs the group pass over that set
+  unfolded. Cost: one decode and one PCM write per folding member, on that
+  arm only. Waits on the per-member Concat fold ask in
+  upstream-requests.md; the follow-up is deleting `groupPass`'s rendering arm
+  and passing the folds to `Concat` instead.
 
-- `[upstream]` **An album mixing a surround member with a stereo one cannot
-  be measured as a group.** `loudness.MeasureAlbum` measures the group over
-  a WaxFlow Concat, which conforms every member to the widest layout through
-  `dsp/mix`, and that mixer builds no target wider than stereo, so the
-  timeline fails when it reaches the narrower member, with an error that
-  names no track. WaxTap therefore reads every member's width first and
-  refuses such a set before measuring, naming the narrower track
-  (`normalize --album` and `--album --measure-loudness` both). The
-  per-member fold (this sweep) covers the uniform case, every member the
-  same width. Waits on the WaxFlow Concat ask in upstream-requests.md; the
-  follow-up is a group pass over per-member folded media once one exists.
-
-- `[upstream]` **A truncated ADTS's walked count can overstate a genuinely
-  truncated final frame.** `adts.Demuxer.extend` indexes a resynced frame
-  from its header alone and only discovers, one call later, that its
-  declared span runs past the data end, by which point it is already
-  counted, with no warning attached (the ADTS walker ask in
-  upstream-requests.md). `Runner.MeasureLength`'s walk path has no signal
-  to detect or correct this, so `TestMeasureLengthOfTruncatedPayloads`
-  tolerates a one-frame gap against an independent decode instead of
-  asserting equality, and `CutSpec.SourceSamples` can be a frame too
-  generous for a bounded (non-open-ended) span on such a file, or for a
-  multi-keep composition's open-ended final span, which still declares
-  `SourceSamples - from` at `Concat`'s seam (a single-keep open-ended span
-  opens through `Slice` instead and is genuinely unaffected). What that
-  costs a user: an interior cut of a truncated ADTS (a multi-keep
-  composition, which is what removing a span in the middle composes) is
-  refused as unsupported input, where the same cut of a truncated MP3 now
-  runs; `TestCutOnTruncatedLazyPayloadMeasuresFirst` asserts the ADTS case
-  only for a span that reaches the end. Waits on the WaxFlow ADTS walker ask
-  in upstream-requests.md; the follow-up is tightening that test back to
-  strict equality, asserting the interior cut, and dropping the one-frame
-  slack the `SourceSamples` bound carries for it.
-
-## Tests
-
-- `[in-repo]` **The `cmd/waxtap` suite depends on test order.** `go test
-  -shuffle=on ./cmd/waxtap` fails on a different test each run (seen:
-  `TestBatchTranscodeCommandIntegration`, `TestBatchDownmixIsDecidedPerFile`,
-  each on which batch item was copied rather than encoded), so some state
-  one test sets outlives it. CI runs the suite in source order until it is
-  found; add `-shuffle=on` to the test job's `go test` once a shuffled run
-  passes. Found reworking the workflows on 2026-09-17.
-
-## CI
-
-- `[in-repo]` **The daily `doctor` run has never seen past the bot wall.**
-  Not one of the 105 runs of `.github/workflows/doctor-cron.yml` since its
-  first on 2026-06-04 has passed: each ran to the end of its retry loop (199
-  to 289 s, where a first-attempt pass returns within a minute), and every
-  log that survives, 2026-06-20 on, shows `login-required` on all three
-  candidates from the GitHub-hosted runner's address, classed as
-  environmental, so the job stayed green throughout. The refusal arrives in
-  the player response, before there is anything to descramble, so the
-  workflow's one hard signal, an exit 4 from the extraction or cipher path,
-  has had nothing to observe. The 2026-09-17 rework puts each run's verdict
-  on its summary page and reads every candidate of every attempt for that
-  class, which shows the streak but does not end it. Ending it means running
-  from an address YouTube serves: a self-hosted runner, `--proxy` to one, or
-  the sidecar URLs (`--session-url`, `--potoken-url`,
-  `--player-context-url`) from repository secrets, which is what `doctor`
-  probes for. Undecided: which, and whether a run that never reaches YouTube
-  should keep counting as green. Found reworking the workflows on
-  2026-09-17.
+- `[upstream]` **`info --probe` reports no length for a fragmented MP4.**
+  YouTube's itag 140 is fMP4: a 699-byte init `moov` with an empty sample
+  table, a `sidx`, then one `moof`+`mdat` pair per ~160 KB of audio.
+  WaxFlow's `mp4.Demuxer.fragmentedGapless` takes a fragmented track's length
+  from the init segment's edit list alone and leaves it unknown when there is
+  none, and YouTube writes no `edts`/`elst`, so the probe reports a zero
+  duration for that row while its `mvhd` states the real one and the `sidx`
+  beside it carries every fragment's duration. Measured on a ten-minute track:
+  the probe reads to the end of the fragments looking for what it never finds,
+  which was 39 range requests over the whole 10 MB before `probeRangeBudget`
+  bounded it to 1 MiB and sent the row to the staging path instead. The answer
+  is the same zero either way; the bound costs the 1 MiB already fetched on top
+  of the staged download, about 10% for that row, and it is what keeps a probe's
+  cost a property of the design rather than of the container. Waits on the
+  WaxFlow fragmented-length ask in
+  upstream-requests.md; the follow-up is asserting a probed duration for the
+  itag-140 row and, once a fragmented open is header-sized, dropping that row
+  from what the budget has to cover.

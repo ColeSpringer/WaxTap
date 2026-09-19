@@ -26,8 +26,14 @@ type PlayerContext struct {
 	// under it and binds the GVS PO token's content binding to it, so the URL,
 	// the visitor-id header, and the token stay coherent to the byte.
 	VisitorData string
-	// ClientVersion is the InnerTube client version the context was minted under;
-	// it is echoed in the SABR streamerContext client_info.
+	// UserAgent and ClientVersion are the browser identity the context was minted
+	// under: the exact navigator.userAgent, and the InnerTube client version its
+	// player ran, which is echoed in the SABR streamerContext client_info. When
+	// UserAgent is set, the WEB requests under this context (the SABR stream and
+	// the GVS token request's [Request]) carry it in place of WaxTap's own Chrome
+	// identity, so Options.ChromeMajor does not apply and the URL, the visitor id,
+	// the token, and the requests present one browser. Empty means WaxTap's own.
+	UserAgent     string
 	ClientVersion string
 	// Title and Author are video metadata for the output. They may be empty; the
 	// consumer falls back to the video ID for the filename when Title is empty.

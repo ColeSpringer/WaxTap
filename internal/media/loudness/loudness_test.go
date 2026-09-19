@@ -3,6 +3,7 @@ package loudness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -181,12 +182,12 @@ func TestMeasureCut(t *testing.T) {
 	}
 }
 
-// A measurement that fails mid-read names the file, so the failure exits as
-// I/O (10) the way the write path's does, instead of as unsupported input
-// (2). The bounded span declares more than the truncated file holds and the
-// header is trusted (sourceSamples 0), which is the refusal that used to
-// arrive nameless.
-func TestMeasureCutNamesTheFileOnAReadFailure(t *testing.T) {
+// A caller that measured nothing (sourceSamples 0) over a file whose headers
+// only claim a length used to get a refusal here: the bounded span declared
+// more than the truncated file holds. OpenComposed measures the source itself
+// now, so the span asks for what the file has and the measurement succeeds at
+// the length a read delivers, well short of the Xing-declared 2 s.
+func TestMeasureCutWithNoLengthMeasuresTheSource(t *testing.T) {
 	r := media.NewRunner(media.RunnerConfig{})
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -212,10 +213,25 @@ func TestMeasureCutNamesTheFileOnAReadFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
+	measured, err := r.MeasureLength(ctx, cut)
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
 	keeps := []cutrange.Range{{Start: 0, End: 1900 * time.Millisecond}}
-	_, err = MeasureCut(ctx, r, cut, keeps, pr.Format.Duration, 0, 0, 0)
-	if pe, ok := errors.AsType[*fs.PathError](err); !ok || pe.Path != cut {
-		t.Fatalf("got %v, want a PathError naming %s", err, cut)
+	// A PathError here would be the old behaviour: a span past a truncated file
+	// read as an I/O failure rather than as the file's own shortfall.
+	l, err := MeasureCut(ctx, r, cut, keeps, pr.Format.Duration, 0, 0, 0)
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		t.Fatalf("got a PathError naming %s: a span past a truncated file is the file's shortfall, not a read failure", pe.Path)
+	}
+	if err != nil {
+		t.Fatalf("MeasureCut: %v", err)
+	}
+	if !l.Finite() {
+		t.Errorf("measurement not finite: %+v", l)
+	}
+	if measured.Duration >= pr.Format.Duration {
+		t.Fatalf("measured %v against a declared %v: the fixture is not short", measured.Duration, pr.Format.Duration)
 	}
 }
 
@@ -228,7 +244,7 @@ func TestMeasureAlbum(t *testing.T) {
 		os.WriteFile(p, mediatest.SineWAV(2, 2), 0o644)
 		inputs = append(inputs, p)
 	}
-	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs, nil)
+	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs, nil, []int{2, 2})
 	if err != nil {
 		t.Fatalf("measure album: %v", err)
 	}
@@ -241,7 +257,7 @@ func TestMeasureAlbum(t *testing.T) {
 
 	// A uniform fold moves both the tracks and the group: a stereo source
 	// folded to mono is the audio a mono encode of the album would meter.
-	mono, monoTracks, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 1})
+	mono, monoTracks, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 1}, []int{2, 2})
 	if err != nil {
 		t.Fatalf("measure album folded: %v", err)
 	}
@@ -249,15 +265,113 @@ func TestMeasureAlbum(t *testing.T) {
 		t.Errorf("folded album %+v / track %+v match the unfolded figures; the fold did not reach the measurement", mono, monoTracks[0])
 	}
 
-	// A fold only some members take leaves the group at the source layout:
-	// the timeline conforms every member to the widest one first, so a fold
-	// after that is not the fold the encoder applies.
-	mixed, _, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 0})
+	// A fold only some members take is rendered per member before the group
+	// pass, so the group is measured at the widths the encode delivers: one
+	// mono member beside one stereo one, not a stereo mix of both. It is
+	// therefore neither the unfolded figure nor the all-folded one.
+	mixed, _, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 0}, []int{2, 2})
 	if err != nil {
 		t.Fatalf("measure album part-folded: %v", err)
 	}
-	if mixed.IntegratedLUFS != album.IntegratedLUFS {
-		t.Errorf("part-folded album = %.3f, want the unfolded %.3f", mixed.IntegratedLUFS, album.IntegratedLUFS)
+	if mixed.IntegratedLUFS == album.IntegratedLUFS {
+		t.Errorf("part-folded album = %.3f, the same as the unfolded figure: the fold did not reach the group", mixed.IntegratedLUFS)
+	}
+	if !mixed.Finite() {
+		t.Errorf("part-folded album not finite: %+v", mixed)
+	}
+}
+
+// TestMeasureAlbumRendersAFoldingMemberBeforeTheGroup pins the pitfall the
+// rendering arm exists for: the timeline conforms every member to the widest
+// layout before any fold can apply, and the mixer normalizes each output row by
+// the energy of every source coefficient, silent positions included, so folding
+// after a widening is not the member's own fold. The group figure must match a
+// concatenation of the members already folded, and must differ from the
+// fold-after-widen figure by enough to matter.
+func TestMeasureAlbumRendersAFoldingMemberBeforeTheGroup(t *testing.T) {
+	ctx := context.Background()
+	r := media.NewRunner(media.RunnerConfig{})
+	dir := t.TempDir()
+
+	// A wide member's energy sits in its front pair, with the rest silent.
+	// Every channel carrying the same tone folds back coherently to the same
+	// loudness, which would hide what the widening does to the normalization.
+	write := func(name string, channels int) string {
+		p := filepath.Join(dir, name)
+		body := mediatest.SineWAV(2, channels)
+		if channels > 2 {
+			body = mediatest.FrontsOnlyWAV(2, channels)
+		}
+		if err := os.WriteFile(p, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	for _, tc := range []struct {
+		name     string
+		channels []int
+		folds    []int
+		// widths is what the caller probed; nil stands for a set whose widths
+		// could not be read, which must not be mistaken for a set that shares
+		// one width, since that is the condition the fold-once arm rests on.
+		widths []int
+	}{
+		{"5.1 beside 7.1, both folded", []int{6, 8}, []int{2, 2}, []int{6, 8}},
+		{"5.1 beside stereo, one folded", []int{6, 2}, []int{2, 0}, []int{6, 2}},
+		{"widths unknown", []int{6, 8}, []int{2, 2}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := make([]string, len(tc.channels))
+			for i, ch := range tc.channels {
+				inputs[i] = write(fmt.Sprintf("%d-%d.wav", i, ch), ch)
+			}
+			group, _, err := MeasureAlbum(ctx, r, inputs, tc.folds, tc.widths)
+			if err != nil {
+				t.Fatalf("measure album: %v", err)
+			}
+
+			// The reference: each member folded on its own, then concatenated.
+			folded := make([]string, len(inputs))
+			for i, in := range inputs {
+				if tc.folds[i] == 0 {
+					folded[i] = in
+					continue
+				}
+				out := filepath.Join(t.TempDir(), fmt.Sprintf("f%d.wav", i))
+				if _, terr := r.Transcode(ctx, in, out, media.Spec{Codec: media.CodecWAV, Channels: tc.folds[i]}); terr != nil {
+					t.Fatalf("fold %d: %v", i, terr)
+				}
+				folded[i] = out
+			}
+			med, closer, err := r.OpenAlbumConcat(ctx, folded, nil)
+			if err != nil {
+				t.Fatalf("concat of folded members: %v", err)
+			}
+			want, err := r.AnalyzeMedia(ctx, med, "", 0)
+			closer()
+			if err != nil {
+				t.Fatalf("analyze folded concat: %v", err)
+			}
+			if d := math.Abs(group.IntegratedLUFS - want.IntegratedLUFS); d > 0.05 {
+				t.Errorf("group = %.3f, folded-members concat = %.3f, off by %.3f LU", group.IntegratedLUFS, want.IntegratedLUFS, d)
+			}
+
+			// The trap: folding the group after the timeline widened it.
+			wide, closeWide, err := r.OpenAlbumConcat(ctx, inputs, nil)
+			if err != nil {
+				t.Fatalf("concat of sources: %v", err)
+			}
+			after, err := r.AnalyzeMedia(ctx, wide, "", 2)
+			closeWide()
+			if err != nil {
+				t.Fatalf("analyze fold-after-widen: %v", err)
+			}
+			if d := math.Abs(group.IntegratedLUFS - after.IntegratedLUFS); d <= 0.5 {
+				t.Errorf("group = %.3f and fold-after-widen = %.3f differ by only %.3f dB; the arm would not be worth its renders",
+					group.IntegratedLUFS, after.IntegratedLUFS, d)
+			}
+		})
 	}
 }
 

@@ -51,7 +51,7 @@ func newCacheDirCmd() *cobra.Command {
 			}
 			_, statErr := os.Stat(dir)
 			exists := statErr == nil
-			if rootFlagsValue.json {
+			if outputFlags(cmd).json {
 				return writeJSON(cmd.OutOrStdout(), struct {
 					SchemaVersion int    `json:"schemaVersion"`
 					Dir           string `json:"dir"`
@@ -83,7 +83,7 @@ func newCacheCleanCmd() *cobra.Command {
 			if err := os.RemoveAll(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("remove cache %s: %w", dir, err)
 			}
-			if rootFlagsValue.json {
+			if outputFlags(cmd).json {
 				return writeJSON(cmd.OutOrStdout(), struct {
 					SchemaVersion int    `json:"schemaVersion"`
 					Dir           string `json:"dir"`

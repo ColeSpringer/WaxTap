@@ -1,6 +1,7 @@
 package download
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -8,6 +9,13 @@ import (
 
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
+
+// errRangeIgnored marks a reply that did not honour a bounded range: a 200
+// where a 206 was asked for, or a body whose span or length is not the one
+// requested. It is terminal on the request ladder, because an origin that
+// ignored the range will ignore the retry, and it is what tells a ranged reader
+// to hand the Source back for a plain sequential fetch instead.
+var errRangeIgnored = errors.New("download: the origin did not honour the requested byte range")
 
 // RangeStrategy describes the wire format for byte ranges and the checks needed
 // before the downloader writes bytes at an offset. Standard HTTP servers use a
@@ -50,7 +58,7 @@ func (HeaderRange) Validate(resp *http.Response, start, end int64) error {
 		if start == 0 && end < 0 {
 			return nil
 		}
-		return fmt.Errorf("download: server ignored Range header (got 200 for %s)", rangeLabel(start, end))
+		return fmt.Errorf("%w: got 200 for %s", errRangeIgnored, rangeLabel(start, end))
 	default:
 		return statusError(resp)
 	}
@@ -71,12 +79,20 @@ func (QueryRange) Apply(req *http.Request, start, end int64) {
 	req.URL.RawQuery = q.Encode()
 }
 
-// Validate accepts 200 and verifies the declared range or length when the
-// response provides enough information. Open-ended requests have no expected byte
-// count, so Content-Length alone is not useful.
+// Validate accepts 200 and verifies the declared range or length. Open-ended
+// requests have no expected byte count, so Content-Length alone is not useful.
+//
+// A bounded request must come back with a span or a length to check it against.
+// Unlike a 206, a 200 is what this dialect answers whether or not it honoured
+// the parameter, so a reply that states neither is indistinguishable from the
+// whole file: writing it at the requested offset, or caching it as that block,
+// would put the resource's head under a later offset's name.
 func (QueryRange) Validate(resp *http.Response, start, end int64) error {
 	if resp.StatusCode != http.StatusOK {
 		return statusError(resp)
+	}
+	if _, _, _, ok := parseContentRange(resp); end >= 0 && !ok && resp.ContentLength < 0 {
+		return fmt.Errorf("%w: %s answered 200 with neither Content-Range nor Content-Length", errRangeIgnored, rangeLabel(start, end))
 	}
 	return checkRangedLength(resp, start, end)
 }
@@ -91,10 +107,10 @@ func (QueryRange) Validate(resp *http.Response, start, end int64) error {
 func checkRangedLength(resp *http.Response, start, end int64) error {
 	if crStart, crEnd, _, ok := parseContentRange(resp); ok {
 		if crStart != start {
-			return fmt.Errorf("download: response Content-Range starts at %d, requested %d", crStart, start)
+			return fmt.Errorf("%w: Content-Range starts at %d, requested %d", errRangeIgnored, crStart, start)
 		}
 		if end >= 0 && crEnd != end {
-			return fmt.Errorf("download: response Content-Range ends at %d, requested %d", crEnd, end)
+			return fmt.Errorf("%w: Content-Range ends at %d, requested %d", errRangeIgnored, crEnd, end)
 		}
 	}
 	if end < 0 {
@@ -102,7 +118,7 @@ func checkRangedLength(resp *http.Response, start, end int64) error {
 	}
 	want := end - start + 1
 	if cl := resp.ContentLength; cl >= 0 && cl != want {
-		return fmt.Errorf("download: range bytes=%d-%d returned %d bytes, want %d", start, end, cl, want)
+		return fmt.Errorf("%w: bytes=%d-%d returned %d bytes, want %d", errRangeIgnored, start, end, cl, want)
 	}
 	return nil
 }

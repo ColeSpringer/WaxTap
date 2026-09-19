@@ -340,7 +340,7 @@ func TestFetch_IgnoredRangeHeaderIsError(t *testing.T) {
 
 	d := newTestDownloader(1<<10, 2)
 	_, err := d.fetch(context.Background(), Source{URL: srv.URL}, 10, 19)
-	if err == nil || !strings.Contains(err.Error(), "ignored Range") {
-		t.Fatalf("err = %v, want ignored-Range error", err)
+	if !errors.Is(err, errRangeIgnored) {
+		t.Fatalf("err = %v, want errRangeIgnored", err)
 	}
 }

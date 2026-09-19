@@ -131,6 +131,11 @@ type Downloader struct {
 	maxRefreshes    int
 	baseBackoff     time.Duration
 	maxBackoff      time.Duration
+	// rangeBlock overrides DefaultRangeBlock for a RangeReader. It has no
+	// Config field: a block size is a property of how origins behave, not
+	// something a caller tunes, and only this package's tests set it so a
+	// small fixture can span several blocks.
+	rangeBlock int64
 }
 
 // New returns a Downloader, filling unset Config fields with defaults. It panics

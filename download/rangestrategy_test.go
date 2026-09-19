@@ -3,7 +3,6 @@ package download
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3/waxerr"
@@ -61,7 +60,7 @@ func TestHeaderRange_Validate(t *testing.T) {
 		wantIgnoredRange bool
 	}{
 		{"bounded 206 correct length", resp(206, 90, nil), 10, 99, false, false, false},
-		{"bounded 206 wrong length", resp(206, 50, nil), 10, 99, true, false, false},
+		{"bounded 206 wrong length", resp(206, 50, nil), 10, 99, true, false, true},
 		{"bounded 206 unknown length", resp(206, -1, nil), 10, 99, false, false, false},
 		{"bounded 200 ignored range", resp(200, 100, nil), 10, 99, true, false, true},
 		{"bounded 404", resp(404, 0, nil), 10, 99, true, true, false},
@@ -81,8 +80,8 @@ func TestHeaderRange_Validate(t *testing.T) {
 					t.Fatalf("err = %v, want *waxerr.HTTPStatusError", err)
 				}
 			}
-			if tt.wantIgnoredRange && (err == nil || !strings.Contains(err.Error(), "ignored Range")) {
-				t.Fatalf("err = %v, want ignored-Range error", err)
+			if tt.wantIgnoredRange && !errors.Is(err, errRangeIgnored) {
+				t.Fatalf("err = %v, want errRangeIgnored", err)
 			}
 		})
 	}
@@ -102,6 +101,18 @@ func TestQueryRange_Validate(t *testing.T) {
 	// Without a known end, there is no byte count to validate.
 	if err := (QueryRange{}).Validate(resp(200, -1, nil), 0, -1); err != nil {
 		t.Errorf("200 open-ended: unexpected error %v", err)
+	}
+	// A bounded reply that states no length at all is indistinguishable from
+	// the whole file: this dialect answers 200 whether or not it honoured the
+	// parameter, so there is nothing left to check it against. Accepting it
+	// would let a chunked origin's head be written at another offset.
+	if err := (QueryRange{}).Validate(resp(200, -1, nil), 10, 99); !errors.Is(err, errRangeIgnored) {
+		t.Errorf("200 bounded with no length = %v, want errRangeIgnored", err)
+	}
+	// A Content-Range that covers the request is evidence enough on its own.
+	withRange := resp(200, -1, http.Header{"Content-Range": []string{"bytes 10-99/1000"}})
+	if err := (QueryRange{}).Validate(withRange, 10, 99); err != nil {
+		t.Errorf("200 bounded with a matching Content-Range: unexpected error %v", err)
 	}
 }
 

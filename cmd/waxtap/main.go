@@ -29,22 +29,23 @@ func main() {
 	// A failure that followed the signal is a cancellation, whatever it reports.
 	// stop() is deferred and cannot have run, so ctx.Err() is set only by a signal.
 	err = finalError(ctx, err)
-	os.Exit(report(os.Stdout, os.Stderr, os.Args[1:], err))
+	os.Exit(report(os.Stdout, os.Stderr, os.Args[1:], outputFlags(root).json, err))
 }
 
 // report renders a terminal error and returns the process exit code. It lives
 // apart from main so tests can reach it: they call root.Execute() and never
-// main(), and the flag-parse case is only observable here.
-func report(stdout, stderr io.Writer, args []string, err error) int {
+// main(), and the flag-parse case is only observable here. jsonMode is the
+// root's --json, read after Execute returns; it is the only output flag a
+// terminal error consults.
+func report(stdout, stderr io.Writer, args []string, jsonMode bool, err error) int {
 	// Some commands write their own JSON failure document. Keep the wrapped exit
 	// code, but do not write another document.
 	if _, rendered := errors.AsType[*alreadyRenderedError](err); rendered {
 		return exitCodeFor(err)
 	}
-	// rootFlagsValue holds the parsed flags, which is the answer whenever parsing
-	// got that far. Only a failure that preceded it has to re-read the command
-	// line, and only those are marked; see usageError.
-	jsonMode := rootFlagsValue.json
+	// The parsed flag is the answer whenever parsing got that far. Only a
+	// failure that preceded it has to re-read the command line, and only those
+	// are marked; see usageError.
 	if ue, ok := errors.AsType[*usageError](err); ok && ue.flagsUnparsed {
 		jsonMode = jsonMode || jsonRequested(args)
 	}

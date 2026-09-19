@@ -32,9 +32,10 @@ type ProbeResult struct {
 	// length reads as clean), so an empty list is not a certificate of health.
 	//
 	// Damage only, and only what reading the headers finds. A demuxer that
-	// walks its payload lazily (MP3, bare or inside a WAV or AIFF-C; ADTS; a
-	// Matroska with only an advisory length) reports damage past the head
-	// from the read that reaches it, which Result.InputWarnings carries.
+	// walks its payload lazily (MP3, bare or inside a WAV or AIFF-C; ADTS;
+	// Matroska) reports damage past the head from the read that reaches it,
+	// which Result.InputWarnings carries; a walk that measures the file
+	// (Runner.MeasureLength) finds it too.
 	Warnings []string
 	// Notes are what WaxFlow did with an input that is not damaged: a stream
 	// it ignored, a chapter list it capped at its own limit, a timeline it
@@ -46,12 +47,12 @@ type ProbeResult struct {
 	// LengthClaimed says the default track's length is a claim the headers
 	// make, not a count a read confirmed: the demuxer walks its payload
 	// lazily and has not reached the end (container.Walker: MP3, bare or in
-	// a WAV or AIFF-C; ADTS; any Matroska whose open did not walk it, which
-	// is every non-Opus track), or it states an advisory total (ASF), or
+	// a WAV or AIFF-C; ADTS; every Matroska track, since an open reads to the
+	// first cluster and no further), or it states an advisory total (ASF), or
 	// none at all. A cut resolved against such a length can declare a span
 	// the file does not hold, so the pipeline measures the file first
-	// (Runner.MeasureLength), at the cost of a decode on those cut runs when
-	// the walk cannot settle the count itself.
+	// (Runner.MeasureLength), a walk for every container that has one and a
+	// decode only for the one that does not.
 	LengthClaimed bool
 }
 
@@ -116,14 +117,30 @@ func (r *Runner) Probe(ctx context.Context, input string) (ProbeResult, error) {
 		return ProbeResult{}, err
 	}
 	defer closeSrc()
-	return r.probeSource(ctx, src, input, hintFor(input))
+	return r.ProbeSource(ctx, src, input, hintFor(input))
 }
 
-func (r *Runner) probeSource(ctx context.Context, src container.Source, input, hint string) (ProbeResult, error) {
+// ProbeSource probes an already-open Source, for an input that is not a local
+// file: a ranged HTTP reader over a resolved stream. input names it for error
+// classification, and hint is the container hint an extension would have given
+// (".webm", ".m4a"), empty when there is none.
+//
+// The source is bound to ctx before anything reads it, so a network-backed one
+// honors cancellation; see container.Contextual on why the binding has to
+// happen at the outermost source.
+//
+// The concurrency slot is held across every read the probe makes, which for a
+// remote source means holding it across a handful of HTTP round trips rather
+// than a local read. That is deliberate: the one caller that probes a remote
+// source is a single info request, with nothing else competing for the slot,
+// and releasing it mid-probe would let the decode work it bounds start while
+// the probe still holds a demuxer open on the same Runner.
+func (r *Runner) ProbeSource(ctx context.Context, src container.Source, input, hint string) (ProbeResult, error) {
 	if err := r.acquire(ctx); err != nil {
 		return ProbeResult{}, err
 	}
 	defer r.release()
+	src = container.BindContext(ctx, src)
 
 	// OpenDemuxer runs the same resolve, open, and trackless check a non-strict
 	// Probe does (format/format.go:200-217); it also hands back the demuxer, so
@@ -136,15 +153,24 @@ func (r *Runner) probeSource(ctx context.Context, src container.Source, input, h
 		return ProbeResult{}, classifyInputError(err, input)
 	}
 	pr := mapProbe(info, src.Size())
-	def := info.Default()
-	if w, ok := demux.(container.Walker); (ok && !w.Walked()) || def.SamplesAdvisory || def.Samples < 0 {
-		pr.LengthClaimed = true
-	}
+	pr.LengthClaimed = lengthClaimed(demux, info.Default())
 	return pr, nil
 }
 
+// lengthClaimed reports whether a track's length is a claim its headers make
+// rather than a count a read confirmed: the demuxer walks its payload lazily
+// and has not reached the end, or the track states an advisory total, or none
+// at all. It is what ProbeResult.LengthClaimed reports and what openComposed
+// tests before planning a bounded span.
+func lengthClaimed(demux container.Demuxer, t container.Track) bool {
+	if w, ok := demux.(container.Walker); ok && !w.Walked() {
+		return true
+	}
+	return t.SamplesAdvisory || t.Samples < 0
+}
+
 // mapProbe converts a WaxFlow probe into a ProbeResult. It never errors; the
-// caller (probeSource) has already ensured the input decoded.
+// caller (ProbeSource) has already ensured the input decoded.
 //
 // The default track is reported first (so AudioStream describes it) and its
 // duration is Format.Duration: cuts and measurements run against the default

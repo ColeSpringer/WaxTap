@@ -341,9 +341,6 @@ func TestSponsorBlockURLOnCapableCommandsOnly(t *testing.T) {
 // heartbeat wanted neither. loadConfig now refuses the pair, so every command
 // that calls setup rejects it before doing any work.
 func TestQuietAndVerboseConflict(t *testing.T) {
-	// newRootCmd rebinds the persistent flags to the package-level rootFlagsValue.
-	saved := rootFlagsValue
-	t.Cleanup(func() { rootFlagsValue = saved })
 	// Point the optional config file at a path that does not exist, so a real one
 	// in the user's config dir cannot color the result. A missing WAXTAP_CONFIG is
 	// not an error; only an explicit --config demands the file.

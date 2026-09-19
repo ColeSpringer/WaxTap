@@ -46,7 +46,7 @@ func newExitCodesCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			if rootFlagsValue.json {
+			if outputFlags(cmd).json {
 				return writeJSON(out, struct {
 					SchemaVersion int             `json:"schemaVersion"`
 					ExitCodes     []exitCodeEntry `json:"exitCodes"`

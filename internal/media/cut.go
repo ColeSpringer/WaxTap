@@ -60,10 +60,14 @@ type CutSpec struct {
 	RequireCopyCutMode bool // --cut-mode copy
 	RequireCopyFormat  bool // --format copy
 	Encode             Spec
-	// SourceSamples is the frame count a decode of the source delivers, when
-	// the caller measured it (Runner.MeasureLength) because the headers only
-	// claim a length; 0 trusts the headers. The composed timeline holds each
-	// span to it, so a span reaching the end asks for what the file has.
+	// SourceSamples is the frame count a read of the source delivers, when the
+	// caller measured it (Runner.MeasureLength) because the headers only claim a
+	// length. The composed timeline holds every span to it, in both directions:
+	// a span reaching the end asks for what the file has, and a file holding
+	// more than its headers declare gives up the declaration, not the audio.
+	// 0 means the caller did not measure, and Render measures the source itself
+	// rather than plan a bounded span against a number nothing confirmed; a file
+	// whose headers state an exact count is not measured either way.
 	SourceSamples int64
 }
 
@@ -115,11 +119,10 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	}
 	defer closeSrc()
 
-	if err := r.acquire(ctx); err != nil {
-		return CutResult{}, err
-	}
-	defer r.release()
-
+	// The concurrency slot is taken by cutRemux and cutReencode, around the work
+	// that reads or writes audio, rather than here: openComposed may have to
+	// measure the source first, which takes a slot of its own, and a
+	// concurrency-1 Runner held one here would deadlock against itself.
 	hint := hintFor(input)
 	outExt := hintFor(output)
 
@@ -155,12 +158,12 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			if spec.Encode.Codec == CodecCopy {
 				return CutResult{}, fmt.Errorf("%w: this source codec cannot be packet-cut and has no same-family encoder; pass an explicit format (e.g. flac) to render the cut", waxerr.ErrIncompatibleSpec)
 			}
-			if levels, found, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+			if levels, found, err = r.cutReencode(ctx, input, src, hint, outExt, spec, staged); err != nil {
 				return CutResult{}, classifyEngineError(err, input, output)
 			}
 		}
 	} else {
-		if levels, found, err = r.cutReencode(ctx, src, hint, outExt, spec, staged); err != nil {
+		if levels, found, err = r.cutReencode(ctx, input, src, hint, outExt, spec, staged); err != nil {
 			return CutResult{}, classifyEngineError(err, input, output)
 		}
 	}
@@ -182,6 +185,10 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 // (and no error) when WaxFlow declines the source codec, so the caller re-encodes
 // instead, and the damage the packet walk found when it ran.
 func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, keeps []cutrange.Range, total time.Duration, dst *tempfile.File) (done bool, found []string, err error) {
+	if err := r.acquire(ctx); err != nil {
+		return false, nil, err
+	}
+	defer r.release()
 	grid, err := r.engine.PacketGrid(src, hint)
 	if err != nil {
 		return false, nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
@@ -195,6 +202,26 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 	if !ok {
 		return false, nil, nil // unknown codec: let the re-encode path handle it
 	}
+	// Walk a lazily walked demuxer before planning, now that the codec is one
+	// this path can copy. validateCutSpans bounds every span by track.Samples
+	// whether or not it is advisory, which a Matroska open now states only as
+	// the Info Duration, and PlanCut places inner trims from the MidTrims a walk
+	// recorded. An unwalked track has neither, so the copy plan would meet a
+	// mid-stream refusal instead of declining. The cost is a frame-index pass,
+	// warm in the page cache after PacketGrid's own read.
+	//
+	// A walk that fails declines rather than failing the cut: the re-encode
+	// fallback reads the file itself and reports what it finds, which is a
+	// better answer for a damaged source than refusing the copy outright.
+	walked, walkErr, ctxErr := walkDefault(ctx, demux, info, track)
+	if ctxErr != nil {
+		return false, nil, ctxErr
+	}
+	if walkErr != nil {
+		r.log.DebugContext(ctx, "the packet walk failed; re-encoding the cut instead of copying it", "err", walkErr)
+		return false, nil, nil
+	}
+	track = walked
 	spans := toSpans(keeps, total, track.Fmt.Rate)
 	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
 
@@ -225,13 +252,19 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 // them (with an optional crossfade), and re-encodes with spec.Encode. It reports
 // the encode's level measurement and the damage the read found alongside; see
 // Result.Levels and Result.InputWarnings.
-func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, []string, error) {
-	med, err := r.openComposed(src, hint, spec.Keeps, spec.Total, spec.Crossfade, spec.SourceSamples)
+func (r *Runner) cutReencode(ctx context.Context, input string, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, []string, error) {
+	// Composing may measure the source, which takes a slot; the encode below
+	// takes its own once the composition is built.
+	med, err := r.openComposed(ctx, input, src, hint, spec.Keeps, spec.Total, spec.Crossfade, spec.SourceSamples)
 	if err != nil {
 		return Levels{}, nil, err
 	}
 	defer med.Close()
 
+	if err := r.acquire(ctx); err != nil {
+		return Levels{}, nil, err
+	}
+	defer r.release()
 	opts := encodeOptions(spec.Encode)
 	name, _ := codecFormat(spec.Encode.Codec)
 	opts.Container = containerFor(name, outExt)
@@ -248,26 +281,40 @@ func (r *Runner) cutReencode(ctx context.Context, src container.Source, hint, ou
 //
 // It probes the source's rate to convert the time-domain keeps to sample
 // spans. sourceSamples is 0 or the count a caller's Runner.MeasureLength
-// delivered; see CutSpec.SourceSamples.
-func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration, sourceSamples int64) (format.Media, error) {
-	_, info, err := format.OpenDemuxer(src, hint, nil)
+// delivered; see CutSpec.SourceSamples. A source whose headers only claim a
+// length and that the caller did not measure is measured here, so no bounded
+// span is ever planned against a number nothing confirmed; input names the file
+// that measurement reads. The measurement takes a concurrency slot, so a caller
+// holding one must not reach here.
+func (r *Runner) openComposed(ctx context.Context, input string, src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration, sourceSamples int64) (format.Media, error) {
+	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	track := info.Default()
-	// bound is what a bounded span is clamped under: the media a span opens
-	// refuses a bound past its own declared total (Slice checks it up front
-	// through SpanTrack), and the track handed to a timeline refuses one
-	// past the measured count, so the smaller of the two it is.
-	bound := track.Samples
-	if sourceSamples > 0 {
-		// The caller measured the source (MeasureLength), which is the
-		// length the timeline holds each span to; the declaration is only
-		// what the spans are still clamped under.
-		if bound <= 0 || sourceSamples < bound {
-			bound = sourceSamples
+	// measured, not sourceSamples > 0: a file that holds no frames measures as
+	// zero, and reverting to the header's claim there would plan the one span
+	// shape WaxFlow reports as a blind request rather than a damaged file.
+	measured := sourceSamples > 0
+	if !measured && lengthClaimed(demux, track) {
+		// Nobody measured, and the headers only claim: measure now. The caller
+		// asked for a cut of this file, not for a guess about its length.
+		length, lerr := r.MeasureLength(ctx, input)
+		if lerr != nil {
+			return nil, lerr
 		}
-		track.Samples, track.SamplesAdvisory = sourceSamples, false
+		sourceSamples, measured = length.Samples, true
+	}
+	// bound is what a bounded span is clamped under. The measurement is it,
+	// alone: MeasureLength returns the count the run enforces, already settled
+	// against the declaration (container.SettleLength clamps a capped track to
+	// what its packets hold and takes the raw run for one that only claimed a
+	// length), so re-clamping here could only subtract from an answer that is
+	// already the truth.
+	bound := track.Samples
+	if measured {
+		bound = sourceSamples
+		track.Samples, track.SamplesAdvisory, track.SamplesExact = sourceSamples, false, true
 	}
 	// An open-ended final span inherits the track's own claim about its
 	// length, and a Concat refuses one that is advisory (a WMA nobody
@@ -277,13 +324,24 @@ func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrang
 	openEnded := !track.SamplesAdvisory && track.Samples >= 0
 	rate := track.Fmt.Rate
 
+	// measured wraps each opened media in the count this cut was planned
+	// against, so the slice's own up-front check accepts every span the plan
+	// holds and an overrun reports as the damaged file it is rather than as a
+	// span built blind. It is a no-op when nothing was measured.
+	hold := func(m format.Media) format.Media {
+		if !measured {
+			return m
+		}
+		return waxflow.MeasuredMedia(m, sourceSamples)
+	}
+
 	if len(keeps) == 1 {
 		from, to := sampleBounds(keeps[0], total, rate, bound, openEnded)
 		med, err := format.Open(src, hint, nil)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 		}
-		sl, err := waxflow.Slice(med, from, to)
+		sl, err := waxflow.Slice(hold(med), from, to)
 		if err != nil {
 			med.Close()
 			return nil, err
@@ -303,7 +361,7 @@ func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrang
 			if err != nil {
 				return nil, err
 			}
-			return waxflow.Slice(m, from, to)
+			return waxflow.Slice(hold(m), from, to)
 		}}
 	}
 	xfade := int64(0)
@@ -315,13 +373,14 @@ func (r *Runner) openComposed(src container.Source, hint string, keeps []cutrang
 
 // OpenComposed opens the cut-composed Media for measurement (loudness), without
 // re-encoding. The caller closes it. sourceSamples is 0 or the count a
-// caller's Runner.MeasureLength delivered; see CutSpec.SourceSamples.
-func (r *Runner) OpenComposed(input string, keeps []cutrange.Range, total, crossfade time.Duration, sourceSamples int64) (format.Media, func() error, error) {
+// caller's Runner.MeasureLength delivered; see CutSpec.SourceSamples; a source
+// whose headers only claim a length is measured here when it is 0.
+func (r *Runner) OpenComposed(ctx context.Context, input string, keeps []cutrange.Range, total, crossfade time.Duration, sourceSamples int64) (format.Media, func() error, error) {
 	src, closeSrc, err := openSource(input)
 	if err != nil {
 		return nil, nil, err
 	}
-	med, err := r.openComposed(src, hintFor(input), keeps, total, crossfade, sourceSamples)
+	med, err := r.openComposed(ctx, input, src, hintFor(input), keeps, total, crossfade, sourceSamples)
 	if err != nil {
 		_ = closeSrc()
 		return nil, nil, err

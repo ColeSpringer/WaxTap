@@ -98,9 +98,12 @@ leaves the true-peak limiter idle and reproduces the input's track-to-track
 spacing exactly, at the cost of landing short; the default `limit` reaches for
 the target and lets the per-track limiter compress that spacing. Every track is
 measured at the width its own encode delivers, so a lossy target's fold of a
-surround master is in the figures the gain comes from. An album mixing a
-surround member with a stereo one is refused: the group measurement mixes only
-to mono or stereo. Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
+surround master is in the figures the gain comes from. An album mixing widths is
+measured as a group with each narrower member placed into the widest layout and
+its missing positions silent, so the group figure is what every member
+contributes at its own width; a member whose positions have no place in that
+layout (a side pair beside a back pair) is refused, naming the track. Loudness
+uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
 
@@ -483,10 +486,11 @@ chain can use the adopted session.
 A refusal the sidecar codes is read: `video-unavailable` is the video's
 playability verdict (exit 3, skip-class, the chain still tries the native
 clients), and a refusal that states a wait (`Retry-After` or
-`retry_after_seconds`) is retried once after it, up to 60 s. A `/session` that
-exports `user_agent` and `client_version` has WaxTap's WEB requests carry that
-browser's identity. A context that carries the video's channel, description,
-thumbnail ladder, live flags, and publish date fills `Result.Metadata`,
+`retry_after_seconds`) is retried once after it, up to 60 s. A `/session` or
+`/player-context` that exports `user_agent` and `client_version` has WaxTap's
+WEB requests carry that browser's identity. A context that carries the video's
+channel, description, thumbnail ladder, live flags, and publish date fills
+`Result.Metadata`,
 `--write-info-json`, and the cover-art ladder on that path as every other path
 does.
 

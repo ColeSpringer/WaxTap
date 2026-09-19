@@ -111,7 +111,7 @@ func newInfoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed URL of the selected stream (sensitive, expires)")
-	cmd.Flags().BoolVar(&probe, "probe", false, "probe the selected stream for authoritative rate/channels/duration")
+	cmd.Flags().BoolVar(&probe, "probe", false, "read the selected stream's headers for its rate, channels, and length")
 	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters) via a token-free watch-page pass")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	cmd.Flags().IntVar(&itag, "itag", 0, "report an exact itag instead of the best audio")

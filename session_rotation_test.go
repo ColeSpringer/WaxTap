@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -81,6 +82,26 @@ func rotationPlayerJSON(vd string, clen int, extraQuery string) string {
 
 var playerBodyVD = regexp.MustCompile(`"visitorData"\s*:\s*"([^"]+)"`)
 
+// rotRange parses googlevideo's inclusive "start-end" range parameter, clamped
+// to the resource. An absent end means to the last byte.
+func rotRange(spec string, total int) (start, end int) {
+	parts := strings.SplitN(spec, "-", 2)
+	start, _ = strconv.Atoi(parts[0])
+	end = total - 1
+	if len(parts) == 2 && parts[1] != "" {
+		if e, err := strconv.Atoi(parts[1]); err == nil {
+			end = e
+		}
+	}
+	if end > total-1 {
+		end = total - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start, end
+}
+
 // guestHomepage answers the homepage bootstrap with a fresh guest identity: the
 // visitorData in ytcfg and the cookie that anchors it.
 func guestHomepage(vd string) *http.Response {
@@ -105,6 +126,12 @@ type rotationWorld struct {
 	homepageHits int
 	vdServed     []string // visitorData observed on media requests, in order
 	mediaCodes   []int    // status answered for each media request
+	// ignoreRange makes the origin answer every media request with the whole
+	// body whatever range was asked for, which is what a ranged reader has to
+	// detect before it can fall back to a sequential fetch.
+	ignoreRange bool
+	mediaRanges []string // the range= parameter of each media request, "" for none
+	bytesServed int      // media bytes written, so a test can prove a probe read less than the file
 }
 
 func (w *rotationWorld) flagged() string {
@@ -147,12 +174,25 @@ func (w *rotationWorld) roundTrip(t *testing.T) rotationRT {
 		case strings.Contains(r.URL.Path, "/videoplayback"):
 			vd := r.URL.Query().Get("vd")
 			w.vdServed = append(w.vdServed, vd)
+			spec := r.URL.Query().Get("range")
+			w.mediaRanges = append(w.mediaRanges, spec)
 			if w.capped(vd) {
 				w.mediaCodes = append(w.mediaCodes, http.StatusForbidden)
 				return rotResp(http.StatusForbidden, ""), nil
 			}
 			w.mediaCodes = append(w.mediaCodes, http.StatusOK)
-			return rotResp(http.StatusOK, w.media), nil
+			body := w.media
+			if spec != "" && !w.ignoreRange {
+				// googlevideo's dialect: a 200 carrying the requested slice,
+				// with its own Content-Length.
+				start, end := rotRange(spec, len(w.media))
+				body = w.media[start : end+1]
+			}
+			w.bytesServed += len(body)
+			resp := rotResp(http.StatusOK, body)
+			resp.ContentLength = int64(len(body))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			return resp, nil
 		}
 		return rotResp(http.StatusNotFound, ""), nil
 	}

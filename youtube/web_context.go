@@ -98,7 +98,7 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 
 	return &Extraction{
 		video:           video,
-		profile:         c.webContextProfile(pc.ClientVersion),
+		profile:         c.webContextProfile(pc.UserAgent, pc.ClientVersion),
 		session:         sess,
 		attempt:         AttemptWebContext,
 		rawAudio:        raw,
@@ -140,14 +140,18 @@ const ClientNameWebContext = "WEB_CONTEXT"
 
 // webContextProfile builds the WEB_CONTEXT client profile: a WEB identity that
 // requires only a GVS PO token (the player token is skipped because /player is
-// not called here) and no signature timestamp. version comes from the attested
-// context so the SABR client_info matches the session the URL was minted under,
-// and the User-Agent comes from the client's web identity so a ChromeMajor
-// override applies here exactly as on every other WEB-family path.
-func (c *Client) webContextProfile(version string) ClientProfile {
+// not called here) and no signature timestamp. userAgent and version come from
+// the attested context, so the SABR client_info and the requests match the
+// browser the URL was minted under. A context that states no user agent falls
+// back to the client's own web identity, where a ChromeMajor override applies
+// exactly as on every other WEB-family path.
+func (c *Client) webContextProfile(userAgent, version string) ClientProfile {
 	base := profileWeb
 	base.Name = ClientNameWebContext
 	base.UserAgent = c.webFallback.UserAgent
+	if userAgent != "" {
+		base.UserAgent = userAgent
+	}
 	if version != "" {
 		base.Version = version
 	}

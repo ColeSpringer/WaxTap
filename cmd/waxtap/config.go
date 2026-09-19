@@ -170,10 +170,11 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		return coalesceBool(def, file, env, flagBoolPtr(flags, name))
 	}
 
+	of := outputFlags(cmd)
 	a := &appConfig{
-		json:    rootFlagsValue.json,
-		quiet:   rootFlagsValue.quiet,
-		verbose: rootFlagsValue.verbose,
+		json:    of.json,
+		quiet:   of.quiet,
+		verbose: of.verbose,
 
 		cacheDir: str("cache-dir", fc.CacheDir, ec.CacheDir, ""),
 		noCache:  boolean("no-cache", fc.NoCache, ec.NoCache, false),

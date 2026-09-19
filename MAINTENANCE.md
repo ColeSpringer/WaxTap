@@ -102,14 +102,17 @@ num=49151` (admin). Linux and macOS CI are unaffected, and the Windows leg
 starts on a fresh runner with an empty pool.
 
 CI runs gofmt, vet, and a `go mod tidy` check, the race tests on Linux, macOS,
-and Windows, and a GoReleaser snapshot of every release target. `vulncheck`
-runs govulncheck against each release target on every change and weekly. The
-daily `doctor` workflow fails only on an extraction failure (exit 4, on any
-candidate of any attempt); login-required, availability, and rate-limit
-failures remain warnings, and each run's summary page carries the verdict and
-the report. A manual dispatch with `full` set runs the whole-track check.
-GitHub switches a schedule off after 60 days without a commit and emails the
-owner; re-enable it from the Actions tab.
+and Windows (shuffled), and a GoReleaser snapshot of every release target.
+`vulncheck` runs govulncheck against each release target on every change and
+weekly. GitHub switches a schedule off after 60 days without a commit and emails
+the owner; re-enable it from the Actions tab.
+
+Live extraction health is not checked from CI. A GitHub-hosted address is
+bot-walled in the player response, before the cipher path runs, so a scheduled
+`doctor` could never observe the exit-4 alarm it existed for: all 105 scheduled
+runs from 2026-06-04 to 2026-09-17 refused with `login-required` on every
+candidate and none reached YouTube. Run `waxtap doctor` from a served address
+before a release.
 
 ## Client identity
 
@@ -227,21 +230,23 @@ A refusal is retried once. A transport failure or an HTTP 408/5xx earns it after
 the wait the sidecar stated (`Retry-After` or `retry_after_seconds`), else after
 500 ms; a 429 earns it only with a stated wait, since a bare 429 says back off.
 Any other refusal, including a playability verdict, does not. A stated wait over
-60 s is reported rather than slept through.
+60 s is reported rather than slept through. The decision is exported as
+`waxtap.SidecarRetryWait`, so an in-process adapter translating another client's
+failures into `SidecarError`/`SidecarResponseError` runs WaxTap's rule instead of
+a second one that drifts from it.
 
 Every sidecar request is bounded by `WithSidecarTimeout` (CLI
 `sidecarTimeoutSeconds`), 60 s by default; a `/session` resolution runs under
 `Timeouts.WebContext` like a `/player-context` call, ahead of the extraction
 budget.
 
-A bot check the sidecar's browser hits ("Sign in to confirm you're not a bot",
-status `LOGIN_REQUIRED`) arrives as a per-video `video-unavailable` and
-classifies as `login-required`, as WaxTap's own WEB `/player` does; it arms no
-cool-down, so a batch run pays one context call per item until the chain
-delivers. If a later client reaches the stream, that verdict is dropped (see
-the precedence note below), so it decides the exit code only when nothing
-delivered. The ask for WaxSeal to answer it as `player-context-failed` is in
-docs/upstream-requests.md.
+A bot check the sidecar's browser hits ("Sign in to confirm you're not a bot")
+buys a fresh identity once every 10 minutes; past that WaxSeal refuses the video
+as `player-context-failed` (HTTP 502) with a 2 minute `Retry-After`. That wait is
+past the 60 s cap, so WaxTap reports it rather than sleeping through it: the
+context arm is parked for the stated wait (capped at 5 minutes) and the native
+chain serves the rest of the batch meanwhile. With nothing delivering, it is exit
+9 with the wait in the hint.
 
 Error precedence across a download's attempts: `waxerr.PreferErr` ranks
 availability verdicts above everything else, but an attempt that reached the
@@ -276,6 +281,14 @@ descrambled. Format entries require enough identity to select and request the
 audio, especially `itag`, `lmt`, `xtags`, and `mime_type`; richer quality,
 duration, DRC, and track fields are optional. An optional `session_generation`
 names the daemon session behind the context.
+
+Optional identity keys: `user_agent` and `client_version`, the exact
+`navigator.userAgent` and InnerTube client version the context was minted under.
+When set, the WEB requests under the context (the SABR stream and the GVS token
+request) carry that browser's identity in place of WaxTap's own, so
+`--chrome-major` does not apply there; a context that states neither leaves them
+to WaxTap's own WEB identity. This is the `/session` contract's pair, on the
+per-video call.
 
 Optional metadata keys: `channel_id`, `description`, `thumbnails` (`url`,
 `width`, `height`, in the player response's order), `is_live_content`,

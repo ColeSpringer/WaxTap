@@ -12,8 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/colespringer/waxflow/container"
 
 	"github.com/colespringer/waxtap/v3/download"
 	"github.com/colespringer/waxtap/v3/format"
@@ -265,6 +268,7 @@ func (c *Client) engine() *media.Runner {
 		c.runner = media.NewRunner(media.RunnerConfig{
 			MaxProcs: procs,
 			Logger:   c.log,
+			TempDir:  c.opts.TempDir,
 		})
 	})
 	return c.runner
@@ -291,8 +295,11 @@ type InfoResult struct {
 	// metadata came from. When false, an empty Chapters slice or Unknown
 	// Availability means enrichment did not run, not that the video has none.
 	FullMetadata bool
-	// Probed reports that InfoProbe probed the resolved best-audio stream,
-	// so that row's sample rate, channels, bitrate, and duration are authoritative.
+	// Probed reports that InfoProbe read the resolved best-audio stream's
+	// headers, so that row's sample rate, channels, and duration come from the
+	// container rather than the manifest. The duration is the container's own:
+	// a count for a format that states one, and the declared total for a
+	// Matroska, whose open reads no further than the first cluster.
 	// It is false for SABR streams, which have no direct URL to probe.
 	Probed bool
 	// BestIndex is the index into Video.Formats that InfoResolved/InfoProbe resolved
@@ -422,8 +429,10 @@ func (c *Client) Info(ctx context.Context, url string, depth InfoDepth, opts ...
 // InfoBasic returns extracted metadata and candidate formats. InfoResolved
 // additionally resolves the best-audio format, surfacing resolution errors (such
 // as ErrNeedsPOToken) and filling in its content length. InfoProbe additionally
-// probes that resolved stream and fills its authoritative sample rate, channel
-// count, and duration (network-expensive: it stages the stream to a temp file).
+// reads that resolved stream's headers and fills its sample rate, channel
+// count, and duration. It reads over ranged HTTP, a handful of requests for a
+// header-sized prefix, and stages the whole stream only when the origin will
+// not serve bounded ranges.
 // The signed stream URLs themselves are not returned through Video; use Download
 // or Stream to fetch bytes.
 func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, opts ...ReadOption) (*InfoResult, error) {
@@ -483,12 +492,11 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		video.Formats[idx].ContentLength = rs.ContentLength
 	}
 
-	// A probe reads a local file, so the remote row is staged first. SABR streams
-	// have no direct URL and cannot be staged.
+	// SABR streams have no direct URL, so there is nothing for a probe to read.
 	if depth >= InfoProbe && rs.Probeable() {
 		runner := c.engine()
-		// The probe reads the whole stream, so it outlives a signed URL as
-		// readily as a download does and refreshes the same way.
+		// The probe reads the stream over the signed URL, so it can outlive one
+		// as a download does and refreshes the same way.
 		em := newEmitter(nil, "")
 		refresh := c.directRefresh(Request{SourcePolicy: ro.policy}, id, format.Target{}, ext, video.Formats[idx].Itag, rs.ExpiresAt, em, &refreshStats{})
 		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx], refresh)
@@ -507,25 +515,112 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	return res, nil
 }
 
-// probeRemote stages a resolved stream to a temp file and probes it locally.
-// It downloads the whole audio stream once (tens of MB) to read a header. A
-// lazy ranged-HTTP Source would not save that read for the row YouTube serves
-// by default: WaxFlow frame-counts every cluster of a WebM Opus track at open
-// (the CodecDelay walk), so a probe reads the file either way. It would pay
-// for an m4a row only. The ask for a header-only probe mode is in
-// docs/upstream-requests.md; until then staging is the design. Staging also
-// sidesteps any container header-size cliff: a moov-at-end MP4 or a large
-// Matroska SeekHead just works on a full local file. The download refreshes an
-// expired or capped URL like any other transfer.
+// rangedSource presents a download.RangeReader as a WaxFlow Source whose reads
+// can be bound to a context. io.ReaderAt has no ctx, so the binding is the
+// handoff container.Contextual exists for; the reader's own view shares the
+// block cache and refresh state, and differs only in the ctx its fetches use.
+type rangedSource struct{ rr *download.RangeReader }
+
+func (s rangedSource) ReadAt(p []byte, off int64) (int, error) { return s.rr.ReadAt(p, off) }
+func (s rangedSource) Size() int64                             { return s.rr.Size() }
+
+func (s rangedSource) WithContext(ctx context.Context) container.Source {
+	return rangedSource{rr: s.rr.WithContext(ctx)}
+}
+
+// probeRemote reads a resolved stream's headers over ranged HTTP, staging the
+// whole thing only when a bounded read cannot answer.
+//
+// A Matroska open reads to the first cluster and no further, and an MP4's moov
+// sits at one end of the file or the other, so a probe of either touches a
+// block or two: the ranged reader turns that into a handful of requests instead
+// of a download of tens of megabytes. A mid-probe transport failure comes back
+// in its own class (an expired URL, an incomplete stream, a rate limit) rather
+// than as a path error naming a file that was never written, and it does not
+// fall back: staging would fail the same way.
+//
+// Staging is for the two cases a bounded read cannot serve: an origin that
+// ignores byte ranges, and a container whose headers outrun probeRangeBudget.
+// It runs one open-ended request through Stream rather than ToFile, whose
+// parallel bounded chunks would meet an ignored range again, and it presents
+// the live Source so a URL the origin already refreshed is not sent back.
 func (c *Client) probeRemote(ctx context.Context, runner *media.Runner, rs youtube.ResolvedStream, f Format, refresh download.RefreshFunc) (media.ProbeResult, error) {
+	ext := sourceExt(f)
+	rr, err := c.dl.OpenRange(ctx, toSource(rs), refresh, probeRangeBudget)
+	if err != nil {
+		return c.probeFallback(ctx, runner, err, nil, refresh, ext, f)
+	}
+	pr, perr := runner.ProbeSource(ctx, rangedSource{rr: rr}, "itag "+strconv.Itoa(f.Itag)+" stream", ext)
+	stats := rr.Stats()
+	c.log.DebugContext(ctx, "probed a remote stream by range",
+		"itag", f.Itag, "requests", stats.Requests, "bytesFetched", stats.BytesFetched, "size", rr.Size())
+	// A reader that stopped short is consulted whether or not the demuxer
+	// reported it: a probe is what InfoResult.Probed calls authoritative, and a
+	// demuxer that treats a refused read as the end of what it could scan would
+	// otherwise have a partial read reported as the container's own numbers.
+	if rerr := rr.Err(); rerr != nil {
+		return c.probeFallback(ctx, runner, rerr, rr, refresh, ext, f)
+	}
+	if perr != nil {
+		return media.ProbeResult{}, perr
+	}
+	return pr, nil
+}
+
+// probeFallback decides what a reader's terminal failure means for the probe:
+// a source that will not serve bounded ranges, or one whose headers outran the
+// budget, is staged and read locally; anything else is the failure's own class
+// (an expired URL, an incomplete stream, a rate limit), which staging would
+// meet again and which a caller acts on. rr is nil when the failure happened
+// before a reader existed.
+func (c *Client) probeFallback(ctx context.Context, runner *media.Runner, err error, rr *download.RangeReader, refresh download.RefreshFunc, ext string, f Format) (media.ProbeResult, error) {
+	if unsupported, ok := errors.AsType[*download.RangeUnsupportedError](err); ok {
+		c.log.DebugContext(ctx, "the origin will not serve byte ranges; staging the stream to probe it", "itag", f.Itag, "err", err)
+		return c.probeStaged(ctx, runner, unsupported.Source, refresh, ext)
+	}
+	if over, ok := errors.AsType[*download.RangeBudgetError](err); ok && rr != nil {
+		c.log.DebugContext(ctx, "the container's headers are spread past the ranged-read budget; staging the stream to probe it",
+			"itag", f.Itag, "fetched", over.Fetched, "budget", over.Budget, "size", over.Size)
+		return c.probeStaged(ctx, runner, rr.Current(), refresh, ext)
+	}
+	return media.ProbeResult{}, err
+}
+
+// probeRangeBudget is how much of a stream a ranged probe may fetch. A container
+// that keeps its headers at the ends reads well inside it: a Matroska open stops
+// at the first cluster (one block) and an MP4's moov sits at one end or the
+// other (two). A fragmented MP4 does not, because its timing lives in
+// per-fragment headers spread end to end, and reading that file in blocks is
+// the whole download in round-trip pieces; YouTube's itag 140 is one, and
+// measured at 39 blocks for a ten-minute track before this bound existed.
+//
+// Past the budget the probe stages the stream and answers from the local file,
+// whether or not the demuxer reported the refused read: what InfoResult.Probed
+// calls authoritative has to come from a complete one. The blocks already
+// fetched are the price of finding out, about 10% on top of the staged download
+// for the fragmented MP4 above, against a fortyfold saving on the WebM row that
+// is what --probe selects by default.
+//
+// It is a var so a test can lower it; nothing sets it at runtime.
+var probeRangeBudget int64 = 4 * download.DefaultRangeBlock
+
+// probeStaged downloads src sequentially and probes the resulting file. The
+// single open-ended request is the point: this path exists because the origin
+// refused a bounded one.
+func (c *Client) probeStaged(ctx context.Context, runner *media.Runner, src download.Source, refresh download.RefreshFunc, ext string) (media.ProbeResult, error) {
 	dir, err := c.makeJobDir()
 	if err != nil {
 		return media.ProbeResult{}, err
 	}
 	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "probe"+sourceExt(f))
-	if _, err := c.dl.ToFile(ctx, toSource(rs), path, refresh, nil); err != nil {
-		return media.ProbeResult{}, err
+	path := filepath.Join(dir, "probe"+ext)
+	r, _, serr := c.dl.Stream(ctx, src, refresh, nil)
+	if serr != nil {
+		return media.ProbeResult{}, serr
+	}
+	defer r.Close()
+	if _, werr := c.dl.ReaderToFile(r, path); werr != nil {
+		return media.ProbeResult{}, werr
 	}
 	return runner.Probe(ctx, path)
 }
@@ -941,8 +1036,9 @@ const (
 	// These signed googlevideo URLs are temporary and sensitive; the CLI omits
 	// them from human output unless --show-url is given.
 	InfoResolved
-	// InfoProbe additionally probes the selected format only. This is
-	// network-expensive (it reads the remote signed URL) and is never run on
-	// every candidate.
+	// InfoProbe additionally reads the selected format's container headers over
+	// ranged HTTP. It touches the network (a few requests for a header-sized
+	// prefix, or the whole stream against an origin that ignores ranges) and is
+	// never run on every candidate.
 	InfoProbe
 )

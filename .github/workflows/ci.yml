@@ -59,8 +59,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: go test (race)
-        run: go test -race ./...
+      - name: go test (race, shuffled)
+        # Shuffled so a test that leans on the order of another runs into it here
+        # rather than in a rewrite months later.
+        run: go test -race -shuffle=on ./...
 
   release-dry-run:
     # The GoReleaser run the release workflow performs on a tag, as a snapshot:

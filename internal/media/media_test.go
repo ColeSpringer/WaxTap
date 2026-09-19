@@ -15,6 +15,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/format"
+	wferr "github.com/colespringer/waxflow/waxerr"
 	"github.com/colespringer/waxlabel"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
@@ -1154,6 +1155,18 @@ func TestProbeSurfacesDamageWarnings(t *testing.T) {
 
 // encodedFixture encodes a 2 s stereo sine to codec and returns its path,
 // named by the codec's own extension (aac lands as ADTS).
+// webmFixture writes an Opus track in a Matroska, whose open reads to the first
+// cluster and states only the Info Duration; encodedFixture's Opus row is Ogg,
+// which settles its length at open from the granule position.
+func webmFixture(t *testing.T, dir string) string {
+	t.Helper()
+	out := filepath.Join(dir, "fixture.webm")
+	if _, err := NewRunner(RunnerConfig{}).Transcode(context.Background(), wavFixture(t, 2, 2), out, Spec{Codec: CodecOpus}); err != nil {
+		t.Fatalf("fixture webm: %v", err)
+	}
+	return out
+}
+
 func encodedFixture(t *testing.T, dir string, codec Codec) string {
 	t.Helper()
 	ext := map[Codec]string{CodecMP3: "mp3", CodecAAC: "aac", CodecFLAC: "flac", CodecWAV: "wav", CodecOpus: "opus"}[codec]
@@ -1180,6 +1193,10 @@ func TestProbeReportsClaimedLength(t *testing.T) {
 		{"mp3", encodedFixture(t, dir, CodecMP3), true},
 		{"adts", encodedFixture(t, dir, CodecAAC), true},
 		{"wma", wma, true},
+		// An Opus row is Ogg, settled at open by its granule position; the same
+		// codec in a Matroska is not, since an open reads to the first cluster
+		// and reports the Info Duration.
+		{"webm", webmFixture(t, dir), true},
 		{"flac", encodedFixture(t, dir, CodecFLAC), false},
 		{"wav", encodedFixture(t, dir, CodecWAV), false},
 		{"opus", encodedFixture(t, dir, CodecOpus), false},
@@ -1228,28 +1245,21 @@ func TestShortDecodeNotes(t *testing.T) {
 	}
 }
 
-// The measured length is what a lazily walked payload really has: the
-// truncated MP3 still declares its full Xing count, and only a decode
-// settles it; a truncated ADTS declares nothing, and the walk settles it.
+// The measured length is what a lazily walked payload really has. The walk
+// settles it for both codecs now: it replaces a Xing count it came up short of
+// and drops a final frame whose declared span runs past the data end, so the
+// walked count and an independent decode agree to the sample.
 //
 // The split is 61%, not the rounder 60%: this fixture is ~1044.875-byte CBR
 // MP3 frames in an 83590-byte file, so 5% of it is almost exactly 4 frames,
 // and every multiple of 5% lands close enough to a frame boundary that the
 // truncated byte range ends up holding only whole frames - a clean,
-// undamaged, shorter MP3 that still carries its now-stale Xing count (the
-// "A walk that comes up short keeps the Xing count" entry above already
-// covers that gap; it is not new damage for a walk to flag). 61% does not
-// land on a boundary and is confirmed against this fixture.
-//
-// The cross-check and warnings assertions below tolerate a second, separate
-// gap, ADTS-only: adts.Demuxer.extend can walk a genuinely truncated final
-// frame in as whole, over-counting by that one frame with no warning
-// attached (docs/upstream-requests.md, "A truncated ADTS frame can be
-// walked in as if it were whole"). mpa's own walker does not share it.
+// undamaged, shorter MP3 whose stale Xing count the walk still corrects, but
+// with nothing to warn about. 61% does not land on a boundary and is confirmed
+// against this fixture.
 func TestMeasureLengthOfTruncatedPayloads(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
-	oneFrame := map[Codec]int64{CodecMP3: 1152, CodecAAC: 1024}
 	for _, codec := range []Codec{CodecMP3, CodecAAC} {
 		intact := encodedFixture(t, dir, codec) // 2 s
 		whole, err := os.ReadFile(intact)
@@ -1282,47 +1292,80 @@ func TestMeasureLengthOfTruncatedPayloads(t *testing.T) {
 		if short.Duration <= 0 || short.Duration >= full.Duration {
 			t.Errorf("%s: Duration = %v, want inside (0, %v)", codec, short.Duration, full.Duration)
 		}
-		// The measurement is what a decode delivers, whichever way it was taken -
-		// except a walked count (ADTS here), which can overstate a genuinely
-		// truncated final frame by up to that one frame: adts.Demuxer.extend
-		// indexes a resynced frame from its header alone and only discovers, one
-		// step later, that its declared span runs past the data end, by which
-		// point it is already counted and there is nothing left to flag. A
-		// decode-settled count (MP3 here) carries no such gap, so the tolerance
-		// is exactly one frame: anything wider would let a real mismeasurement
-		// (a second dropped frame, say) through silently.
-		decoded, _, decodeWarnings, derr := r.countFrames(context.Background(), cut, hintFor(cut))
+		// The measurement is exactly what a decode delivers, for both codecs and
+		// whichever way it was taken. The walk drops a final frame whose declared
+		// span runs past the data end rather than counting it, so a walked count
+		// and a decoded one agree to the sample; any gap at all is a real
+		// mismeasurement.
+		decoded, _, _, derr := r.countFrames(context.Background(), cut, hintFor(cut))
 		if derr != nil {
 			t.Fatalf("%s: decode: %v", codec, derr)
 		}
-		if decoded > short.Samples {
-			t.Errorf("%s: MeasureLength %d, decode %d: a decode must never deliver more than the measured length", codec, short.Samples, decoded)
-		} else if gap := short.Samples - decoded; gap > oneFrame[codec] {
-			t.Errorf("%s: MeasureLength %d, decode %d: gap of %d samples exceeds one frame (%d)", codec, short.Samples, decoded, gap, oneFrame[codec])
+		if decoded != short.Samples {
+			t.Errorf("%s: MeasureLength %d, decode %d: the walk and the decode must agree", codec, short.Samples, decoded)
 		}
-		// The walk path's own Warnings can miss the same truncated-final-frame
-		// finding the decode above makes (the silent branch again), so either
-		// source proving the file is genuinely damaged satisfies this.
-		if len(short.Warnings) == 0 && len(decodeWarnings) == 0 {
-			t.Errorf("%s: the measurement of a truncated file found no damage to report, by either path", codec)
+		// A truncated file is damaged, and the measurement that found the
+		// shortfall is the one that has to say so.
+		if len(short.Warnings) == 0 {
+			t.Errorf("%s: the measurement of a truncated file found no damage to report", codec)
 		}
 	}
 }
 
+// TestMeasureLengthWalksAXingMP3 covers the case the walk used to refuse to
+// settle: an MP3 whose Xing frame declares the intact length over a payload
+// that stops early. The walk now replaces that count with what it found, so the
+// measurement costs a header scan rather than a decode, and it says why.
+func TestMeasureLengthWalksAXingMP3(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	intact := encodedFixture(t, dir, CodecMP3) // 2 s, with a Xing frame
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := filepath.Join(dir, "cut.mp3")
+	if err := os.WriteFile(cut, whole[:len(whole)*61/100], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	walked, ok, err := r.walkLength(context.Background(), cut)
+	if err != nil {
+		t.Fatalf("walkLength: %v", err)
+	}
+	if !ok {
+		t.Fatal("walkLength did not settle a Xing MP3's count; the measurement fell back to a decode")
+	}
+	decoded, _, _, err := r.countFrames(context.Background(), cut, hintFor(cut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walked.Samples != decoded {
+		t.Errorf("walked %d, decoded %d: the walk is the measurement now, so the two must agree", walked.Samples, decoded)
+	}
+	joined := strings.Join(walked.Warnings, "; ")
+	if !strings.Contains(joined, "declares") {
+		t.Errorf("warnings = %q, want the declared-versus-held mismatch", joined)
+	}
+	if !strings.Contains(joined, "truncated final frame") {
+		t.Errorf("warnings = %q, want the dropped final frame", joined)
+	}
+}
+
 // TestMeasureLengthReleasesWalkSlotBeforeDecodeFallback covers a Runner
-// bounded to one concurrent operation: an input whose header already states
-// a count (an MP3's Xing frame) skips the walk outright and falls straight
-// to countFrames, which acquires its own slot. If MeasureLength's walk
-// attempt held its slot past that point, this would deadlock instead of
-// returning.
+// bounded to one concurrent operation: a WMA is the one container with no walk
+// to settle its count, so the measurement falls straight through to
+// countFrames, which acquires its own slot. If walkLength held its slot past
+// its return, this would deadlock instead of returning.
 func TestMeasureLengthReleasesWalkSlotBeforeDecodeFallback(t *testing.T) {
 	r := NewRunner(RunnerConfig{MaxProcs: 1})
-	dir := t.TempDir()
-	mp3 := encodedFixture(t, dir, CodecMP3)
+	wma := filepath.Join(t.TempDir(), "in.wma")
+	if err := os.WriteFile(wma, mediatest.LosslessWMA(), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, err := r.MeasureLength(context.Background(), mp3); err != nil {
+		if _, err := r.MeasureLength(context.Background(), wma); err != nil {
 			t.Errorf("MeasureLength: %v", err)
 		}
 	}()
@@ -1362,16 +1405,13 @@ func TestAcquireRefusesACanceledContext(t *testing.T) {
 // points do not describe this file" refusal.
 //
 // Covered for both a single keep spanning the whole (clamped) length and a
-// multi-keep composition whose final span is the one that reaches it. Only
-// the multi-keep shape actually discriminates on sourceSamples: a single keep
-// opens straight through Slice, whose open-ended form makes no length
-// promise at all, so it reads cleanly to the real end even at sourceSamples
-// 0 (through the untrustworthy bound). A multi-keep composition opens
-// through Concat, which holds every member - including an open-ended final
-// one, via SpanTrack's arithmetic over the (possibly overridden) track - to
-// its own declared length at the seam; the negative subtest below confirms
-// sourceSamples, not the open-ended form by itself, is what avoids that
-// refusal.
+// multi-keep composition whose final span is the one that reaches it. A caller
+// that passes no count no longer gets the refusal either: openComposed measures
+// the file itself rather than plan a bounded span against a number nothing
+// confirmed. What it does not do is trust a count past what the file holds -
+// the last subtest hands one over deliberately, and the overrun reports as the
+// damaged file it is (CodeMalformedInput, exit 2), never as a request built
+// blind.
 func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
@@ -1397,7 +1437,7 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 
 	readToEOF := func(t *testing.T, keeps []cutrange.Range, sourceSamples int64) error {
 		t.Helper()
-		med, closer, err := r.OpenComposed(cut, keeps, total, 0, sourceSamples)
+		med, closer, err := r.OpenComposed(ctx, cut, keeps, total, 0, sourceSamples)
 		if err != nil {
 			return err
 		}
@@ -1429,21 +1469,77 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 			t.Fatalf("ReadChunk: %v", err)
 		}
 	})
-	t.Run("two keeps, unmeasured still fails", func(t *testing.T) {
-		// Without sourceSamples the final span's declared length comes from
-		// the untrustworthy Xing count (SpanTrack over the unmeasured track),
-		// and Concat holds that member to it at the seam, so the composition
-		// still fails instead of quietly reading short. This is what proves
-		// the measurement above is doing the work, not the open-ended form on
-		// its own.
-		err := readToEOF(t, multiKeeps, 0)
-		if err == nil {
-			t.Fatal("want an error: an unmeasured final span still declares the untrustworthy Xing length to Concat")
-		}
-		if !strings.Contains(err.Error(), "declared") {
-			t.Errorf("got %v, want a declared-vs-delivered mismatch", err)
+	t.Run("two keeps, unmeasured", func(t *testing.T) {
+		// A caller with no count of its own used to get the seam refusal here,
+		// because the final span declared the untrustworthy Xing length to
+		// Concat. openComposed now measures the file first, so the composition
+		// reads to the real end like the measured cases above.
+		if err := readToEOF(t, multiKeeps, 0); err != nil {
+			t.Fatalf("ReadChunk: %v", err)
 		}
 	})
+	t.Run("a count past the file is the file's fault", func(t *testing.T) {
+		// A caller that hands over more than the file holds gets the overrun
+		// reported as damage, which is exit 2 with no path error, rather than
+		// as a blind request (CodeInvalidRequest), which openComposed cannot
+		// produce: every bounded span it plans is over a measured track.
+		err := readToEOF(t, multiKeeps, length.Samples*2)
+		if err == nil {
+			t.Fatal("want an error: the count declares audio the file does not hold")
+		}
+		if code := wferr.CodeOf(err); code != wferr.CodeMalformedInput {
+			t.Errorf("code = %v, want CodeMalformedInput: the file is short, the request is not blind", code)
+		}
+		if !errors.Is(classifyEngineError(err, cut, ""), waxerr.ErrUnsupportedInput) {
+			t.Errorf("classified as %v, want ErrUnsupportedInput (exit 2)", classifyEngineError(err, cut, ""))
+		}
+	})
+}
+
+// TestRenderMeasuresAClaimedLengthAtConcurrencyOne covers a Runner bounded to
+// one concurrent operation cutting a file whose headers only claim a length,
+// with no count from the caller. openComposed measures the source itself there,
+// and that measurement takes a slot: if Render still held one around the whole
+// call, this would deadlock instead of writing the cut.
+func TestRenderMeasuresAClaimedLengthAtConcurrencyOne(t *testing.T) {
+	r := NewRunner(RunnerConfig{MaxProcs: 1})
+	dir := t.TempDir()
+	intact := encodedFixture(t, dir, CodecMP3) // 2 s, Xing frame
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := filepath.Join(dir, "cut.mp3")
+	if err := os.WriteFile(cut, whole[:len(whole)*61/100], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.flac")
+
+	done := make(chan error, 1)
+	go func() {
+		// SourceSamples 0: nobody measured, and the keeps reach the declared
+		// (untrustworthy) end, which is the shape that needs the measurement.
+		_, rerr := r.Render(context.Background(), cut, out, CutSpec{
+			Keeps: []cutrange.Range{
+				{Start: 0, End: 300 * time.Millisecond},
+				{Start: 600 * time.Millisecond, End: 2 * time.Second},
+			},
+			Total:  2 * time.Second,
+			Encode: Spec{Codec: CodecFLAC},
+		})
+		done <- rerr
+	}()
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("Render: %v", rerr)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Render did not return: the composition's measurement deadlocked against the slot Render held")
+	}
+	if _, serr := os.Stat(out); serr != nil {
+		t.Errorf("no output written: %v", serr)
+	}
 }
 
 // A track with no declared length at all (raw ADTS; also MP3 in an AIFF-C)
@@ -1466,7 +1562,7 @@ func TestOpenComposedNoDeclaredLengthFallsBackToBounded(t *testing.T) {
 	// sourceSamples 0: nobody measured it, which is exactly the case openEnded
 	// must not treat as open-ended just because SamplesAdvisory happens to be
 	// false for a track that also has no length claim at all.
-	med, closer, err := r.OpenComposed(intact, keeps, total, 0, 0)
+	med, closer, err := r.OpenComposed(context.Background(), intact, keeps, total, 0, 0)
 	if err != nil {
 		t.Fatalf("open composed: %v", err)
 	}

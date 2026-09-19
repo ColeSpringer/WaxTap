@@ -805,6 +805,80 @@ func TestFacade_ForcedIOSDeliversViaPlayerContext(t *testing.T) {
 	}
 }
 
+// TestFacade_WebContextPresentsTheContextUserAgent pins the identity on the
+// wire. A context that states the browser it was minted on has the WEB requests
+// under it present that navigator.userAgent, so the signed URL, the visitor id,
+// the token, and the request all come from one browser; a context that states
+// none presents WaxTap's own web identity, with ChromeMajor applied. SABR's
+// debug log does not print the header, so the request is the only place to
+// assert it.
+func TestFacade_WebContextPresentsTheContextUserAgent(t *testing.T) {
+	const browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+	const ownMajor = 151
+
+	for _, tc := range []struct {
+		name      string
+		contextUA string
+		want      string
+	}{
+		{"context identity", browserUA, browserUA},
+		{"no context identity", "", "Chrome/" + fmt.Sprint(ownMajor)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initBytes, mediaBytes := []byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA")
+			umpBody := fSabrHappyBody(initBytes, mediaBytes)
+			var mu sync.Mutex
+			var agents []string
+			rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.Path, "/videoplayback") {
+					mu.Lock()
+					agents = append(agents, r.Header.Get("User-Agent"))
+					mu.Unlock()
+					return resp(http.StatusOK, umpBody), nil
+				}
+				return resp(http.StatusNotFound, nil), nil
+			})
+			ctxt := iosPlayerContext()
+			ctxt.UserAgent = tc.contextUA
+			c, err := waxtap.New(waxtap.Options{
+				HTTPClient:  &http.Client{Transport: rt},
+				ChromeMajor: ownMajor,
+				PlayerContextProvider: potoken.PlayerContextProviderFunc(
+					func(context.Context, string) (potoken.PlayerContext, error) { return ctxt, nil },
+				),
+				POTokenProvider: fProvider{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			res, err := c.Download(context.Background(), waxtap.Request{
+				URL:         "dummyVideo0",
+				ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToWriter(&buf)},
+			})
+			if err != nil {
+				t.Fatalf("download: %v", err)
+			}
+			if res.Client != "WEB_CONTEXT" {
+				t.Fatalf("Result.Client = %q, want WEB_CONTEXT", res.Client)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(agents) == 0 {
+				t.Fatal("no SABR request reached the origin")
+			}
+			for _, got := range agents {
+				if !strings.Contains(got, tc.want) {
+					t.Errorf("SABR User-Agent = %q, want it to carry %q", got, tc.want)
+				}
+			}
+			if tc.contextUA == "" && strings.Contains(agents[0], browserUA) {
+				t.Errorf("SABR User-Agent = %q, want WaxTap's own identity: the context stated none", agents[0])
+			}
+		})
+	}
+}
+
 // TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain verifies that a
 // failed player-context falls through to the configured iOS client.
 func TestFacade_ForcedIOSPlayerContextFailureFallsThroughToIOSChain(t *testing.T) {

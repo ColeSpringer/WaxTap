@@ -30,7 +30,7 @@ func newVersionCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			v := resolveVersion()
-			if rootFlagsValue.json {
+			if outputFlags(cmd).json {
 				return writeJSON(cmd.OutOrStdout(), struct {
 					SchemaVersion int    `json:"schemaVersion"`
 					Version       string `json:"version"`

@@ -68,10 +68,12 @@ func TestProcessWarnsInputDamage(t *testing.T) {
 		{"flac", FormatFLAC, ".flac", "declares"},
 		// The frame-indexed payloads walk lazily: their probe reads the headers
 		// clean, and the truncated frame is found by the read that reaches it,
-		// which the write reports and the warning carries. ADTS declares no
-		// length at all, so nothing else would have said the file was short.
+		// which the write reports and the warning carries. Both word it the same
+		// way now that ADTS drops a final frame whose declared span runs past
+		// the data end instead of indexing it, which is what MP3's walker always
+		// did.
 		{"mp3", FormatMP3, ".mp3", "truncated final frame"},
-		{"aac", FormatAAC, ".aac", "final frame truncated"},
+		{"aac", FormatAAC, ".aac", "truncated final frame"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -430,16 +432,11 @@ func TestCutOnTruncatedLazyPayloadMeasuresFirst(t *testing.T) {
 		name   string
 		format TranscodeFormat
 		ext    string
-		// interior says an interior span of the truncated file can be cut.
-		// A truncated ADTS's walked count is one frame too generous
-		// (WaxFlow's adts.Demuxer.extend indexes a frame before finding its
-		// span runs past the data end), and a composition's seam check holds
-		// the member to that count, so the run is refused. The ask is in
-		// docs/upstream-requests.md and the residual in
-		// docs/deferred-work.md; a span reaching the end is open-ended and
-		// unaffected, which is the shape the entry is about.
-		interior bool
-	}{{"mp3", FormatMP3, ".mp3", true}, {"adts", FormatAAC, ".aac", false}} {
+		// damage is the wording the container's own walker uses for the
+		// shortfall it found. MP3 has a stale Xing count to contradict as
+		// well as a frame to drop; ADTS declared no length to begin with.
+		damage string
+	}{{"mp3", FormatMP3, ".mp3", "declares"}, {"adts", FormatAAC, ".aac", "truncated final frame"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			_, truncated := damagedFixture(t, dir, "in"+tc.ext, tc.format) // 3 s declared, ~1.8 s real
@@ -457,8 +454,12 @@ func TestCutOnTruncatedLazyPayloadMeasuresFirst(t *testing.T) {
 			if d := res.OutputFormat.Duration; d <= 0 || d > 1800*time.Millisecond {
 				t.Errorf("output duration %v, want the readable remainder (about 1.3 s)", d)
 			}
-			if got := warningDetail(res, WarnInputDamage); got == "" {
+			got := warningDetail(res, WarnInputDamage)
+			if got == "" {
 				t.Error("no input-damage warning for the truncated source")
+			}
+			if !strings.Contains(got, tc.damage) {
+				t.Errorf("input-damage detail = %q, want it to carry %q", got, tc.damage)
 			}
 
 			// A span past the real end is rejected up front, naming the damage.
@@ -471,10 +472,11 @@ func TestCutOnTruncatedLazyPayloadMeasuresFirst(t *testing.T) {
 				t.Fatalf("err = %v, want the pre-engine rejection", err)
 			}
 
-			if !tc.interior {
-				return
-			}
-			// A normalizing cut takes the same path and no longer flips to exit 2.
+			// An interior cut composes several spans, whose seam holds each
+			// member to the measured count. It runs for both codecs now that
+			// the walk of a truncated ADTS no longer counts a frame it cannot
+			// read. A normalizing cut takes the same path and no longer flips
+			// to exit 2.
 			if _, err := c.Process(ctx, ProcessRequest{Input: truncated, ProcessSpec: ProcessSpec{
 				Output:    ToFile(filepath.Join(dir, "norm.flac")),
 				Transcode: &TranscodeSpec{Format: FormatFLAC},

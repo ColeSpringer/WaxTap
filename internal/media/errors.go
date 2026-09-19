@@ -34,6 +34,16 @@ import (
 //	CodeCanceled                             canceled     context.Canceled      exit 130
 //	everything else                          -            unmapped              exit 1
 //
+// A span that outruns its source arrives under one of two codes, and only one
+// of them is reachable here: CodeMalformedInput when the track declared a length
+// the run held it to, CodeInvalidRequest when the slice was built blind, over a
+// track whose length nothing measured. openComposed is the only place WaxTap
+// builds a slice, and it measures a claimed length before planning a bounded
+// span (an open-ended one promises no length at all), so every overrun WaxTap
+// can reach reports as the damaged file it is, at exit 2 with no PathError. The
+// blind arm stays in the table because WaxFlow can still raise it; nothing here
+// produces it.
+//
 // CodeUnsupportedFormat is WaxFlow's "the file is fine and this build is not":
 // a codec it has no decoder for, a channel configuration outside its scope, a
 // spec its encoders cannot produce. It maps to the spec sentinel here, the

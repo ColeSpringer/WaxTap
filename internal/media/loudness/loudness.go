@@ -125,7 +125,7 @@ func Measure(ctx context.Context, r *media.Runner, input string, channels int) (
 // count a prior media.Runner.MeasureLength(input) delivered, when the source's
 // headers only claim a length; see media.CutSpec.SourceSamples.
 func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutrange.Range, total, crossfade time.Duration, channels int, sourceSamples int64) (Loudness, error) {
-	med, closer, err := r.OpenComposed(input, keeps, total, crossfade, sourceSamples)
+	med, closer, err := r.OpenComposed(ctx, input, keeps, total, crossfade, sourceSamples)
 	if err != nil {
 		return Loudness{}, err
 	}
@@ -146,31 +146,45 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 //
 // folds[i], when 1 or 2, folds track i's measurement to that width, the width
 // the album's encode delivers for it (media.Runner.PlanOutputChannels); 0, or a
-// nil slice, keeps the source layout. The group pass folds only when every
-// track folds to one width: the timeline conforms every member to the widest
-// layout, and a fold applied after that conversion is not the fold the encoder
-// applies to the member itself. A surround album's members share one width in
-// every case the timeline opens at all (the mixer builds no up-mix wider than
-// stereo, so a surround member beside a stereo one is refused at the stereo
-// member's open), which is why the rule is all-or-nothing rather than per
-// member.
-func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds []int) (album Loudness, perTrack []Loudness, err error) {
+// nil slice, keeps the source layout. widths[i] is track i's source channel
+// count, which the caller has already probed; 0, or a short slice, means it
+// could not be read, which counts as a width of its own and keeps such a set
+// off the fold-once arm below.
+//
+// The group pass has to measure the album at the widths the encode delivers,
+// and the timeline conforms every member to the widest layout before any fold
+// can apply, so how it runs depends on the set:
+//
+//   - Nothing folds: the Concat at source widths. A narrower member is placed
+//     into the widest layout at unity with its missing positions silent, which
+//     is loudness-neutral under BS.1770. The one exception is a mono member,
+//     which is duplicated across the front pair and measures about 3 dB up in
+//     the group; that predates this and is not new here.
+//   - Every member folds, to one width, from one source width: the Concat
+//     folded once. Both conditions matter. A fold after a widening is not the
+//     member's own fold, because the mixer normalizes each output row by the
+//     energy of every source coefficient, silent positions included, so a 5.1
+//     member widened to 7.1 and then folded to stereo lands about 1 dB under
+//     its direct fold.
+//   - Anything else, the realistic case being a surround member folded to
+//     stereo for a lossy target beside a stereo one: every folding member is
+//     rendered to a temporary PCM WAV at its own fold first, and the group runs
+//     over that set unfolded. It costs one decode and one PCM write per folding
+//     member, only here, and the renders are all held until the measurement
+//     returns, since the group reads them as one timeline. The renders keep the
+//     source's own sample domain (media.Spec.BitDepth 0), so nothing is lost to
+//     them beyond the fold itself.
+func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds, widths []int) (album Loudness, perTrack []Loudness, err error) {
 	perTrack = make([]Loudness, len(inputs))
 	// The per-track pass reads every file to its end, which is the measurement
 	// the group timeline needs for a member whose headers state its length
 	// only approximately; see media.Runner.OpenAlbumConcat.
 	measured := make([]int64, len(inputs))
-	groupFold := 0
-	uniform := len(folds) == len(inputs) && len(inputs) > 0
 	for i, in := range inputs {
 		fold := 0
 		if i < len(folds) {
 			fold = folds[i]
 		}
-		if fold == 0 || (groupFold != 0 && fold != groupFold) {
-			uniform = false
-		}
-		groupFold = max(groupFold, fold)
 		res, found, aerr := r.AnalyzeFile(ctx, in, fold)
 		if aerr != nil {
 			// The album has many inputs, so the failure names its file, the way
@@ -181,10 +195,17 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds [
 		perTrack[i].Warnings = found
 		measured[i] = res.Samples
 	}
-	if !uniform {
-		groupFold = 0
+
+	// groupPass blanks the count of any member it replaces with a render, whose
+	// own headers state a countable length; the members it leaves alone keep the
+	// count the per-track pass already paid for.
+	groupInputs, groupFold, cleanup, gerr := groupPass(ctx, r, inputs, folds, widths, measured)
+	if gerr != nil {
+		return Loudness{}, nil, gerr
 	}
-	med, closer, oerr := r.OpenAlbumConcat(ctx, inputs, measured)
+	defer cleanup()
+
+	med, closer, oerr := r.OpenAlbumConcat(ctx, groupInputs, measured)
 	if oerr != nil {
 		return Loudness{}, nil, oerr
 	}
@@ -198,6 +219,69 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds [
 		return Loudness{}, nil, merr
 	}
 	return fromResult(ares), perTrack, nil
+}
+
+// groupPass picks how the group measurement runs, returning the members to
+// concatenate, the fold to apply to the concatenation, and the cleanup for any
+// temporary renders. See MeasureAlbum for the three arms.
+func groupPass(ctx context.Context, r *media.Runner, inputs []string, folds, widths []int, measured []int64) ([]string, int, func(), error) {
+	noop := func() {}
+	foldOf := func(i int) int {
+		if i < len(folds) {
+			return folds[i]
+		}
+		return 0
+	}
+	widthOf := func(i int) int {
+		if i < len(widths) {
+			return widths[i]
+		}
+		return 0
+	}
+	anyFold, allFold, oneFold, oneWidth := false, len(inputs) > 0, 0, true
+	for i := range inputs {
+		f := foldOf(i)
+		if f == 0 {
+			allFold = false
+		} else {
+			anyFold = true
+			if oneFold != 0 && f != oneFold {
+				allFold = false
+			}
+			oneFold = f
+		}
+		if w := widthOf(i); w <= 0 || w != widthOf(0) {
+			oneWidth = false
+		}
+	}
+	switch {
+	case !anyFold:
+		return inputs, 0, noop, nil
+	case allFold && oneWidth:
+		return inputs, oneFold, noop, nil
+	}
+
+	dir, cleanup, derr := r.ScratchDir("waxtap-album-*")
+	if derr != nil {
+		return nil, 0, noop, derr
+	}
+	rendered := make([]string, len(inputs))
+	for i, in := range inputs {
+		f := foldOf(i)
+		if f == 0 {
+			rendered[i] = in
+			continue
+		}
+		out := filepath.Join(dir, fmt.Sprintf("%03d.wav", i))
+		if _, terr := r.Transcode(ctx, in, out, media.Spec{Codec: media.CodecWAV, Channels: f}); terr != nil {
+			cleanup()
+			return nil, 0, noop, fmt.Errorf("track %s: %w", filepath.Base(in), terr)
+		}
+		rendered[i] = out
+		// The render is a different file from the one that count describes.
+		measured[i] = -1
+	}
+	return rendered, 0, cleanup, nil
 }
 
 // GainFor is the closed form of ffmpeg's linear-mode loudnorm: the gain that

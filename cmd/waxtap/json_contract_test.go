@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/colespringer/waxtap/v3"
 )
 
@@ -20,19 +22,13 @@ import (
 // contract can only be asserted through this seam.
 func runMain(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	// report reads rootFlagsValue, which newRootCmd rebinds but no test resets on
-	// the way out. Restoring it keeps a --json run from coloring whatever comes
-	// next.
-	saved := rootFlagsValue
-	t.Cleanup(func() { rootFlagsValue = saved })
-
 	var outBuf, errBuf bytes.Buffer
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SetOut(&outBuf)
 	root.SetErr(&errBuf)
 	if err := root.Execute(); err != nil {
-		code = report(&outBuf, &errBuf, args, normalizeExecuteError(err, args))
+		code = report(&outBuf, &errBuf, args, outputFlags(root).json, normalizeExecuteError(err, args))
 	}
 	return outBuf.String(), errBuf.String(), code
 }
@@ -231,12 +227,8 @@ func TestJSONRequested(t *testing.T) {
 // TestReportRendersJSONError: a flag the parser rejects aborts before --json is
 // read, and the error still owes the contract a document on stdout.
 func TestReportRendersJSONError(t *testing.T) {
-	saved := rootFlagsValue
-	t.Cleanup(func() { rootFlagsValue = saved })
-	rootFlagsValue = rootFlags{}
-
 	var stdout, stderr bytes.Buffer
-	code := report(&stdout, &stderr, []string{"info", "x", "--nope", "--json"}, unparsedFlagsError("unknown flag: --nope"))
+	code := report(&stdout, &stderr, []string{"info", "x", "--nope", "--json"}, false, unparsedFlagsError("unknown flag: --nope"))
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
@@ -254,16 +246,13 @@ func TestReportRendersJSONError(t *testing.T) {
 }
 
 // TestReportIgnoresJSONAsAFlagValue: `--format --json` parses cleanly, with
-// --json eaten as --format's value. rootFlagsValue is then the whole truth, and
-// re-reading the args would turn a typo into a JSON document nobody asked for.
+// --json eaten as --format's value. The parsed flags are then the whole truth,
+// and re-reading the args would turn a typo into a JSON document nobody asked
+// for.
 func TestReportIgnoresJSONAsAFlagValue(t *testing.T) {
-	saved := rootFlagsValue
-	t.Cleanup(func() { rootFlagsValue = saved })
-	rootFlagsValue = rootFlags{}
-
 	args := []string{"transcode", "nope.flac", "--format", "--json"}
 	var stdout, stderr bytes.Buffer
-	code := report(&stdout, &stderr, args, usagef("no such file and not a valid YouTube URL or ID: nope.flac"))
+	code := report(&stdout, &stderr, args, false, usagef("no such file and not a valid YouTube URL or ID: nope.flac"))
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
@@ -277,7 +266,7 @@ func TestReportIgnoresJSONAsAFlagValue(t *testing.T) {
 	// An unknown command never reaches flag parsing either, so it keeps the probe.
 	stdout.Reset()
 	stderr.Reset()
-	report(&stdout, &stderr, []string{"bogus", "--json"}, normalizeExecuteError(errors.New(`unknown command "bogus" for "waxtap"`), []string{"bogus", "--json"}))
+	report(&stdout, &stderr, []string{"bogus", "--json"}, false, normalizeExecuteError(errors.New(`unknown command "bogus" for "waxtap"`), []string{"bogus", "--json"}))
 	if stdout.Len() == 0 {
 		t.Error("an unknown command with --json wrote no document; its flags were never parsed either")
 	}
@@ -557,5 +546,48 @@ func TestWriteRecordKeepsTheCountHonest(t *testing.T) {
 	writeRecord(&out, map[string]any{"ok": true})
 	if got := strings.TrimRight(out.String(), "\n"); got != `{"ok":true}` {
 		t.Errorf("record = %q", got)
+	}
+}
+
+// TestSubcommandOutputModeIsItsOwn pins the order dependence the output flags
+// used to carry: they lived in a package-level value that only newRootCmd
+// rebound, so a subcommand a test built on its own inherited whatever the last
+// root run had asked for and printed NDJSON at a human assertion. The failure
+// needed a shuffle to show; this runs the two in order on purpose.
+func TestSubcommandOutputModeIsItsOwn(t *testing.T) {
+	root := newRootCmd()
+	root.SetArgs([]string{"version", "--json"})
+	var rootOut bytes.Buffer
+	root.SetOut(&rootOut)
+	root.SetErr(&rootOut)
+	if err := root.Execute(); err != nil {
+		t.Fatalf("version --json: %v\n%s", err, rootOut.String())
+	}
+	if !strings.HasPrefix(strings.TrimSpace(rootOut.String()), "{") {
+		t.Fatalf("version --json wrote no document:\n%s", rootOut.String())
+	}
+
+	dir := t.TempDir()
+	in := filepath.Join(dir, "a.flac")
+	synthAudio(t, in, "flac")
+
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"normalize", newNormalizeCmd(), []string{in, "--measure-loudness"}},
+		{"transcode", newTranscodeCmd(), []string{in, "--format", "mp3", "-o", filepath.Join(dir, "a.mp3")}},
+	} {
+		c.cmd.SetArgs(c.args)
+		var buf bytes.Buffer
+		c.cmd.SetOut(&buf)
+		c.cmd.SetErr(&buf)
+		if err := c.cmd.Execute(); err != nil {
+			t.Fatalf("%s: %v\n%s", c.name, err, buf.String())
+		}
+		if got := buf.String(); strings.Contains(got, `"schemaVersion"`) {
+			t.Errorf("%s built on its own printed JSON; --json belongs to the root run that asked for it:\n%s", c.name, got)
+		}
 	}
 }
