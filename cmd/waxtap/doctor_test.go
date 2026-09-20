@@ -437,3 +437,230 @@ func TestDoctorJSONNotes(t *testing.T) {
 		t.Errorf("notes = %v, want the key omitted on a clean run", doc["notes"])
 	}
 }
+
+// TestProbeSidecarsPing covers the health question doctor asks before it pays
+// for a proof: it runs first, its entry carries what the daemon said, a loss
+// the daemon confirmed makes the run unhealthy on that error, and a daemon
+// with no /ping is not a sick one.
+func TestProbeSidecarsPing(t *testing.T) {
+	pingWith := func(h waxtap.SidecarHealth, err error) func(context.Context) (waxtap.SidecarHealth, error) {
+		return func(context.Context) (waxtap.SidecarHealth, error) { return h, err }
+	}
+
+	t.Run("live tenant answers first", func(t *testing.T) {
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping:    pingWith(waxtap.SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"}, nil),
+			session: fakeSessionProvider{sess: potoken.Session{VisitorData: "vd"}},
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 2 || probes[0].Endpoint != "ping" || probes[1].Endpoint != "session" {
+			t.Fatalf("probes = %+v, want the ping ahead of the session probe", probes)
+		}
+		p := probes[0]
+		if !p.OK || p.Probe != "tenant" || p.Reason != "ok" || p.BrowserRelaunched || p.Error != nil {
+			t.Errorf("ping = %+v, want ok with the daemon's scope and reason", p)
+		}
+	})
+
+	t.Run("benign window with a relaunch stays healthy", func(t *testing.T) {
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserRelaunched: true}, nil),
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 1 || !probes[0].OK || probes[0].Reason != "no-session" || !probes[0].BrowserRelaunched {
+			t.Fatalf("probes = %+v, want an ok ping carrying no-session and the relaunch", probes)
+		}
+		if !sidecarProbesHealthy(probes) {
+			t.Error("a benign window is the daemon's own 200 under strict; the run stays healthy")
+		}
+	})
+
+	t.Run("an endpoint probe's failure names the run's error ahead of the ping's", func(t *testing.T) {
+		loss := &waxtap.SidecarResponseError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping?strict=true", StatusCode: 503, Code: "probe-failed"}
+		refused := &waxtap.SidecarResponseError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", StatusCode: 401, Code: "unauthorized"}
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping:    pingWith(waxtap.SidecarHealth{Reason: "probe-failed"}, loss),
+			session: fakeSessionProvider{err: refused},
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 2 || probes[0].OK || probes[1].OK {
+			t.Fatalf("probes = %+v, want both failed", probes)
+		}
+		// The session endpoint is what a download hits, so its refusal, and
+		// its exit code, is the run's; the ping line above already shows the
+		// ping's own.
+		if err := firstSidecarProbeError(probes); err != refused {
+			t.Errorf("firstSidecarProbeError = %v, want the session probe's refusal ahead of the ping's", err)
+		}
+	})
+
+	t.Run("confirmed loss fails the run on its error", func(t *testing.T) {
+		loss := &waxtap.SidecarResponseError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping?strict=true", StatusCode: 503, Code: "probe-failed", Reason: "no browser answers and none could be launched"}
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping:    pingWith(waxtap.SidecarHealth{Probe: "daemon", Reason: "probe-failed", Error: "no browser answers and none could be launched"}, loss),
+			session: fakeSessionProvider{sess: potoken.Session{VisitorData: "vd"}},
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 2 {
+			t.Fatalf("probes = %+v, want the ping and the session probe", probes)
+		}
+		p := probes[0]
+		if p.OK || p.StatusCode != 503 || p.Code != "probe-failed" || p.Probe != "daemon" || p.Reason != "probe-failed" || p.Error == nil || p.Error.Code != "network" {
+			t.Errorf("ping = %+v, want the 503 with its reason and a network-class error", p)
+		}
+		if sidecarProbesHealthy(probes) {
+			t.Error("a loss the daemon confirmed must make the run unhealthy")
+		}
+		if err := firstSidecarProbeError(probes); err != loss {
+			t.Errorf("firstSidecarProbeError = %v, want the ping's refusal, which decides the exit code", err)
+		}
+	})
+
+	t.Run("no /ping is not a failure", func(t *testing.T) {
+		// Every answer that says "no such route here", with a wait a proxy
+		// might tack on, which a route that does not exist cannot mean.
+		for _, status := range []int{404, 405, 410, 501} {
+			missing := &waxtap.SidecarResponseError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping?strict=true", StatusCode: status, Code: "not-found", RetryAfter: 5 * time.Second}
+			probes := probeSidecars(context.Background(), sidecarProviders{
+				ping:    pingWith(waxtap.SidecarHealth{}, missing),
+				pingVia: "po-token",
+				token:   &fakeTokenProvider{tok: "tok"},
+			}, "dummyVideo0", time.Minute)
+			if len(probes) != 2 {
+				t.Fatalf("probes = %+v, want the ping and the token probe", probes)
+			}
+			p := probes[0]
+			if !p.OK || p.StatusCode != status || p.Error != nil || p.err != nil || p.RetryAfterSeconds != 0 {
+				t.Errorf("HTTP %d: ping = %+v, want it recorded ok with the status, no error, and no wait: the daemon offers no /ping, and the token probe asks what it does offer", status, p)
+			}
+			if p.Via != "po-token" {
+				t.Errorf("ping via = %q, want the sidecar whose URL it was derived from", p.Via)
+			}
+			if !sidecarProbesHealthy(probes) || firstSidecarProbeError(probes) != nil {
+				t.Errorf("HTTP %d: a daemon without /ping must not fail the run", status)
+			}
+		}
+	})
+
+	t.Run("a 403 on /ping is still a failure", func(t *testing.T) {
+		walled := &waxtap.SidecarResponseError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping?strict=true", StatusCode: 403, Code: "forbidden"}
+		probes := probeSidecars(context.Background(), sidecarProviders{ping: pingWith(waxtap.SidecarHealth{}, walled)}, "dummyVideo0", time.Minute)
+		if len(probes) != 1 || probes[0].OK {
+			t.Fatalf("probes = %+v, want a failure: a 403 can mean a wrong key, which only the ping said cheaply", probes)
+		}
+	})
+
+	t.Run("unreachable daemon fails the run", func(t *testing.T) {
+		down := &waxtap.SidecarError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping?strict=true", Err: errors.New("connection refused")}
+		probes := probeSidecars(context.Background(), sidecarProviders{ping: pingWith(waxtap.SidecarHealth{}, down)}, "dummyVideo0", time.Minute)
+		if len(probes) != 1 || probes[0].OK || probes[0].Error == nil || probes[0].Error.Code != "network" {
+			t.Fatalf("probes = %+v, want one network-class failure", probes)
+		}
+	})
+}
+
+// The ping runs without the handoff deadline the three probes share. It
+// neither retries nor sleeps, so the library's own request bound, sized for
+// WaxSeal's probe worst case, covers the whole call, where the 60 s handoff
+// budget would cut a wedged daemon's answer short and lose the verdict.
+func TestProbeSidecarsPingOutlivesTheHandoffBudget(t *testing.T) {
+	var pingBounded, sessionBounded bool
+	probes := probeSidecars(context.Background(), sidecarProviders{
+		ping: func(ctx context.Context) (waxtap.SidecarHealth, error) {
+			_, pingBounded = ctx.Deadline()
+			return waxtap.SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"}, nil
+		},
+		session: deadlineSessionProvider{bounded: &sessionBounded},
+	}, "dummyVideo0", 20*time.Millisecond)
+	if len(probes) != 2 || !probes[0].OK || !probes[1].OK {
+		t.Fatalf("probes = %+v, want both ok", probes)
+	}
+	if pingBounded {
+		t.Error("the ping ran under the handoff deadline, which cuts WaxSeal's worst-case probe short")
+	}
+	if !sessionBounded {
+		t.Error("the session probe must keep the handoff deadline")
+	}
+}
+
+// deadlineSessionProvider records whether its context carried a deadline.
+type deadlineSessionProvider struct{ bounded *bool }
+
+func (d deadlineSessionProvider) ProvideSession(ctx context.Context) (potoken.Session, error) {
+	_, *d.bounded = ctx.Deadline()
+	return potoken.Session{VisitorData: "vd"}, nil
+}
+
+// TestDoctorHumanPingLines pins the one line each ping outcome renders as.
+func TestDoctorHumanPingLines(t *testing.T) {
+	cases := []struct {
+		name  string
+		probe doctorSidecarProbe
+		want  string
+	}{
+		{"tenant ok", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "ok"}, "sidecar:  ping ok (12 ms, tenant ok)"},
+		{"daemon scope", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 9, Probe: "daemon", Reason: "ok"}, "sidecar:  ping ok (9 ms, daemon ok)"},
+		{"benign with a relaunch", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2300, Probe: "tenant", Reason: "no-session", BrowserRelaunched: true}, "sidecar:  ping ok (2.3 s, tenant no-session, browser relaunched)"},
+		{"older daemon without a probe scope", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Reason: "busy"}, "sidecar:  ping ok (12 ms, reason busy)"},
+		{"answered without a health body", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 3}, "sidecar:  ping ok (3 ms)"},
+		{"probe scope without a reason word", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant"}, "sidecar:  ping ok (12 ms, tenant probe)"},
+		{"not offered", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2, StatusCode: 404, Code: "not-found"}, "sidecar:  ping not offered (HTTP 404, 2 ms)"},
+		{"not offered as a method", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2, StatusCode: 405}, "sidecar:  ping not offered (HTTP 405, 2 ms)"},
+		// A verdict probe keeps its own line whatever status it carries.
+		{"verdict", doctorSidecarProbe{Endpoint: "player-context", OK: true, LatencyMs: 5, StatusCode: 422, Code: "video-unavailable", Verdict: "video-unavailable"}, "sidecar:  player-context ok (5 ms, reported video-unavailable for the probed video)"},
+		{"confirmed loss", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 40000, StatusCode: 503, Code: "probe-failed", Probe: "tenant", Reason: "probe-failed",
+			Error: &errorJSON{Code: "network", Message: "sidecar health endpoint at http://127.0.0.1:4416/ping returned HTTP 503 (probe-failed): no browser answers and none could be launched"}},
+			"sidecar:  ping FAILED: sidecar health endpoint at http://127.0.0.1:4416/ping returned HTTP 503 (probe-failed): no browser answers and none could be launched (tenant probe)"},
+		// What the daemon checked and whether it relaunched the browser matter
+		// most on a failure, and go after the message, ahead of a stated wait.
+		{"confirmed loss after a relaunch, with a wait", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 40000, StatusCode: 503, Code: "probe-failed", Probe: "daemon", Reason: "probe-failed", BrowserRelaunched: true, RetryAfterSeconds: 5,
+			Error: &errorJSON{Code: "network", Message: "M"}},
+			"sidecar:  ping FAILED: M (daemon probe, browser relaunched); retry in 5s"},
+		{"unreachable, nothing decoded", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 3, Error: &errorJSON{Code: "network", Message: "M"}}, "sidecar:  ping FAILED: M"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+			renderSidecarProbes(env, []doctorSidecarProbe{tc.probe})
+			if got := strings.TrimSuffix(out.String(), "\n"); got != tc.want {
+				t.Errorf("line = %q\nwant   %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The ping's entry carries the daemon's words under their own keys, and only
+// when the daemon said them, so the other probes' entries are unchanged.
+func TestDoctorJSONPingEntry(t *testing.T) {
+	decode := func(rep *doctorReport) []any {
+		t.Helper()
+		var out bytes.Buffer
+		env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
+		if err := emitDoctorJSON(env, rep, nil); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+			t.Fatalf("decode %q: %v", out.String(), err)
+		}
+		arr, _ := m["sidecars"].([]any)
+		return arr
+	}
+	arr := decode(&doctorReport{Healthy: true, Sidecars: []doctorSidecarProbe{
+		{Endpoint: "ping", OK: true, LatencyMs: 12, Via: "session", Probe: "tenant", Reason: "no-session", BrowserRelaunched: true},
+		{Endpoint: "ping", OK: true, LatencyMs: 3},
+		{Endpoint: "session", OK: true, LatencyMs: 300},
+	}})
+	if len(arr) != 3 {
+		t.Fatalf("sidecars = %v, want three entries", arr)
+	}
+	first, _ := arr[0].(map[string]any)
+	if first["via"] != "session" || first["probe"] != "tenant" || first["reason"] != "no-session" || first["browserRelaunched"] != true {
+		t.Errorf("sidecars[0] = %v, want via, probe, reason, and browserRelaunched", first)
+	}
+	for i := 1; i < 3; i++ {
+		entry, _ := arr[i].(map[string]any)
+		for _, key := range []string{"via", "probe", "reason", "browserRelaunched"} {
+			if _, ok := entry[key]; ok {
+				t.Errorf("sidecars[%d] = %v, want %q omitted when the daemon said nothing", i, entry, key)
+			}
+		}
+	}
+}

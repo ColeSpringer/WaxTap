@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -641,5 +643,139 @@ func TestTimeoutDefaults(t *testing.T) {
 	}
 	if got := coalesceDuration(defaultSidecarTimeout, nil, nil); got != 60*time.Second {
 		t.Errorf("unset resolves to %v, want the default", got)
+	}
+}
+
+// TestSidecarProvidersPing pins which daemon doctor asks for its health: the
+// one behind the most WaxSeal-specific URL configured (session, else
+// player-context, else PO-token), once, with the run's key and timeout.
+func TestSidecarProvidersPing(t *testing.T) {
+	var got struct {
+		path, key string
+		strict    bool
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.path, got.key, got.strict = r.URL.Path, r.Header.Get("X-API-Key"), r.URL.Query().Get("strict") == "true"
+		_, _ = io.WriteString(w, `{"ok":true,"probe":"tenant","reason":"ok"}`)
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name     string
+		cfg      appConfig
+		wantPath string
+		wantVia  string
+	}{
+		{"session outranks the rest", appConfig{sessionURL: srv.URL + "/a/session", playerContextURL: srv.URL + "/b/player-context", potokenURL: srv.URL + "/c/get_pot"}, "/a/ping", "session"},
+		{"player-context outranks the token", appConfig{playerContextURL: srv.URL + "/b/player-context", potokenURL: srv.URL + "/c/get_pot"}, "/b/ping", "player-context"},
+		{"token alone", appConfig{potokenURL: srv.URL + "/c/get_pot"}, "/c/ping", "po-token"},
+		{"base URL", appConfig{potokenURL: srv.URL}, "/ping", "po-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := tc.cfg
+			a.apiKey, a.sidecarTimeout = "K", time.Second
+			sc, err := a.sidecarProviders()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sc.ping == nil {
+				t.Fatal("a configured sidecar must give doctor a ping")
+			}
+			if sc.pingVia != tc.wantVia {
+				t.Errorf("pingVia = %q, want %q, the sidecar whose URL the ping was derived from", sc.pingVia, tc.wantVia)
+			}
+			got.path = ""
+			h, err := sc.ping(context.Background())
+			if err != nil || !h.OK {
+				t.Fatalf("ping = %+v, %v", h, err)
+			}
+			if got.path != tc.wantPath || got.key != "K" || !got.strict {
+				t.Errorf("pinged %q (key %q, strict %v), want %q with the run's key under strict", got.path, got.key, got.strict, tc.wantPath)
+			}
+		})
+	}
+
+	// The run's sidecar timeout bounds the ping only when it was set: left
+	// alone, the ping keeps the library's own allowance for a daemon that is
+	// tearing down and relaunching its browser, which the 60 s default would
+	// cut short.
+	t.Run("timeout applies only when set", func(t *testing.T) {
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = io.WriteString(w, `{"ok":true,"probe":"tenant","reason":"ok"}`)
+		}))
+		defer slow.Close()
+		unset := appConfig{potokenURL: slow.URL, sidecarTimeout: 20 * time.Millisecond}
+		sc, err := unset.sidecarProviders()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h, err := sc.ping(context.Background()); err != nil || !h.OK {
+			t.Errorf("ping = %+v, %v; want the answer: an unset sidecar timeout leaves the ping its own bound", h, err)
+		}
+		set := appConfig{potokenURL: slow.URL, sidecarTimeout: 20 * time.Millisecond, sidecarTimeoutSet: true}
+		sc, err = set.sidecarProviders()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sc.ping(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want the set 20 ms sidecar timeout to cut the ping", err)
+		}
+	})
+
+	none := appConfig{}
+	sc, err := none.sidecarProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.ping != nil {
+		t.Error("no sidecar configured, yet a ping was built")
+	}
+}
+
+// The ping keeps its own default bound only while sidecarTimeoutSeconds is
+// left alone; set through either layer, the value applies to it too.
+func TestLoadConfigRecordsSidecarTimeoutSet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXTAP_CONFIG", path)
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "test"}
+		bindConfigFlags(cmd.Flags())
+		bindNetworkFlags(cmd.Flags())
+		bindPlayerExtractionFlags(cmd.Flags())
+		return cmd
+	}
+
+	cfg, err := loadConfig(newCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.sidecarTimeoutSet || cfg.sidecarTimeout != defaultSidecarTimeout {
+		t.Errorf("unset: set = %v, timeout = %v; want the default, recorded as not set", cfg.sidecarTimeoutSet, cfg.sidecarTimeout)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"sidecarTimeoutSeconds": 7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(newCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.sidecarTimeoutSet || cfg.sidecarTimeout != 7*time.Second {
+		t.Errorf("file: set = %v, timeout = %v; want 7s, recorded as set", cfg.sidecarTimeoutSet, cfg.sidecarTimeout)
+	}
+
+	t.Setenv("WAXTAP_SIDECAR_TIMEOUT", "5")
+	cfg, err = loadConfig(newCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.sidecarTimeoutSet || cfg.sidecarTimeout != 5*time.Second {
+		t.Errorf("env: set = %v, timeout = %v; want 5s, recorded as set", cfg.sidecarTimeoutSet, cfg.sidecarTimeout)
 	}
 }

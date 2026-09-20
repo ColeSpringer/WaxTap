@@ -18,13 +18,4 @@ Gate tags:
 - `[upstream]` needs sibling-repo work first; the ask is in
   upstream-requests.md.
 
-## Doctor
-
-- `[in-repo]` **`doctor` does not ask WaxSeal's `/ping` before paying for a
-  proof.** WaxSeal answers `GET /ping?strict=true` in one round trip with a
-  `reason` (`ok`, `no-session`, `busy`, `probe-failed`) and, keyless on a keyed
-  daemon, a daemon-scope answer that needs no key; `probeSidecars`
-  (`cmd/waxtap/doctor.go`) probes the session, token, and context endpoints
-  with browser-backed calls only, so a walled or wedged daemon is reported as
-  a `502` with no reason. Cut from the 2026-09-19 contract pass for scope; the
-  follow-up is a cheap `/ping` probe ahead of the three, shown with its reason.
+No open entries.

@@ -248,6 +248,30 @@ Every sidecar request is bounded by `WithSidecarTimeout` (CLI
 `Timeouts.WebContext` like a `/player-context` call, ahead of the extraction
 budget.
 
+`doctor` asks the daemon for its health before it pays for a proof: one
+`GET /ping?strict=true` on the `/ping` sibling of the most WaxSeal-specific URL
+configured (`--session-url`, else `--player-context-url`, else
+`--potoken-url`; the `--json` entry's `via` names which), with `--api-key` in
+the header, sent once. The `ping` line reports the daemon's own words: the
+scope it checked (`tenant`, or `daemon` when a keyed daemon got no key) and
+its reason (`ok`, `no-session`, `busy`, `probe-failed`), plus a browser
+relaunch when the probe made one. A 200 is healthy or a benign window and
+keeps the run healthy. A 503 is a loss the daemon confirmed: it fails the run
+as exit 9 with the reason as the entry's code, as does a 200 that says
+`probe-failed`, which a daemon predating `?strict` sends; an endpoint probe
+that also failed names the run's error ahead of it, since the endpoints are
+what a download hits. A 200 whose JSON carries no health body (bgutil's
+`/ping` reports its uptime and version) counts as answered, and a status that
+names a missing route (404, 405, 410, 501) from a daemon with no `/ping` is
+recorded as not offered without failing the run. Unless `sidecarTimeoutSeconds`
+is set, the ping is allowed 110 s, WaxSeal's own healthcheck allowance for a
+probe that finds the browser wedged and tears it down and relaunches it
+(102 s, 105 on Windows), rather than the 60 s the other requests default to:
+a healthy daemon answers in one round trip, and the answer that runs long is
+the verdict the ping exists to fetch. A set `sidecarTimeoutSeconds` bounds the
+ping like every other request. Library callers ask the same question with
+`waxtap.PingSidecar`, bounded the same way and by their context.
+
 A bot check the sidecar's browser hits ("Sign in to confirm you're not a bot")
 buys a fresh identity once every 10 minutes; past that WaxSeal refuses the video
 as `player-context-failed` (HTTP 502) with a 2 minute `Retry-After`. That wait is

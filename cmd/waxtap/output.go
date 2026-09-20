@@ -680,6 +680,13 @@ func classifyArgs(err error, args []string) classifiedError {
 		c.hint = sidecarHint(sre)
 	case isProviderError(err):
 		c.exitCode, c.code, c.hint = 9, "network", providerHint(err)
+	// A sidecar the dial could not reach outside a provider's wrapping (the
+	// doctor ping) is a network failure whatever failed inside the dial: a TLS
+	// handshake that rejected the certificate arrives without the net.OpError
+	// the connection case below reads, and used to fall through to the generic
+	// exit 1 with no hint. A provider's own failure keeps its hint above.
+	case isSidecarConnection(err):
+		c.exitCode, c.code, c.hint = 9, "network", sidecarConnectionHint
 	// An upstream service that answers with an error status is the same failure
 	// class as one that cannot be reached; only the hint differs.
 	case hasHTTPStatus:
@@ -701,6 +708,9 @@ const (
 	poTokenHint          = "configure --potoken-url, or if one is set the provider's mint failed or YouTube rejected the token (attestation status 3); run `waxtap doctor` or see MAINTENANCE.md"
 	incompleteStreamHint = "another client may deliver the full stream (omit --no-fallback); for forced WEB audio supply both --player-context-url and --session-url (both also require --potoken-url), then retry if WEB hit a transient status-2 cap"
 	cipherSolveHint      = "full WEB audio needs an attested identity; supply both --player-context-url and --session-url (both also require --potoken-url)"
+	// sidecarConnectionHint follows any sidecar the dial could not reach; the
+	// message already names which one.
+	sidecarConnectionHint = "start the sidecar or correct its URL (--potoken-url/--player-context-url/--session-url)"
 )
 
 // watchPageSuffix labels a Client line whose delivery came from the watch-page

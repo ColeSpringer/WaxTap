@@ -44,11 +44,20 @@ func WithSidecarAPIKey(key string) SidecarOption {
 // proof (10 to 30 s), then the 12 s separation window. A wait the sidecar asks
 // for through Retry-After is not counted against it; the caller's context is,
 // and on the player-context provider Timeouts.WebContext bounds the whole call.
+// [PingSidecar] takes it as given too; only its default differs, see there.
 func WithSidecarTimeout(d time.Duration) SidecarOption {
 	return func(c *sidecarConfig) { c.timeout = d }
 }
 
+// applySidecarOptions resolves opts for a provider, with the 60 s request
+// default.
 func applySidecarOptions(opts []SidecarOption) sidecarConfig {
+	return applySidecarOptionsDefault(opts, defaultSidecarTimeout)
+}
+
+// applySidecarOptionsDefault resolves opts, filling a timeout no option set,
+// or set to zero or less, with def.
+func applySidecarOptionsDefault(opts []SidecarOption, def time.Duration) sidecarConfig {
 	var c sidecarConfig
 	for _, opt := range opts {
 		if opt != nil {
@@ -56,7 +65,7 @@ func applySidecarOptions(opts []SidecarOption) sidecarConfig {
 		}
 	}
 	if c.timeout <= 0 {
-		c.timeout = defaultSidecarTimeout
+		c.timeout = def
 	}
 	return c
 }
@@ -208,6 +217,190 @@ func (r sidecarReporter) invalidate(ctx context.Context, inv potoken.SessionInva
 		}
 	}
 	return nil
+}
+
+// SidecarHealth is what the daemon behind a sidecar says about itself when
+// asked GET /ping?strict=true, WaxSeal's health contract. A ping never attests
+// or mints; it is the one cheap question a caller can ask before paying for a
+// proof, and doctor asks it ahead of its endpoint probes.
+//
+// Probe and Reason are WaxSeal's own words. Probe says what the daemon
+// checked: "tenant" for the session the key selects (or the one tenant of a
+// keyless daemon), "daemon" for the shared browser alone, which is what a
+// keyed daemon answers a keyless ping with instead of 401. Reason is exactly
+// one of "ok", "no-session", "busy", and "probe-failed": the middle two are
+// benign windows the daemon keeps at 200 even under strict, and the last is a
+// loss the probe confirmed. A daemon that answered without a health body (a
+// bgutil server reports its uptime and version) leaves every field empty: the
+// ping proved it answers, and nothing more.
+type SidecarHealth struct {
+	// OK reports a live session (a tenant probe) or a running browser (a daemon
+	// probe). It is false inside the benign windows, which are still healthy.
+	OK bool
+	// Probe is the scope the daemon checked: "tenant" or "daemon". Empty from a
+	// daemon that predates the field, or one that is not WaxSeal.
+	Probe string
+	// Reason is the daemon's reason word: "ok", "no-session", "busy", or
+	// "probe-failed". Empty when the body carried none.
+	Reason string
+	// Error is the daemon's own account of a probe that was not ok, capped
+	// like a refusal's reason. Empty when it gave none.
+	Error string
+	// BrowserRelaunched reports that the probe found the shared browser gone
+	// and relaunched it before answering, which otherwise shows only in the
+	// daemon's log.
+	BrowserRelaunched bool
+}
+
+// sidecarPingReasonProbeFailed is the one reason a strict ping maps to 503: a
+// loss the probe confirmed. WaxTap keeps no list of the benign reasons, since
+// the daemon's status under strict already applies its own.
+const sidecarPingReasonProbeFailed = "probe-failed"
+
+// sidecarPingLabel identifies the health endpoint in errors.
+const sidecarPingLabel = "sidecar health endpoint"
+
+// sidecarPingTimeout is the ping's default request bound: the 110 s WaxSeal's
+// own healthcheck allows a probe, its documented worst case for finding the
+// shared browser wedged, tearing it down, and relaunching it (102 s, 105 on
+// Windows) plus the probe's own connect, transfer, and decode. A healthy ping
+// answers in one page round trip and a busy one inside 30 s; only that
+// teardown runs long, and the 60 s the other endpoints default to would cut
+// it and replace the verdict the ping exists to fetch with a deadline.
+const sidecarPingTimeout = 110 * time.Second
+
+// PingSidecar asks the daemon behind a configured sidecar URL for its health:
+// one GET /ping?strict=true on the /ping sibling of baseURL, which is a base
+// such as "http://127.0.0.1:4416" or a full endpoint such as ".../session",
+// taken the way the NewSidecar* constructors and their /report sibling take
+// it; a query the URL carries is sent as configured, after strict. The request
+// carries [WithSidecarAPIKey] in its header. It is sent once: a probe is a
+// question, and a retry could not change its answer. Like every sidecar
+// request it follows no redirect and ignores [Options.HTTPClient].
+//
+// The verdict is the daemon's. A 200 is healthy, or a benign window that
+// strict keeps at 200 (no-session, busy), and returns the health with a nil
+// error. A 200 whose JSON carries no health body counts as answered, which is
+// all a daemon that is not WaxSeal can say; one that is not JSON is the
+// unusable response it is from any sidecar. A 503 is the loss the probe
+// confirmed, returned as a [SidecarResponseError] whose Code is the reason and
+// whose Reason is the daemon's account, beside the decoded health; so is a 200
+// whose reason is "probe-failed", which a daemon that predates ?strict sends
+// where a 503 goes today. Any other status is the refusal it is everywhere
+// else (401 for a wrong key, 404 from a daemon with no /ping), and a
+// connection failure is a [SidecarError].
+//
+// A healthy ping costs the daemon one page round trip. One that finds the
+// browser wedged tears it down and relaunches it before answering, which
+// WaxSeal bounds at 105 s, so without [WithSidecarTimeout] the request is
+// allowed the 110 s WaxSeal's own healthcheck allows rather than the 60 s the
+// other endpoints default to. A timeout that is given is the bound, as on any
+// other request, and ctx bounds the call for a caller that will not wait.
+func PingSidecar(ctx context.Context, baseURL string, opts ...SidecarOption) (SidecarHealth, error) {
+	endpoint, err := sidecarPingURL(baseURL)
+	if err != nil {
+		return SidecarHealth{}, err
+	}
+	cfg := applySidecarOptionsDefault(opts, sidecarPingTimeout)
+	return pingSidecar(ctx, newSidecarClient(cfg.timeout), endpoint, cfg.apiKey)
+}
+
+// sidecarPingURL derives the /ping sibling of a configured sidecar URL, base
+// or endpoint, asking for the strict answer beside any query it carried.
+func sidecarPingURL(baseURL string) (string, error) {
+	endpoint, err := buildSidecarURL(baseURL, "/ping")
+	if err != nil {
+		return "", err
+	}
+	sibling, err := siblingSidecarURL(endpoint, "ping")
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(sibling)
+	if err != nil {
+		return "", err
+	}
+	// strict leads, so it is the value the daemon reads should the configured
+	// query name one too, and that query follows as it was written: re-encoding
+	// it would send something other than what was configured, which no other
+	// sidecar request does.
+	if u.RawQuery == "" {
+		u.RawQuery = "strict=true"
+	} else {
+		u.RawQuery = "strict=true&" + u.RawQuery
+	}
+	return u.String(), nil
+}
+
+// sidecarHealthBody is the wire shape of a health body, the fields WaxTap
+// reads of it. Every health body carries ok, so a body without it, whatever
+// else it carries, is not one: a refusal envelope, or what a daemon that is
+// not WaxSeal answers /ping with.
+type sidecarHealthBody struct {
+	OK                *bool  `json:"ok"`
+	Probe             string `json:"probe"`
+	Reason            string `json:"reason"`
+	Error             string `json:"error"`
+	BrowserRelaunched bool   `json:"browser_relaunched"`
+}
+
+// pingSidecar is one strict ping of endpoint. A health body arrives with a 200
+// or a 503 and is read from either; every other status is a refusal.
+func pingSidecar(ctx context.Context, client *http.Client, endpoint, apiKey string) (SidecarHealth, error) {
+	resp, err := sidecarDo(ctx, client, http.MethodGet, endpoint, sidecarPingLabel, apiKey, nil)
+	if err != nil {
+		return SidecarHealth{}, err
+	}
+	defer drainSidecarBody(resp)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return SidecarHealth{}, sidecarRefusalError(resp, readSidecarRefusal(resp), sidecarPingLabel, endpoint)
+	}
+	// Read once, under the success bound, since a 503 whose body turns out not
+	// to be a health body is read again as the refusal it is.
+	buf, derr := io.ReadAll(io.LimitReader(resp.Body, sidecarSuccessBodyLimit))
+	var body sidecarHealthBody
+	if derr == nil {
+		// One value, as every other sidecar answer is read: what follows it is
+		// not the daemon's answer.
+		derr = json.NewDecoder(bytes.NewReader(buf)).Decode(&body)
+	}
+	if body.OK == nil {
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			// The refusal is read from the same bytes, under its own bound, so
+			// an envelope the bound cut is reported as one.
+			r := parseSidecarRefusal(json.NewDecoder(bytes.NewReader(buf[:min(len(buf), sidecarErrorBodyLimit)])), resp.Header)
+			return SidecarHealth{}, sidecarRefusalError(resp, r, sidecarPingLabel, endpoint)
+		}
+		if derr != nil {
+			// The same structured message a malformed 200 gets from sidecarJSON,
+			// a body that died mid-read included: the daemon answered, and no
+			// raw bytes are echoed.
+			return SidecarHealth{}, &SidecarResponseError{Label: sidecarPingLabel, Endpoint: endpoint, Reason: fmt.Sprintf("malformed JSON response: %v", derr), Cause: derr}
+		}
+		// A 200 whose JSON carries no health body: the daemon answered, and
+		// that is all it said.
+		return SidecarHealth{}, nil
+	}
+	// Capped like a refusal's fields: the words are the daemon's, never raw
+	// bytes of whatever answered.
+	h := SidecarHealth{
+		OK:                *body.OK,
+		Probe:             capRunes(strings.TrimSpace(body.Probe), sidecarCodeRunes),
+		Reason:            capRunes(strings.TrimSpace(body.Reason), sidecarCodeRunes),
+		Error:             capRunes(strings.TrimSpace(body.Error), sidecarReasonRunes),
+		BrowserRelaunched: body.BrowserRelaunched,
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || h.Reason == sidecarPingReasonProbeFailed {
+		// The loss the daemon confirmed, as the refusal it is: the reason where
+		// a code goes, the daemon's account where a reason goes, and a wait a
+		// proxy may have stated on it.
+		r := sidecarRefusal{Reason: h.Error, Code: h.Reason}
+		if d, ok := httpx.ParseRetryAfter(resp.Header); ok {
+			r.RetryAfter = d
+		}
+		return h, sidecarRefusalError(resp, r, sidecarPingLabel, endpoint)
+	}
+	return h, nil
 }
 
 // validateHTTPBaseURL parses base and requires an http or https scheme and a
@@ -396,23 +589,22 @@ func retryableSidecarStatus(status int) bool {
 	}
 }
 
-// sidecarJSON exchanges JSON with the PO-token, session, and player-context
-// providers. Connection failures return *SidecarError. Unusable responses return
-// *SidecarResponseError without including raw response bodies. label identifies
-// the provider in returned errors. A non-empty apiKey is sent in the X-API-Key
-// header.
-func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in, out any) error {
+// sidecarDo sends one request to a sidecar: in as JSON when it is non-nil,
+// JSON asked for, and a non-empty apiKey in the X-API-Key header. A connection
+// failure is a *SidecarError naming label and endpoint. The response is the
+// caller's to read and drain.
+func sidecarDo(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in any) (*http.Response, error) {
 	var body io.Reader
 	if in != nil {
 		buf, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -421,12 +613,24 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		// Preserve the provider name and endpoint so the caller can distinguish a
 		// connection failure from the sentinel that may wrap it.
-		return &SidecarError{Label: label, Endpoint: endpoint, Err: err}
+		return nil, &SidecarError{Label: label, Endpoint: endpoint, Err: err}
+	}
+	return resp, nil
+}
+
+// sidecarJSON exchanges JSON with the PO-token, session, and player-context
+// providers. Connection failures return *SidecarError. Unusable responses return
+// *SidecarResponseError without including raw response bodies. label identifies
+// the provider in returned errors. A non-empty apiKey is sent in the X-API-Key
+// header.
+func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in, out any) error {
+	resp, err := sidecarDo(ctx, client, method, endpoint, label, apiKey, in)
+	if err != nil {
+		return err
 	}
 	// Both readers below are bounded, so a larger body would leave bytes on the
 	// wire and make Close discard the connection. sidecarCall retries, and a
@@ -435,24 +639,7 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 	if resp.StatusCode != http.StatusOK {
 		// Include a short reason from a known JSON field, but do not echo arbitrary
 		// response bytes that might contain tokens or cookies.
-		r := readSidecarRefusal(resp)
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 && r.Reason == "" {
-			// A redirect is never followed (newSidecarClient), so where it
-			// pointed is the one thing the answer says; the target is redacted
-			// like the endpoint it was asked at.
-			if loc := resp.Header.Get("Location"); loc != "" {
-				r.Reason = capRunes("redirected to "+redactURL(loc), sidecarReasonRunes)
-			}
-		}
-		return &SidecarResponseError{
-			Label:      label,
-			Endpoint:   endpoint,
-			StatusCode: resp.StatusCode,
-			Reason:     r.Reason,
-			Code:       r.Code,
-			Details:    r.Details,
-			RetryAfter: r.RetryAfter,
-		}
+		return sidecarRefusalError(resp, readSidecarRefusal(resp), label, endpoint)
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, sidecarSuccessBodyLimit)).Decode(out); err != nil {
 		// A json decode error is a structured syntax/shape message (an offending
@@ -482,6 +669,13 @@ type sidecarRefusal struct {
 // the HTTP-level statement, and a proxy or a later sidecar version can set it
 // where the body cannot be changed.
 func readSidecarRefusal(resp *http.Response) sidecarRefusal {
+	return parseSidecarRefusal(json.NewDecoder(io.LimitReader(resp.Body, sidecarErrorBodyLimit)), resp.Header)
+}
+
+// parseSidecarRefusal is readSidecarRefusal over a decoder the caller built,
+// for a body already read once as something else (a 503 that carried no
+// health body). The decoder must be bounded the same way.
+func parseSidecarRefusal(dec *json.Decoder, header http.Header) sidecarRefusal {
 	var msg struct {
 		Error             string `json:"error"`
 		Message           string `json:"message"`
@@ -489,7 +683,7 @@ func readSidecarRefusal(resp *http.Response) sidecarRefusal {
 		Details           string `json:"details"`
 		RetryAfterSeconds int    `json:"retry_after_seconds"`
 	}
-	derr := json.NewDecoder(io.LimitReader(resp.Body, sidecarErrorBodyLimit)).Decode(&msg)
+	derr := dec.Decode(&msg)
 	reason := strings.TrimSpace(msg.Error)
 	if reason == "" {
 		reason = strings.TrimSpace(msg.Message)
@@ -508,12 +702,35 @@ func readSidecarRefusal(resp *http.Response) sidecarRefusal {
 		Code:    capRunes(strings.TrimSpace(msg.Code), sidecarCodeRunes),
 		Details: capRunes(strings.TrimSpace(msg.Details), sidecarReasonRunes),
 	}
-	if d, ok := httpx.ParseRetryAfter(resp.Header); ok {
+	if d, ok := httpx.ParseRetryAfter(header); ok {
 		r.RetryAfter = d
 	} else if msg.RetryAfterSeconds > 0 {
 		r.RetryAfter = time.Duration(msg.RetryAfterSeconds) * time.Second
 	}
 	return r
+}
+
+// sidecarRefusalError is the error for a non-OK response: its status and what
+// r read of its body, plus, for a redirect that carried no reason, where it
+// pointed.
+func sidecarRefusalError(resp *http.Response, r sidecarRefusal, label, endpoint string) *SidecarResponseError {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 && r.Reason == "" {
+		// A redirect is never followed (newSidecarClient), so where it pointed
+		// is the one thing the answer says; the target is redacted like the
+		// endpoint it was asked at.
+		if loc := resp.Header.Get("Location"); loc != "" {
+			r.Reason = capRunes("redirected to "+redactURL(loc), sidecarReasonRunes)
+		}
+	}
+	return &SidecarResponseError{
+		Label:      label,
+		Endpoint:   endpoint,
+		StatusCode: resp.StatusCode,
+		Reason:     r.Reason,
+		Code:       r.Code,
+		Details:    r.Details,
+		RetryAfter: r.RetryAfter,
+	}
 }
 
 // drainSidecarBody reads the bounded remainder of a response body and closes it,
@@ -605,8 +822,9 @@ func transportReason(err error) error {
 
 // SidecarResponseError reports a non-OK status or an invalid response from a
 // configured sidecar. StatusCode is zero when an HTTP 200 response had invalid
-// content. SidecarError is reserved for connection failures. Its Error string
-// self-redacts the endpoint.
+// content, and 200 when a health body answered with that status names a failed
+// probe ([PingSidecar]), Code then carrying the verdict. SidecarError is
+// reserved for connection failures. Its Error string self-redacts the endpoint.
 type SidecarResponseError struct {
 	Label      string // provider name, such as "session endpoint"
 	Endpoint   string // configured endpoint (redacted in the Error string)

@@ -88,6 +88,9 @@ type appConfig struct {
 	resolveTimeout    time.Duration
 	webContextTimeout time.Duration
 	sidecarTimeout    time.Duration
+	// sidecarTimeoutSet records that sidecarTimeout was configured rather than
+	// defaulted, since doctor's ping keeps its own longer default otherwise.
+	sidecarTimeoutSet bool
 	// sidecars caches the providers sidecarProviders built, so options and
 	// doctor share one set. sidecarsBuilt distinguishes "none configured" from
 	// "not built yet".
@@ -211,6 +214,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		resolveTimeout:      coalesceDuration(defaultResolveTimeout, fc.ResolveTimeoutSec, ec.ResolveTimeoutSec),
 		webContextTimeout:   coalesceDuration(defaultWebContextTimeout, fc.WebContextTimeoutSec, ec.WebContextTimeoutSec),
 		sidecarTimeout:      coalesceDuration(defaultSidecarTimeout, fc.SidecarTimeoutSec, ec.SidecarTimeoutSec),
+		sidecarTimeoutSet:   fc.SidecarTimeoutSec != nil || ec.SidecarTimeoutSec != nil,
 		sponsorBlockTimeout: coalesceDuration(defaultSponsorBlockTimeout, fc.SponsorBlockTimeoutSec, ec.SponsorBlockTimeoutSec),
 		chunkTimeout:        coalesceDuration(defaultChunkTimeout, fc.ChunkTimeoutSec, ec.ChunkTimeoutSec),
 	}
@@ -537,6 +541,16 @@ type sidecarProviders struct {
 	token   waxtap.POTokenProvider
 	context waxtap.PlayerContextProvider
 	session waxtap.POTokenSessionProvider
+	// ping asks the daemon behind the sidecars for its health, WaxSeal's
+	// GET /ping?strict=true, ahead of the probes that would pay for a proof.
+	// One daemon gets one question: it goes to the most WaxSeal-specific URL
+	// configured (session, else player-context, else PO-token), since the
+	// three are documented as one host, and a token server that is not WaxSeal
+	// is what the token probe checks. Nil when no sidecar is configured.
+	// pingVia names that sidecar, so the ping's entry says which URL it went
+	// to the way the other entries' names do.
+	ping    func(context.Context) (waxtap.SidecarHealth, error)
+	pingVia string
 }
 
 // sidecarProviders builds every configured sidecar provider once. Each gets its
@@ -583,6 +597,30 @@ func (a *appConfig) sidecarProviders() (sidecarProviders, error) {
 			return sidecarProviders{}, usagef("invalid --session-url %q: %v", a.sessionURL, err)
 		}
 		sc.session = p
+	}
+	// The chosen URL passed its constructor above, so the ping's own derivation
+	// cannot fail on it; what the call returns is the daemon's answer. The
+	// run's sidecar timeout bounds the ping only when it was set: left alone,
+	// the ping keeps the library's allowance for a daemon that is tearing down
+	// and relaunching its browser, which the 60 s default would cut short.
+	via, pingURL := "", ""
+	switch {
+	case a.sessionURL != "":
+		via, pingURL = "session", a.sessionURL
+	case a.playerContextURL != "":
+		via, pingURL = "player-context", a.playerContextURL
+	case a.potokenURL != "":
+		via, pingURL = "po-token", a.potokenURL
+	}
+	if pingURL != "" {
+		opts := []waxtap.SidecarOption{waxtap.WithSidecarAPIKey(a.apiKey)}
+		if a.sidecarTimeoutSet {
+			opts = append(opts, waxtap.WithSidecarTimeout(a.sidecarTimeout))
+		}
+		sc.pingVia = via
+		sc.ping = func(ctx context.Context) (waxtap.SidecarHealth, error) {
+			return waxtap.PingSidecar(ctx, pingURL, opts...)
+		}
 	}
 	a.sidecars, a.sidecarsBuilt = sc, true
 	return sc, nil

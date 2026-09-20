@@ -500,19 +500,22 @@ does.
 Static adoption is also available with
 `--visitor-data` and optional `--cookies`. Library callers get the same handoff
 via the `NewSidecar*` providers, each taking a base URL or full endpoint plus an
-optional `WithSidecarAPIKey`; `ParseNetscapeCookies` loads a static session from
-a browser `cookies.txt`. See [MAINTENANCE.md](MAINTENANCE.md) for sidecar
+optional `WithSidecarAPIKey`; `PingSidecar` asks the daemon behind such a URL
+for its health; `ParseNetscapeCookies` loads a static session from a browser
+`cookies.txt`. See [MAINTENANCE.md](MAINTENANCE.md) for sidecar
 contracts and SABR diagnostics.
 
 ## Maintenance
 
 `waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
 check; `waxtap doctor --full` verifies complete delivery. With sidecar URLs
-configured, each is probed once first (session, PO token, player-context), so a
-cold daemon's first-call cost and any refusal code are visible; the token and
-context probe latencies include WaxSeal's separation waits, which is the cost a
-first download pays, not a relaunch. A probe that relays the video's own
-playability verdict still counts as a healthy sidecar. The
+configured, the daemon behind them is asked for its health first (WaxSeal's
+`/ping`, one round trip, reported with its reason: `ok`, `no-session`, `busy`,
+or `probe-failed`), then each endpoint is probed once (session, PO token,
+player-context), so a cold daemon's first-call cost and any refusal code are
+visible; the token and context probe latencies include WaxSeal's separation
+waits, which is the cost a first download pays, not a relaunch. A probe that
+relays the video's own playability verdict still counts as a healthy sidecar. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
 failures, SABR changes, fixtures, and releases. Work cut from a change is
 tracked in [docs/deferred-work.md](docs/deferred-work.md), and what WaxTap

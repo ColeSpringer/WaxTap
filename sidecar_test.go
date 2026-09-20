@@ -1323,3 +1323,309 @@ func TestSidecarClientTimeouts(t *testing.T) {
 		t.Errorf("non-positive option must select the default, got %v", got)
 	}
 }
+
+// TestPingSidecarWire pins the request a ping sends: one GET on the /ping
+// sibling of the configured endpoint, ?strict=true beside whatever query the
+// endpoint carried, the key in the header, and JSON asked for.
+func TestPingSidecarWire(t *testing.T) {
+	var got struct{ method, path, query, key, accept string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method, got.path, got.query = r.Method, r.URL.Path, r.URL.RawQuery
+		got.key, got.accept = r.Header.Get("X-API-Key"), r.Header.Get("Accept")
+		_, _ = io.WriteString(w, `{"ok":true,"probe":"tenant","reason":"ok"}`)
+	}))
+	defer srv.Close()
+
+	h, err := PingSidecar(context.Background(), srv.URL+"/api/session/?key=K&odd%2Fone", WithSidecarAPIKey("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.OK || h.Probe != "tenant" || h.Reason != "ok" {
+		t.Errorf("health = %+v, want the live tenant answer", h)
+	}
+	if got.method != http.MethodGet || got.path != "/api/ping" {
+		t.Errorf("request = %s %s, want GET /api/ping (the sibling of the configured endpoint)", got.method, got.path)
+	}
+	// strict leads, so it is the value WaxSeal reads, and the configured query
+	// follows byte for byte, not re-encoded.
+	if want := "strict=true&key=K&odd%2Fone"; got.query != want {
+		t.Errorf("query = %q, want %q", got.query, want)
+	}
+	if got.key != "secret" || got.accept != "application/json" {
+		t.Errorf("headers: X-API-Key = %q, Accept = %q", got.key, got.accept)
+	}
+
+	// A base URL pings at its root, and no key sends no header.
+	got.key = "set"
+	if _, err := PingSidecar(context.Background(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if got.path != "/ping" || got.key != "" {
+		t.Errorf("base URL: path = %q, X-API-Key = %q; want /ping and no header", got.path, got.key)
+	}
+}
+
+// TestPingSidecar covers every answer a daemon can give a strict ping, and that
+// each one is asked for exactly once: a probe is a question, not a request a
+// retry could make succeed.
+func TestPingSidecar(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		retryAfter string // a Retry-After header, when one is sent
+		body       string
+		want       SidecarHealth
+		// wantErr is nil for a healthy answer; otherwise the refusal's status,
+		// code, wait, and the start of its reason. A wantErr with status 0 is
+		// a malformed 200.
+		wantErr *SidecarResponseError
+	}{
+		{
+			name: "live tenant session", status: 200,
+			body: `{"ok":true,"probe":"tenant","reason":"ok","attest":"streaming","generation":7}`,
+			want: SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"},
+		},
+		{
+			name: "daemon scope, keyless on a keyed daemon", status: 200,
+			body: `{"ok":true,"probe":"daemon","reason":"ok","browser_relaunched":false}`,
+			want: SidecarHealth{OK: true, Probe: "daemon", Reason: "ok"},
+		},
+		{
+			// A benign window stays healthy under strict, as the daemon's own
+			// status says, and the relaunch it reports is carried.
+			name: "no-session after a relaunch", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"no attested session","browser_relaunched":true}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserRelaunched: true},
+		},
+		{
+			name: "busy", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"busy","error":"the page is held by a request"}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "busy", Error: "the page is held by a request"},
+		},
+		{
+			// The loss the daemon confirmed: 503 under strict, with its account.
+			name: "probe-failed", status: 503,
+			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"the shared browser missed two probes and was torn down and relaunched","browser_relaunched":true}`,
+			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "the shared browser missed two probes and was torn down and relaunched", BrowserRelaunched: true},
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "the shared browser missed two probes"},
+		},
+		{
+			// A wait a proxy states on the loss travels with the refusal like
+			// any other.
+			name: "probe-failed with a stated wait", status: 503, retryAfter: "30",
+			body:    `{"ok":false,"probe":"daemon","reason":"probe-failed","error":"no browser answers"}`,
+			want:    SidecarHealth{Probe: "daemon", Reason: "probe-failed", Error: "no browser answers"},
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "no browser answers", RetryAfter: 30 * time.Second},
+		},
+		{
+			// Older daemons omit the reason word; the body is still a health
+			// body, told by its ok field, and ok:true is healthy.
+			name: "health body without a reason word", status: 200,
+			body: `{"ok":true,"probe":"tenant"}`,
+			want: SidecarHealth{OK: true, Probe: "tenant"},
+		},
+		{
+			// One JSON value is read, as every other sidecar answer is; what
+			// follows it is not the daemon's answer.
+			name: "health body with trailing bytes", status: 200,
+			body: `{"ok":true,"probe":"tenant","reason":"ok"}` + "\ntrailing",
+			want: SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"},
+		},
+		{
+			// A health body is a success body and gets the success bound, so
+			// one padded past the refusal limit still decodes.
+			name: "oversized health body", status: 200,
+			body: `{"ok":true,"probe":"tenant","reason":"ok","pad":"` + strings.Repeat("x", 70000) + `"}`,
+			want: SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"},
+		},
+		{
+			// A foreign envelope that happens to carry a reason key has no ok
+			// field, so it is read as the refusal it is, not as a verdict.
+			name: "a 503 envelope with a reason key", status: 503,
+			body:    `{"reason":"upstream down","code":"bad-gateway","error":"gateway down"}`,
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "bad-gateway", Reason: "gateway down"},
+		},
+		{
+			name: "a 200 that is empty", status: 200,
+			body:    ``,
+			wantErr: &SidecarResponseError{Reason: "malformed JSON response"},
+		},
+		{
+			// A daemon that predates ?strict answers a confirmed loss with 200;
+			// its reason is the verdict the 503 would carry today.
+			name: "probe-failed from a pre-strict daemon", status: 200,
+			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"session retired"}`,
+			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "session retired"},
+			wantErr: &SidecarResponseError{StatusCode: 200, Code: "probe-failed", Reason: "session retired"},
+		},
+		{
+			// A 503 without a health body is an ordinary refusal: a proxy's, or
+			// a daemon's envelope. Its code and text are read the usual way.
+			name: "a 503 that is not a health body", status: 503,
+			body:    `{"error":"upstream down","code":"bad-gateway"}`,
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "bad-gateway", Reason: "upstream down"},
+		},
+		{
+			name: "a 503 that is not JSON", status: 503,
+			body:    `<html>gateway timeout</html>`,
+			wantErr: &SidecarResponseError{StatusCode: 503},
+		},
+		{
+			name: "wrong key", status: 401,
+			body:    `{"error":"invalid or missing API key","code":"unauthorized"}`,
+			wantErr: &SidecarResponseError{StatusCode: 401, Code: "unauthorized", Reason: "invalid or missing API key"},
+		},
+		{
+			name: "no /ping", status: 404,
+			body:    `{"error":"not found","code":"not-found"}`,
+			wantErr: &SidecarResponseError{StatusCode: 404, Code: "not-found", Reason: "not found"},
+		},
+		{
+			// bgutil answers /ping with its uptime and version: it answered, and
+			// that is all the ping can say about a daemon with no health body.
+			name: "a daemon that is not WaxSeal", status: 200,
+			body: `{"server_uptime":12.5,"version":"1.1.0"}`,
+			want: SidecarHealth{},
+		},
+		{
+			name: "a 200 that is not JSON", status: 200,
+			body:    `OK`,
+			wantErr: &SidecarResponseError{Reason: "malformed JSON response"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, hits := scriptedSidecar(t, sidecarReply{status: tc.status, retryAfter: tc.retryAfter, body: tc.body})
+			h, err := PingSidecar(context.Background(), srv.URL+"/session")
+			if h != tc.want {
+				t.Errorf("health = %+v, want %+v", h, tc.want)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Errorf("the daemon was asked %d times, want once: a probe earns no retry", n)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("err = %v, want none", err)
+				}
+				return
+			}
+			sre, ok := errors.AsType[*SidecarResponseError](err)
+			if !ok {
+				t.Fatalf("err = %v (%T), want a *SidecarResponseError", err, err)
+			}
+			if sre.StatusCode != tc.wantErr.StatusCode || sre.Code != tc.wantErr.Code || sre.RetryAfter != tc.wantErr.RetryAfter || !strings.HasPrefix(sre.Reason, tc.wantErr.Reason) {
+				t.Errorf("refusal = %+v, want status %d, code %q, wait %v, reason starting %q", sre, tc.wantErr.StatusCode, tc.wantErr.Code, tc.wantErr.RetryAfter, tc.wantErr.Reason)
+			}
+			if !strings.Contains(sre.Endpoint, "/ping") || sre.Label != "sidecar health endpoint" {
+				t.Errorf("refusal names %q at %q, want the health endpoint", sre.Label, sre.Endpoint)
+			}
+		})
+	}
+}
+
+// The failed ping's message reads like every other refusal, with the reason
+// where a code goes, so a reader of the doctor line sees the verdict before the
+// daemon's account of it.
+func TestPingSidecarErrorText(t *testing.T) {
+	srv, _ := scriptedSidecar(t, sidecarReply{status: 503, body: `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"no browser answers and none could be launched: exit status 1"}`})
+	_, err := PingSidecar(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("want the confirmed loss as an error")
+	}
+	want := "sidecar health endpoint at " + srv.URL + "/ping returned HTTP 503 (probe-failed): no browser answers and none could be launched: exit status 1"
+	if got := err.Error(); got != want {
+		t.Errorf("err = %q\nwant %q", got, want)
+	}
+}
+
+// TestPingSidecarTimeout pins the ping's bound. Given no timeout, it is
+// allowed WaxSeal's documented probe worst case rather than the 60 s the
+// other endpoints get, since the answer that runs long is the verdict it
+// exists to fetch; a timeout that is given is the bound, shorter or longer,
+// as it is on every other sidecar request; and the caller's context always
+// decides how long it will wait.
+func TestPingSidecarTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"ok":true,"probe":"tenant","reason":"ok"}`)
+	}))
+	defer srv.Close()
+
+	h, err := PingSidecar(context.Background(), srv.URL)
+	if err != nil || !h.OK {
+		t.Fatalf("ping = %+v, %v; want the answer under the default bound", h, err)
+	}
+	_, err = PingSidecar(context.Background(), srv.URL, WithSidecarTimeout(20*time.Millisecond))
+	if _, ok := errors.AsType[*SidecarError](err); !ok || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the given 20 ms timeout to cut the ping as a connection failure", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := PingSidecar(ctx, srv.URL); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the caller's deadline to cut the ping", err)
+	}
+}
+
+// A 200 whose body dies mid-read came from a daemon that answered, so it is
+// the unusable response sidecarJSON reports for the same thing, not a
+// connection failure.
+func TestPingSidecarBodyCutMidRead(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "4096")
+		_, _ = io.WriteString(w, `{"ok":true,"probe":`)
+	}))
+	defer srv.Close()
+	_, err := PingSidecar(context.Background(), srv.URL)
+	sre, ok := errors.AsType[*SidecarResponseError](err)
+	if !ok || sre.StatusCode != 0 || !strings.HasPrefix(sre.Reason, "malformed JSON response") || sre.Cause == nil {
+		t.Fatalf("err = %v (%T), want the malformed-200 refusal carrying the read error", err, err)
+	}
+}
+
+func TestPingSidecarUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := srv.URL
+	srv.Close()
+	_, err := PingSidecar(context.Background(), addr)
+	se, ok := errors.AsType[*SidecarError](err)
+	if !ok {
+		t.Fatalf("err = %v (%T), want a *SidecarError for a closed port", err, err)
+	}
+	// The message names the health endpoint, redacted to its path: the strict
+	// query is not a secret, but every endpoint is printed the same way.
+	if want := "sidecar health endpoint unreachable at " + addr + "/ping: "; !strings.HasPrefix(se.Error(), want) {
+		t.Errorf("err = %q, want it to start %q", se.Error(), want)
+	}
+}
+
+// A ping follows no redirect either: the key must stay bound to the endpoint
+// it was configured for.
+func TestPingSidecarDoesNotFollowRedirects(t *testing.T) {
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true,"probe":"tenant","reason":"ok"}`)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/ping", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := PingSidecar(context.Background(), srv.URL, WithSidecarAPIKey("secret"))
+	sre, ok := errors.AsType[*SidecarResponseError](err)
+	if !ok || sre.StatusCode != http.StatusFound || !strings.HasPrefix(sre.Reason, "redirected to ") {
+		t.Fatalf("err = %v, want a 302 refusal naming where it pointed", err)
+	}
+	if n := targetHits.Load(); n != 0 {
+		t.Errorf("redirect target contacted %d times; the key must stay bound to the endpoint", n)
+	}
+}
+
+func TestPingSidecarRejectsBadURL(t *testing.T) {
+	for _, bad := range []string{"", "ftp://127.0.0.1:4416", "127.0.0.1:4416", "http://"} {
+		if _, err := PingSidecar(context.Background(), bad); err == nil {
+			t.Errorf("PingSidecar(%q) accepted the URL", bad)
+		}
+	}
+}

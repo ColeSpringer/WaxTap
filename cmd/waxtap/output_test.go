@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -219,6 +220,40 @@ func TestExitCodeFor(t *testing.T) {
 		if got := exitCodeFor(tt.err); got != tt.want {
 			t.Errorf("exitCodeFor(%v) = %d, want %d", tt.err, got, tt.want)
 		}
+	}
+}
+
+// A sidecar connection failure is a network failure whatever failed inside the
+// dial. A TLS handshake that rejected the certificate, or a body cut mid-read,
+// arrives without a net.OpError, and without a case of its own the error fell
+// through to the generic exit 1 with no hint, for every sidecar.
+func TestClassifyError_SidecarConnectionWithoutOpError(t *testing.T) {
+	cause := &url.Error{Op: "Get", URL: "https://seal.example/ping?strict=true", Err: &tls.CertificateVerificationError{Err: errFake("x509: certificate signed by unknown authority")}}
+	se := &waxtap.SidecarError{Label: "sidecar health endpoint", Endpoint: "https://seal.example/ping?strict=true", Err: cause}
+	c := classifyArgs(se, nil)
+	if c.exitCode != 9 || c.code != "network" {
+		t.Errorf("exit = %d, code = %q, want 9 and network", c.exitCode, c.code)
+	}
+	if !strings.Contains(c.hint, "--session-url") || !strings.Contains(c.hint, "--potoken-url") {
+		t.Errorf("hint = %q, want the sidecar URL flags named", c.hint)
+	}
+	if !strings.Contains(c.message, "sidecar health endpoint unreachable at https://seal.example/ping:") || strings.Contains(c.message, "strict") {
+		t.Errorf("message = %q, want the self-redacting unreachable text", c.message)
+	}
+}
+
+// A download's provider failure keeps the provider's own hint, which names the
+// two flags that provider can come from, even though the sidecar connection
+// failure it wraps has a case of its own for the bare error.
+func TestClassifyError_ProviderErrorKeepsItsHint(t *testing.T) {
+	se := &waxtap.SidecarError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", Err: &net.OpError{Op: "dial", Err: errFake("refused")}}
+	pe := &waxtap.ProviderError{Endpoint: "session", Cause: se}
+	c := classifyArgs(pe, nil)
+	if c.exitCode != 9 || c.code != "network" {
+		t.Errorf("exit = %d, code = %q, want 9 and network", c.exitCode, c.code)
+	}
+	if c.hint != providerHint(pe) {
+		t.Errorf("hint = %q, want the provider's own %q", c.hint, providerHint(pe))
 	}
 }
 
