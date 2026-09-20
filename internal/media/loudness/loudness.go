@@ -205,6 +205,20 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds, 
 	return fromResult(ares), perTrack, nil
 }
 
+// trackAnalyzer is the part of media.Runner the per-track pass uses: the
+// concurrency the runner admits, and a whole-file analysis. measureTracks
+// takes it rather than the Runner itself so a test can drive the pass with an
+// analyzer that counts the calls in flight, which is the one property a
+// stopwatch cannot pin here: "go test ./..." runs package binaries -p at a
+// time, so on a shared runner a correctly concurrent pass finishes no sooner
+// than a serial one.
+type trackAnalyzer interface {
+	// Concurrency is how many analyses to run at once, at least one; see
+	// media.Runner.Concurrency.
+	Concurrency() int
+	AnalyzeFile(ctx context.Context, input string, channels int) (*waxflow.AnalyzeResult, []string, error)
+}
+
 // measureTracks runs the per-track pass and returns each track's measurement
 // with the frame count its read delivered. The counts are what the group
 // timeline needs for a member whose headers state its length only
@@ -229,7 +243,7 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds, 
 // The error reported is the lowest-numbered track's, which is the one a pass
 // down the list would have hit first. That is the global one: indexes go out
 // in order, so every track left undispatched sits above every track that ran.
-func measureTracks(ctx context.Context, r *media.Runner, inputs []string, folds []int) ([]Loudness, []int64, error) {
+func measureTracks(ctx context.Context, r trackAnalyzer, inputs []string, folds []int) ([]Loudness, []int64, error) {
 	perTrack := make([]Loudness, len(inputs))
 	measured := make([]int64, len(inputs))
 	errs := make([]error, len(inputs))
@@ -251,7 +265,11 @@ func measureTracks(ctx context.Context, r *media.Runner, inputs []string, folds 
 	}()
 
 	var wg sync.WaitGroup
-	for range min(r.Concurrency(), len(inputs)) {
+	// The budget is floored rather than trusted: an analyzer reporting none
+	// would start no workers, and the pass would hand back an album of
+	// unmeasured tracks with no error against any of them. media.Runner
+	// reports a floor of one, so the floor here only ever holds a stub.
+	for range min(max(r.Concurrency(), 1), len(inputs)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

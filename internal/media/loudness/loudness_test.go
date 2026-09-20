@@ -8,10 +8,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/colespringer/waxflow"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/media"
@@ -310,43 +312,92 @@ func TestMeasureAlbumNamesTheFirstBadTrack(t *testing.T) {
 	}
 }
 
-// TestMeasureTracksRunsAcrossTheRunnersBudget pins that the per-track pass uses
-// the concurrency the runner admits. The tracks are independent decodes, and
-// taking them one after another was the dominant cost of measuring an album.
-// It times the pass alone: the group read that follows it walks every track as
-// one timeline and is serial by construction, so including it would compare
-// two numbers that mostly are not this.
+// countingAnalyzer is a trackAnalyzer that decodes nothing. It reports a fixed
+// budget and holds every call until want of them are in flight together, so
+// peak ends up being the pass's real width rather than a timing artifact.
+type countingAnalyzer struct {
+	budget, want     int
+	admitted, giveUp chan struct{}
+
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+	calls    int
+	opened   bool
+}
+
+func (a *countingAnalyzer) Concurrency() int { return a.budget }
+
+func (a *countingAnalyzer) AnalyzeFile(context.Context, string, int) (*waxflow.AnalyzeResult, []string, error) {
+	a.mu.Lock()
+	a.inFlight++
+	a.calls++
+	a.peak = max(a.peak, a.inFlight)
+	fills := a.inFlight == a.want && !a.opened
+	a.opened = a.opened || fills
+	a.mu.Unlock()
+	if fills {
+		close(a.admitted)
+	}
+	select {
+	case <-a.admitted:
+	case <-a.giveUp:
+	}
+	a.mu.Lock()
+	a.inFlight--
+	a.mu.Unlock()
+	return &waxflow.AnalyzeResult{}, nil, nil
+}
+
+// TestMeasureTracksRunsAcrossTheRunnersBudget pins that the per-track pass
+// asks the runner what it admits and runs that many tracks at once, instead of
+// walking the list. The tracks are independent decodes, and taking them one
+// after another was the dominant cost of measuring an album.
+//
+// It counts the calls in flight rather than timing a wide pass against a
+// serial one. A stopwatch here measures the machine and not the code: "go test
+// ./..." runs package binaries -p at a time, which defaults to GOMAXPROCS, so
+// on a three- or four-core runner the sibling packages hold every core this
+// pass would have widened onto, and a correctly concurrent pass finishes no
+// sooner than a serial one. The count is the property itself, it covers the
+// budget the pass asks for rather than only the fan-out beneath it, and it
+// holds on one core.
 func TestMeasureTracksRunsAcrossTheRunnersBudget(t *testing.T) {
-	const tracks = 8
-	if runtime.GOMAXPROCS(0) < 2 {
-		t.Skip("one core: there is no concurrency to observe")
-	}
-	dir := t.TempDir()
-	inputs := make([]string, tracks)
-	for i := range inputs {
-		p := filepath.Join(dir, fmt.Sprintf("%d.wav", i))
-		if err := os.WriteFile(p, mediatest.SineWAV(2, 2), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		inputs[i] = p
-	}
-	run := func(procs int) time.Duration {
-		t.Helper()
-		r := media.NewRunner(media.RunnerConfig{MaxProcs: procs})
-		start := time.Now()
-		if _, _, err := measureTracks(context.Background(), r, inputs, nil); err != nil {
-			t.Fatalf("measure tracks at %d: %v", procs, err)
-		}
-		return time.Since(start)
-	}
-	one := run(1)
-	wide := run(min(runtime.GOMAXPROCS(0), tracks))
-	// The same work against the same files on the same machine, so the only
-	// difference is how many run at once. Half is a loose bound for a pass
-	// that should be near 1/N: what it catches is a return to one at a time.
-	if wide > one/2 {
-		t.Errorf("measuring %d tracks took %v across %d at a time against %v one at a time; the pass looks serial",
-			tracks, wide, min(runtime.GOMAXPROCS(0), tracks), one)
+	for _, tc := range []struct{ budget, tracks int }{
+		{4, 8}, // a budget under the album: the budget is the width
+		{8, 4}, // a budget over it: every track still runs at once
+		{1, 4}, // a budget of one is the serial pass, and stays serial
+		{0, 4}, // a budget of none is floored, not read as an album already done
+	} {
+		t.Run(fmt.Sprintf("%d at a time over %d tracks", tc.budget, tc.tracks), func(t *testing.T) {
+			a := &countingAnalyzer{
+				budget:   tc.budget,
+				want:     min(max(tc.budget, 1), tc.tracks),
+				admitted: make(chan struct{}),
+				giveUp:   make(chan struct{}),
+			}
+			// A narrower pass never fills the barrier. Releasing the waiters
+			// on a timer ends the run with a count to report, rather than
+			// leaving the test deadline to kill it with no message.
+			timer := time.AfterFunc(30*time.Second, func() { close(a.giveUp) })
+			defer timer.Stop()
+
+			inputs := make([]string, tc.tracks)
+			for i := range inputs {
+				inputs[i] = fmt.Sprintf("/a/%d.wav", i)
+			}
+			if _, _, err := measureTracks(context.Background(), a, inputs, nil); err != nil {
+				t.Fatalf("measure tracks: %v", err)
+			}
+			// Read after measureTracks has joined its workers.
+			if a.calls != tc.tracks {
+				t.Errorf("%d of %d tracks were analyzed; an album measured short reports no error against the tracks it skipped", a.calls, tc.tracks)
+			}
+			if a.peak != a.want {
+				t.Errorf("at most %d tracks ran at once against a runner admitting %d over %d tracks; want %d",
+					a.peak, tc.budget, tc.tracks, a.want)
+			}
+		})
 	}
 }
 
