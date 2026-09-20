@@ -198,7 +198,9 @@ compiled player.
 ## PO tokens and sidecars
 
 WaxTap does not ship a PO-token generator. Library users supply
-`Options.POTokenProvider`; the CLI uses a bgutil-compatible `--potoken-url`.
+`Options.POTokenProvider`; the CLI uses a bgutil-compatible `--potoken-url`. The
+request carries `content_binding` and `scope` (`player` or `gvs`); WaxSeal
+namespaces its cache by the scope and bgutil ignores it.
 
 Supported scopes:
 
@@ -222,6 +224,7 @@ Sidecar response classification:
 | Failure | Exit |
 |---|---|
 | HTTP 422 `video-unavailable` | 3 (the playability verdict's class) |
+| HTTP 3xx (never followed) | 2 |
 | HTTP 4xx except 408/422/429 | 2 |
 | HTTP 429 | 5 |
 | Connection failure, HTTP 408/5xx, or invalid response | 9 |
@@ -231,9 +234,14 @@ the wait the sidecar stated (`Retry-After` or `retry_after_seconds`), else after
 500 ms; a 429 earns it only with a stated wait, since a bare 429 says back off.
 Any other refusal, including a playability verdict, does not. A stated wait over
 60 s is reported rather than slept through. The decision is exported as
-`waxtap.SidecarRetryWait`, so an in-process adapter translating another client's
-failures into `SidecarError`/`SidecarResponseError` runs WaxTap's rule instead of
-a second one that drifts from it.
+`waxtap.SidecarRetryWait`, and the pause policy around the wait as
+`waxtap.PauseBlocked` (whether the caller's budget can fit it: a cancellation
+outranks the refusal, a deadline that cannot fit the wait plus a second of
+headroom returns the refusal now) and `waxtap.PauseInterrupted` (a deadline
+expiring mid-sleep reports the refusal, a cancellation itself), so an in-process
+adapter translating another client's failures into
+`SidecarError`/`SidecarResponseError` runs WaxTap's rule instead of a second one
+that drifts from it.
 
 Every sidecar request is bounded by `WithSidecarTimeout` (CLI
 `sidecarTimeoutSeconds`), 60 s by default; a `/session` resolution runs under
@@ -275,12 +283,15 @@ response must include:
 
 If present, `playability_status` must be `OK`. A non-200 answer carries
 `{"error","code"}` and, for `video-unavailable`, `details` holding the
-playability status; the status is classified as a `/player` status would be.
-`player_url` is needed when the streaming URL's `n` parameter must be
-descrambled. Format entries require enough identity to select and request the
-audio, especially `itag`, `lmt`, `xtags`, and `mime_type`; richer quality,
-duration, DRC, and track fields are optional. An optional `session_generation`
-names the daemon session behind the context.
+playability status; the status is classified as a `/player` status would be. A
+refusal that states a wait carries `retry_after_seconds` beside the
+`Retry-After` header; a `video-unavailable` never does, since it is the video's
+verdict and no wait changes it. A redirect is not followed and is reported as a
+configuration error. `player_url` is needed when the streaming URL's `n`
+parameter must be descrambled. Format entries require enough identity to select
+and request the audio, especially `itag`, `lmt`, `xtags`, and `mime_type`;
+richer quality, duration, DRC, and track fields are optional. An optional
+`session_generation` names the daemon session behind the context.
 
 Optional identity keys: `user_agent` and `client_version`, the exact
 `navigator.userAgent` and InnerTube client version the context was minted under.
@@ -290,11 +301,12 @@ request) carry that browser's identity in place of WaxTap's own, so
 to WaxTap's own WEB identity. This is the `/session` contract's pair, on the
 per-video call.
 
-Optional metadata keys: `channel_id`, `description`, `thumbnails` (`url`,
-`width`, `height`, in the player response's order), `is_live_content`,
-`is_live_now`, `is_upcoming`, and `publish_date` (RFC 3339 or `2006-01-02`).
-They fill the delivered `Video` as a `/player` response would; a live or
-upcoming flag refuses the context with the same sentinels.
+Optional metadata keys: `title`, `author`, `length_seconds`, `channel_id`,
+`description`, `thumbnails` (`url`, `width`, `height`, in the player response's
+order), `is_live_content`, `is_live_now`, `is_upcoming`, and `publish_date`
+(RFC 3339 or `2006-01-02`). They fill the delivered `Video` as a `/player`
+response would; a live or upcoming flag refuses the context with the same
+sentinels.
 
 `--player-context-url` requires `--potoken-url`, and the context mint and
 download must share an egress IP because the signed URL is IP-bound.
@@ -316,12 +328,12 @@ token minter. The CLI accepts either:
 
 ```sh
 waxtap download <url> --client web \
-  --session-url http://127.0.0.1:4417/session \
-  --potoken-url http://127.0.0.1:4417
+  --session-url http://127.0.0.1:4416/session \
+  --potoken-url http://127.0.0.1:4416
 
 waxtap download <url> --client web \
   --visitor-data 'Cgt...%3D%3D' --cookies ./cookies.txt \
-  --potoken-url http://127.0.0.1:4417
+  --potoken-url http://127.0.0.1:4416
 ```
 
 The `/session` response contains the exact `visitor_data` literal, optional
@@ -330,9 +342,13 @@ cookies, an optional `session_generation` naming the session, and optional
 WEB requests under the session; WEB_EMBEDDED_PLAYER takes only the user agent).
 `cookie_header` and `same_site` are ignored: the cookies array carries the same
 information. The camelCase keys `visitorData`, `sessionGeneration`, `userAgent`,
-and `clientVersion` are also accepted. Adoption requires
-a single-client chain and drops login cookies. Adoption failures are fatal. The
-minter and download must share an egress IP.
+and `clientVersion` are also accepted. Adoption requires a single-client chain
+and drops login cookies. Adoption failures are fatal. A `/session` runs the
+same streaming proof as `/player-context`, with the same cool-downs: a bot
+check on the sidecar's browser is refused as `no-session` (HTTP 503) with a
+2 minute `Retry-After`, past the 60 s cap, so WaxTap reports it with the wait
+in the hint rather than sleeping through it. The minter and download must share
+an egress IP.
 
 When googlevideo caps delivery on the adopted session (empty-body 403 past
 roughly 1 MB, well before the URL expires), WaxTap POSTs

@@ -59,8 +59,9 @@ func fitsBeforeDeadline(ctx context.Context, d time.Duration) bool {
 // the pause may proceed. pending is the typed error the caller is already holding
 // for the failure that provoked the pause.
 //
-// Exported, with ParseRetryAfter, for the sidecar providers, whose dedicated
-// clients bypass Client.Do.
+// Exported, with ParseRetryAfter and KeepCause, for the sidecar providers, whose
+// dedicated clients bypass Client.Do; the root package re-exports it as
+// waxtap.PauseBlocked for adapters outside this module.
 //
 // Cancellation outranks pending. A context canceled while a request was failing is
 // a caller giving up (a Ctrl-C at the CLI), and reporting that as a rate limit or a
@@ -112,13 +113,17 @@ func NamesTransportCause(err error) bool {
 	return ok
 }
 
-// keepCause chooses between a backoff interrupted by the context and the error
+// KeepCause chooses between a backoff interrupted by the context and the error
 // that provoked the backoff, applying PauseBlocked's policy to the pause that
 // started before the context ended: a cancellation is the caller giving up and
 // outranks pending, while an expired deadline is the case pending exists to
-// explain. PauseBlocked has already run at every call site, so reaching here
-// with a deadline error means the deadline moved or the clock did.
-func keepCause(interrupted, pending error) error {
+// explain. A caller that ran PauseBlocked first, as Do does, reaches here with
+// a deadline error only if the deadline moved or the clock did; one that did
+// not gets the same policy applied to whatever it hands over.
+//
+// Exported, with PauseBlocked, for the root package's re-export to in-process
+// sidecar adapters, which is why the rule stands on its arguments alone.
+func KeepCause(interrupted, pending error) error {
 	if pending == nil || !errors.Is(interrupted, context.DeadlineExceeded) {
 		return interrupted
 	}
@@ -313,7 +318,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				}
 				c.log.DebugContext(ctx, "httpx: transport error, retrying", "host", host, "attempt", attempt, "err", err)
 				if werr := Sleep(ctx, wait); werr != nil {
-					return nil, keepCause(werr, err)
+					return nil, KeepCause(werr, err)
 				}
 				continue
 			}
@@ -362,7 +367,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				rlRetryStatus = status
 				c.log.DebugContext(ctx, "httpx: rate limited, backing off", "host", host, "wait", sleepFor)
 				if werr := Sleep(ctx, sleepFor); werr != nil {
-					return nil, keepCause(werr, rlErr)
+					return nil, KeepCause(werr, rlErr)
 				}
 				continue
 			}
@@ -381,7 +386,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			}
 			c.log.DebugContext(ctx, "httpx: server error, retrying", "host", host, "status", resp.StatusCode, "attempt", attempt)
 			if werr := Sleep(ctx, wait); werr != nil {
-				return nil, keepCause(werr, lastErr)
+				return nil, KeepCause(werr, lastErr)
 			}
 			continue
 		}

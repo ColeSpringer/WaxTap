@@ -3,7 +3,9 @@ package media
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1604,5 +1606,153 @@ func TestPlanOutputChannelsFollowsTheEncoder(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: PlanOutputChannels = %d, want %d", tc.codec, got, tc.want)
 		}
+	}
+}
+
+// TestMeasureLengthWalksAFragmentedMP4: a fragmented movie's head states its
+// length through the segment index, a declared count the open does not check,
+// so a probe reports it claimed; the walk reads the moof headers and settles
+// it exact, which is the measurement a cut or a timeline member takes without
+// a decode.
+func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	progressive, err := os.ReadFile(encodeFixture(t, r, dir, "in.m4a", CodecAAC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragmented, err := mediatest.FragmentAAC(progressive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frag := writeFixture(t, dir, "frag.m4a", fragmented)
+
+	pr, err := r.Probe(ctx, frag)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	a, ok := pr.AudioStream()
+	if !ok || a.Samples <= 0 || a.SamplesExact || a.SamplesAdvisory || !pr.LengthClaimed {
+		t.Fatalf("probe = %+v claimed %v; want a declared count that is neither exact nor advisory, reported as a claim", a, pr.LengthClaimed)
+	}
+	walked, ok, err := r.walkLength(ctx, frag)
+	if err != nil || !ok {
+		t.Fatalf("walkLength = %+v, %v, %v; want the walk to settle the count", walked, ok, err)
+	}
+	if walked.Samples != a.Samples {
+		t.Errorf("the walk counted %d frames where the index declared %d", walked.Samples, a.Samples)
+	}
+	// MeasureLength is the caller's door, and a walker's answer has to come
+	// from the walk: a decode of the same file would agree on the count, so
+	// what pins the cheap path is that walkLength answered ok above and that
+	// MeasureLength returns what it found.
+	measured, err := r.MeasureLength(ctx, frag)
+	if err != nil {
+		t.Fatalf("MeasureLength: %v", err)
+	}
+	if measured.Samples != walked.Samples {
+		t.Errorf("MeasureLength = %d, walk = %d; the walker's answer is the one that stands", measured.Samples, walked.Samples)
+	}
+	// The declaration is the sidx's, so a fragmented movie whose index lies is
+	// settled by the walk rather than believed. Cutting the last fragment's
+	// declared size leaves an index that over-declares, which the walk must
+	// disagree with; a walk that echoed the header could not.
+	lying := writeFixture(t, dir, "lying.m4a", overstatedSidx(t, fragmented))
+	pr2, err := r.Probe(ctx, lying)
+	if err != nil {
+		t.Fatalf("probe the overstated index: %v", err)
+	}
+	a2, _ := pr2.AudioStream()
+	walked2, ok, err := r.walkLength(ctx, lying)
+	if err != nil || !ok {
+		t.Fatalf("walkLength on the overstated index = %v, %v", ok, err)
+	}
+	if a2.Samples <= walked2.Samples {
+		t.Errorf("index declared %d and the walk found %d; the fixture does not overstate", a2.Samples, walked2.Samples)
+	}
+	if walked2.Samples != walked.Samples {
+		t.Errorf("the walk counted %d frames on the overstated index, %d on the honest one; the fragments are the same", walked2.Samples, walked.Samples)
+	}
+}
+
+// overstatedSidx returns frag with one fragment's subsegment_duration in the
+// segment index inflated, so the head declares a length the fragments do not
+// hold. The sidx is the box right after the init segment; its first entry's
+// duration is the second word of the first reference.
+func overstatedSidx(t *testing.T, frag []byte) []byte {
+	t.Helper()
+	i := bytes.Index(frag, []byte("sidx"))
+	if i < 0 {
+		t.Fatal("no sidx in the fixture")
+	}
+	out := bytes.Clone(frag)
+	// box header (4 size + 4 type) then 24 bytes of sidx fields, then the
+	// first reference's size word; the duration follows it.
+	at := i + 4 + 24 + 4
+	binary.BigEndian.PutUint32(out[at:], binary.BigEndian.Uint32(out[at:])+44100)
+	return out
+}
+
+// TestPlanOutputChannelsCapsEveryCodecAtOneWidth pins the property an album's
+// group measurement rests on: for one codec and one spec, every source wide
+// enough to be folded is folded to the same count.
+//
+// loudness.groupPass builds a mixed album's timeline at that one count, and
+// refuses a set that names two, because one timeline carries one width and a
+// member folded to a width its own encode does not deliver would put the
+// album's gain on figures that describe no file that was written. Client
+// .ProcessAlbum derives its folds from this function, so what makes that
+// refusal unreachable is the table below rather than anything in WaxTap.
+//
+// The caps are WaxFlow's encoders', so a dependency bump is what would change
+// them. This is the test that says so: a codec that folds 8 channels to 6 and
+// 3 to 2 would make an album of the two a set groupPass has to refuse, and the
+// fix then is per-member widths in the timeline, not a wider cap here.
+func TestPlanOutputChannelsCapsEveryCodecAtOneWidth(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	widths := []int{1, 2, 3, 4, 6, 8}
+	srcs := make(map[int]string, len(widths))
+	for _, w := range widths {
+		srcs[w] = writeFixture(t, dir, fmt.Sprintf("src%d.wav", w), mediatest.SineWAV(1, w))
+	}
+	for _, c := range []Codec{CodecMP3, CodecAAC, CodecHEAAC, CodecOpus, CodecVorbis, CodecFLAC, CodecWAV, CodecAIFF} {
+		t.Run(c.String(), func(t *testing.T) {
+			out := filepath.Join(dir, "out"+c.Extension())
+			folds := map[int][]int{}
+			for _, w := range widths {
+				n, err := r.PlanOutputChannels(ctx, srcs[w], out, Spec{Codec: c})
+				if err != nil {
+					t.Fatalf("plan %d channels: %v", w, err)
+				}
+				if n <= 0 {
+					t.Fatalf("plan for %d channels = %d, want a positive count", w, n)
+				}
+				if n < w {
+					folds[n] = append(folds[n], w)
+				} else if n > w {
+					t.Errorf("plan for %d channels = %d; an encode that widens its source is not a fold and the album pass does not model it", w, n)
+				}
+			}
+			if len(folds) > 1 {
+				t.Errorf("folds to %v; one codec and one spec must name one fold width, since an album builds one timeline at it", folds)
+			}
+			// The other half of the precondition: nothing escapes the fold.
+			// A member left at its source width beside a folded one would
+			// deliver a second width, which is the set groupPass refuses.
+			for fold := range folds {
+				for _, w := range widths {
+					if w <= fold {
+						continue
+					}
+					n, err := r.PlanOutputChannels(ctx, srcs[w], out, Spec{Codec: c})
+					if err != nil || n != fold {
+						t.Errorf("a %d-channel source plans %d (err %v) beside a fold to %d; every source above the fold takes it", w, n, err, fold)
+					}
+				}
+			}
+		})
 	}
 }

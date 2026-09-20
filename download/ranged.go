@@ -118,9 +118,9 @@ type rangeState struct {
 //
 // budget caps the total bytes fetched; 0 is unlimited. A consumer that means to
 // read a header states one, so a container whose layout turns a bounded read
-// into a sweep of the whole resource (a fragmented MP4 whose timing lives in
-// per-fragment headers spread end to end) stops early with a *RangeBudgetError
-// instead of fetching the file one block at a time. refresh may be nil.
+// into a sweep of the whole resource (a head that keeps going, block after
+// block) stops early with a *RangeBudgetError instead of fetching the file one
+// block at a time. refresh may be nil.
 func (d *Downloader) OpenRange(ctx context.Context, src Source, refresh RefreshFunc, budget int64) (*RangeReader, error) {
 	// One sharedSource per reader: the probe gets its own refresh budget and
 	// its own no-progress bail rather than sharing a download's.

@@ -841,9 +841,11 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 // AlbumProcessResult.Delivered.
 //
 // The analytic shift is correct only because the group figure was measured at
-// the widths the encode delivers: loudness.MeasureAlbum renders a folding
-// member at its own fold before the group pass, so album + gain describes the
-// files that were written rather than a wider mix of their sources.
+// the widths the encode delivers: loudness.MeasureAlbum folds a uniform set in
+// the measurement and builds a mixed set's timeline at the fold's width, each
+// folding member folded by its own chain before the seam, so album + gain
+// describes the files that were written rather than a wider mix of their
+// sources.
 //
 // Deriving the analytic cases is not a shortcut: the measurement is a second
 // decode of every track in the album, and running it to confirm an answer that is
@@ -869,7 +871,7 @@ func albumDelivered(ctx context.Context, runner *media.Runner, outputs []string,
 	// counts those two itself. The write loop's Levels.Samples is not that
 	// number for ADTS, whose container carries no gapless trim, so the walk
 	// delivers the encoder's priming and padding on top of it.
-	med, closer, err := runner.OpenAlbumConcat(ctx, outputs, nil)
+	med, closer, err := runner.OpenAlbumConcat(ctx, outputs, nil, 0)
 	if err != nil {
 		return nil
 	}

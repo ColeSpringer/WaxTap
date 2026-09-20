@@ -1072,16 +1072,18 @@ func isSidecarConnection(err error) bool {
 }
 
 // sidecarHint returns guidance for a sidecar refusal: authentication help for
-// 401/403, a rate-limit advisory for 429, and the wait the sidecar asked for
-// when it stated one. It rides the c.hint channel so package main needs no
-// redact helper for the 429 message.
+// 401/403, a rate-limit advisory for 429, the endpoint URL to correct for a
+// redirect, and the wait the sidecar asked for when it stated one. It rides the c.hint
+// channel so package main needs no redact helper for the 429 message.
 func sidecarHint(sre *waxtap.SidecarResponseError) string {
 	var parts []string
-	switch sre.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	switch status := sre.StatusCode; {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		parts = append(parts, "the sidecar requires authentication; set or verify --api-key")
-	case http.StatusTooManyRequests:
+	case status == http.StatusTooManyRequests:
 		parts = append(parts, "check the sidecar's rate limits")
+	case status >= 300 && status < 400:
+		parts = append(parts, "the sidecar redirected the request, which WaxTap does not follow; configure the endpoint's canonical URL")
 	}
 	if sre.RetryAfter > 0 {
 		parts = append(parts, fmt.Sprintf("the sidecar asked for a retry in %s", sre.RetryAfter.Round(time.Second)))
@@ -1090,9 +1092,9 @@ func sidecarHint(sre *waxtap.SidecarResponseError) string {
 }
 
 // sidecarResponseExit maps a sidecar response to its CLI exit code and machine
-// code. Client errors indicate invalid configuration, 429 indicates rate
-// limiting, and timeouts, server errors, and invalid HTTP 200 responses indicate
-// network or provider failures.
+// code. Client errors and redirects indicate invalid configuration, 429
+// indicates rate limiting, and timeouts, server errors, and invalid HTTP 200
+// responses indicate network or provider failures.
 //
 // A video-unavailable refusal never reaches here: it unwraps to its availability
 // verdict, which classifyArgs matches first.
@@ -1102,6 +1104,11 @@ func sidecarResponseExit(sre *waxtap.SidecarResponseError) (int, string) {
 	case status == http.StatusTooManyRequests:
 		return 5, "rate-limited"
 	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return 2, "invalid-config"
+	case status >= 300 && status < 400:
+		// Redirects are never followed (newSidecarClient), so a 3xx is the
+		// endpoint URL being wrong: a non-canonical path, or a scheme the
+		// daemon's proxy upgrades. WaxSeal answers a doubled slash with a 307.
 		return 2, "invalid-config"
 	default:
 		return 9, "network"

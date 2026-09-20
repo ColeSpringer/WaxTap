@@ -226,8 +226,37 @@ func TestSidecarRetryWait(t *testing.T) {
 	}
 }
 
+// TestPauseExportsRunTheOneRule pins that the exported pause policy is the
+// policy itself and not a second copy of it: an in-process adapter (WaxSeal's
+// provider) calls these, so each has to answer the way internal/httpx does.
+// The rules are pinned there (TestPauseBlocked, TestKeepCause); what is pinned
+// here is the export and the case that separates each function from the
+// other, since a wrapper crossed over would pass a weaker test.
+func TestPauseExportsRunTheOneRule(t *testing.T) {
+	pending := errors.New("refusal")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := PauseBlocked(cancelled, time.Second, pending); !errors.Is(err, context.Canceled) {
+		t.Errorf("PauseBlocked cancelled = %v, want the cancellation to outrank the pending error", err)
+	}
+	tight, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := PauseBlocked(tight, time.Second, pending); err != pending {
+		t.Errorf("PauseBlocked with no headroom = %v, want the pending error", err)
+	}
+	if err := PauseBlocked(context.Background(), time.Hour, pending); err != nil {
+		t.Errorf("PauseBlocked with no deadline = %v, want nil", err)
+	}
+	if err := PauseInterrupted(context.DeadlineExceeded, pending); err != pending {
+		t.Errorf("PauseInterrupted deadline = %v, want the pending error it explains", err)
+	}
+	if err := PauseInterrupted(context.Canceled, pending); !errors.Is(err, context.Canceled) {
+		t.Errorf("PauseInterrupted cancelled = %v, want the cancellation", err)
+	}
+}
+
 func TestBgutilProviderPlayerScope(t *testing.T) {
-	var gotBinding string
+	var gotBinding, gotScope string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/get_pot" {
 			t.Errorf("path = %q, want /get_pot", r.URL.Path)
@@ -236,7 +265,7 @@ func TestBgutilProviderPlayerScope(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		gotBinding = req.ContentBinding
+		gotBinding, gotScope = req.ContentBinding, req.Scope
 		_ = json.NewEncoder(w).Encode(bgutilResponse{POToken: "TOKEN-P", ExpiresAt: "2026-06-09T07:25:25Z"})
 	}))
 	defer srv.Close()
@@ -254,6 +283,9 @@ func TestBgutilProviderPlayerScope(t *testing.T) {
 	}
 	if gotBinding != "vid123" {
 		t.Errorf("content_binding = %q, want vid123 (player scope binds to the video ID)", gotBinding)
+	}
+	if gotScope != "player" {
+		t.Errorf("scope = %q, want player", gotScope)
 	}
 	if resp.Token != "TOKEN-P" {
 		t.Errorf("token = %q, want TOKEN-P", resp.Token)
@@ -290,11 +322,11 @@ func TestBgutilProviderSendsAPIKey(t *testing.T) {
 }
 
 func TestBgutilProviderGVSScopeAndEpochExpiry(t *testing.T) {
-	var gotBinding string
+	var gotBinding, gotScope string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req bgutilRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotBinding = req.ContentBinding
+		gotBinding, gotScope = req.ContentBinding, req.Scope
 		_ = json.NewEncoder(w).Encode(bgutilResponse{POToken: "TOKEN-G", ExpiresAt: "1812345925"})
 	}))
 	defer srv.Close()
@@ -312,6 +344,9 @@ func TestBgutilProviderGVSScopeAndEpochExpiry(t *testing.T) {
 	}
 	if gotBinding != "VISITOR==" {
 		t.Errorf("content_binding = %q, want the visitor data (GVS scope)", gotBinding)
+	}
+	if gotScope != "gvs" {
+		t.Errorf("scope = %q, want gvs", gotScope)
 	}
 	if resp.Token != "TOKEN-G" {
 		t.Errorf("token = %q, want TOKEN-G", resp.Token)
@@ -402,6 +437,54 @@ func TestBgutilProviderBindingErrorsBeforeRequest(t *testing.T) {
 	}
 }
 
+// TestSidecarRefusalSurvivesALargeEnvelope: WaxSeal clamps each text field of
+// its error envelope at 4 KiB, and a player-context refusal can carry a browser
+// trace in both error and details. Once JSON-escaped that is past 8 KiB, and a
+// read that stops there loses the code and the details with the truncated
+// document; the limit has to cover the envelope.
+func TestSidecarRefusalSurvivesALargeEnvelope(t *testing.T) {
+	recordSidecarSleeps(t)
+	trace := strings.Repeat("at frame\n", 512) // 4.5 KiB raw, more escaped
+	body, err := json.Marshal(map[string]any{"error": trace, "code": "player-context-failed", "details": trace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := scriptedSidecar(t, sidecarReply{status: http.StatusBadGateway, body: string(body)})
+	p, err := NewSidecarPlayerContextProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.ProvidePlayerContext(context.Background(), "dummyVideo0")
+	sre, ok := errors.AsType[*SidecarResponseError](err)
+	if !ok || sre.Code != "player-context-failed" || sre.Details == "" {
+		t.Fatalf("err = %v, want the refusal's code and details read from the large envelope", err)
+	}
+}
+
+// TestSidecarRefusalPastTheLimitSaysSo: a decode fills nothing when the document
+// is cut, so an envelope past the limit loses the code with it. The refusal has
+// to say that rather than report a bare status, since a reason the reader can
+// act on is the difference between a contract mismatch and a mystery 502.
+func TestSidecarRefusalPastTheLimitSaysSo(t *testing.T) {
+	recordSidecarSleeps(t)
+	huge, err := json.Marshal(map[string]any{
+		"error": strings.Repeat("y", sidecarErrorBodyLimit+1), "code": "player-context-failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := scriptedSidecar(t, sidecarReply{status: http.StatusBadGateway, body: string(huge)})
+	p, err := NewSidecarPlayerContextProvider(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.ProvidePlayerContext(context.Background(), "dummyVideo0")
+	sre, ok := errors.AsType[*SidecarResponseError](err)
+	if !ok || !strings.Contains(sre.Reason, "past the") {
+		t.Fatalf("err = %v, want the refusal to name the body it could not read", err)
+	}
+}
+
 // TestSidecarClientDoesNotFollowRedirects confirms the dedicated client pins
 // credentials to the endpoint: a 3xx becomes a SidecarResponseError instead of
 // being chased to another host.
@@ -430,6 +513,12 @@ func TestSidecarClientDoesNotFollowRedirects(t *testing.T) {
 	sre, ok := errors.AsType[*SidecarResponseError](provErr)
 	if !ok || sre.StatusCode != http.StatusFound {
 		t.Fatalf("err = %v, want a SidecarResponseError with StatusCode 302", provErr)
+	}
+	if !strings.HasPrefix(sre.Reason, "redirected to ") {
+		t.Errorf("reason = %q, want where the redirect pointed; a 3xx carries no envelope", sre.Reason)
+	}
+	if n := len([]rune(sre.Reason)); n > sidecarReasonRunes+1 {
+		t.Errorf("reason ran to %d runes; a Location is capped like every other reason", n)
 	}
 	if n := targetHits.Load(); n != 0 {
 		t.Errorf("redirect target contacted %d times; credentials must stay bound to the endpoint", n)

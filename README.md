@@ -98,11 +98,14 @@ leaves the true-peak limiter idle and reproduces the input's track-to-track
 spacing exactly, at the cost of landing short; the default `limit` reaches for
 the target and lets the per-track limiter compress that spacing. Every track is
 measured at the width its own encode delivers, so a lossy target's fold of a
-surround master is in the figures the gain comes from. An album mixing widths is
-measured as a group with each narrower member placed into the widest layout and
-its missing positions silent, so the group figure is what every member
-contributes at its own width; a member whose positions have no place in that
-layout (a side pair beside a back pair) is refused, naming the track. Loudness
+surround master is in the figures the gain comes from. The group is built at
+that width too, each wider member folded before it meets the others, so the
+album figure is the members' own folds and not a fold of their mix. An album
+that mixes widths and folds none of them is measured at its widest, each
+narrower member placed into that layout with its missing positions silent;
+either way the group figure is what every member contributes at the width it
+delivers. A member whose positions have no place in the layout it is placed
+into (a side pair beside a back pair) is refused, naming the track. Loudness
 uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes

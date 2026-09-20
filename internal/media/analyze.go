@@ -96,7 +96,17 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input strin
 // holds the run to the measurement rather than to the header, which is the
 // engine's design (see waxflow.ConcatSource.Track): the header was never a
 // number the decode could be held to.
-func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured []int64) (format.Media, func() error, error) {
+//
+// channels, when nonzero, is the width the timeline is built at
+// (waxflow.ConcatOptions.Channels): every member whose count differs is
+// conformed to it by its own chain before it meets its siblings, a fold for a
+// wider member and a placement for a narrower one, which is the conversion the
+// member's own encode to that count applies. Zero keeps the envelope, the
+// widest member's layout, with narrower members placed into it. A fold applied
+// to the assembled timeline instead is what the engine refuses on a mixed-width
+// timeline (format.MixedWidth): dsp/mix normalizes each output row over every
+// source column, silent ones included, so that fold is not any member's own.
+func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured []int64, channels int) (format.Media, func() error, error) {
 	members := make([]waxflow.ConcatSource, len(inputs))
 	for i, in := range inputs {
 		track, err := r.albumTrack(in)
@@ -122,10 +132,10 @@ func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured 
 			return openFileMedia(path, hint)
 		}}
 	}
-	med, err := waxflow.Concat(members, waxflow.ConcatOptions{})
+	med, err := waxflow.Concat(members, waxflow.ConcatOptions{Channels: channels})
 	if err != nil {
-		// A member the timeline cannot place (a layout whose positions have no
-		// home in the envelope) comes back coded. Unclassified it exited 1;
+		// A member the timeline cannot place or fold (a layout whose positions
+		// have no home in the target) comes back coded. Unclassified it exited 1;
 		// it is a statement about the set of files, so it exits 2 like every
 		// other input refusal. No file is named here: the member index is in
 		// the text, and the album caller turns that into a track name.
@@ -164,13 +174,13 @@ type Length struct {
 // a cut needs of a payload the demuxer walks lazily. The walk is the cheap
 // measurement, frame headers only, and it now settles the count in both
 // directions for every container that has one, confirming or replacing what
-// the headers declared (ADTS, MP3 bare or in a WAV or AIFF-C, Matroska). Only
-// ASF has no walk, so that alone decodes to EOF and counts what the decode
-// delivers. A fallback to the decode path opens and demuxes the file a second
-// time: countFrames needs its own format.Open, not the demuxer walkLength
-// already held. Either way the answer is what a read of the file yields, with
-// the damage the read found. A decode takes a concurrency slot like every
-// other one here and stops at a cancellation.
+// the headers declared (ADTS, MP3 bare or in a WAV or AIFF-C, Matroska, a
+// fragmented MP4). Only ASF has no walk, so that alone decodes to EOF and
+// counts what the decode delivers. A fallback to the decode path opens and
+// demuxes the file a second time: countFrames needs its own format.Open, not
+// the demuxer walkLength already held. Either way the answer is what a read of
+// the file yields, with the damage the read found. A decode takes a
+// concurrency slot like every other one here and stops at a cancellation.
 func (r *Runner) MeasureLength(ctx context.Context, input string) (Length, error) {
 	walked, ok, err := r.walkLength(ctx, input)
 	if err != nil || ok {

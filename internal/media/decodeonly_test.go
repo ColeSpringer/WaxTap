@@ -433,7 +433,7 @@ func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
 	wma := writeFixture(t, dir, "in.wma", mediatest.ChapteredWMA())
 	for name, measured := range map[string][]int64{"short slice": nil, "negative entry": {-1}} {
 		t.Run(name, func(t *testing.T) {
-			med, closer, err := r.OpenAlbumConcat(ctx, []string{wma}, measured)
+			med, closer, err := r.OpenAlbumConcat(ctx, []string{wma}, measured, 0)
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -449,7 +449,7 @@ func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, closer, err := r.OpenAlbumConcat(canceled, []string{wma}, nil); !errors.Is(err, context.Canceled) {
+	if _, closer, err := r.OpenAlbumConcat(canceled, []string{wma}, nil, 0); !errors.Is(err, context.Canceled) {
 		if err == nil {
 			closer()
 		}

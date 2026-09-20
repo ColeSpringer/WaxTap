@@ -223,7 +223,7 @@ func TestExitCodeFor(t *testing.T) {
 }
 
 func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
-	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", Err: &net.OpError{Op: "dial", Err: errFake("refused")}}
+	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4416/get_pot", Err: &net.OpError{Op: "dial", Err: errFake("refused")}}
 	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
 	if got := exitCodeFor(wrapped); got != 9 {
 		t.Errorf("unreachable PO-token sidecar exit = %d, want 9 (a dead sidecar is a network failure)", got)
@@ -243,7 +243,7 @@ func TestClassifyError_DeadPOTokenSidecar(t *testing.T) {
 
 func TestClassifyError_SidecarAuth(t *testing.T) {
 	for _, status := range []int{401, 403} {
-		sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", StatusCode: status}
+		sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4416/get_pot", StatusCode: status}
 		c := classifyError(sre)
 		if c.exitCode != 2 || c.code != "invalid-config" {
 			t.Errorf("status %d = %+v, want invalid-config/2", status, c)
@@ -411,6 +411,7 @@ func TestClassifyError_SidecarResponse(t *testing.T) {
 		exit    int
 		code    string
 	}{
+		{name: "redirect", status: 307, exit: 2, code: "invalid-config"},
 		{name: "bad request", status: 400, exit: 2, code: "invalid-config"},
 		{name: "unauthorized", status: 401, exit: 2, code: "invalid-config"},
 		{name: "too many requests", status: 429, exit: 5, code: "rate-limited"},
@@ -443,7 +444,7 @@ func TestClassifyError_SidecarResponse(t *testing.T) {
 }
 
 func TestFriendlyError_Sidecar429NamesSidecar(t *testing.T) {
-	sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://user:pass@127.0.0.1:4417/get_pot?key=secret", StatusCode: 429}
+	sre := &waxtap.SidecarResponseError{Label: "bgutil PO-token server", Endpoint: "http://user:pass@127.0.0.1:4416/get_pot?key=secret", StatusCode: 429}
 	msg := friendlyError(sre)
 	// The message names the specific provider (distinct from YouTube) and status;
 	// the "check the sidecar's rate limits" advisory now rides on the hint channel.
@@ -883,11 +884,11 @@ func TestFriendlyError_ProxyAndInvalidPlaylist(t *testing.T) {
 }
 
 func TestFriendlyError_SidecarUnreachableBeatsPOToken(t *testing.T) {
-	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4417/get_pot", Err: errors.New("connection refused")}
+	se := &waxtap.SidecarError{Label: "bgutil PO-token server", Endpoint: "http://127.0.0.1:4416/get_pot", Err: errors.New("connection refused")}
 	// The YouTube layer wraps provider failures with ErrNeedsPOToken.
 	wrapped := fmt.Errorf("%w: PO token provider failed: %w", waxtap.ErrNeedsPOToken, se)
 	msg := friendlyError(wrapped)
-	if !strings.Contains(msg, "unreachable") || !strings.Contains(msg, "127.0.0.1:4417") {
+	if !strings.Contains(msg, "unreachable") || !strings.Contains(msg, "127.0.0.1:4416") {
 		t.Errorf("friendlyError = %q, want it to name the unreachable provider", msg)
 	}
 	if strings.Contains(msg, "verified PO token") {
@@ -1163,5 +1164,9 @@ func TestSidecarHint_StatedWait(t *testing.T) {
 	auth := &waxtap.SidecarResponseError{StatusCode: 401, RetryAfter: 5 * time.Second}
 	if h := sidecarHint(auth); !strings.Contains(h, "--api-key") || !strings.Contains(h, "retry in 5s") {
 		t.Errorf("hint = %q, want both parts joined", h)
+	}
+	moved := &waxtap.SidecarResponseError{StatusCode: 307, Reason: "redirected to http://127.0.0.1:4416/player-context/"}
+	if h := sidecarHint(moved); !strings.Contains(h, "canonical URL") {
+		t.Errorf("hint = %q, want the redirect explained", h)
 	}
 }

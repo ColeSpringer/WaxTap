@@ -633,4 +633,30 @@ func TestPauseBlocked(t *testing.T) {
 	if err := PauseBlocked(context.Background(), time.Hour, pending); err != nil {
 		t.Errorf("no deadline = %v, want nil", err)
 	}
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := PauseBlocked(expired, time.Millisecond, pending); err != pending {
+		t.Errorf("expired deadline = %v, want the pending error rather than a bare timeout", err)
+	}
+	if err := PauseBlocked(expired, time.Millisecond, nil); err != nil {
+		t.Errorf("expired deadline with nothing pending = %v, want nil: there is no cause to prefer", err)
+	}
+}
+
+// TestKeepCause pins the other half of the deadline policy, for a pause that
+// PauseBlocked allowed and the context then ended early.
+func TestKeepCause(t *testing.T) {
+	pending := errors.New("refusal")
+	if err := KeepCause(context.Canceled, pending); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled = %v, want the cancellation: the caller gave up", err)
+	}
+	if err := KeepCause(context.DeadlineExceeded, pending); err != pending {
+		t.Errorf("deadline = %v, want the pending error it explains", err)
+	}
+	if err := KeepCause(context.DeadlineExceeded, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("deadline with nothing pending = %v, want the deadline", err)
+	}
+	if err := KeepCause(nil, pending); err != nil {
+		t.Errorf("uninterrupted pause = %v, want nil", err)
+	}
 }

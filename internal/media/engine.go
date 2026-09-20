@@ -13,6 +13,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"runtime"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -26,21 +27,28 @@ type RunnerConfig struct {
 	MaxProcs int
 	// Logger receives debug logs. Nil discards them.
 	Logger *slog.Logger
-	// TempDir is where an operation that needs a scratch file of its own
-	// writes it (the album group pass renders a folding member to PCM there).
-	// Empty uses the OS default. It is not where an output is staged: that
-	// goes beside the output file, so the commit is a rename on one
-	// filesystem.
-	TempDir string
 }
 
 // Runner drives WaxFlow's engine for local audio files. It bounds concurrency,
 // and it is safe for concurrent use.
 type Runner struct {
-	engine  *waxflow.Engine
-	sem     chan struct{}
-	log     *slog.Logger
-	tempDir string
+	engine *waxflow.Engine
+	sem    chan struct{}
+	log    *slog.Logger
+}
+
+// Concurrency is how many operations the Runner admits at once, for a caller
+// with independent work to size its own fan-out by. An unlimited Runner
+// answers GOMAXPROCS: the operations here are decodes, so that is the number
+// a caller should start anyway, and handing back "no limit" would invite one
+// goroutine and one open descriptor per album track.
+//
+// It is a floor of one, so a caller can range over it without a guard.
+func (r *Runner) Concurrency() int {
+	if r.sem == nil {
+		return max(runtime.GOMAXPROCS(0), 1)
+	}
+	return max(cap(r.sem), 1)
 }
 
 // NewRunner builds a Runner. WaxFlow's engine construction cannot fail, so there
@@ -55,27 +63,10 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		sem = make(chan struct{}, cfg.MaxProcs)
 	}
 	return &Runner{
-		engine:  waxflow.New(waxflow.WithLogger(slog.New(demoteImplicitDownmix{log.Handler()}))),
-		sem:     sem,
-		log:     log,
-		tempDir: cfg.TempDir,
+		engine: waxflow.New(waxflow.WithLogger(slog.New(demoteImplicitDownmix{log.Handler()}))),
+		sem:    sem,
+		log:    log,
 	}
-}
-
-// ScratchDir creates a directory for one operation's intermediate files under
-// the configured temp root, and returns it with the func that removes it. The
-// caller removes it when the operation returns; nothing here outlives a call.
-func (r *Runner) ScratchDir(pattern string) (string, func(), error) {
-	if r.tempDir != "" {
-		if err := os.MkdirAll(r.tempDir, 0o777); err != nil {
-			return "", nil, err
-		}
-	}
-	dir, err := os.MkdirTemp(r.tempDir, pattern)
-	if err != nil {
-		return "", nil, err
-	}
-	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // implicitDownmixMsg is WaxFlow's log record for a channel fold the caller did

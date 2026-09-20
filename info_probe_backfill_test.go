@@ -238,6 +238,45 @@ func TestInfoProbeReadsAnM4AMoovByRange(t *testing.T) {
 	}
 }
 
+// TestInfoProbeReadsAFragmentedM4AHeadByRange: YouTube's itag 140 is a
+// fragmented MP4 with no edit list, its length stated by the segment index
+// behind the moov. The open stops at the moov and reads ahead only to the
+// first moof, so the probe answers from the first block with the duration the
+// sidx sums. This row used to read to the end of the fragments looking for a
+// length that was never there, and fell to the staging path once the budget
+// stopped it.
+func TestInfoProbeReadsAFragmentedM4AHeadByRange(t *testing.T) {
+	media, err := mediatest.FragmentAAC(m4aFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &rotationWorld{media: string(media), player: m4aPlayerJSON, uncapped: true}
+	c := rotationClient(t, w)
+
+	res, err := c.InfoResult(context.Background(), "dummyVideo0", InfoProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Probed {
+		t.Fatal("Probed = false")
+	}
+	f := res.Video.Formats[res.BestIndex]
+	if f.SampleRate != 44100 || f.Channels != 2 {
+		t.Errorf("probed row = rate %d ch %d, want 44100/2", f.SampleRate, f.Channels)
+	}
+	// The sidx counts the fragments' raw frames, encoder priming and padding
+	// included, so the head states a little over the tone's length.
+	if d := f.Duration - probeFixtureSeconds*time.Second; d > 100*time.Millisecond || d < -50*time.Millisecond {
+		t.Errorf("Duration = %v, want within 100ms of %ds", f.Duration, probeFixtureSeconds)
+	}
+	if len(w.mediaRanges) != 1 {
+		t.Errorf("media requests = %v, want one: the head is in the first block", w.mediaRanges)
+	}
+	if w.bytesServed > download.DefaultRangeBlock {
+		t.Errorf("served %d bytes, want at most one %d-byte block", w.bytesServed, download.DefaultRangeBlock)
+	}
+}
+
 // TestInfoProbeStagesWhenTheOriginIgnoresRanges: an origin that answers a
 // bounded request with the whole body cannot be read in ranges, so the probe
 // stages the stream. It does that with one open-ended request rather than
@@ -270,9 +309,8 @@ func TestInfoProbeStagesWhenTheOriginIgnoresRanges(t *testing.T) {
 	}
 }
 
-// TestInfoProbeStagesWhenTheHeadersOutrunTheBudget: a container whose headers
-// are spread across the file (a fragmented MP4 with no edit list, which is what
-// YouTube's itag 140 is) would turn a ranged read into the whole download in
+// TestInfoProbeStagesWhenTheHeadersOutrunTheBudget: a container whose head
+// outruns the budget would turn a ranged read into the whole download in
 // round-trip pieces. The budget stops it and the probe stages instead, so the
 // answer is the same and the cost is bounded. The budget is lowered here rather
 // than shipping a fixture large enough to trip the real one.

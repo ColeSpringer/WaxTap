@@ -39,8 +39,8 @@ type Result struct {
 	// InputWarnings is the input damage the read worked around, complete as of
 	// the end of the write: a demuxer that walks its payload lazily (MP3, bare
 	// or inside a WAV or AIFF-C; ADTS; a Matroska with only an advisory
-	// length) finds damage where the read reaches it, so a probe of the
-	// headers sees the head's share and this list the whole. It is the same
+	// length; a fragmented MP4) finds damage where the read reaches it, so a
+	// probe of the headers sees the head's share and this list the whole. It is the same
 	// list ProbeResult.Warnings carries, the probe's entries included, each
 	// once; nil for a clean source.
 	InputWarnings []string

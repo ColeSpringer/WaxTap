@@ -257,9 +257,13 @@ func newSidecarClient(timeout time.Duration) *http.Client {
 // lower limit because only a short reason is retained.
 const (
 	sidecarSuccessBodyLimit = 1 << 20 // 1 MiB
-	sidecarErrorBodyLimit   = 8 << 10 // 8 KiB
-	sidecarReasonRunes      = 200     // cap on an extracted reason
-	sidecarCodeRunes        = 64      // cap on an extracted code
+	// The reference sidecar clamps each text field of its error envelope at
+	// 4 KiB and its own client reads 64 KiB, so a refusal whose reason and
+	// details both carry a browser trace passes 8 KiB once JSON-escaped; a
+	// limit under the envelope cuts the document and loses the code with it.
+	sidecarErrorBodyLimit = 64 << 10 // 64 KiB
+	sidecarReasonRunes    = 200      // cap on an extracted reason
+	sidecarCodeRunes      = 64       // cap on an extracted code
 )
 
 // SidecarCodeVideoUnavailable is the refusal code WaxTap acts on: the sidecar's
@@ -289,11 +293,9 @@ var sidecarSleep = httpx.Sleep
 //
 // SidecarRetryWait decides whether the failure earns it and how long to wait. A
 // wait the sidecar stated is honoured up to sidecarRetryMaxWait; a transient
-// failure that stated none earns sidecarTransientWait. Then PauseBlocked applies
-// the deadline policy Client.Do uses: a cancelled context returns the
-// cancellation, a deadline that cannot fit the wait plus a second of headroom
-// returns the refusal (sleeping into a deadline is exactly the waste a cool-down
-// exists to avoid). The second attempt's error is returned as it is.
+// failure that stated none earns sidecarTransientWait. Then PauseBlocked and
+// PauseInterrupted apply the deadline policy Client.Do uses around the sleep.
+// The second attempt's error is returned as it is.
 //
 // /report is deliberately not routed through here: a report is sent once.
 func sidecarCall(ctx context.Context, client *http.Client, method, endpoint, label, apiKey string, in, out any) error {
@@ -305,16 +307,11 @@ func sidecarCall(ctx context.Context, client *http.Client, method, endpoint, lab
 	if !retry {
 		return err
 	}
-	if berr := httpx.PauseBlocked(ctx, wait, err); berr != nil {
+	if berr := PauseBlocked(ctx, wait, err); berr != nil {
 		return berr
 	}
 	if serr := sidecarSleep(ctx, wait); serr != nil {
-		// A cancellation names the caller giving up; a deadline expiring mid-pause
-		// is the case the refusal itself explains.
-		if !errors.Is(serr, context.DeadlineExceeded) {
-			return serr
-		}
-		return err
+		return PauseInterrupted(serr, err)
 	}
 	return sidecarJSON(ctx, client, method, endpoint, label, apiKey, in, out)
 }
@@ -350,6 +347,34 @@ func SidecarRetryWait(err error) (time.Duration, bool) {
 		return sidecarTransientWait, true
 	}
 	return 0, false
+}
+
+// PauseBlocked is the pause policy every WaxTap retry applies before it sleeps
+// for a wait, exported beside SidecarRetryWait so an in-process adapter runs
+// one rule rather than a copy of it. It returns the error to report instead of
+// pausing for wait, or nil when the pause may proceed; pending is the typed
+// failure the caller holds for what provoked the pause.
+//
+// A cancellation outranks pending: a context cancelled while a request was
+// failing is the caller giving up, and reporting that as the refusal
+// misclassifies it. A deadline that cannot fit wait plus a second of headroom
+// returns pending now, since sleeping into a deadline buys a retry that cannot
+// finish and a bare timeout that hides the cause; the comparison refuses at
+// equality. A deadline already expired returns pending for the same reason.
+//
+// A nil pending is a caller with nothing to report, so a budget that cannot fit
+// the wait returns nil and the pause proceeds. Pass the failure being retried.
+func PauseBlocked(ctx context.Context, wait time.Duration, pending error) error {
+	return httpx.PauseBlocked(ctx, wait, pending)
+}
+
+// PauseInterrupted is the other half of the policy, for a pause PauseBlocked
+// allowed that the context then ended early: interrupted is the sleep's
+// context error. A cancellation is the caller giving up and is returned as it
+// is; a deadline expiring mid-pause is the case pending explains, so pending
+// is returned instead of a bare timeout. A nil pending returns interrupted.
+func PauseInterrupted(interrupted, pending error) error {
+	return httpx.KeepCause(interrupted, pending)
 }
 
 // retryableSidecarStatus reports whether a status is the kind a second attempt
@@ -411,6 +436,14 @@ func sidecarJSON(ctx context.Context, client *http.Client, method, endpoint, lab
 		// Include a short reason from a known JSON field, but do not echo arbitrary
 		// response bytes that might contain tokens or cookies.
 		r := readSidecarRefusal(resp)
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 && r.Reason == "" {
+			// A redirect is never followed (newSidecarClient), so where it
+			// pointed is the one thing the answer says; the target is redacted
+			// like the endpoint it was asked at.
+			if loc := resp.Header.Get("Location"); loc != "" {
+				r.Reason = capRunes("redirected to "+redactURL(loc), sidecarReasonRunes)
+			}
+		}
 		return &SidecarResponseError{
 			Label:      label,
 			Endpoint:   endpoint,
@@ -456,10 +489,19 @@ func readSidecarRefusal(resp *http.Response) sidecarRefusal {
 		Details           string `json:"details"`
 		RetryAfterSeconds int    `json:"retry_after_seconds"`
 	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, sidecarErrorBodyLimit)).Decode(&msg)
+	derr := json.NewDecoder(io.LimitReader(resp.Body, sidecarErrorBodyLimit)).Decode(&msg)
 	reason := strings.TrimSpace(msg.Error)
 	if reason == "" {
 		reason = strings.TrimSpace(msg.Message)
+	}
+	// A decode leaves every field empty when it fails, so a document the limit
+	// cut loses the code with it and the refusal would otherwise report a bare
+	// status. Only a cut document is reported: io.ErrUnexpectedEOF is a JSON
+	// body that ended mid-value, where a body that was never JSON (a proxy's
+	// HTML error page) is a syntax error and stays unechoed, as does the
+	// ordinary empty body behind a 3xx. The text names no body bytes.
+	if reason == "" && errors.Is(derr, io.ErrUnexpectedEOF) {
+		reason = fmt.Sprintf("refusal body past the %d-byte limit; its code and details were cut with it", sidecarErrorBodyLimit)
 	}
 	r := sidecarRefusal{
 		Reason:  capRunes(reason, sidecarReasonRunes),
@@ -486,7 +528,14 @@ func drainSidecarBody(resp *http.Response) {
 
 // capRunes truncates s to at most n runes, appending an ellipsis when truncated.
 // It counts runes so truncation never splits a multibyte character.
+//
+// A string of at most n bytes holds at most n runes, so the ordinary short
+// field returns without decoding: the rune conversion is what a body read at
+// sidecarErrorBodyLimit would otherwise pay on every refusal.
 func capRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
@@ -641,8 +690,12 @@ func newBgutilProvider(endpoint, apiKey string, timeout time.Duration) *bgutilPr
 }
 
 // bgutilRequest and bgutilResponse mirror the bgutil /get_pot wire contract.
+// Scope names what the binding is (player: a video ID; gvs: visitor data).
+// WaxSeal namespaces its token cache by it; bgutil ignores it. It is always
+// set: contentBinding refuses every scope it cannot name.
 type bgutilRequest struct {
 	ContentBinding string `json:"content_binding"`
+	Scope          string `json:"scope"`
 }
 
 type bgutilResponse struct {
@@ -653,13 +706,13 @@ type bgutilResponse struct {
 
 // ProvidePOToken requests a scope-bound token from the configured sidecar.
 func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request) (potoken.Response, error) {
-	binding, err := contentBinding(req)
+	binding, scope, err := contentBinding(req)
 	if err != nil {
 		return potoken.Response{}, err
 	}
 	var out bgutilResponse
 	if err := sidecarCall(ctx, p.http, http.MethodPost, p.endpoint, "bgutil PO-token server", p.apiKey,
-		bgutilRequest{ContentBinding: binding}, &out); err != nil {
+		bgutilRequest{ContentBinding: binding, Scope: scope}, &out); err != nil {
 		return potoken.Response{}, err
 	}
 	if out.POToken == "" {
@@ -671,23 +724,28 @@ func (p *bgutilProvider) ProvidePOToken(ctx context.Context, req potoken.Request
 	}, nil
 }
 
-// contentBinding selects the bgutil content_binding for the token scope: a player
-// token binds to the video ID; a GVS (stream) token binds to the raw visitor-data
-// string. Other scopes are unsupported by this provider.
-func contentBinding(req potoken.Request) (string, error) {
+// contentBinding selects the bgutil content_binding for the token scope, and the
+// scope's own wire name: a player token binds to the video ID; a GVS (stream)
+// token binds to the raw visitor-data string. Other scopes are unsupported by
+// this provider.
+//
+// The wire name is potoken.Scope.String(), which is the vocabulary that package
+// defines and ParseScope reads back; spelling it here again would be a second
+// source of truth for someone else's names.
+func contentBinding(req potoken.Request) (binding, scope string, err error) {
 	switch req.Scope {
 	case potoken.ScopePlayer:
 		if req.VideoID == "" {
-			return "", fmt.Errorf("bgutil: player PO token requested without a video ID")
+			return "", "", fmt.Errorf("bgutil: player PO token requested without a video ID")
 		}
-		return req.VideoID, nil
+		return req.VideoID, req.Scope.String(), nil
 	case potoken.ScopeGVS:
 		if req.VisitorData == "" {
-			return "", fmt.Errorf("bgutil: GVS PO token requested without visitor data")
+			return "", "", fmt.Errorf("bgutil: GVS PO token requested without visitor data")
 		}
-		return req.VisitorData, nil
+		return req.VisitorData, req.Scope.String(), nil
 	default:
-		return "", fmt.Errorf("bgutil: unsupported PO-token scope %q", req.Scope)
+		return "", "", fmt.Errorf("bgutil: unsupported PO-token scope %q", req.Scope)
 	}
 }
 
@@ -899,7 +957,7 @@ func newHTTPSessionProvider(endpoint, apiKey string, timeout time.Duration, rep 
 }
 
 // sessionDoc mirrors the /session wire contract. snake_case keys are canonical
-// (the reference minter, WaxSeal's :4417, uses them); camelCase variants are also
+// (the reference minter, WaxSeal's :4416, uses them); camelCase variants are also
 // accepted so the contract does not break on casing:
 //
 //	{"visitor_data":"<exact X-Goog-Visitor-Id literal>",

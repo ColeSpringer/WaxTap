@@ -33,9 +33,9 @@ type ProbeResult struct {
 	//
 	// Damage only, and only what reading the headers finds. A demuxer that
 	// walks its payload lazily (MP3, bare or inside a WAV or AIFF-C; ADTS;
-	// Matroska) reports damage past the head from the read that reaches it,
-	// which Result.InputWarnings carries; a walk that measures the file
-	// (Runner.MeasureLength) finds it too.
+	// Matroska; a fragmented MP4) reports damage past the head from the read
+	// that reaches it, which Result.InputWarnings carries; a walk that
+	// measures the file (Runner.MeasureLength) finds it too.
 	Warnings []string
 	// Notes are what WaxFlow did with an input that is not damaged: a stream
 	// it ignored, a chapter list it capped at its own limit, a timeline it
@@ -48,11 +48,12 @@ type ProbeResult struct {
 	// make, not a count a read confirmed: the demuxer walks its payload
 	// lazily and has not reached the end (container.Walker: MP3, bare or in
 	// a WAV or AIFF-C; ADTS; every Matroska track, since an open reads to the
-	// first cluster and no further), or it states an advisory total (ASF), or
-	// none at all. A cut resolved against such a length can declare a span
-	// the file does not hold, so the pipeline measures the file first
-	// (Runner.MeasureLength), a walk for every container that has one and a
-	// decode only for the one that does not.
+	// first cluster and no further; a fragmented MP4, whose head states what
+	// its segment index sums until the fragments are walked), or it states an
+	// advisory total (ASF), or none at all. A cut resolved against such a
+	// length can declare a span the file does not hold, so the pipeline
+	// measures the file first (Runner.MeasureLength), a walk for every
+	// container that has one and a decode only for the one that does not.
 	LengthClaimed bool
 }
 

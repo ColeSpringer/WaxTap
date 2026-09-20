@@ -268,7 +268,6 @@ func (c *Client) engine() *media.Runner {
 		c.runner = media.NewRunner(media.RunnerConfig{
 			MaxProcs: procs,
 			Logger:   c.log,
-			TempDir:  c.opts.TempDir,
 		})
 	})
 	return c.runner
@@ -588,18 +587,19 @@ func (c *Client) probeFallback(ctx context.Context, runner *media.Runner, err er
 
 // probeRangeBudget is how much of a stream a ranged probe may fetch. A container
 // that keeps its headers at the ends reads well inside it: a Matroska open stops
-// at the first cluster (one block) and an MP4's moov sits at one end or the
-// other (two). A fragmented MP4 does not, because its timing lives in
-// per-fragment headers spread end to end, and reading that file in blocks is
-// the whole download in round-trip pieces; YouTube's itag 140 is one, and
-// measured at 39 blocks for a ten-minute track before this bound existed.
+// at the first cluster (one block), an MP4's moov sits at one end or the other
+// (two), and a fragmented MP4's open stops at its moov and reads ahead only as
+// far as the segment index that states its length (one; YouTube's itag 140).
+// The bound is for a head none of those have, one that outruns it, so a probe's
+// cost stays a property of the design rather than of the container. It sits at
+// four blocks rather than the two the worst of those reads: the figures above
+// are this muxer's, and the margin is for a moov carrying more than WaxTap
+// writes (a long chapter list, cover art) rather than a limit to tune.
 //
 // Past the budget the probe stages the stream and answers from the local file,
 // whether or not the demuxer reported the refused read: what InfoResult.Probed
 // calls authoritative has to come from a complete one. The blocks already
-// fetched are the price of finding out, about 10% on top of the staged download
-// for the fragmented MP4 above, against a fortyfold saving on the WebM row that
-// is what --probe selects by default.
+// fetched are the price of finding out.
 //
 // It is a var so a test can lower it; nothing sets it at runtime.
 var probeRangeBudget int64 = 4 * download.DefaultRangeBlock
