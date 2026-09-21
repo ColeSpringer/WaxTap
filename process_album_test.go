@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -803,6 +804,9 @@ func TestAlbumMonoMemberIsNotCountedAsDualMono(t *testing.T) {
 // the same as the single-file path gives. It is not bad input: the file may
 // be perfectly good audio the run cannot read.
 func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a 0000 file is merely read-only on Windows, and read-only files still open for reading")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a 0000 file")
 	}

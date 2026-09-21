@@ -250,7 +250,16 @@ func ResolveLink(finalPath string) string {
 	if err != nil {
 		return finalPath // dangling, or a loop: replace the link
 	}
-	return target
+	dir := filepath.Dir(finalPath)
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return target
+	}
+	rel, err := filepath.Rel(realDir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return target
+	}
+	return filepath.Join(dir, rel)
 }
 
 // chmodUmask changes a staged file from os.CreateTemp's private mode to the mode

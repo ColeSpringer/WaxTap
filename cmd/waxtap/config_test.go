@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -828,6 +829,9 @@ func TestCheckTempDir(t *testing.T) {
 // An unwritable directory is refused too, which needs a real filesystem check
 // rather than a stat: a directory can exist and still take no files.
 func TestCheckTempDirUnwritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Mkdir ignores its mode on Windows, so the directory stays writable")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a 0000 directory")
 	}

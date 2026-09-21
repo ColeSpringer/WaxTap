@@ -54,3 +54,13 @@ Gate tags:
   this change and applies to every cut and copy landing in such a container.
   Picking it up means saying so, as a warning when the output container cannot
   carry a gapless trim the source stated.
+- `[in-repo]` **Two access-denial guarantees go untested on Windows.** That an
+  unreadable album member is an I/O failure rather than bad input, and that an
+  unwritable `--temp-dir` is a usage error, are both proved by staging a `0000`
+  file or directory. Windows has no such mode: `syscall.Mkdir` drops its mode
+  argument entirely, and `Open` maps only the write bit onto the read-only
+  attribute, which still opens for reading. Both tests asserted a denial that
+  cannot happen there, so both now skip on Windows and the two classifications
+  are covered on unix alone. Picking it up means denying access the way Windows
+  does, through an ACL or a handle held open without sharing, behind one helper
+  the two tests share.
