@@ -1466,13 +1466,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return "", nil, err
 	}
 	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
-	warnCutSnapped(em, pres)
-	warnLoudnessTargetMissed(em, req.Loudness, pres)
-	warnImplicitDownmix(em, req.ProcessSpec, pres)
-	warnImplicitLossy(em, req.ProcessSpec, pres)
-	warnGaplessDropped(em, pres)
-	warnBitrateAdjusted(em, req.ProcessSpec, pres)
-	warnOutputClipping(em, req.Loudness, pres)
+	warnRendered(em, req.ProcessSpec, pres)
 	// Input damage and an empty input are deliberately not reported here: a
 	// YouTube container either probes exactly or fails outright, so the only
 	// thing either could describe is a delivery of ours that came up short or

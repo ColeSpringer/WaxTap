@@ -31,6 +31,8 @@ func codecFor(name string) media.Codec {
 		return media.CodecFLAC
 	case "aac":
 		return media.CodecAAC
+	case "he-aac":
+		return media.CodecHEAAC
 	case "opus":
 		return media.CodecOpus
 	case "vorbis":
@@ -749,6 +751,10 @@ func TestContainerAccepts(t *testing.T) {
 		{"aiff", "wav", false},      // CodecWAV is RIFF, which .aiff cannot hold
 		{"wav", "aiff", false},      // and the mirror
 		{"aif", "aiff", true},       // both output spellings
+		// WaxFlow's wav row writes four spellings and its mp3 row two.
+		{"wave", "pcm_s16le", true}, {"rf64", "pcm_s16le", true}, {"bw64", "pcm_s16le", true},
+		{"wave", "opus", false}, {"rf64", "opus", false}, {"bw64", "opus", false},
+		{"mpga", "mp3", true}, {"mpga", "opus", false},
 	}
 	for _, c := range cases {
 		if got := containerAccepts(c.ext, c.codec); got != c.want {
@@ -792,16 +798,21 @@ func TestContainerTablesConsistent(t *testing.T) {
 	// Each container's default encoder must produce a codec accepted by that
 	// container. codecName maps presets to representative codec names.
 	codecName := map[media.Codec]string{
-		media.CodecFLAC:   "flac",
-		media.CodecAAC:    "aac",
-		media.CodecMP3:    "mp3",
-		media.CodecOpus:   "opus",
-		media.CodecVorbis: "vorbis",
-		media.CodecWAV:    "pcm_s16le",
-		media.CodecALAC:   "alac",
-		media.CodecAIFF:   "aiff",
+		media.CodecFLAC:    "flac",
+		media.CodecAAC:     "aac",
+		media.CodecMP3:     "mp3",
+		media.CodecOpus:    "opus",
+		media.CodecVorbis:  "vorbis",
+		media.CodecWAV:     "pcm_s16le",
+		media.CodecALAC:    "alac",
+		media.CodecAIFF:    "aiff",
+		media.CodecWavPack: "wavpack",
+		media.CodecAPE:     "ape",
 	}
-	for _, ext := range []string{"flac", "wav", "aiff", "aif", "aifc", "afc", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "mka", "mkv"} {
+	// Every inferable spelling, now and later: a new one added to the table
+	// without its own arm here would be checked the moment it lands.
+	for _, dotted := range media.OutputContainerExts() {
+		ext := strings.TrimPrefix(dotted, ".")
 		c, ok := media.ContainerCodec(ext)
 		if !ok {
 			t.Errorf("media.ContainerCodec(%q) = not ok, want a default codec", ext)
@@ -889,6 +900,107 @@ func TestRunSmartCutFlacReencodes(t *testing.T) {
 	}
 	if a, _ := res.OutputProbe.AudioStream(); a.CodecName != "flac" {
 		t.Errorf("output codec = %q, want flac", a.CodecName)
+	}
+	if res.CutDeclined != media.DeclinedCodec {
+		t.Errorf("CutDeclined = %v, want DeclinedCodec", res.CutDeclined)
+	}
+}
+
+// A smart cut of an MP3 decodes and re-encodes in the family, and the
+// result says the copy was declined by the codec, which is what the facade
+// turns into cut-decoded. An accurate cut names its decode and has no copy
+// to decline; a kept named format is a copy cut again and declines the same.
+func TestRunSmartCutMP3ReportsTheDecline(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	src := synthSine(t, dir, "src.mp3", 2, "mp3")
+	keep := []cutrange.Range{{Start: 500 * time.Millisecond, End: time.Second}}
+	res, err := Run(context.Background(), r, src, filepath.Join(dir, "out.mp3"), Spec{Remove: keep}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecMP3 || res.CutDeclined != media.DeclinedCodec {
+		t.Errorf("transcoded=%v codec=%v declined=%v, want the family re-encode declined by the codec", res.Transcoded, res.OutputCodec, res.CutDeclined)
+	}
+	accurate, err := Run(context.Background(), r, src, filepath.Join(dir, "acc.mp3"), Spec{Remove: keep, Codec: media.CodecMP3, Keep: KeepCodec, CutMode: media.ModeAccurate}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accurate.CutDeclined != media.NotDeclined {
+		t.Errorf("an accurate cut reports %v, want no decline: nothing was tried", accurate.CutDeclined)
+	}
+	kept, err := Run(context.Background(), r, src, filepath.Join(dir, "kept.mp3"), Spec{Remove: keep, Codec: media.CodecMP3, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.CutDeclined != media.DeclinedCodec {
+		t.Errorf("a kept named mp3 reports %v, want the codec: the copy was tried and declined", kept.CutDeclined)
+	}
+}
+
+// A copy the keep rule made of a named codec must fall back to that codec,
+// not to the source's own family. The two differ for exactly one pair: an
+// aac request keeps an HE-AAC source, and when the packet cut declines (an
+// HE-AAC cut past the stream start does) the decode owes the caller the
+// AAC-LC they named.
+func TestRunKeptCodecCutFallsBackToTheNamedCodec(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	he := synthSine(t, dir, "he.m4a", 3, "he-aac")
+	// Removing the head leaves a first span past the stream start, which is
+	// the one shape WaxFlow will not packet-cut for HE-AAC.
+	keep := []cutrange.Range{{Start: 0, End: time.Second}}
+	res, err := Run(context.Background(), r, he, filepath.Join(dir, "cut.m4a"),
+		Spec{Codec: media.CodecAAC, Keep: KeepCodec, Remove: keep}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecAAC {
+		t.Errorf("transcoded=%v codec=%v, want the aac-lc the caller named", res.Transcoded, res.OutputCodec)
+	}
+	if a, _ := res.OutputProbe.AudioStream(); a.CodecName != "aac" {
+		t.Errorf("the file holds %s, want aac", a.CodecName)
+	}
+	// The container's own choice is the source's identity, so an he-aac
+	// source kept by .m4a falls back to he-aac, as it always has.
+	byContainer, err := Run(context.Background(), r, he, filepath.Join(dir, "bycontainer.m4a"),
+		Spec{Codec: media.CodecAAC, Keep: KeepContainer, Remove: keep}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !byContainer.Transcoded || byContainer.OutputCodec != media.CodecHEAAC {
+		t.Errorf("transcoded=%v codec=%v, want the source family the container kept", byContainer.Transcoded, byContainer.OutputCodec)
+	}
+}
+
+// A decode the request named needs no container extension: it promotes to an
+// encoder whose own muxer writes the file, exactly as a fold does. The copy
+// rule's "choose a container" refusal is for a copy, and must not fire ahead
+// of the promotion and refuse a cut nobody asked to copy.
+func TestRunAccurateCutNeedsNoContainerExtension(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	src := synthSine(t, dir, "src.opus", 2, "opus")
+	keep := []cutrange.Range{{Start: 500 * time.Millisecond, End: time.Second}}
+	for _, tc := range []struct {
+		name string
+		spec Spec
+	}{
+		{"accurate", Spec{Remove: keep, CutMode: media.ModeAccurate, Downmix: 2}},
+		{"crossfade", Spec{Remove: keep, Crossfade: 50 * time.Millisecond, Downmix: 2}},
+	} {
+		res, err := Run(context.Background(), r, src, filepath.Join(dir, tc.name+"-bare"), tc.spec, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !res.Transcoded || res.OutputCodec != media.CodecOpus || res.CutMode != media.ModeAccurate {
+			t.Errorf("%s: transcoded=%v codec=%v mode=%v, want the family decode", tc.name, res.Transcoded, res.OutputCodec, res.CutMode)
+		}
+	}
+	// A copy cut still needs one: its packets go into whatever the name says.
+	if _, err := Run(context.Background(), r, src, filepath.Join(dir, "copy-bare"),
+		Spec{Remove: keep, CutMode: media.ModeCopy}, nil); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Errorf("a copy cut into an extensionless output: err = %v, want ErrIncompatibleSpec", err)
 	}
 }
 
@@ -1377,11 +1489,13 @@ func TestNormalizeIntoAForeignContainerPromotesAndSaysSo(t *testing.T) {
 	}
 }
 
-// A format the container chose is a fallback: once the source is staged and
-// probed, a container that carries its codec keeps it, and only one that
-// cannot takes the encoder the caller passed. A knob or a gain that needs
-// an encode gets the same-family encoder, so an Opus source into .ogg
-// normalizes by its header gain rather than becoming Vorbis.
+// The keep rule on both its keeps. A format the container chose is a
+// fallback: once the source is staged and probed, a container that carries
+// its codec keeps it, and only one that cannot takes the encoder the caller
+// passed. A codec the caller named keeps a source already in it the same
+// way. A knob or a gain that needs an encode gets that encoder, so an Opus
+// source into .ogg normalizes by its header gain rather than becoming
+// Vorbis, and a decode the request named is never a copy.
 func TestRunContainerChosenKeepsACarriedSource(t *testing.T) {
 	dir := t.TempDir()
 	src := synthSine(t, dir, "src.opus", 2, "opus")
@@ -1394,18 +1508,32 @@ func TestRunContainerChosenKeepsACarriedSource(t *testing.T) {
 		transcoded bool
 		codec      media.Codec
 		cut        bool
+		cutMode    media.Mode
 	}{
-		{"mka keeps opus", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true}, false, media.CodecCopy, false},
-		{"ogg keeps opus", "out.ogg", Spec{Codec: media.CodecVorbis, ContainerChosen: true}, false, media.CodecCopy, false},
-		{"m4a cannot carry opus", "out.m4a", Spec{Codec: media.CodecAAC, ContainerChosen: true}, true, media.CodecAAC, false},
-		{"a bitrate the codec takes needs an encode", "out.mka", Spec{Codec: media.CodecOpus, Bitrate: 96000, ContainerChosen: true}, true, media.CodecOpus, false},
-		{"a bit depth the codec ignores keeps the copy", "out.mka", Spec{Codec: media.CodecOpus, BitDepth: 16, ContainerChosen: true}, false, media.CodecCopy, false},
-		{"named opus still encodes", "out.mka", Spec{Codec: media.CodecOpus}, true, media.CodecOpus, false},
+		{"mka keeps opus", "out.mka", Spec{Codec: media.CodecOpus, Keep: KeepContainer}, false, media.CodecCopy, false, 0},
+		{"ogg keeps opus", "out.ogg", Spec{Codec: media.CodecVorbis, Keep: KeepContainer}, false, media.CodecCopy, false, 0},
+		{"m4a cannot carry opus", "out.m4a", Spec{Codec: media.CodecAAC, Keep: KeepContainer}, true, media.CodecAAC, false, 0},
+		{"a bitrate the codec takes needs an encode", "out.mka", Spec{Codec: media.CodecOpus, Bitrate: 96000, Keep: KeepContainer}, true, media.CodecOpus, false, 0},
+		{"a bit depth the codec ignores keeps the copy", "out.mka", Spec{Codec: media.CodecOpus, BitDepth: 16, Keep: KeepContainer}, false, media.CodecCopy, false, 0},
+		{"named opus still encodes", "out.mka", Spec{Codec: media.CodecOpus}, true, media.CodecOpus, false, 0},
 		// A cut is not copy-only: it copies packets where the codec allows,
 		// as a local cut into this container does, and the flag that gets a
 		// plain copy past the no-op return must not make it one.
-		{"a cut stays a packet copy", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true, Remove: keep}, false, media.CodecCopy, true},
-		{"a crossfade re-encodes in the family", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true, Remove: keep, Crossfade: 50 * time.Millisecond}, true, media.CodecOpus, true},
+		{"a cut stays a packet copy", "out.mka", Spec{Codec: media.CodecOpus, Keep: KeepContainer, Remove: keep}, false, media.CodecCopy, true, media.ModeCopy},
+		{"a crossfade re-encodes in the family", "out.mka", Spec{Codec: media.CodecOpus, Keep: KeepContainer, Remove: keep, Crossfade: 50 * time.Millisecond}, true, media.CodecOpus, true, media.ModeAccurate},
+		// A named codec is a codec to deliver: with KeepCodec a source
+		// already in it is the copy an encode would have been, minus the
+		// generation. Without the keep the zero value encodes, as ever.
+		{"kept opus stays a copy", "out.mka", Spec{Codec: media.CodecOpus, Keep: KeepCodec}, false, media.CodecCopy, false, 0},
+		{"kept opus into its own container", "out.opus", Spec{Codec: media.CodecOpus, Keep: KeepCodec}, false, media.CodecCopy, false, 0},
+		{"kept aac on an opus source encodes", "out.m4a", Spec{Codec: media.CodecAAC, Keep: KeepCodec}, true, media.CodecAAC, false, 0},
+		{"a bitrate on a kept opus encodes", "out.opus", Spec{Codec: media.CodecOpus, Keep: KeepCodec, Bitrate: 96000}, true, media.CodecOpus, false, 0},
+		{"a bit depth on a kept opus is inert", "out.opus", Spec{Codec: media.CodecOpus, Keep: KeepCodec, BitDepth: 16}, false, media.CodecCopy, false, 0},
+		// What must never be a copy, on either keep: an accurate cut and a
+		// crossfade were promised a decode, and a fold needs the encoder.
+		{"an accurate cut on a kept opus decodes", "out.opus", Spec{Codec: media.CodecOpus, Keep: KeepCodec, Remove: keep, CutMode: media.ModeAccurate}, true, media.CodecOpus, true, media.ModeAccurate},
+		{"an accurate cut on a kept container decodes", "out.mka", Spec{Codec: media.CodecOpus, Keep: KeepContainer, Remove: keep, CutMode: media.ModeAccurate}, true, media.CodecOpus, true, media.ModeAccurate},
+		{"a crossfade on a kept opus decodes", "out.opus", Spec{Codec: media.CodecOpus, Keep: KeepCodec, Remove: keep, Crossfade: 50 * time.Millisecond}, true, media.CodecOpus, true, media.ModeAccurate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1416,6 +1544,9 @@ func TestRunContainerChosenKeepsACarriedSource(t *testing.T) {
 			}
 			if res.Transcoded != tc.transcoded || res.OutputCodec != tc.codec || res.Cut != tc.cut {
 				t.Errorf("transcoded=%v codec=%v cut=%v, want %v %v %v", res.Transcoded, res.OutputCodec, res.Cut, tc.transcoded, tc.codec, tc.cut)
+			}
+			if tc.cut && res.CutMode != tc.cutMode {
+				t.Errorf("cutMode = %v, want %v", res.CutMode, tc.cutMode)
 			}
 			p, err := r.Probe(context.Background(), out)
 			if err != nil {
@@ -1428,21 +1559,127 @@ func TestRunContainerChosenKeepsACarriedSource(t *testing.T) {
 	}
 	// The gain rides in the head of a kept Opus copy under cap.
 	res, err := Run(context.Background(), r, src, filepath.Join(dir, "gain.ogg"),
-		Spec{Codec: media.CodecVorbis, ContainerChosen: true, Loudness: &Loudness{Apply: true, Target: -18}}, nil)
+		Spec{Codec: media.CodecVorbis, Keep: KeepContainer, Loudness: &Loudness{Apply: true, Target: -18}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Transcoded || !res.GainInHeader {
 		t.Errorf("transcoded=%v gainInHeader=%v, want a header-gain copy", res.Transcoded, res.GainInHeader)
 	}
+
+	// The same for a named codec the source already has: cap rides the head,
+	// limit reshapes samples and so takes the encoder, and a measure-only run
+	// writes the copy where the zero value writes nothing at all.
+	res, err = Run(context.Background(), r, src, filepath.Join(dir, "gain.opus"),
+		Spec{Codec: media.CodecOpus, Keep: KeepCodec, Loudness: &Loudness{Apply: true, Target: -18}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Transcoded || !res.GainInHeader {
+		t.Errorf("a kept named opus: transcoded=%v gainInHeader=%v, want a header-gain copy", res.Transcoded, res.GainInHeader)
+	}
+	res, err = Run(context.Background(), r, src, filepath.Join(dir, "limit.opus"),
+		Spec{Codec: media.CodecOpus, Keep: KeepCodec, Loudness: &Loudness{Apply: true, Target: -18, PeakLimit: true}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecOpus {
+		t.Errorf("a kept named opus under limit: transcoded=%v codec=%v, want the encode", res.Transcoded, res.OutputCodec)
+	}
+	res, err = Run(context.Background(), r, src, filepath.Join(dir, "measured.opus"),
+		Spec{Codec: media.CodecOpus, Keep: KeepCodec, Loudness: &Loudness{Apply: false}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OutputPath == "" || res.Transcoded || !res.LoudnessMeasured {
+		t.Errorf("a measure-only kept opus: path=%q transcoded=%v measured=%v, want the copy written and measured", res.OutputPath, res.Transcoded, res.LoudnessMeasured)
+	}
 }
 
-// The chosen-container bit is a fallback, so it never makes a spec that
-// would have been written fail. Two sources take the family encoder rather
-// than the copy the container rule would otherwise reach for: PCM, whose
-// packets belong to their container and cannot move, and an output naming
-// no container at all, where there is no rule to apply and the muxer comes
-// from the format.
+// A fold takes the encoder, and it takes the codec the caller named rather
+// than the source's family: aac on an HE-AAC source folds to AAC-LC, while
+// the same request without a fold, or with a fold that has nothing to
+// fold, keeps the HE-AAC packets, which WaxFlow copies under aac's name.
+func TestRunKeepCodecFoldsWithTheNamedCodec(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	he := synthSine(t, dir, "src.m4a", 2, "he-aac")
+	kept, err := Run(context.Background(), r, he, filepath.Join(dir, "kept.m4a"), Spec{Codec: media.CodecAAC, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Transcoded || kept.OutputCodec != media.CodecCopy {
+		t.Errorf("aac on he-aac: transcoded=%v codec=%v, want the copy", kept.Transcoded, kept.OutputCodec)
+	}
+	inert, err := Run(context.Background(), r, he, filepath.Join(dir, "inert.m4a"), Spec{Codec: media.CodecAAC, Keep: KeepCodec, Downmix: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inert.Transcoded {
+		t.Errorf("a fold to the source's own width re-encoded")
+	}
+	folded, err := Run(context.Background(), r, he, filepath.Join(dir, "mono.m4a"), Spec{Codec: media.CodecAAC, Keep: KeepCodec, Downmix: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !folded.Transcoded || folded.OutputCodec != media.CodecAAC {
+		t.Errorf("a real fold: transcoded=%v codec=%v, want the named aac encoder", folded.Transcoded, folded.OutputCodec)
+	}
+	up, err := Run(context.Background(), r, he, filepath.Join(dir, "up.m4a"), Spec{Codec: media.CodecHEAAC, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Transcoded {
+		t.Errorf("he-aac named on an he-aac source re-encoded")
+	}
+	lc := synthSine(t, dir, "lc.m4a", 2, "aac")
+	down, err := Run(context.Background(), r, lc, filepath.Join(dir, "down.m4a"), Spec{Codec: media.CodecHEAAC, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !down.Transcoded || down.OutputCodec != media.CodecHEAAC {
+		t.Errorf("he-aac named on an aac-lc source: transcoded=%v codec=%v, want the encode", down.Transcoded, down.OutputCodec)
+	}
+}
+
+// An accurate cut, or a crossfade, whose codec is still Copy after the fold
+// promotion (a downmix asked for on a source already at that width, which
+// is the one shape the facade waives its refusal for) is promoted to the
+// family encoder rather than copied; an explicit copy format asked for two
+// things at once and is refused.
+func TestRunAccurateCutNeverCopiesThroughTheDownmixRoute(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	src := synthSine(t, dir, "src.opus", 2, "opus")
+	keep := []cutrange.Range{{Start: 500 * time.Millisecond, End: time.Second}}
+	for _, tc := range []struct {
+		name string
+		spec Spec
+	}{
+		{"accurate", Spec{Remove: keep, CutMode: media.ModeAccurate, Downmix: 2}},
+		{"crossfade", Spec{Remove: keep, Crossfade: 50 * time.Millisecond, Downmix: 2}},
+	} {
+		res, err := Run(context.Background(), r, src, filepath.Join(dir, tc.name+".opus"), tc.spec, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !res.Transcoded || res.OutputCodec != media.CodecOpus || res.CutMode != media.ModeAccurate {
+			t.Errorf("%s: transcoded=%v codec=%v mode=%v, want the family decode", tc.name, res.Transcoded, res.OutputCodec, res.CutMode)
+		}
+		tc.spec.Remux = true
+		if _, err := Run(context.Background(), r, src, filepath.Join(dir, tc.name+"-copy.opus"), tc.spec, nil); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+			t.Errorf("%s with an explicit copy: err = %v, want ErrIncompatibleSpec", tc.name, err)
+		}
+	}
+}
+
+// A keep is a fallback, so it never makes a spec that would have been
+// written fail. Two sources take the family encoder rather than the copy the
+// container rule would otherwise reach for: PCM, whose packets belong to
+// their container and cannot move, and an output naming no container at all,
+// where there is no rule to apply and the muxer comes from the format. A
+// named codec is kept on the same terms, except that it matches on codecs
+// alone, so an extensionless output is a copy under it.
 func TestRunContainerChosenNeverRefusesWhatItCannotKeep(t *testing.T) {
 	dir := t.TempDir()
 	r := newTestRunner(t)
@@ -1454,7 +1691,7 @@ func TestRunContainerChosenNeverRefusesWhatItCannotKeep(t *testing.T) {
 	// Matroska carries PCM through WaxFlow's wav row, so the container rule
 	// keeps the source; a copy of it would be declined by the remux.
 	out := filepath.Join(dir, "pcm.mka")
-	res, err := Run(context.Background(), r, wav, out, Spec{Codec: media.CodecOpus, ContainerChosen: true}, nil)
+	res, err := Run(context.Background(), r, wav, out, Spec{Codec: media.CodecOpus, Keep: KeepContainer}, nil)
 	if err != nil {
 		t.Fatalf("PCM into .mka: %v", err)
 	}
@@ -1471,12 +1708,31 @@ func TestRunContainerChosenNeverRefusesWhatItCannotKeep(t *testing.T) {
 	// and its own muxer writes the file.
 	opus := synthSine(t, dir, "in.opus", 1, "opus")
 	bare := filepath.Join(dir, "bare")
-	res, err = Run(context.Background(), r, opus, bare, Spec{Codec: media.CodecOpus, ContainerChosen: true}, nil)
+	res, err = Run(context.Background(), r, opus, bare, Spec{Codec: media.CodecOpus, Keep: KeepContainer}, nil)
 	if err != nil {
 		t.Fatalf("an extensionless output: %v", err)
 	}
 	if !res.Transcoded || res.OutputCodec != media.CodecOpus {
 		t.Errorf("transcoded=%v codec=%v, want the format the caller passed", res.Transcoded, res.OutputCodec)
+	}
+
+	// A named codec is kept on the same terms. PCM still takes its bit-exact
+	// encode, since its packets belong to their container; an extensionless
+	// output is a copy, the match being of codecs and the muxer coming from
+	// the codec rather than from the name.
+	res, err = Run(context.Background(), r, wav, filepath.Join(dir, "pcm2.wav"), Spec{Codec: media.CodecWAV, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatalf("a named wav on PCM: %v", err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecWAV {
+		t.Errorf("transcoded=%v codec=%v, want the bit-exact wav encode", res.Transcoded, res.OutputCodec)
+	}
+	res, err = Run(context.Background(), r, opus, filepath.Join(dir, "bare-kept"), Spec{Codec: media.CodecOpus, Keep: KeepCodec}, nil)
+	if err != nil {
+		t.Fatalf("a named opus into an extensionless output: %v", err)
+	}
+	if res.Transcoded || res.OutputCodec != media.CodecCopy {
+		t.Errorf("transcoded=%v codec=%v, want the copy", res.Transcoded, res.OutputCodec)
 	}
 }
 

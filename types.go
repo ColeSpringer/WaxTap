@@ -336,11 +336,24 @@ const (
 	FormatAPE
 )
 
-// TranscodeSpec requests re-encoding. An explicit FormatCopy remuxes (container
-// copy, no re-encode) into the destination container; a nil TranscodeSpec
-// keeps the selected source bytes untouched.
+// TranscodeSpec names the output codec. Format's encoder runs unless the
+// source is already in Format (see Force); an explicit FormatCopy remuxes
+// (container copy, no re-encode) into the destination container; a nil
+// TranscodeSpec keeps the selected source bytes untouched. Split and
+// ProcessAlbum always run the encoder Format names.
 type TranscodeSpec struct {
-	// Format selects the output preset.
+	// Format is the codec to deliver. A source already in it, as the run
+	// finds it once the file is staged and probed, is kept: a copy into
+	// Format's container when nothing else needs the encoder, Format's
+	// encoder when Bitrate (on a codec that takes one), BitDepth (on a
+	// lossless codec), a downmix that folds, a loudness apply, an accurate
+	// cut, or a crossfade does. Result.Transcoded reports the copy as false,
+	// and a measure-only run writes it where it wrote an encode. An AAC-LC
+	// request keeps an HE-AAC source, which WaxFlow copies under its own
+	// identity; the reverse encodes. A WAV or AIFF request on a PCM source
+	// runs the bit-exact encode, since PCM packets belong to their
+	// container. A copy into raw ADTS (.aac) can raise [WarnGaplessDropped]
+	// like any copy.
 	Format TranscodeFormat
 	// Bitrate is the target bits per second for lossy presets (e.g. 256000).
 	// Zero selects the preset default. Ignored by lossless presets.
@@ -357,16 +370,20 @@ type TranscodeSpec struct {
 	// rejected with ErrIncompatibleSpec even on a preset that would ignore it,
 	// because it is a mistake about a value the caller believes will apply.
 	BitDepth int
+	// Force runs Format's encoder even when the source is already in Format,
+	// which is otherwise kept; see Format. It overrides FromContainer.
+	// FormatCopy has no encoder to force, so the pair is refused with
+	// ErrIncompatibleSpec.
+	Force bool
 	// FromContainer says the output's container picked Format rather than
 	// the caller: the encoder an output named by extension alone runs when
 	// the source codec is not known up front (a URL, whose codec only the
 	// download settles). The run then keeps the source codec wherever the
-	// container carries it, as a copy when nothing else needs an encode and
-	// as the same-family encoder when Bitrate, BitDepth, or a loudness apply
-	// does (an Opus source normalizing under PeakCap takes the header gain
-	// and stays Opus), and encodes to Format only when the container cannot.
-	// A lossy encode that runs this way is reported as [WarnImplicitLossy];
-	// a caller that wants Format regardless leaves this false.
+	// container carries it, on the terms Format keeps a source already in
+	// it, and encodes to Format only when the container cannot. A lossy
+	// encode that runs this way is reported as [WarnImplicitLossy]; a caller
+	// that wants Format's encoder regardless sets Force, whose encode is its
+	// own.
 	FromContainer bool
 }
 
@@ -969,8 +986,19 @@ const (
 	// gapless trim (raw ADTS): the packets moved unchanged, so the encoder
 	// delay and padding the source's container hid play as audio, and the
 	// file states no length. The detail counts the samples. An encode does
-	// not raise it, since decoding applies the trim.
+	// not raise it, since decoding applies the trim. A named aac format that
+	// kept an AAC delivery into .aac is such a copy.
 	WarnGaplessDropped
+	// WarnCutDecoded reports a smart cut that could not copy packets and
+	// decoded a lossy source, re-encoding it in its own family: a second
+	// generation the request never asked for, since a smart cut names no
+	// encode and a named format the source was already in asked for a
+	// copy. The detail names the encoder, the reason (a codec that cannot
+	// be cut in place, an HE-AAC cut past the stream start, a raw ADTS
+	// destination, or a cut shape WaxFlow declined), and what would avoid
+	// it. A lossless fallback loses nothing and is not reported; neither
+	// is a decode the request named (an accurate cut, a crossfade).
+	WarnCutDecoded
 )
 
 func (w WarningCode) String() string {
@@ -1029,6 +1057,8 @@ func (w WarningCode) String() string {
 		return "watch-page-no-token"
 	case WarnGaplessDropped:
 		return "gapless-dropped"
+	case WarnCutDecoded:
+		return "cut-decoded"
 	default:
 		return "unknown"
 	}

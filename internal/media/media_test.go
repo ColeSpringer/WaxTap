@@ -346,6 +346,9 @@ func TestRenderCutRemuxOpusIsLossless(t *testing.T) {
 	if res.Levels != (Levels{}) {
 		t.Errorf("cut-remux Levels = %+v, want zero (a packet copy re-derives no samples)", res.Levels)
 	}
+	if res.Declined != NotDeclined {
+		t.Errorf("Declined = %v, want NotDeclined: the packets were copied", res.Declined)
+	}
 }
 
 func TestRenderCutReportsLevels(t *testing.T) {
@@ -389,6 +392,51 @@ func TestRenderCutFlacFallsBackToReencode(t *testing.T) {
 	}
 	if a, _ := mustProbe(t, r, out).AudioStream(); a.CodecName != "flac" {
 		t.Errorf("re-encoded codec = %q, want flac", a.CodecName)
+	}
+	if res.Declined != DeclinedCodec {
+		t.Errorf("Declined = %v, want DeclinedCodec", res.Declined)
+	}
+}
+
+// A smart cut reports why it decoded: MP3 packets cannot be cut in place,
+// an HE-AAC packet cut must keep the stream start, raw ADTS cannot state
+// the trims an AAC cut synthesizes. The copy that ran reports nothing.
+func TestRenderCutReportsWhyTheCopyDeclined(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRunner(RunnerConfig{})
+	keeps := []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}, {Start: 1200 * time.Millisecond, End: 2 * time.Second}}
+	render := func(in, out string, enc Codec, keeps []cutrange.Range) CutResult {
+		t.Helper()
+		res, err := r.Render(context.Background(), in, filepath.Join(dir, out), CutSpec{
+			Keeps: keeps, Total: 2 * time.Second, CopyCut: true, Encode: Spec{Codec: enc}})
+		if err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+		return res
+	}
+	if res := render(encodedFixture(t, dir, CodecMP3), "mp3.mp3", CodecMP3, keeps); res.Mode != ModeAccurate || res.Declined != DeclinedCodec {
+		t.Errorf("mp3: mode %v declined %v, want a decode declined by the codec", res.Mode, res.Declined)
+	}
+	if res := render(encodedFixture(t, dir, CodecFLAC), "flac.flac", CodecFLAC, keeps); res.Declined != DeclinedCodec {
+		t.Errorf("flac: declined %v, want the codec", res.Declined)
+	}
+	m4a := filepath.Join(dir, "src.m4a") // progressive MP4, whose edit list states the delay a cut carries
+	if _, err := r.Transcode(context.Background(), wavFixture(t, 2, 2), m4a, Spec{Codec: CodecAAC}); err != nil {
+		t.Fatal(err)
+	}
+	if res := render(m4a, "adts.aac", CodecAAC, keeps); res.Mode != ModeAccurate || res.Declined != DeclinedContainer {
+		t.Errorf("aac into .aac: mode %v declined %v, want a decode the destination declined", res.Mode, res.Declined)
+	}
+	if res := render(m4a, "kept.m4a", CodecAAC, keeps); res.Mode != ModeCopy || res.Declined != NotDeclined {
+		t.Errorf("aac into .m4a: mode %v declined %v, want the copy", res.Mode, res.Declined)
+	}
+	he := filepath.Join(dir, "he.m4a")
+	if _, err := r.Transcode(context.Background(), wavFixture(t, 2, 2), he, Spec{Codec: CodecHEAAC}); err != nil {
+		t.Fatal(err)
+	}
+	mid := []cutrange.Range{{Start: 500 * time.Millisecond, End: 2 * time.Second}}
+	if res := render(he, "mid.m4a", CodecHEAAC, mid); res.Mode != ModeAccurate || res.Declined != DeclinedStreamStart {
+		t.Errorf("he-aac past the start: mode %v declined %v, want a decode declined by the stream start", res.Mode, res.Declined)
 	}
 }
 
@@ -481,10 +529,76 @@ func TestContainerAcceptsTable(t *testing.T) {
 		{"wv", "wavpack", true}, {"wv", "flac", false}, {"wv", "ape", false},
 		{"ape", "ape", true}, {"ape", "wavpack", false},
 		{"mka", "wavpack", false}, {"mka", "ape", false},
+		// WaxFlow's wav row registers four spellings and its mp3 row two; a
+		// spelling one table missed would collect the wrong bytes under the
+		// right name.
+		{"wave", "pcm", true}, {"rf64", "pcm", true}, {"bw64", "pcm", true},
+		{"wave", "opus", false}, {"rf64", "opus", false}, {"bw64", "opus", false},
+		{"wave", "aiff", false},
+		{"mpga", "mp3", true}, {"mpga", "opus", false},
 	}
 	for _, c := range cases {
 		if got := ContainerAccepts(c.ext, c.codec); got != c.want {
 			t.Errorf("ContainerAccepts(%q,%q) = %v, want %v", c.ext, c.codec, got, c.want)
+		}
+	}
+}
+
+// Every spelling WaxFlow writes is one WaxTap infers, so an output named
+// with it is constrained by its name rather than force-muxed under it (a
+// FLAC under out.rf64). The container overrides WaxFlow reaches through a
+// format row's container func are not in Outputs and are pinned by hand.
+func TestInferableContainersCoverWaxFlowsOutputs(t *testing.T) {
+	for _, o := range waxflow.Outputs() {
+		for _, ext := range o.Exts {
+			if !inferableContainers[ext] {
+				t.Errorf(".%s (WaxFlow's %s row) is not inferable", ext, o.Name)
+			}
+			if _, ok := ContainerCodec(ext); !ok {
+				t.Errorf(".%s names no usual encoder", ext)
+			}
+			if c, _ := ContainerCodec(ext); !ContainerAccepts(ext, c.String()) && c != CodecWAV && c != CodecAIFF {
+				t.Errorf(".%s does not accept its own usual encoder %v", ext, c)
+			}
+		}
+	}
+	for _, ext := range []string{"mka", "mkv", "webm", "mp4"} {
+		if !inferableContainers[ext] {
+			t.Errorf(".%s is not inferable", ext)
+		}
+	}
+}
+
+// A named codec is kept when the source is already in it: the source's own
+// family encoder is the target, or the target is AAC-LC and the source is
+// HE-AAC, which WaxFlow copies under its own identity. The reverse is an
+// encode, PCM matches whichever of WAV and AIFF the output names, and an
+// unknown source matches nothing.
+func TestSourceMatchesNamesTheSameFamily(t *testing.T) {
+	cases := []struct {
+		source string
+		target Codec
+		ext    string
+		want   bool
+	}{
+		{"opus", CodecOpus, "opus", true},
+		{"opus", CodecOpus, "mka", true},
+		{"opus", CodecOpus, "", true},
+		{"he-aac", CodecAAC, "m4a", true},
+		{"aac", CodecHEAAC, "m4a", false},
+		{"he-aac", CodecHEAAC, "m4a", true},
+		{"mp3", CodecOpus, "opus", false},
+		{"pcm_s16le", CodecWAV, "wav", true},
+		{"pcm_s16le", CodecAIFF, "aiff", true},
+		{"pcm_s16le", CodecWAV, "aiff", false},
+		{"flac", CodecFLAC, "flac", true},
+		{"wma", CodecMP3, "mp3", false},
+		{"", CodecOpus, "opus", false},
+		{"opus", CodecCopy, "opus", false},
+	}
+	for _, tc := range cases {
+		if got := SourceMatches(tc.source, tc.target, tc.ext); got != tc.want {
+			t.Errorf("SourceMatches(%q, %v, %q) = %v, want %v", tc.source, tc.target, tc.ext, got, tc.want)
 		}
 	}
 }
@@ -1082,6 +1196,36 @@ func TestRenderRequireCopyHEAACMidStream(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stream start") {
 		t.Errorf("err = %v, want it to name HE-AAC's head-only constraint", err)
+	}
+	// The one reason that applied, not a catalogue of every reason a copy
+	// cut can decline: the destination was never in question here.
+	if strings.Contains(err.Error(), "ADTS") {
+		t.Errorf("err = %v, want it to name only the reason that applied", err)
+	}
+}
+
+// Each explicit copy request is refused in the terms of the reason that
+// actually applied: the codec for an MP3, the cut's shape for a span holding
+// no whole packet, and copy-exact says the same in its own words.
+func TestRenderRequireCopyNamesTheReason(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	keeps := []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}, {Start: 1200 * time.Millisecond, End: 2 * time.Second}}
+	_, err := r.Render(context.Background(), encodedFixture(t, dir, CodecMP3), filepath.Join(dir, "a.mp3"), CutSpec{
+		Keeps: keeps, Total: 2 * time.Second, CopyCut: true, RequireCopyCutMode: true, Encode: Spec{Codec: CodecMP3}})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec", err)
+	}
+	if !strings.Contains(err.Error(), "cannot be cut in place") || strings.Contains(err.Error(), "stream start") {
+		t.Errorf("err = %v, want the codec reason alone", err)
+	}
+	_, err = r.Render(context.Background(), encodedFixture(t, dir, CodecMP3), filepath.Join(dir, "b.mka"), CutSpec{
+		Keeps: keeps, Total: 2 * time.Second, CopyCut: true, SpliceTrims: true, Encode: Spec{Codec: CodecMP3}})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("copy-exact err = %v, want ErrIncompatibleSpec", err)
+	}
+	if !strings.Contains(err.Error(), "cannot be cut in place") {
+		t.Errorf("copy-exact err = %v, want the codec reason named", err)
 	}
 }
 
@@ -1845,6 +1989,9 @@ func TestRenderCopyCutDeclinesASpanWithNoWholePacket(t *testing.T) {
 	res := render(t, "interior.opus", []cutrange.Range{{Start: 0, End: time.Second}, narrow, {Start: 2 * time.Second, End: 3 * time.Second}})
 	if res.Mode != ModeAccurate {
 		t.Errorf("interior: mode = %v, want ModeAccurate (the copy rung declined)", res.Mode)
+	}
+	if res.Declined != DeclinedCut {
+		t.Errorf("interior: Declined = %v, want DeclinedCut", res.Declined)
 	}
 	if res.Snaps != 0 || !slices.Equal(res.Keeps, []cutrange.Range{{Start: 0, End: time.Second}, narrow, {Start: 2 * time.Second, End: 3 * time.Second}}) {
 		t.Errorf("interior: Keeps = %v, Snaps = %d, want the request back from a re-encode", res.Keeps, res.Snaps)

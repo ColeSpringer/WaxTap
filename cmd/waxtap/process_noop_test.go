@@ -538,3 +538,57 @@ func TestTranscodePCMSameContainerCopies(t *testing.T) {
 		t.Errorf("wav to aiff should re-encode; PCM's layout belongs to its container:\n%s", stdout)
 	}
 }
+
+// keptDelivery answers for a URL result the pipeline wrote by keeping the
+// delivery. A loudness apply is excluded because a kept Opus riding the
+// header gain is normalized, not remuxed, and the note's remedy would sit
+// beside a loudness line; a local file has the shortcut's own note, and a
+// stream to stdout has no path to name.
+func TestKeptDeliveryAnswersForAKeptURLResult(t *testing.T) {
+	base := func() *waxtap.Result {
+		return &waxtap.Result{
+			SourceKind:   waxtap.SourceYouTube,
+			SourceFormat: waxtap.Format{Codec: "opus"},
+			OutputPath:   "x.opus",
+		}
+	}
+	if !keptDelivery(base()) {
+		t.Error("a kept delivery answered false")
+	}
+	for _, tc := range []struct {
+		name string
+		mut  func(*waxtap.Result)
+	}{
+		{"transcoded", func(r *waxtap.Result) { r.Transcoded = true }},
+		{"normalized", func(r *waxtap.Result) { r.LoudnessApplied = true }},
+		{"a local file", func(r *waxtap.Result) { r.SourceKind = waxtap.SourceLocalFile }},
+		{"a stream", func(r *waxtap.Result) { r.OutputPath = "" }},
+	} {
+		res := base()
+		tc.mut(res)
+		if keptDelivery(res) {
+			t.Errorf("%s answered true", tc.name)
+		}
+	}
+	if keptDelivery(nil) {
+		t.Error("a nil result answered true")
+	}
+}
+
+// The note names the output's container when the path has one, and the
+// request's own --format when it does not: "already what . holds" names
+// nothing at all.
+func TestKeptTargetNamesTheContainerOrTheFormat(t *testing.T) {
+	for _, tc := range []struct {
+		path, format, want string
+	}{
+		{"/tmp/a.opus", "", ".opus"},
+		{"/tmp/a.mka", "opus", ".mka"},
+		{"/tmp/a", "opus", "--format opus"},
+		{"/tmp/a.alac", "alac", ".alac"},
+	} {
+		if got := keptTarget(tc.path, tc.format); got != tc.want {
+			t.Errorf("keptTarget(%q, %q) = %q, want %q", tc.path, tc.format, got, tc.want)
+		}
+	}
+}

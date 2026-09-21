@@ -74,6 +74,29 @@ type Loudness struct {
 	PeakLimit bool
 }
 
+// Keep is what the caller lets the keep rule keep, once the staged source
+// can be seen. The facade derives it from TranscodeSpec: Force gives
+// KeepNone, FromContainer gives KeepContainer, any other named format
+// KeepCodec, so the pipeline never holds two answers at once.
+type Keep uint8
+
+const (
+	// KeepNone: Codec is an encoder to run, whatever the source is in.
+	KeepNone Keep = iota
+	// KeepCodec: Codec is a codec to deliver, so a source already in it
+	// (media.SourceMatches) is kept: a copy when nothing else needs the
+	// encoder, Codec's encoder when Bitrate, BitDepth, a fold, a loudness
+	// apply, an accurate cut, or a crossfade does.
+	KeepCodec
+	// KeepContainer: Codec is the output container's usual encoder, chosen
+	// because the caller named an extension and could not see the source (a
+	// URL, whose codec only the download settles). The container keeps
+	// whatever it carries, on KeepCodec's terms, and encodes to Codec
+	// otherwise (media.OutputCodecFor). Ignored when Codec is CodecCopy,
+	// which takes the copy rule on its own.
+	KeepContainer
+)
+
 // Spec describes the processing to perform. The zero value is a pass-through:
 // nothing to cut, copy the source codec, no loudness work, which Run reports as
 // no output produced.
@@ -104,16 +127,9 @@ type Spec struct {
 	// re-encode or cut already runs.
 	Remux bool
 
-	// ContainerChosen says Codec is the output container's usual encoder,
-	// chosen because the caller named an extension and could not see the
-	// source (a URL, whose codec only the download settles). Run then
-	// applies the container rule to the staged source's real codec: a
-	// container that carries it keeps it, as a copy when nothing else needs
-	// an encode and as the same-family encoder when Bitrate, BitDepth, or a
-	// loudness apply does; a container that cannot carry it encodes to
-	// Codec. Ignored when Codec is CodecCopy, which takes the copy rule
-	// below on its own.
-	ContainerChosen bool
+	// Keep says what Run's keep rule may keep once the staged source is
+	// probed; the zero value keeps nothing, so Codec is an encoder to run.
+	Keep Keep
 
 	// Loudness controls measurement/normalization. Nil means no loudness work.
 	Loudness *Loudness
@@ -178,8 +194,13 @@ type Result struct {
 	// CutSnaps counts the interior joins a packet copy moved inward to the
 	// packet grid and CutSnapMax is the largest single move; both zero for a
 	// decode and for a copy whose edges already sat on the grid.
-	CutSnaps         int
-	CutSnapMax       time.Duration
+	CutSnaps   int
+	CutSnapMax time.Duration
+	// CutDeclined says why a cut that would have copied packets decoded
+	// instead (media.CopyDecline); NotDeclined when the copy ran, or when
+	// the spec named an encode and no copy was in question. The fallback's
+	// encoder is OutputCodec.
+	CutDeclined      media.CopyDecline
 	Transcoded       bool        // a re-encode ran (not a container copy)
 	OutputCodec      media.Codec // codec written to OutputPath
 	LoudnessMeasured bool        // input loudness was measured
@@ -362,41 +383,80 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	res.SourceNotes = slices.Clone(probe.Notes)
 	res.SourceEmpty = sourceEmpty
 
-	// The container chose the codec, before the source could be seen. Now
-	// that it can, the rule the caller would have applied runs against the
-	// real codec (media.OutputCodecFor): a container that carries it keeps
-	// it, so an Opus download into .ogg or .mka stays Opus and a normalize
-	// of it can take the header gain below, and one that cannot takes the
-	// encoder the caller passed, which is that container's own.
-	if spec.ContainerChosen && transcoding {
-		// An extension naming no container WaxTap writes is left to the
-		// caller's format, which then picks the muxer, exactly as the copy
-		// rule below leaves such a path alone (media.needsForcedMuxer). The
-		// bit is a fallback, so it never turns a spec that would have been
-		// written into a refusal; CheckOutputContainer refuses the names
-		// that must be refused, before the pipeline is reached.
-		c, kept, cerr := media.OutputCodecFor(containerExt(output), res.SourceCodec)
+	// Reduce the channel count only when the source exceeds the requested target.
+	fold := 0
+	if spec.Downmix > 0 && srcChannels > spec.Downmix {
+		fold = spec.Downmix
+	}
+
+	// A decode the request named: accurate by name, a crossfade because it
+	// blends across each join. Neither may be delivered as a packet copy, so
+	// the keep rule and the promotion below both take the encoder, and the
+	// copy rule's "choose a container" refusal is not theirs to raise.
+	namedDecode := effectiveCut && (spec.CutMode == media.ModeAccurate || spec.Crossfade > 0)
+
+	// keptNamed is the codec a KeepCodec match turned into a copy. A copy cut
+	// that declines falls back to it rather than to the source's own family,
+	// which the two differ over for one pair: an aac request keeps an HE-AAC
+	// source, and a decode owes the caller the AAC-LC they named. CodecCopy
+	// means the caller named nothing, where the source family is the answer.
+	keptNamed := media.CodecCopy
+
+	// The staged source's real codec is known now, so the keep rule runs
+	// here: a source an encode would deliver unchanged is kept, as a copy
+	// when nothing else needs the encoder and as the encoder when a knob it
+	// honours, a fold, a gain, or a cut promised a decode does. Which
+	// sources qualify is the caller's choice. A codec the caller named
+	// (KeepCodec) keeps a source already in it, so an Opus delivery into
+	// .opus is a copy, which the CLI's same-format shortcut already gives a
+	// local file and nothing could give a URL before the download. A
+	// container the caller named (KeepContainer) keeps whatever it carries
+	// and takes its own encoder otherwise, the container rule
+	// (media.OutputCodecFor). KeepNone is the caller asking for the encoder
+	// regardless.
+	if transcoding && spec.Keep != KeepNone {
+		c, kept := spec.Codec, media.SourceMatches(res.SourceCodec, spec.Codec, containerExt(output))
+		if spec.Keep == KeepContainer {
+			// An extension naming no container WaxTap writes is left to the
+			// caller's format, which then picks the muxer, exactly as the copy
+			// rule below leaves such a path alone (media.needsForcedMuxer). The
+			// bit is a fallback, so it never turns a spec that would have been
+			// written into a refusal; CheckOutputContainer refuses the names
+			// that must be refused, before the pipeline is reached.
+			if cc, k, cerr := media.OutputCodecFor(containerExt(output), res.SourceCodec); cerr == nil {
+				c, kept = cc, k
+			} else {
+				kept = false
+			}
+		}
 		switch {
-		case cerr != nil:
-			// Nothing to apply the rule against; spec.Codec stands.
 		case !kept:
 			spec.Codec = c
 		case c == media.CodecWAV || c == media.CodecAIFF:
-			// The container carries the source, but the source is PCM,
-			// whose sample layout belongs to its container: the packets
-			// cannot move unchanged (media.Runner.remux declines every PCM
-			// copy, remuxDeclined). The family row is an encode, and a PCM
-			// encode is bit exact, so nothing is lost by taking it.
+			// The target carries the source, but the source is PCM, whose
+			// sample layout belongs to its container: the packets cannot
+			// move unchanged (media.Runner.remux declines every PCM copy,
+			// remuxDeclined). The family row is an encode, and a PCM encode
+			// is bit exact, so nothing is lost by taking it.
 			spec.Codec = c
-		case (spec.Bitrate > 0 && media.TakesBitRate(c)) || (spec.BitDepth > 0 && c.IsLossless()) || apply:
+		case (spec.Bitrate > 0 && media.TakesBitRate(c)) || (spec.BitDepth > 0 && c.IsLossless()) || apply || fold > 0:
 			// Only a knob the family encoder honours forces the encode: a
 			// bit depth on Opus or a bit rate on FLAC is ignored by that
 			// encoder and would buy a generation for nothing, which is what
 			// the CLI's same-format shortcut already decides for a local file
-			// (specChangesAudio). A fold needs nothing here: the downmix
-			// promotion below turns a copy into the family encode itself.
+			// (specChangesAudio).
+			//
+			// A fold takes the encoder here rather than through the downmix
+			// promotion below, so it runs the codec the caller named (aac on
+			// an HE-AAC source folds to AAC-LC) instead of the source's family.
+			spec.Codec = c
+		case namedDecode:
+			// A copy cut would honour neither, and Render never learns the mode.
 			spec.Codec = c
 		default:
+			if spec.Keep == KeepCodec {
+				keptNamed = c
+			}
 			spec.Codec = media.CodecCopy
 			// A copy has no encoder to hand a knob to; an ignored one is
 			// zeroed as the CLI's shortcut zeroes it, so it neither reaches
@@ -413,19 +473,17 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		}
 	}
 
-	// Reduce the channel count only when the source exceeds the requested target.
-	fold := 0
-	if spec.Downmix > 0 && srcChannels > spec.Downmix {
-		fold = spec.Downmix
-	}
-
 	// Resolve container compatibility before choosing an encoder. Automatic
 	// processing may select the container's default codec; an explicitly
 	// requested container copy must fail on an incompatible extension.
 	if spec.Codec == media.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
 		copyOnly := remux || spec.CutMode == media.ModeCopy || spec.CutMode == media.ModeCopyExact
-		noContainer := effectiveCut && fold == 0 && (ext == "" || ext == "copy")
+		// A fold, an accurate cut, and a crossfade all promote to an encoder
+		// below, whose own muxer writes the file, so none of them needs an
+		// extension to name a container. Only a copy does: its packets go
+		// into whatever the name says.
+		noContainer := effectiveCut && fold == 0 && !namedDecode && (ext == "" || ext == "copy")
 		// A source WaxFlow only decodes has no packets any container can carry
 		// unchanged, so every request to keep them fails for the one reason,
 		// ahead of the container checks that would otherwise suggest containers
@@ -473,6 +531,29 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		remux = false
 	}
 
+	// A decode the request named must not become a packet copy. Accurate
+	// mode and a crossfade reach here with the codec still Copy by one
+	// route: the facade waives its "pass --format" refusal when a downmix is
+	// asked for, and a fold that turns out to have nothing to fold leaves
+	// the copy standing. Promote the way a fold does, to the source's own
+	// family; an explicit copy format asked for two things at once and is
+	// refused, as Render refuses a crossfade beside --format copy.
+	if namedDecode && spec.Codec == media.CodecCopy {
+		what := "an accurate cut"
+		if spec.Crossfade > 0 {
+			what = "a crossfade"
+		}
+		if remux {
+			return Result{}, fmt.Errorf("%w: %s needs a decode, which --format copy forbids; drop one", waxerr.ErrIncompatibleSpec, what)
+		}
+		c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output))
+		if !ok {
+			return Result{}, fmt.Errorf("%w: cannot decode %s of %s without a transcode target (pass --format)", waxerr.ErrIncompatibleSpec, what, sourceCodecLabel(res.SourceCodec))
+		}
+		spec.Codec = c
+		transcoding = true
+	}
+
 	// An explicit copy cut cannot ride along with an encode. The facade rejects the
 	// --format form before any download, but this also catches the route it cannot
 	// see: the downmix branch above sets spec.Codec without consulting CutMode, so
@@ -493,9 +574,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		return Result{}, fmt.Errorf("%w: loudness apply requires a transcode target, not copy", waxerr.ErrIncompatibleSpec)
 	}
 
-	// A copy cut that survived container resolution stays lossless: WaxTap
-	// cut-remuxes it (kept codec, byte-identical packets) and re-encodes only if
-	// WaxFlow declines the source codec.
+	// A copy cut is one neither the keep rule nor the guard above turned into
+	// an encode, so it is never accurate and never crossfaded. It stays
+	// lossless: WaxTap cut-remuxes it (kept codec, byte-identical packets)
+	// and re-encodes only if the copy declines.
 	copyCut := effectiveCut && spec.Codec == media.CodecCopy
 
 	// A gain the Opus header can carry: cap mode's one scalar, on an Opus
@@ -615,9 +697,15 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			send(StageCutting)
 			fallback := enc
 			if copyCut {
-				// The re-encode fallback (when cut-remux declines the source codec)
-				// keeps the source family, staying lossless for a lossless source.
-				if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
+				// The re-encode fallback (when the packet copy declines, for
+				// whatever reason Render reports on Declined) keeps the source
+				// family, staying lossless for a lossless source. A codec the
+				// caller named wins over the family: that is what they asked
+				// to be delivered, and the copy was only the cheaper way to
+				// deliver it.
+				if keptNamed != media.CodecCopy {
+					fallback.Codec = keptNamed
+				} else if c, ok := sourceEncodeCodec(res.SourceCodec, containerExt(output)); ok {
 					fallback.Codec = c
 				}
 			}
@@ -640,10 +728,11 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			res.Keeps = cres.Keeps
 			res.CutMode = cres.Mode
 			res.CutSnaps, res.CutSnapMax = cres.Snaps, cres.SnapMax
+			res.CutDeclined = cres.Declined
 			res.Levels = cres.Levels
 			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, cres.InputWarnings)
-			// A copy cut that fell back to a re-encode (cut-remux declined the source
-			// codec) reports the encode it actually produced.
+			// A copy cut that fell back to a re-encode (the packet copy declined;
+			// res.CutDeclined says why) reports the encode it actually produced.
 			if copyCut && cres.Mode == media.ModeAccurate {
 				transcoding = true
 				spec.Codec = fallback.Codec

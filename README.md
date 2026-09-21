@@ -93,10 +93,11 @@ waxtap doctor
 `resolved.*`; treat that output as sensitive. `info --full` adds publish date
 and chapters via a token-free watch-page fetch.
 
-`transcode` and `normalize` also take directories: `-r` recurses, `--dir` sets
-an output directory, and `--force` re-encodes files already in the target
-codec, naming the container's encoder for an output named by extension alone,
-so `implicit-lossy` is not raised.
+`transcode` and `normalize` also take directories: `-r` recurses and `--dir`
+sets an output directory. `transcode --force` re-encodes an input already in
+the target codec, naming the container's encoder for an output named by
+extension alone, so `implicit-lossy` is not raised; it names an encoder, so it
+cannot pair with `--format copy`.
 
 Album normalization applies one gain to every track: `--peak-mode cap`
 leaves the true-peak limiter idle and reproduces the input's track-to-track
@@ -124,7 +125,11 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   moves inward to the packet grid, so up to one frame (20 ms Opus, 21 to 23 ms
   AAC) of wanted audio is missing at each join and nothing from a removed span
   is delivered; the run reports it as `cut-snapped`, and `--json` carries
-  `cutMode`, `cutSnaps`, and `cutSnapMaxMs`. `copy-exact` keeps the copy and
+  `cutMode`, `cutSnaps`, and `cutSnapMaxMs`. `smart` on any other source (MP3,
+  Vorbis, FLAC, ALAC, WavPack, APE, PCM) decodes and re-encodes in the source's
+  own family: bit exact for a lossless source, and for a lossy one a second
+  generation, which is the case reported as `cut-decoded`. A copy into raw
+  ADTS (`.aac`), which cannot state the cut's trims, decodes the same way. `copy-exact` keeps the copy and
   makes each interior tail exact, with the decoder converged across the join,
   through per-packet trims that only `.mka`/`.mkv`/`.webm` can carry (Firefox
   rejects such a file; other players honour it); the heads still land within one
@@ -152,19 +157,25 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   encoding, so it overrides `--channels`; the run prints a note when the
   delivered layout is not the one asked for.
 - An output extension names a container. Without `--format`, a format-named
-  extension (`.flac`, `.mp3`, `.opus`, `.wav`, `.aiff`, `.wv`, `.ape`) selects
-  that format; a container that holds several codecs (`.ogg`/`.oga`,
+  extension (`.flac`, `.mp3` (`.mpga`), `.opus`, `.wav` (`.wave`, `.rf64`,
+  `.bw64`), `.aiff`, `.wv`, `.ape`) selects that format; a container that holds several codecs (`.ogg`/`.oga`,
   `.mka`/`.mkv`, `.webm`, `.mp4`/`.m4a`/`.m4b`, `.aac`) keeps the source codec
   when it can carry it (a copy, or under `normalize --peak-mode cap` the Opus
   header gain) and otherwise runs the container's usual encoder (`.ogg` Vorbis,
   `.mka`/`.webm` Opus, `.mp4` AAC), reported as `implicit-lossy`. A URL's codec
   is checked after the download, so `transcode <url> out.mka` copies an Opus
   stream, cuts it at the packet grid like `cut` does when a cut is asked for,
-  and `out.m4a` encodes it. `--format ogg` still means Vorbis.
+  and `out.m4a` encodes it. `--format ogg` still means Vorbis. A format-named
+  extension, or `--format`, names the codec to deliver: a source already in it
+  is copied rather than re-encoded, a URL's once the download is staged, so
+  `transcode <url> out.opus` and `download --format opus` keep an Opus delivery
+  and say so; `--force` is the request to encode it anyway. An accurate cut, a
+  crossfade, and a fold always run the encoder.
 - `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
   Names are case-insensitive and trimmed, and a few spellings are aliases:
-  `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, `wv` for
-  wavpack, `heaac` for he-aac, and `remux` for copy. `he-aac` encodes HE-AAC v1
+  `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff,
+  `wave`/`rf64`/`bw64` for wav, `mpga` for mp3, `wv` for wavpack, `heaac` for
+  he-aac, and `remux` for copy. `he-aac` encodes HE-AAC v1
   in `.m4a` at 64 kbps by default (a low-bitrate preset; `aac` stays the
   256 kbps AAC-LC one), and `--format aac` on a source that is already HE-AAC
   copies it under its own identity rather than re-encoding it to AAC-LC.
@@ -376,6 +387,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `bitrate-adjusted` | the encoder used the nearest bit rate it supports; the detail names the requested and the delivered rate |
 | `watch-page-no-token` | a WEB run fell back to the watch page, so the PO token it minted was never exercised |
 | `gapless-dropped` | a copy into raw ADTS (`.aac`) delivered the source's encoder delay and padding as audio, since ADTS states no gapless trim and no length |
+| `cut-decoded` | a `smart` cut could not copy packets and decoded a lossy source, re-encoding it in its own family: a second generation; the detail says why (the codec, an HE-AAC cut past the start, raw ADTS, or the cut's shape) |
 
 | Note | Meaning |
 |---|---|
@@ -395,7 +407,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `length-unchecked` | the SponsorBlock preview could not fetch the video's length, so segments were not checked against it |
 | `playlist-ignored` | a playlist URL was passed to a video command; the video was used |
 | `probe-skipped` | `--probe` read nothing: the selected stream is SABR-only |
-| `same-format-copied` | the input is already the target format and was copied; `--force` re-encodes |
+| `same-format-copied` | the input, or the delivery, is already the target format and was copied; `--force` re-encodes (`transcode --force` for a download) |
 | `selection-unmatched` | no audio format matched the requested selection |
 | `sidecar-write-failed` | the `--write-info-json` sidecar could not be written |
 | `unaltered-copy` | the output is a byte-for-byte copy of the source |

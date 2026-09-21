@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
@@ -517,7 +518,11 @@ func newTranscodeCmd() *cobra.Command {
 			"codecs (.ogg, .mka, .webm, .mp4, .m4a, .aac) keeps the source codec when it\n" +
 			"can carry it and otherwise runs its own usual encoder, reported as\n" +
 			"implicit-lossy. A format-named extension (.flac, .mp3, .opus, .wav, .aiff,\n" +
-			".wv, .ape) names that format.\n" +
+			".wv, .ape) names that format.\n\n" +
+			"Either way the format is the codec to deliver: a source already in it is\n" +
+			"copied rather than re-encoded, a URL's once the download is staged, and\n" +
+			"--force is the request to encode it anyway. --downmix still encodes, since\n" +
+			"folding channels needs one.\n\n" +
 			"When both --format and an output extension are given, the extension must be\n" +
 			"a container that can hold the format (for example, mp3 uses .mp3 only, not\n" +
 			".mka or .flac).\n\n" +
@@ -594,6 +599,9 @@ func newTranscodeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if force && tf == waxtap.FormatCopy {
+				return usagef("--force re-encodes, which --format copy never does; drop one")
+			}
 			specLayout, specDownmix := downmixFields(layout, doDownmix)
 			spec := waxtap.ProcessSpec{
 				// FromContainer when the container picked the encoder, which
@@ -601,7 +609,11 @@ func newTranscodeCmd() *cobra.Command {
 				// keeps the source codec if the staged file's container
 				// carries it. --force means an encode, so it names the
 				// container's encoder instead.
-				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept && !force},
+				//
+				// Force is the same flag on the library: the pipeline keeps a
+				// source already in the target, and --force is the request to
+				// encode it anyway.
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept && !force, Force: force},
 				Channels:  specLayout,
 				Downmix:   specDownmix,
 			}
@@ -626,6 +638,11 @@ func newTranscodeCmd() *cobra.Command {
 			// If a local file already uses the requested codec and no other transform
 			// is pending, stream-copy it instead of encoding it again. This avoids
 			// unnecessary work and an extra lossy pass for MP3, AAC, Opus, and Vorbis.
+			//
+			// The pipeline's keep rule reaches the same answer from the staged
+			// file, which is how a URL gets it. This stays for what only a local
+			// probe can do: deliver a PCM source verbatim, where the pipeline
+			// runs the bit-exact encode, and name the file it probed in the note.
 			//
 			// The output path does not constrain this. A remux picks its container
 			// from the source codec and passes the extension only as an override, so a
@@ -695,6 +712,17 @@ func newTranscodeCmd() *cobra.Command {
 				} else {
 					env.note(noteSameFormatCopied, "%s is already %s; copied without re-encoding (use --force to re-encode)", source, probedCodec)
 				}
+			} else if spec.Transcode != nil && spec.Transcode.Format != waxtap.FormatCopy && keptDelivery(res) {
+				// The pipeline kept the delivery: the staged download was
+				// already what the named format, or the named container,
+				// holds. The local shortcut's note names the file it probed;
+				// a delivery is named by its family.
+				//
+				// A path naming no container (extensionless, or a codec name)
+				// constrains nothing, so what the request asked for is its
+				// own --format; inferOutputFormatProbed refuses such a path
+				// without one, so it is always set when the extension is not.
+				keptDeliveryNote(env, res, keptTarget(res.OutputPath, format), "use --force to re-encode")
 			}
 			return emitResult(env, res)
 		},
@@ -725,11 +753,53 @@ func containerExtOf(path string) string {
 	return strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
 }
 
+// keptDelivery reports a URL result the pipeline wrote by keeping the
+// delivery rather than encoding it. Nothing is said for an encode, a
+// loudness apply (a kept Opus riding the header gain is normalized, and the
+// re-encode remedy would sit beside a loudness line), a local file (the
+// shortcut's note), or a stream to stdout, which has no path to name. The
+// caller checks that a format was named.
+func keptDelivery(res *waxtap.Result) bool {
+	return res != nil && res.SourceKind == waxtap.SourceYouTube && !res.Transcoded && !res.LoudnessApplied && res.OutputPath != ""
+}
+
+// keptTarget names what a kept delivery was asked to land in: the output's
+// own container when the path names one, and the request's --format when it
+// does not (an extensionless or codec-named -o path, where nothing
+// constrains the write and the muxer comes from the format).
+func keptTarget(outPath, format string) string {
+	if ext := containerExtOf(outPath); ext != "" {
+		return "." + ext
+	}
+	return "--format " + format
+}
+
+// keptDeliveryNote is what a URL command says when the pipeline kept the
+// delivery rather than encoding it: the family the stream arrived in, what
+// the request asked it to land in, and how to ask for the encode instead.
+// One sentence for both commands, which differ only in those two: transcode
+// names the output's container and has --force, while download names the
+// --format the user typed and points at transcode, having no --force.
+func keptDeliveryNote(env *appEnv, res *waxtap.Result, target, remedy string) {
+	env.note(noteSameFormatCopied, "the delivered %s stream is already what %s holds; remuxed without re-encoding (%s)",
+		deliveredFamily(res), target, remedy)
+}
+
+// deliveredFamily names the codec family of a result's source, for a note
+// that speaks of the delivery rather than of a file on disk. It is a
+// function because the transcode command's --format variable shadows the
+// format package inside its RunE.
+func deliveredFamily(res *waxtap.Result) string {
+	return format.CodecFamily(res.SourceFormat.Codec)
+}
+
 // multiCodecExt reports whether ext names a container that holds several
 // codecs, so the source's own codec decides what the output takes. A
 // format-named extension (.flac, .mp3, .opus, .wav, .aiff, .wv, .ape) names
-// its format and never reaches the probe. .aac and .m4a parse as AAC, and
-// listing them here lets an HE-AAC or ALAC source keep its codec.
+// its format and never reaches the probe here; the pipeline settles what that
+// format does once the source is staged, keeping one already in it. .aac and
+// .m4a parse as AAC, and listing them here lets an HE-AAC or ALAC source keep
+// its codec.
 func multiCodecExt(ext string) bool {
 	switch ext {
 	case "ogg", "oga", "mka", "mkv", "webm", "mp4", "m4a", "m4b", "aac":

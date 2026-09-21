@@ -335,12 +335,30 @@ func TestMeasureNote(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			measureNote(noteEnv(&buf), tc.res)
+			measureNote(noteEnv(&buf), &downloadFlags{}, tc.res)
 			if got := strings.Contains(buf.String(), "unaltered copy"); got != tc.want {
 				t.Errorf("measureNote emitted=%v (%q), want %v", got, buf.String(), tc.want)
 			}
 		})
 	}
+	// A named format the pipeline kept wrote a remux, which the kept-delivery
+	// note reports in the same run; calling it an unaltered copy beside that
+	// would have the two contradict each other.
+	t.Run("a kept named format", func(t *testing.T) {
+		var buf bytes.Buffer
+		res := &waxtap.Result{LoudnessMeasured: true, OutputPath: "/x.opus", SourceFormat: waxtap.Format{Codec: "opus"}}
+		measureNote(noteEnv(&buf), &downloadFlags{format: "opus"}, res)
+		if strings.Contains(buf.String(), "unaltered copy") {
+			t.Errorf("emitted %q, want silence beside the kept-delivery note", buf.String())
+		}
+		// A format the delivery was not in encodes, so nothing was kept and
+		// the note is not this one's to suppress.
+		buf.Reset()
+		measureNote(noteEnv(&buf), &downloadFlags{format: "flac"}, &waxtap.Result{LoudnessMeasured: true, Transcoded: true, OutputPath: "/x.flac"})
+		if strings.Contains(buf.String(), "unaltered copy") {
+			t.Errorf("emitted %q on a transcode, want silence", buf.String())
+		}
+	})
 }
 
 // TestConcurrencyClampNoteDeferred covers F11: resolve ran clampConcurrency

@@ -63,7 +63,7 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 	}
 	specLayout, specDownmix := downmixFields(layout, doDownmix)
 	spec := waxtap.ProcessSpec{
-		Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth},
+		Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth, Force: p.force},
 		Channels:  specLayout,
 		Downmix:   specDownmix,
 	}

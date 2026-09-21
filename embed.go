@@ -333,8 +333,14 @@ func isMP4Ext(path string) bool {
 // An empty extension (a stream sink) counts as capable: there is no filename to
 // misname, so the remux is safe.
 func pictureCapableExt(ext string) bool {
-	switch strings.ToLower(ext) {
-	case "webm", "aac", "wav", "aiff", "aif", "aifc", "afc":
+	ext = strings.ToLower(ext)
+	if media.IsWAVExt(ext) || media.IsAIFFExt(ext) {
+		// All of PCM's spellings answer alike, so a keep-source delivery
+		// under .wave is judged as one under .wav is.
+		return false
+	}
+	switch ext {
+	case "webm", "aac":
 		return false
 	case "wv", "ape", "mka", "mkv":
 		// This switch is keyed on the DELIVERED extension, not the work file's

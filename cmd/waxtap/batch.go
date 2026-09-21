@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/colespringer/waxtap/v3"
-	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
@@ -368,17 +367,21 @@ func matchesTargetFamily(p waxtap.AudioProbe, tf waxtap.TranscodeFormat, outExt 
 		if tf == waxtap.FormatAIFF {
 			return media.IsAIFFExt(strings.ToLower(p.Container)) && media.IsAIFFExt(out)
 		}
-		return strings.EqualFold(p.Container, "wav") && out == "wav"
+		// The probe's side is WaxFlow's own container name, which is "wav"
+		// for every RIFF file whatever its extension; only the output path
+		// carries the spellings, so only it consults IsWAVExt. The aiff arm
+		// above reads alike on both sides because its row is named "aiff".
+		return strings.EqualFold(p.Container, "wav") && media.IsWAVExt(out)
 	}
 	fam := targetCodecFamily(tf)
 	if fam == "" {
 		return false
 	}
-	got := format.CodecFamily(p.Codec)
-	if tf == waxtap.FormatAAC && got == "he-aac" {
-		return true
-	}
-	return got == fam
+	// One statement of the family rule, shared with the pipeline's keep:
+	// targetCodecFamily has already refused the formats with no stable
+	// family, so the probe name is all that is left to compare.
+	target, ok := media.SourceFamilyCodec(fam, outExt)
+	return ok && media.SourceMatches(p.Codec, target, outExt)
 }
 
 // specChangesAudio reports whether the spec requires rewriting a file whose codec

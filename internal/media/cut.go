@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 
@@ -49,8 +50,9 @@ func (m Mode) String() string {
 // CutSpec describes a resolved cut. Keeps are the spans to retain, in order, on
 // the source timeline; Total is the source duration. CopyCut asks for a lossless
 // cut-remux (kept codec, byte-identical packets), which WaxTap tries first and
-// falls back from to Encode when WaxFlow declines the source codec. Encode names
-// the re-encode used for the re-encode path (or the CopyCut fallback).
+// falls back from to Encode when WaxFlow declines the source codec, or the
+// destination or the cut's shape, which Declined names. Encode names the
+// re-encode used for the re-encode path (or the CopyCut fallback).
 type CutSpec struct {
 	Keeps     []cutrange.Range
 	Total     time.Duration
@@ -115,12 +117,82 @@ func decodeReason(s CutSpec) string {
 	}
 }
 
+// CopyDecline says why a cut that would have copied packets decoded instead.
+// Render reports it on CutResult.Declined; NotDeclined means the packets were
+// copied, or no copy was in question (CutSpec.CopyCut false). WaxFlow's
+// declines carry no reason, so the reasons are WaxTap's own: two are decided
+// before any plan is asked for, one by asking for a second plan, and one is
+// what the plan declined without saying.
+type CopyDecline uint8
+
+const (
+	NotDeclined CopyDecline = iota
+	// DeclinedCodec: the source codec cannot be cut in place at all (MP3's
+	// bit reservoir, FLAC's frame numbering, Vorbis's overlap, ALAC, PCM,
+	// and every codec WaxFlow only decodes); waxflow.Cuttable.
+	DeclinedCodec
+	// DeclinedStreamStart: an HE-AAC packet cut must keep the stream start,
+	// and this cut's first span does not.
+	DeclinedStreamStart
+	// DeclinedContainer: the destination declined a cut another container
+	// takes (raw ADTS, which states no trims): the same cut planned into
+	// flat MP4 was accepted.
+	DeclinedContainer
+	// DeclinedCut: the codec can and the container could, and WaxFlow
+	// declined this cut's shape (a span holding no whole packet, spans too
+	// close together, a trim the walk could not place) or the packet walk
+	// could not index the source.
+	DeclinedCut
+)
+
+// String spells the decline, for a log line or a test failure that would
+// otherwise print a bare integer.
+func (d CopyDecline) String() string {
+	switch d {
+	case DeclinedCodec:
+		return "codec"
+	case DeclinedStreamStart:
+		return "stream-start"
+	case DeclinedContainer:
+		return "container"
+	case DeclinedCut:
+		return "cut"
+	default:
+		return "none"
+	}
+}
+
+// copyRefusal explains a declined packet cut to a caller who asked for one by
+// name, in the terms of the reason that applied. Before Render could name the
+// reason, both refusals had to list every reason at once, which read as a
+// catalogue of things that might be wrong with a file rather than as what
+// was.
+func copyRefusal(why CopyDecline) string {
+	switch why {
+	case DeclinedStreamStart:
+		return "an HE-AAC packet cut must keep the stream start, and this cut's first span does not"
+	case DeclinedContainer:
+		return "raw ADTS (.aac) cannot state the trims this cut needs, so name a container that can, .m4a or .mka"
+	case DeclinedCut:
+		return "the packet cut declined this cut's shape: a span must hold a whole packet, spans must not sit too close together, and the packet walk must index the source"
+	default:
+		return fmt.Sprintf("this source codec cannot be cut in place (%s can)", strings.Join(waxflow.CutFormats(), " and "))
+	}
+}
+
+// CutFormats names the formats WaxFlow cuts without a decode, for prose in
+// the facade, which never imports the engine.
+func CutFormats() []string { return waxflow.CutFormats() }
+
 // CutResult reports a completed cut.
 type CutResult struct {
 	Output  string
 	Removed time.Duration
 	Mode    Mode
 	Applied bool
+	// Declined says why a copy cut decoded instead of moving packets;
+	// NotDeclined when the copy ran or none was in question.
+	Declined CopyDecline
 	// Levels is WaxFlow's level measurement of the cut re-encode; see
 	// Result.Levels. It is always zero for a lossless cut-remux.
 	Levels Levels
@@ -146,7 +218,7 @@ type CutResult struct {
 // Render applies spec's cut to input and writes the result to output. Output is
 // staged and atomically renamed on success. When CopyCut is set and no downmix,
 // gain, or crossfade is requested, Render tries a lossless cut-remux first and
-// re-encodes only if WaxFlow declines the source codec.
+// re-encodes when the copy declines, saying why on Declined.
 //
 // input and output must name different files, for the reason Transcode gives.
 func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec) (CutResult, error) {
@@ -177,6 +249,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	// nothing forces a decode (no downmix, gain, or crossfade).
 	tryRemux := spec.CopyCut && spec.Crossfade == 0 && spec.Encode.Channels == 0 && spec.Encode.GainDB == 0
 	mode := Mode(ModeAccurate)
+	declined := NotDeclined
 	var levels Levels
 	var found []string
 	keeps := spec.Keeps
@@ -195,11 +268,10 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		} else {
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
+			declined = out.decline
 			if spec.requireCopy() {
-				// Both sides are named: WaxFlow's declines carry no reason,
-				// and the destination is as likely to be the one that
-				// refused as the source is.
-				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source into this container (%s support a packet-level cut; HE-AAC only when the cut keeps the stream start; raw ADTS (.aac) cannot state the cut's trims, so name a container that does, .m4a or .mka); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"), spec.copyFlags())
+				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this cut: %s; drop %s to re-encode, which stays lossless for a lossless source",
+					waxerr.ErrIncompatibleSpec, copyRefusal(declined), spec.copyFlags())
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless
 			// source. A copy spec whose source has no same-family encoder (WMA,
@@ -236,6 +308,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 		Removed:       spec.Total - cutrange.OutputDuration(keeps, spec.Crossfade),
 		Mode:          mode,
 		Applied:       true,
+		Declined:      declined,
 		Levels:        levels,
 		InputWarnings: found,
 		Keeps:         keeps,
@@ -248,6 +321,7 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 // declined and the caller re-encodes.
 type remuxOutcome struct {
 	done    bool
+	decline CopyDecline      // why, when done is false
 	keeps   []cutrange.Range // landed, on the source timeline
 	snaps   int
 	snapMax time.Duration
@@ -255,19 +329,21 @@ type remuxOutcome struct {
 }
 
 // cutRemux performs the lossless packet-level cut-remux. It reports done=false
-// (and no error) when WaxFlow declines the source codec, so the caller re-encodes
-// instead, the spans the copy really landed on, and the damage the packet walk
-// found when it ran.
+// (and no error) when WaxFlow declines the copy, with the reason on the
+// outcome, so the caller re-encodes instead, the spans the copy really landed
+// on, and the damage the packet walk found when it ran.
+//
+// The cheap answers come first. Opening the demuxer settles the codec, and a
+// codec no cut could ever serve declines there rather than after PacketGrid's
+// read of every packet and the frame-index walk behind it. A Source is a
+// positional reader, so a second open costs nothing and neither open disturbs
+// the other.
 func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (remuxOutcome, error) {
 	keeps, total := spec.Keeps, spec.Total
 	if err := r.acquire(ctx); err != nil {
 		return remuxOutcome{}, err
 	}
 	defer r.release()
-	grid, err := r.engine.PacketGrid(src, hint)
-	if err != nil {
-		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
-	}
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
@@ -275,7 +351,17 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return r.declineCopy(spec) // unknown codec: let the re-encode path handle it
+		return r.declineCopy(spec, DeclinedCodec) // unknown codec: let the re-encode path handle it
+	}
+	if !waxflow.Cuttable(track) {
+		// The fast negative, on the codec alone: an MP3, FLAC, or Vorbis
+		// source pays neither the packet read nor the walk to learn what this
+		// answers for free.
+		return r.declineCopy(spec, DeclinedCodec)
+	}
+	grid, err := r.engine.PacketGrid(src, hint)
+	if err != nil {
+		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	// Walk a lazily walked demuxer before planning, now that the codec is one
 	// this path can copy. validateCutSpans bounds every span by track.Samples
@@ -294,7 +380,7 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 	}
 	if walkErr != nil {
 		r.log.DebugContext(ctx, "the packet walk failed; re-encoding the cut instead of copying it", "err", walkErr)
-		return r.declineCopy(spec)
+		return r.declineCopy(spec, DeclinedCut)
 	}
 	track = walked
 	spans := toSpans(keeps, total, track.Fmt.Rate)
@@ -305,7 +391,30 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 		return remuxOutcome{}, err
 	}
 	if plan == nil {
-		return r.declineCopy(spec) // declined (e.g. FLAC): fall back to a re-encode
+		// The reason classifies WaxFlow's answer rather than pre-empting it,
+		// so a rule it later lifts costs a generation here for nothing: the
+		// plan it would return is taken, and only a decline is explained.
+		why := DeclinedCut
+		switch {
+		case track.Codec == codec.HEAAC && spans[0].From > 0:
+			// The one rule WaxFlow states in a Debug log and nowhere a
+			// caller can read: an HE-AAC packet cut must keep the stream
+			// start. Ahead of the container arm because it declines into
+			// every container, so a re-plan would only confirm it.
+			why = DeclinedStreamStart
+		case containerDropsTrims(opts.Container):
+			// PlanCut is arithmetic and table lookups, so asking again for
+			// the flat MP4 muxer is free, and an answer there proves it was
+			// the destination that declined: raw ADTS states no trims, and
+			// a cut synthesizes them. The same container the copy's gapless
+			// trim is dropped into, for the same reason.
+			again := opts
+			again.Container = ContainerProgressive
+			if p, perr := r.engine.PlanCut(track, again, spans, grid); perr == nil && p != nil {
+				why = DeclinedContainer
+			}
+		}
+		return r.declineCopy(spec, why) // declined: fall back to a re-encode
 	}
 	cutTrack, landedSpans, err := waxflow.CutTrack(track, opts, spans, grid)
 	if err != nil {
@@ -324,15 +433,16 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 	return remuxOutcome{done: true, keeps: landed, snaps: snaps, snapMax: snapMax, found: sourceWarnings(tres.InputWarnings)}, nil
 }
 
-// declineCopy is the answer when WaxFlow will not packet-cut this source. A
-// plain copy falls through to the re-encode; copy-exact asked for a packet
-// cut by name, so it fails here rather than delivering a decode the request
-// ruled out.
-func (r *Runner) declineCopy(spec CutSpec) (remuxOutcome, error) {
+// declineCopy is the answer when WaxFlow will not packet-cut this cut, with
+// why for the caller to report. A plain copy falls through to the re-encode;
+// copy-exact asked for a packet cut by name, so it fails here rather than
+// delivering a decode the request ruled out.
+func (r *Runner) declineCopy(spec CutSpec, why CopyDecline) (remuxOutcome, error) {
 	if spec.SpliceTrims {
-		return remuxOutcome{}, fmt.Errorf("%w: copy-exact needs a packet-level cut this source cannot supply (%s support it); use --cut-mode accurate", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"))
+		return remuxOutcome{}, fmt.Errorf("%w: copy-exact needs a packet-level cut, and this one declined: %s; use --cut-mode accurate",
+			waxerr.ErrIncompatibleSpec, copyRefusal(why))
 	}
-	return remuxOutcome{}, nil
+	return remuxOutcome{decline: why}, nil
 }
 
 // landedKeeps maps the spans a packet cut delivered back onto the time

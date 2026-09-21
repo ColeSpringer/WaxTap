@@ -97,13 +97,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	// Local inputs have no SponsorBlock source, so no SponsorBlock segments were
 	// returned.
 	warnEmptyCut(em, req.Cut, pres, false)
-	warnCutSnapped(em, pres)
-	warnLoudnessTargetMissed(em, req.Loudness, pres)
-	warnImplicitDownmix(em, req.ProcessSpec, pres)
-	warnImplicitLossy(em, req.ProcessSpec, pres)
-	warnGaplessDropped(em, pres)
-	warnBitrateAdjusted(em, req.ProcessSpec, pres)
-	warnOutputClipping(em, req.Loudness, pres)
+	warnRendered(em, req.ProcessSpec, pres)
 	warnInputDamage(em, pres)
 	warnEmptyInput(em, pres)
 	warnLoudnessUnmeasurable(em, pres)

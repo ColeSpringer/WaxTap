@@ -53,13 +53,13 @@ func TestFacade_ContainerChosenKeepsTheDeliveredCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	download := func(out string, format waxtap.TranscodeFormat) *waxtap.Result {
+	download := func(out string, ts waxtap.TranscodeSpec) *waxtap.Result {
 		t.Helper()
 		res, derr := c.Download(ctx, waxtap.Request{
 			URL: "dummyVideo0",
 			ProcessSpec: waxtap.ProcessSpec{
 				Output:    waxtap.ToFile(filepath.Join(dir, out)),
-				Transcode: &waxtap.TranscodeSpec{Format: format, FromContainer: true},
+				Transcode: &ts,
 			},
 		})
 		if derr != nil {
@@ -78,7 +78,7 @@ func TestFacade_ContainerChosenKeepsTheDeliveredCodec(t *testing.T) {
 
 	// Matroska's usual encoder is Opus, and the delivery is Opus: nothing to
 	// re-encode, so the packets move into the .mka the caller named.
-	kept := download("out.mka", waxtap.FormatOpus)
+	kept := download("out.mka", waxtap.TranscodeSpec{Format: waxtap.FormatOpus, FromContainer: true})
 	if kept.Transcoded {
 		t.Errorf("Transcoded = true, want a copy: Matroska carries Opus")
 	}
@@ -98,7 +98,7 @@ func TestFacade_ContainerChosenKeepsTheDeliveredCodec(t *testing.T) {
 
 	// Flat MP4 cannot carry Opus, so the container's own encoder runs and the
 	// generation nobody asked for is reported.
-	encoded := download("out.m4a", waxtap.FormatAAC)
+	encoded := download("out.m4a", waxtap.TranscodeSpec{Format: waxtap.FormatAAC, FromContainer: true})
 	if !encoded.Transcoded {
 		t.Errorf("Transcoded = false, want the encode .m4a forces")
 	}
@@ -107,5 +107,34 @@ func TestFacade_ContainerChosenKeepsTheDeliveredCodec(t *testing.T) {
 	}
 	if !warned(encoded.Warnings) {
 		t.Errorf("warnings = %v, want implicit-lossy for the forced encode", encoded.Warnings)
+	}
+
+	// A named format is the codec to deliver. The delivery is already Opus,
+	// so .opus is a remux of the packets into Ogg, reported as the file on
+	// disk; Force is the caller asking for the encoder anyway; and a format
+	// the delivery is not in encodes without implicit-lossy, since the
+	// request named it.
+	named := download("out.opus", waxtap.TranscodeSpec{Format: waxtap.FormatOpus})
+	if named.Transcoded {
+		t.Errorf("Transcoded = true, want a copy: the delivery is already opus")
+	}
+	if warned(named.Warnings) {
+		t.Errorf("warnings = %v, want none on a copy", named.Warnings)
+	}
+	if named.OutputFormat.Extension != "opus" || named.OutputFormat.MIMEType != `audio/ogg; codecs="opus"` {
+		t.Errorf("OutputFormat = %+v, want the .opus the packets landed in", named.OutputFormat)
+	}
+	if pr, err := media.NewRunner(media.RunnerConfig{}).Probe(ctx, filepath.Join(dir, "out.opus")); err != nil {
+		t.Fatal(err)
+	} else if a, _ := pr.AudioStream(); pr.Format.Container != "ogg" || a.CodecName != "opus" {
+		t.Errorf("delivered %s/%s, want ogg/opus", pr.Format.Container, a.CodecName)
+	}
+	forced := download("forced.opus", waxtap.TranscodeSpec{Format: waxtap.FormatOpus, Force: true})
+	if !forced.Transcoded || !strings.EqualFold(forced.OutputFormat.Codec, "opus") {
+		t.Errorf("Transcoded = %v codec %q, want the encode Force asks for", forced.Transcoded, forced.OutputFormat.Codec)
+	}
+	mp3 := download("out.mp3", waxtap.TranscodeSpec{Format: waxtap.FormatMP3})
+	if !mp3.Transcoded || warned(mp3.Warnings) {
+		t.Errorf("Transcoded = %v warnings %v, want a named encode with no implicit-lossy", mp3.Transcoded, mp3.Warnings)
 	}
 }

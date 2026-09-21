@@ -156,3 +156,55 @@ func mustChapters(t *testing.T, ctx context.Context, path string) []waxlabel.Cha
 	}
 	return doc.Chapters()
 }
+
+// A smart cut that could not copy packets and decoded a lossy source says
+// so, once, naming the encoder, the generation, and the reason. A lossless
+// fallback loses nothing and says nothing, and a packet copy has nothing to
+// say.
+func TestProcessSmartCutSaysWhenItDecoded(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	wav := filepath.Join(dir, "src.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(3, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	encode := func(out string, f TranscodeFormat) string {
+		t.Helper()
+		p := filepath.Join(dir, out)
+		if _, err := c.Process(ctx, ProcessRequest{Input: wav, ProcessSpec: ProcessSpec{Output: ToFile(p), Transcode: &TranscodeSpec{Format: f}}}); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cut := func(in, out string) *Result {
+		t.Helper()
+		res, err := c.Process(ctx, ProcessRequest{Input: in, ProcessSpec: ProcessSpec{
+			Output: ToFile(filepath.Join(dir, out)),
+			Cut:    &CutSpec{Ranges: []TimeRange{{Start: time.Second, End: 2 * time.Second}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	res := cut(encode("in.mp3", FormatMP3), "cut.mp3")
+	if !res.Transcoded || res.CutMode != CutAccurate {
+		t.Fatalf("Transcoded = %v, CutMode = %v, want the family re-encode", res.Transcoded, res.CutMode)
+	}
+	if w, ok := findWarning(res.Warnings, WarnCutDecoded); !ok || !strings.Contains(w.Detail, "mp3") || !strings.Contains(w.Detail, "cannot be cut in place") || !strings.Contains(w.Detail, "second lossy generation") {
+		t.Errorf("warnings = %v, want cut-decoded naming mp3, the reason, and the generation", res.Warnings)
+	}
+	if _, ok := findWarning(res.Warnings, WarnImplicitLossy); ok {
+		t.Errorf("implicit-lossy fired beside cut-decoded: the container carries mp3")
+	}
+	if res := cut(encode("in.flac", FormatFLAC), "cut.flac"); res.Transcoded {
+		if _, ok := findWarning(res.Warnings, WarnCutDecoded); ok {
+			t.Errorf("a lossless fallback warned: %v", res.Warnings)
+		}
+	}
+	if res := cut(segmentedOpus(t, dir, "in.opus"), "cut.opus"); res.Transcoded {
+		t.Errorf("an opus cut was decoded")
+	} else if _, ok := findWarning(res.Warnings, WarnCutDecoded); ok {
+		t.Errorf("a packet copy warned: %v", res.Warnings)
+	}
+}

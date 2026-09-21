@@ -75,8 +75,12 @@ type downloadFlags struct {
 	// alacExtNote does the same for the .alac-container note, which fires from
 	// the per-item BuildRequest seam where only the run scope exists.
 	alacExtNote sync.Once
-	archive     *downloadArchive
-	streamW     io.Writer // stdout sink when --out is "-"; nil for a file sink
+	// keptNote does the same for the kept-delivery note: --format names one
+	// codec for the whole run, so a playlist whose deliveries are already in
+	// it would otherwise repeat the sentence per item.
+	keptNote sync.Once
+	archive  *downloadArchive
+	streamW  io.Writer // stdout sink when --out is "-"; nil for a file sink
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -431,10 +435,10 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 			item := env.withScopedNotes()
 			// Write sidecars and the archive before the result line.
 			if o.Attempted && o.Err == nil && o.Result != nil {
-				finishItem(item, df, o.Entry.VideoID, o.Result)
+				finishItem(env, item, df, o.Entry.VideoID, o.Result)
 				warnChannelLayout(env, item, df, o.Result)
 				warnContainerExtMismatch(item, df, o.Result)
-				measureNote(item, o.Result)
+				measureNote(item, df, o.Result)
 			}
 			if webOutcomeActionable(o.Result, o.Err) {
 				actionableWeb.Store(true)
@@ -542,7 +546,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	}
 
 	id, _ := youtube.ExtractVideoID(arg) // already validated by resolveItem
-	finishItem(env, df, id, res)
+	finishItem(env, env, df, id, res)
 	// The note helpers run before the result is emitted, because the document
 	// carries the notes now: emitting first left every one of them out of it,
 	// which is how a container mismatch could be told to a human on stderr and to
@@ -551,7 +555,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 	// block rather than below it.
 	warnChannelLayout(env, env, df, res)
 	warnContainerExtMismatch(env, df, res)
-	measureNote(env, res)
+	measureNote(env, df, res)
 	noteUseBothWebSourcesIfActionable(env, res, nil)
 	return emitResult(rep, res)
 }
@@ -736,10 +740,23 @@ func noteKeptItem(ctx context.Context, env *appEnv, df *downloadFlags, stamps *i
 
 // finishItem writes the optional sidecar and archive entry after a successful
 // download. Errors are reported as warnings.
-func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
+//
+// runEnv carries the run-level note scope and itemEnv the per-item one, for
+// the reason warnChannelLayout takes both: the kept-delivery note is one fact
+// about the whole run, and a sync.Once against an item scope would hand it to
+// whichever item fired first and to no other.
+func finishItem(runEnv, itemEnv *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
+	// The pipeline kept the delivery: it was already in the codec --format
+	// named. download has no --force, so the remedy names the command that
+	// does.
+	if df.keptFormatDelivery(res) {
+		df.keptNote.Do(func() {
+			keptDeliveryNote(runEnv, res, "--format "+df.format, "transcode --force re-encodes")
+		})
+	}
 	if df.writeInfoJSON && res.OutputPath != "" {
 		if werr := writeInfoSidecar(res.OutputPath, res); werr != nil {
-			env.note(noteSidecarWriteFailed, "could not write info sidecar: %v", werr)
+			itemEnv.note(noteSidecarWriteFailed, "could not write info sidecar: %v", werr)
 		}
 	}
 	if df.archive != nil {
@@ -747,9 +764,18 @@ func finishItem(env *appEnv, df *downloadFlags, id string, res *waxtap.Result) {
 			// The same code the kept-output paths use: whatever the cause, the
 			// consumer's question is "is this file in the archive", and here it
 			// is not.
-			env.note(noteArchiveNotRecorded, "could not update download archive: %v; a re-run will fetch %s again", aerr, displayPath(res.OutputPath))
+			itemEnv.note(noteArchiveNotRecorded, "could not update download archive: %v; a re-run will fetch %s again", aerr, displayPath(res.OutputPath))
 		}
 	}
+}
+
+// keptFormatDelivery reports a run whose named format the pipeline kept: the
+// delivery was already in it, so the packets moved into the output container
+// and nothing was encoded. The note that says so and the measure-only note
+// that must not contradict it both read this.
+func (df *downloadFlags) keptFormatDelivery(res *waxtap.Result) bool {
+	tf, named, err := df.transcodeFormat()
+	return err == nil && named && tf != waxtap.FormatCopy && keptDelivery(res)
 }
 
 // warnChannelLayout reports when the delivered audio does not satisfy an
@@ -867,7 +893,15 @@ func channelCountLabel(ch int) string {
 
 // measureNote reports the output path for a measure-only run. Processing
 // operations suppress the note because the output is no longer an unaltered copy.
-func measureNote(env *appEnv, res *waxtap.Result) {
+//
+// So does a named format the pipeline kept: the packets are the delivery's,
+// but the file around them is not, and the kept-delivery note says that in
+// the same run. Two notes calling one file an unaltered copy and a remux
+// would leave the reader to pick.
+func measureNote(env *appEnv, df *downloadFlags, res *waxtap.Result) {
+	if df.keptFormatDelivery(res) {
+		return
+	}
 	if measureOnly(res) && res.OutputPath != "" {
 		env.note(noteUnalteredCopy, "wrote unaltered copy to %s", displayPath(res.OutputPath))
 	}

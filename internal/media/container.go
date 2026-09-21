@@ -28,6 +28,13 @@ var inferableContainers = map[string]bool{
 	"webm": true, "mka": true, "mkv": true,
 	"aiff": true, "aif": true, "aifc": true, "afc": true,
 	"wv": true, "ape": true,
+	// WaxFlow's wav row's own spellings, and its mp3 row's. Its RIFF muxer
+	// writes the RF64 form only past 4 GiB, so a small file under either
+	// name is a plain RIFF, which every RF64 reader accepts by chunk id.
+	// Listed here so an output named with one is constrained by its name
+	// rather than force-muxed under it, which is how out.rf64 collected
+	// FLAC bytes.
+	"wave": true, "rf64": true, "bw64": true, "mpga": true,
 }
 
 // decodeOnlyContainers maps every extension WaxFlow registers for a container
@@ -78,6 +85,24 @@ func IsAIFFExt(ext string) bool {
 	return false
 }
 
+// IsWAVExt reports whether ext names a RIFF WAV container. WaxFlow's wav row
+// registers four spellings for one container; .rf64/.bw64 name the 64-bit
+// variants, which its muxer writes only past 4 GiB, so a smaller file under
+// either name is a plain RIFF and every reader of those formats accepts it by
+// chunk id rather than by filename.
+//
+// The list lives here for the reason IsAIFFExt's does: the output extension
+// picks between PCM's two containers, so a spelling missed by one table gets
+// the wrong bytes under the right name. ext must be lowercased and undotted,
+// which every caller already guarantees.
+func IsWAVExt(ext string) bool {
+	switch ext {
+	case "wav", "wave", "rf64", "bw64":
+		return true
+	}
+	return false
+}
+
 // needsForcedMuxer reports whether the output path does not name a container
 // WaxTap can infer, so the container comes from the format rather than the
 // filename.
@@ -117,12 +142,14 @@ func ContainerAccepts(ext, codecName string) bool {
 		// "wav" means CodecWAV, which is RIFF and cannot go in an AIFF file.
 		return c == "aiff" || strings.HasPrefix(c, "pcm")
 	}
+	if IsWAVExt(ext) {
+		// The same, for the wav row's four spellings.
+		return isPCM
+	}
 	switch ext {
 	case "flac":
 		return c == "flac"
-	case "wav":
-		return isPCM
-	case "mp3":
+	case "mp3", "mpga":
 		return c == "mp3"
 	case "m4a", "mp4", "m4b":
 		return c == "aac" || c == "alac"
@@ -221,12 +248,13 @@ func ContainerCodec(ext string) (Codec, bool) {
 	if IsAIFFExt(ext) {
 		return CodecAIFF, true
 	}
+	if IsWAVExt(ext) {
+		return CodecWAV, true
+	}
 	switch ext {
 	case "flac":
 		return CodecFLAC, true
-	case "wav":
-		return CodecWAV, true
-	case "mp3":
+	case "mp3", "mpga":
 		return CodecMP3, true
 	case "m4a", "mp4", "m4b", "aac":
 		return CodecAAC, true
@@ -276,6 +304,25 @@ func SourceFamilyCodec(name, outExt string) (Codec, bool) {
 		return CodecWAV, true
 	}
 	return CodecCopy, false
+}
+
+// SourceMatches reports whether an encode to target would deliver the codec
+// the source already has, so a copy is that encode with nothing lost: the
+// source's own family encoder is target (SourceFamilyCodec, with outExt
+// picking PCM's container), or target is AAC-LC and the source is HE-AAC,
+// which WaxFlow copies under its own identity (its aac remux redirects to
+// the he-aac row). The reverse, an HE-AAC target on an AAC-LC source, is a
+// real encode. An unknown source ("") matches nothing, and neither does a
+// copy target, which has no encoder to compare against.
+func SourceMatches(sourceCodec string, target Codec, outExt string) bool {
+	if sourceCodec == "" || target == CodecCopy {
+		return false
+	}
+	if target == CodecAAC && strings.EqualFold(sourceCodec, "he-aac") {
+		return true
+	}
+	c, ok := SourceFamilyCodec(sourceCodec, outExt)
+	return ok && c == target
 }
 
 // OutputCodecFor is the container rule for an output the request named by

@@ -178,6 +178,11 @@ func TestParseTranscodeFormat(t *testing.T) {
 		"aiff": waxtap.FormatAIFF, "aif": waxtap.FormatAIFF,
 		"aifc": waxtap.FormatAIFF, "afc": waxtap.FormatAIFF,
 		"AIFF": waxtap.FormatAIFF,
+		// WaxFlow's wav row writes four spellings and its mp3 row two, for
+		// the same reason: an input named with one parses, transcodeExt
+		// still delivers .wav and .mp3.
+		"wave": waxtap.FormatWAV, "rf64": waxtap.FormatWAV, "bw64": waxtap.FormatWAV,
+		"mpga": waxtap.FormatMP3,
 	}
 	for in, want := range cases {
 		got, err := parseTranscodeFormat(in)

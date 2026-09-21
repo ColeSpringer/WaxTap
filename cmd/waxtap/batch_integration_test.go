@@ -109,6 +109,32 @@ func TestBatchForceReencodesNoOp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outDir, "b.mp3")); err != nil {
 		t.Errorf("forced output missing: %v", err)
 	}
+
+	// The bit reaches the pipeline, not only the batch planner. An aac
+	// target matches an HE-AAC source, so without --force the planner copies
+	// it through and the pipeline would keep it; with --force the named
+	// AAC-LC encoder runs, which the output's own codec shows. The batch
+	// documents carry no transcoded field, so the file is what to read.
+	root2 := t.TempDir()
+	r := media.NewRunner(media.RunnerConfig{})
+	src := filepath.Join(t.TempDir(), "src.wav")
+	if err := os.WriteFile(src, mediatest.SineWAV(1, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Transcode(context.Background(), src, filepath.Join(root2, "c.m4a"), media.Spec{Codec: media.CodecHEAAC}); err != nil {
+		t.Fatalf("he-aac fixture: %v", err)
+	}
+	out2 := filepath.Join(root2, "out")
+	if _, stderr, code := runMain(t, "transcode", root2, "--format", "aac", "--dir", out2, "--force"); code != 0 {
+		t.Fatalf("forced directory transcode: exit %d: %s", code, stderr)
+	}
+	pr, err := r.Probe(context.Background(), filepath.Join(out2, "c.m4a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := pr.AudioStream(); a.CodecName != "aac" {
+		t.Errorf("a forced directory item holds %s, want the aac-lc encode", a.CodecName)
+	}
 }
 
 func TestBatchNormalizeMeasureIntegration(t *testing.T) {

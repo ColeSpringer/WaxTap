@@ -518,4 +518,57 @@ func TestProcessWarnsImplicitLossyPromotion(t *testing.T) {
 	if p, perr := c.ProbeAudio(ctx, ogg); perr != nil || p.Codec != "opus" {
 		t.Errorf("the .ogg holds %q (%v), want opus", p.Codec, perr)
 	}
+
+	// A format the caller named themselves is kept the same way, with no
+	// FromContainer in sight: Format is the codec to deliver, and Force is
+	// the request to run its encoder regardless.
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: opus,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "named.mka")),
+			Transcode: &TranscodeSpec{Format: FormatOpus},
+		},
+	})
+	if err != nil {
+		t.Fatalf("a named opus into .mka: %v", err)
+	}
+	if res.Transcoded {
+		t.Errorf("a named format the source already had was re-encoded")
+	}
+	if w, ok := findWarning(res.Warnings, WarnImplicitLossy); ok {
+		t.Errorf("warned %q, want silence: the caller named the format", w.Detail)
+	}
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: opus,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "named-force.mka")),
+			Transcode: &TranscodeSpec{Format: FormatOpus, Force: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("a forced opus into .mka: %v", err)
+	}
+	if !res.Transcoded {
+		t.Errorf("Force did not reach the encoder")
+	}
+
+	// A forced encode is the caller's, whatever chose the format: the
+	// container's fallback is overridden, so implicit-lossy stays quiet even
+	// though the container could have carried the mp3 source.
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: mp3,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "forced.mka")),
+			Transcode: &TranscodeSpec{Format: FormatOpus, FromContainer: true, Force: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("a forced opus on an mp3 source: %v", err)
+	}
+	if !res.Transcoded || !strings.EqualFold(res.OutputFormat.Codec, "opus") {
+		t.Errorf("transcoded=%v codec=%q, want the encode Force asks for", res.Transcoded, res.OutputFormat.Codec)
+	}
+	if w, ok := findWarning(res.Warnings, WarnImplicitLossy); ok {
+		t.Errorf("warned %q, want silence: Force named the encode", w.Detail)
+	}
 }

@@ -183,9 +183,10 @@ func newNormalizeCmd() *cobra.Command {
 				// codec. A container that could not hold the source picked
 				// that, and a lossy answer it never asked for is reported.
 				// For a URL, whose codec no probe here can see, the pipeline
-				// settles it against the staged file: a container that
-				// carries the source keeps it, and the gain rides in an Opus
-				// head rather than buying a generation.
+				// settles it against the staged file, and a format-named
+				// extension the same way: a target that carries the source
+				// keeps it, and the gain rides in an Opus head rather than
+				// buying a generation.
 				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept},
 				Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: target, PeakMode: pm},
 				Channels:  specLayout,

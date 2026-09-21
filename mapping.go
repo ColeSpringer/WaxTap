@@ -156,6 +156,9 @@ func validateProcessSpec(s ProcessSpec) error {
 	if err := validateBitDepth(s.Transcode); err != nil {
 		return err
 	}
+	if err := validateForce(s.Transcode); err != nil {
+		return err
+	}
 	return validateCoverArt(s)
 }
 
@@ -278,7 +281,7 @@ func validateCutEncodeNeed(s ProcessSpec) error {
 	// cut-plus-remux case is not caught. This sits ahead of the s.Downmix term, so
 	// --cut-mode copy --downmix --format flac fails here too, which is correct.
 	if cut && (s.Cut.Mode == CutCopy || s.Cut.Mode == CutCopyExact) && target != media.CodecCopy {
-		return fmt.Errorf("%w: --cut-mode %s cannot be combined with --format %s, which re-encodes; drop one",
+		return fmt.Errorf("%w: --cut-mode %s cannot be combined with --format %s, which names an encode; drop one",
 			waxerr.ErrIncompatibleSpec, cutModeName(s.Cut.Mode), target)
 	}
 	// Only Matroska states a trim per packet, which is what an exact interior
@@ -402,6 +405,17 @@ func validateBitDepth(t *TranscodeSpec) error {
 	}
 }
 
+// validateForce rejects Force beside FormatCopy. Force asks for Format's
+// encoder and FormatCopy names none, so the pair says two things at once, the
+// way a BitDepth outside the accepted set is refused on a preset that would
+// have ignored it.
+func validateForce(t *TranscodeSpec) error {
+	if t == nil || !t.Force || t.Format != FormatCopy {
+		return nil
+	}
+	return fmt.Errorf("%w: Force runs an encoder and FormatCopy runs none; drop one", waxerr.ErrIncompatibleSpec)
+}
+
 // downmixChannels returns the requested output channel count, or 0 when downmix
 // is disabled. validateProcessSpec rejects layouts without a fixed count.
 func downmixChannels(layout ChannelLayout, downmix bool) int {
@@ -457,7 +471,18 @@ func pipelineSpec(s ProcessSpec, ranges []cutrange.Range) pipeline.Spec {
 		// An explicit FormatCopy is a stream-copy remux (distinct from a nil
 		// Transcode, which keeps the source bytes untouched).
 		ps.Remux = s.Transcode.Format == FormatCopy
-		ps.ContainerChosen = s.Transcode.FromContainer
+		// One answer for the pipeline's keep rule: the container's keep when
+		// the caller named an extension it could not see the source for, the
+		// codec's keep for every other named format, and none when the
+		// caller asked for the encoder regardless.
+		switch {
+		case s.Transcode.Force:
+			ps.Keep = pipeline.KeepNone
+		case s.Transcode.FromContainer:
+			ps.Keep = pipeline.KeepContainer
+		default:
+			ps.Keep = pipeline.KeepCodec
+		}
 	}
 	if s.Loudness != nil {
 		ps.Loudness = &pipeline.Loudness{
@@ -972,12 +997,52 @@ func warnGaplessDropped(em *emitter, pres pipeline.Result) {
 	em.warn(WarnGaplessDropped, fmt.Sprintf("the .%s container states no gapless trim, so %s play as audio; keep the trim with .m4a, or re-encode", ext, what))
 }
 
+// warnCutDecoded reports a cut that would have copied packets and decoded
+// instead, into a lossy encoder. A lossless fallback (a FLAC or WavPack cut
+// is bit exact) says nothing, and a decode the request named (accurate
+// mode, a crossfade, a format the source was not in) never tried a copy.
+func warnCutDecoded(em *emitter, pres pipeline.Result) {
+	if pres.CutDeclined == media.NotDeclined || pres.OutputCodec.IsLossless() {
+		return
+	}
+	var why string
+	fix := "a lossless --format loses nothing further, and --cut-mode copy refuses instead"
+	switch pres.CutDeclined {
+	case media.DeclinedCodec:
+		why = fmt.Sprintf("%s packets cannot be cut in place (%s can)", pres.SourceCodec, strings.Join(media.CutFormats(), " and "))
+	case media.DeclinedStreamStart:
+		why = "an HE-AAC packet cut must keep the stream start"
+	case media.DeclinedContainer:
+		why = "raw ADTS (.aac) cannot state the trims this cut needs"
+		fix = "name .m4a or .mka to copy the packets"
+	default:
+		why = "the packet copy declined this cut's shape (a span must hold a whole packet, and the packet walk must index the source)"
+	}
+	em.warn(WarnCutDecoded, fmt.Sprintf("the cut decoded and re-encoded the audio as %s, a second lossy generation, because %s; %s", pres.OutputCodec, why, fix))
+}
+
+// warnRendered raises the warnings any finished pipeline run can carry,
+// whatever its source kind. The two callers add what only their kind knows
+// (an empty cut's SponsorBlock half; a local input's damage and emptiness),
+// so a warning added here reaches both.
+func warnRendered(em *emitter, spec ProcessSpec, pres pipeline.Result) {
+	warnCutSnapped(em, pres)
+	warnCutDecoded(em, pres)
+	warnLoudnessTargetMissed(em, spec.Loudness, pres)
+	warnImplicitDownmix(em, spec, pres)
+	warnImplicitLossy(em, spec, pres)
+	warnGaplessDropped(em, pres)
+	warnBitrateAdjusted(em, spec, pres)
+	warnOutputClipping(em, spec.Loudness, pres)
+}
+
 // namedAnEncode reports whether the caller asked for the encoder that ran. A
 // nil spec asks for nothing, FormatCopy asks for a copy, and a format taken
 // from the output's container (TranscodeSpec.FromContainer) is the container's
-// choice rather than the caller's; anything else is a target they named.
+// choice rather than the caller's; anything else is a target they named, and a
+// forced encode is the caller's whatever chose the format.
 func namedAnEncode(t *TranscodeSpec) bool {
-	if t == nil || t.FromContainer {
+	if t == nil || (t.FromContainer && !t.Force) {
 		return false
 	}
 	return transcodeCodec(t.Format) != media.CodecCopy

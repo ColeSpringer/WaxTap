@@ -936,6 +936,20 @@ func TestValidateProcessSpec_BitDepth(t *testing.T) {
 	}
 }
 
+// Force runs Format's encoder; FormatCopy runs none, so the pair names two
+// things at once.
+func TestValidateProcessSpec_ForceWithCopy(t *testing.T) {
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatCopy, Force: true}}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("Force with FormatCopy = %v, want ErrIncompatibleSpec", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatOpus, Force: true}}); err != nil {
+		t.Errorf("Force with a real format = %v, want nil", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Transcode: &TranscodeSpec{Format: FormatCopy}}); err != nil {
+		t.Errorf("FormatCopy alone = %v, want nil", err)
+	}
+}
+
 func TestValidateProcessSpec_NegativeCrossfade(t *testing.T) {
 	if err := validateProcessSpec(ProcessSpec{Cut: &CutSpec{Crossfade: -1}}); !errors.Is(err, ErrIncompatibleSpec) {
 		t.Errorf("negative crossfade = %v, want ErrIncompatibleSpec (parity with the CLI)", err)

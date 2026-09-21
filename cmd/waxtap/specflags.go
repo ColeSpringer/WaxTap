@@ -46,7 +46,7 @@ var transcodeFormatNames = []string{"flac", "alac", "wav", "aiff", "wavpack", "a
 // the canonical names. It sits outside formatChoices, which is pinned to exactly
 // the format set, and omits remux=copy on purpose: cut and normalize share this
 // text and must not mention copy at all.
-const formatSpellingNote = " (case-insensitive; ogg=vorbis, m4a=aac, aif=aiff, wv=wavpack, heaac=he-aac)"
+const formatSpellingNote = " (case-insensitive; ogg=vorbis, m4a=aac, aif=aiff, wave/rf64/bw64=wav, mpga=mp3, wv=wavpack, heaac=he-aac)"
 
 // formatChoices renders the --format choices for help text and errors. withCopy
 // prepends the copy pseudo-format, which remuxes rather than encoding, so the
@@ -68,14 +68,19 @@ func parseTranscodeFormat(s string) (waxtap.TranscodeFormat, error) {
 		return waxtap.FormatFLAC, nil
 	case "alac":
 		return waxtap.FormatALAC, nil
-	case "wav":
+	case "wav", "wave", "rf64", "bw64":
+		// Four accepted spellings, one output extension, as AIFF's arm has:
+		// WaxFlow's wav row writes all four, and its RIFF muxer writes the
+		// 64-bit form only past 4 GiB, so a smaller file under either name is
+		// a plain RIFF. transcodeExt still delivers .wav.
 		return waxtap.FormatWAV, nil
 	case "aiff", "aif", "aifc", "afc":
 		// Four accepted spellings, one output extension. .aifc/.afc name the
 		// compressed-capable variant so a file of that type can be named as input;
 		// transcodeExt still delivers .aiff.
 		return waxtap.FormatAIFF, nil
-	case "mp3":
+	case "mp3", "mpga":
+		// Two input spellings from WaxFlow's mp3 row; transcodeExt delivers .mp3.
 		return waxtap.FormatMP3, nil
 	case "aac", "m4a":
 		return waxtap.FormatAAC, nil

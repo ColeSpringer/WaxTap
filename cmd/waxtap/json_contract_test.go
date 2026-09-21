@@ -723,6 +723,19 @@ func TestExtensionNamesAContainer(t *testing.T) {
 		// --force names the container's encoder on the user's behalf, so the
 		// encode is theirs and implicit-lossy stays quiet.
 		{"--force names the container's encoder", []string{"transcode", mp3, filepath.Join(dir, "h.mka"), "--force"}, "opus", true, ""},
+		// A format-named extension, or --format, names the codec to deliver:
+		// a source already in it is kept, and --force is the request to
+		// encode it anyway. The third row is the one that proves the bit
+		// reaches the pipeline, the local shortcut being skipped under
+		// --force.
+		{"a named format keeps a matching local source", []string{"transcode", opus, filepath.Join(dir, "i.opus")}, "opus", false, ""},
+		{"--force on a named format encodes", []string{"transcode", opus, filepath.Join(dir, "j.opus"), "--force"}, "opus", true, ""},
+		{"--format opus --force encodes an opus source", []string{"transcode", opus, filepath.Join(dir, "k.mka"), "--format", "opus", "--force"}, "opus", true, ""},
+		{"an accurate cut on a matching format decodes", []string{"cut", opus, filepath.Join(dir, "m.opus"), "--cut-range", "0-0.5", "--cut-mode", "accurate"}, "opus", true, ""},
+		// A smart cut that could not copy packets says so, whether the
+		// format came from the extension or from --format.
+		{"cut mp3 to mp3 says the cut decoded", []string{"cut", mp3, filepath.Join(dir, "l.mp3"), "--cut-range", "0-0.5"}, "mp3", true, "cut-decoded"},
+		{"cut mp3 --format mp3 is kept, declined, and says so", []string{"cut", mp3, filepath.Join(dir, "n.mp3"), "--cut-range", "0-0.5", "--format", "mp3"}, "mp3", true, "cut-decoded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -733,7 +746,27 @@ func TestExtensionNamesAContainer(t *testing.T) {
 			doc := oneJSONDoc(t, stdout)
 			assertJSONCodec(t, doc, tc.wantCodec, tc.transcoded)
 			assertJSONWarning(t, doc, tc.wantWarn)
+			if tc.name == "an accurate cut on a matching format decodes" {
+				if got, _ := doc["cutMode"].(string); got != "accurate" {
+					t.Errorf("cutMode = %q, want accurate", got)
+				}
+			}
 		})
+	}
+}
+
+// --force runs the target's encoder, and --format copy runs none; asking for
+// both is a usage error that names them.
+func TestTranscodeForceWithCopyIsAUsageError(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	synthChannels(t, in, "flac", 2)
+	_, stderr, code := runMain(t, "transcode", in, "--format", "copy", "--force", "-o", filepath.Join(dir, "out.flac"))
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--force") || !strings.Contains(stderr, "--format copy") {
+		t.Errorf("stderr = %q, want it to name both flags", stderr)
 	}
 }
 
