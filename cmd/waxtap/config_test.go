@@ -9,12 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/testfs"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"math"
@@ -829,17 +829,11 @@ func TestCheckTempDir(t *testing.T) {
 // An unwritable directory is refused too, which needs a real filesystem check
 // rather than a stat: a directory can exist and still take no files.
 func TestCheckTempDirUnwritable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Mkdir ignores its mode on Windows, so the directory stays writable")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root writes into a 0000 directory")
-	}
 	dir := filepath.Join(t.TempDir(), "locked")
-	if err := os.Mkdir(dir, 0o000); err != nil {
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	testfs.DenyAccess(t, dir)
 	if _, ok := errors.AsType[*usageError](checkTempDir(dir)); !ok {
 		t.Error("an unwritable --temp-dir must be a usage error")
 	}

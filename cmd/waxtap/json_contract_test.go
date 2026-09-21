@@ -720,6 +720,9 @@ func TestExtensionNamesAContainer(t *testing.T) {
 		{"normalize opus to ogg takes the header gain", []string{"normalize", opus, filepath.Join(dir, "e.ogg")}, "opus", false, ""},
 		{"normalize opus to webm takes the header gain", []string{"normalize", opus, filepath.Join(dir, "f.webm")}, "opus", false, ""},
 		{"explicit --format ogg still means vorbis", []string{"transcode", opus, filepath.Join(dir, "g.ogg"), "--format", "ogg"}, "vorbis", true, ""},
+		// --force names the container's encoder on the user's behalf, so the
+		// encode is theirs and implicit-lossy stays quiet.
+		{"--force names the container's encoder", []string{"transcode", mp3, filepath.Join(dir, "h.mka"), "--force"}, "opus", true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

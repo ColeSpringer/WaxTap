@@ -17,38 +17,30 @@ import (
 // measures after folding to that channel count so a two-pass gain matches a later
 // downmixing encode; 0 keeps the source layout. The loudness package maps the
 // result to its own type; this keeps the WaxFlow engine and the concurrency bound
-// in one place. It also returns the damage the read found, complete as of the
-// end of the file; see Result.InputWarnings.
-func (r *Runner) AnalyzeFile(ctx context.Context, input string, channels int) (*waxflow.AnalyzeResult, []string, error) {
+// in one place. The damage the read found is on the result's InputWarnings,
+// complete as of the end of the file and in the source's own terms; see
+// Result.InputWarnings.
+func (r *Runner) AnalyzeFile(ctx context.Context, input string, channels int) (*waxflow.AnalyzeResult, error) {
 	src, closeSrc, err := openSource(input)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer closeSrc()
 	if err := r.acquire(ctx); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer r.release()
-	// Opened here rather than through the engine's Analyze, which opens and
-	// closes the media itself: the damage list is live on the media and
-	// complete only once the read has reached the end, so it is read off the
-	// media after the analysis and before the close. The engine's own
-	// AnalyzeMedia runs inside the slot this function holds.
-	med, err := r.engine.OpenStream(src, hintFor(input))
-	if err != nil {
-		return nil, nil, classifyInputError(err, input)
-	}
-	defer med.Close()
-	res, err := r.engine.AnalyzeMedia(ctx, med, waxflow.AnalyzeOptions{Channels: channels})
+	res, err := r.engine.Analyze(ctx, src, hintFor(input), waxflow.AnalyzeOptions{Channels: channels})
 	if err != nil {
 		// A cancellation is not bad input: preserve ctx.Err() so callers classify it
 		// as canceled (exit 130), not unsupported-input (exit 2).
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, nil, ctxErr
+			return nil, ctxErr
 		}
-		return nil, nil, classifyInputError(err, input)
+		return nil, classifyInputError(err, input)
 	}
-	return res, InputWarnings(med), nil
+	res.InputWarnings = sourceWarnings(res.InputWarnings)
+	return res, nil
 }
 
 // AnalyzeMedia measures the loudness of an already-open Media, so a cut/downmix
@@ -60,6 +52,9 @@ func (r *Runner) AnalyzeFile(ctx context.Context, input string, channels int) (*
 // when med has no single file to name, a concatenated timeline with several
 // members (an album's group pass). channels folds the measurement to a downmix
 // target (0 keeps the source layout). The caller owns med.
+//
+// The damage the read found comes back on the result in the source's own
+// terms; med is left open, the caller's to close.
 func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input string, channels int) (*waxflow.AnalyzeResult, error) {
 	if err := r.acquire(ctx); err != nil {
 		return nil, err
@@ -69,6 +64,9 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input strin
 	if err != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if err == nil {
+		res.InputWarnings = sourceWarnings(res.InputWarnings)
+	}
 	// Analysis only ever fails on the media it is reading, so it takes the
 	// input-side classification.
 	return res, classifyInputError(err, input)
@@ -77,67 +75,95 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input strin
 // AnalyzeGroup measures inputs as one programme: each member decoded once at
 // channels[i] (its delivered width; 0 keeps its own) and the group's gates
 // run over every member's blocks at once (waxflow.Engine.AnalyzeGroup). It
-// returns the group figure, each member's own, and the damage each member's
-// read found. The members are decoded one after another inside the engine,
-// so the call takes one concurrency slot for its whole length; an album of
-// N tracks is N decodes, where the Concat pass this replaces was N decodes
-// on top of a per-track pass.
+// returns the group figure and each member's own, with the damage each
+// member's read found on that member's InputWarnings, in the source's own
+// terms (see Result.InputWarnings). The members are decoded one after
+// another inside the engine, so the call takes one concurrency slot for its
+// whole length; an album of N tracks is N decodes.
 //
 // No seam and no envelope: a member whose headers only estimate its length
 // (a WMA, a Matroska on its Info Duration) is measured to its end without a
 // declaration to be held to, and a mono member is measured as mono rather
-// than duplicated across a stereo pair. Errors name the member index, which
-// the album caller turns into a track name.
+// than duplicated across a stereo pair.
 //
-// It holds one descriptor per member for the whole measurement, where the
-// Concat pass it replaces held one at a time: waxflow.GroupMember takes an
-// already-open Media the caller owns, with no lazy open to defer it, so an
-// album of N tracks is N open files. An ask for one is in
-// docs/upstream-requests.md.
-func (r *Runner) AnalyzeGroup(ctx context.Context, inputs []string, channels []int) (*waxflow.AnalyzeResult, []waxflow.AnalyzeResult, [][]string, error) {
+// Each member is opened when the engine reaches it and closed before the
+// next opens (waxflow.GroupMember.Open), so an album holds one descriptor
+// at a time however long it is. Every input is opened and closed once
+// before the first decode, so a member the filesystem refuses is reported
+// without decoding the album ahead of it. An open that fails stops the run
+// there. Its
+// error names the member index in the wording the engine uses, so the album
+// caller names the track from one pattern rather than two, and the cause
+// travels as it is: a file the filesystem would not open is an I/O failure
+// (exit 10), not bad input, and openFileMedia has already classified the
+// refusals that are. The engine hands the same failure back annotated with
+// its own code, under which classifyInputError would report a missing file
+// as bad input, which is why the closure keeps the error itself.
+func (r *Runner) AnalyzeGroup(ctx context.Context, inputs []string, channels []int) (*waxflow.AnalyzeResult, []waxflow.AnalyzeResult, error) {
 	if err := r.acquire(ctx); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	defer r.release()
-	members := make([]waxflow.GroupMember, 0, len(inputs))
-	medias := make([]format.Media, 0, len(inputs))
-	defer func() {
-		for _, m := range medias {
-			_ = m.Close()
-		}
-	}()
+	// A member the filesystem will not hand over is worth finding before any
+	// decoding starts: the engine reaches member N only after decoding the
+	// N-1 before it, so a missing or unreadable last track would otherwise
+	// cost the whole album to report. One open and close each, no headers
+	// read, and the wording the failures below use. A file that disappears
+	// after this still fails there, which is what that path is for.
 	for i, in := range inputs {
-		m, err := openFileMedia(in, hintFor(in))
+		fi, err := os.Stat(in)
 		if err != nil {
-			// The member index, in the wording the engine uses for a member
-			// it could not read, so the album caller names the track from one
-			// pattern rather than two. The cause travels as it is: a file the
-			// filesystem would not open is an I/O failure (exit 10), not bad
-			// input, and openFileMedia has already classified the refusals
-			// that are.
-			return nil, nil, nil, fmt.Errorf("group member %d: %w", i, err)
+			return nil, nil, fmt.Errorf("group member %d: %w", i, err)
 		}
-		medias = append(medias, m)
+		if !fi.Mode().IsRegular() {
+			// A directory, a FIFO, a device: the engine's refusal to make,
+			// as bad input rather than an I/O failure, and openFileMedia
+			// below makes it by name. Not opened here, since Windows
+			// refuses a directory open and unix does not.
+			continue
+		}
+		f, err := os.OpenFile(in, os.O_RDONLY|container.OpenNonblock, 0)
+		if err != nil {
+			return nil, nil, fmt.Errorf("group member %d: %w", i, err)
+		}
+		_ = f.Close()
+	}
+	open := r.openMember
+	if open == nil {
+		open = openFileMedia
+	}
+	var openErr error
+	openFailed := -1
+	members := make([]waxflow.GroupMember, len(inputs))
+	for i, in := range inputs {
 		ch := 0
 		if i < len(channels) {
 			ch = channels[i]
 		}
-		members = append(members, waxflow.GroupMember{Media: m, Channels: ch})
+		members[i] = waxflow.GroupMember{Channels: ch, Open: func() (format.Media, error) {
+			m, err := open(in, hintFor(in))
+			if err != nil {
+				openErr, openFailed = err, i
+			}
+			return m, err
+		}}
 	}
 	res, err := r.engine.AnalyzeGroup(ctx, members, waxflow.AnalyzeOptions{})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, nil, nil, ctxErr
+			return nil, nil, ctxErr
+		}
+		if openErr != nil {
+			return nil, nil, fmt.Errorf("group member %d: %w", openFailed, openErr)
 		}
 		// No file is named here: the member index is in the text, and the
 		// album caller turns that into a track name.
-		return nil, nil, nil, classifyInputError(err, "")
+		return nil, nil, classifyInputError(err, "")
 	}
-	warnings := make([][]string, len(medias))
-	for i, m := range medias {
-		warnings[i] = InputWarnings(m)
+	for i := range res.Members {
+		res.Members[i].InputWarnings = sourceWarnings(res.Members[i].InputWarnings)
 	}
-	return &res.Group, res.Members, warnings, nil
+	return &res.Group, res.Members, nil
 }
 
 // Length is what a measurement of a file delivers: the frame count, its
@@ -271,9 +297,8 @@ func lengthOf(t container.Track, info *format.Info) Length {
 // delivers, the measurement a timeline asks for of a member whose headers
 // only estimate its length; it is MeasureLength's fallback for a payload no
 // walk can settle (a Xing MP3, an ASF). It is a full decode, so it takes a
-// concurrency slot like every other one here and stops at a cancellation; a
-// caller that has already made the decode hands its count to OpenAlbumConcat
-// instead. Besides the count it returns the rate the file was read at and the
+// concurrency slot like every other one here and stops at a cancellation.
+// Besides the count it returns the rate the file was read at and the
 // damage the read found (InputWarnings), which MeasureLength reports as its
 // own.
 func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, int, []string, error) {
@@ -311,7 +336,8 @@ func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, int
 }
 
 // openFileMedia opens path as a Media whose Close also closes the underlying
-// file, so a lazily-opened Concat member releases its descriptor on advance.
+// file, so an album member the group pass opens on demand releases its
+// descriptor when the engine moves on.
 // It classifies what it opens the way openSource does: the open's own failure
 // travels untouched, so a permission or missing-file error stays an I/O
 // failure with its path, while a source the engine refuses to read (a

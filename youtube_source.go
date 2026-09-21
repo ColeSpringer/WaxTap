@@ -1470,6 +1470,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
+	warnGaplessDropped(em, pres)
 	warnBitrateAdjusted(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
 	// Input damage and an empty input are deliberately not reported here: a
@@ -1494,6 +1495,16 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	}
 	res := newProcessResult(SourceYouTube, pres, a.fmtSel, loudnessTarget(req.Loudness))
 	res.OutputFormat = remuxedFormat(res.OutputFormat, remuxedTo)
+	// A copy into the container the output extension named leaves the
+	// delivery's MIME type describing a file that is no longer in that
+	// container (an .mka reported as audio/webm). newProcessResult has
+	// already taken the extension from the path; the type follows it. Not
+	// run when the cover-art pass above did the same job.
+	if remuxedTo == "" && !pres.Transcoded && pres.OutputPath != "" {
+		if ext := strings.TrimPrefix(filepath.Ext(pres.OutputPath), "."); ext != "" && !strings.EqualFold(ext, a.fmtSel.Extension) {
+			res.OutputFormat = remuxedFormat(res.OutputFormat, ext)
+		}
+	}
 	res.VideoID = a.video.ID
 	res.Title = a.video.Title
 	res.Client = a.client

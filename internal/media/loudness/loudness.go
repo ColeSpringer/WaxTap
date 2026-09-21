@@ -60,10 +60,11 @@ type Loudness struct {
 	// on a probe-clean file leaves this as the only evidence.
 	Duration time.Duration
 	// Warnings is the input damage the measurement's read found, in the
-	// source's own terms (media.Result.InputWarnings), complete as of the
-	// end of the read; nil for a clean source. A demuxer that walks its
-	// payload lazily reports damage past the headers only from the read
-	// that reaches it, and a measurement is such a read.
+	// source's own terms (waxflow.AnalyzeResult.InputWarnings, folded by
+	// media.Result.InputWarnings' rule), complete as of the end of the
+	// read; nil for a clean source. A demuxer that walks its payload
+	// lazily reports damage past the headers only from the read that
+	// reaches it, and a measurement is such a read.
 	Warnings []string
 }
 
@@ -96,6 +97,7 @@ func fromResult(res *waxflow.AnalyzeResult) Loudness {
 		TruePeakDBTP:   res.TruePeakDB,
 		LRA:            res.LoudnessRange,
 		SamplePeakDB:   res.SamplePeakDB,
+		Warnings:       res.InputWarnings,
 	}
 	if res.Format.Rate > 0 {
 		l.Duration = time.Duration(float64(res.Samples) / float64(res.Format.Rate) * float64(time.Second))
@@ -107,13 +109,11 @@ func fromResult(res *waxflow.AnalyzeResult) Loudness {
 // the measurement to a downmix target so the gain matches a downmixing encode; 0
 // keeps the source layout.
 func Measure(ctx context.Context, r *media.Runner, input string, channels int) (Loudness, error) {
-	res, found, err := r.AnalyzeFile(ctx, input, channels)
+	res, err := r.AnalyzeFile(ctx, input, channels)
 	if err != nil {
 		return Loudness{}, err
 	}
-	l := fromResult(res)
-	l.Warnings = found
-	return l, nil
+	return fromResult(res), nil
 }
 
 // MeasureCut measures the loudness of the cut-composed audio, so the gain matches
@@ -132,9 +132,7 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 	if err != nil {
 		return Loudness{}, err
 	}
-	l := fromResult(res)
-	l.Warnings = media.InputWarnings(med)
-	return l, nil
+	return fromResult(res), nil
 }
 
 // MeasureAlbum measures a set of tracks as a group and individually, from
@@ -151,7 +149,7 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 // for the group, so the wall clock is at worst what the old group pass alone
 // cost.
 func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds []int) (album Loudness, perTrack []Loudness, err error) {
-	group, members, warnings, err := r.AnalyzeGroup(ctx, inputs, folds)
+	group, members, err := r.AnalyzeGroup(ctx, inputs, folds)
 	if err != nil {
 		return Loudness{}, nil, err
 	}
@@ -159,13 +157,6 @@ func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds [
 	var total time.Duration
 	for i := range members {
 		perTrack[i] = fromResult(&members[i])
-		// The two slices are built from the same input list and should be the
-		// same length; the bound is here so a future engine answering with a
-		// different count reports short figures rather than panicking in a
-		// caller's process.
-		if i < len(warnings) {
-			perTrack[i].Warnings = warnings[i]
-		}
 		total += perTrack[i].Duration
 	}
 	album = fromResult(group)

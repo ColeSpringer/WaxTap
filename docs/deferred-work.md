@@ -18,49 +18,26 @@ Gate tags:
 - `[upstream]` needs sibling-repo work first; the ask is in
   upstream-requests.md.
 
-- `[upstream]` **An album measurement holds one descriptor per track.** The
-  Concat pass `AnalyzeGroup` replaced held one at a time by design;
-  `waxflow.GroupMember` takes an already-open `format.Media`, so every member
-  is opened before the call and held until it returns. Waits on the lazy-open
-  ask in [upstream-requests.md](upstream-requests.md); when it lands,
-  `media.Runner.AnalyzeGroup` opens each member as the engine reaches it.
-- `[in-repo]` **A dead proxy still costs two dial timeouts, not one.** CLI-6's
-  fix bounds every dial at 10 s while a proxy is configured, stops retrying a
-  `proxyconnect` failure, and stops the extraction chain on one, which took the
-  default-budget cost from 45 s to 20 s with the proxy named. The remaining 10 s
-  is the session bootstrap, which swallows its own failure by design
-  (`newBootstrappedSession` "never errors" outside adoption). Making it report a
-  proxy failure would change that contract, which is wider than this finding, so
-  it was left. Picking it up means deciding what a bootstrap that cannot reach
-  the network should do to the run.
-- `[in-repo]` **An extension-named output re-encodes a URL it could have
-  copied.** The container rule reads the output extension, asks
-  `media.OutputCodecFor` what that container carries, and passes the answer as
-  the transcode format. A local file is probed first, so a container that
-  accepts the source codec yields a copy; a URL is not, so `OutputCodecFor`
-  answers from the container alone and `transcode <url> out.mka` re-encodes
-  Opus to Opus. The wrong message this produced is fixed, since
-  `warnImplicitLossy` now asks `media.ContainerAccepts` rather than trusting
-  how the request was built, so what is left is a silent second generation.
-  Picking it up means letting
-  the pipeline decide, with a "the container chose" bit on `pipeline.Spec` so
-  the promotion runs against the staged source's real codec and one rule covers
-  both. `--force` and any honoured knob still have to mean an encode.
-- `[in-repo]` **A copy into ADTS drops the exact length.** `transcode x.m4a
-  out.aac` copies the AAC frames untouched, but ADTS states no sample count:
-  the 10 s source probes at `samples=441000` and the copy at `samples=-1`, so
-  the encoder delay and tail padding the MP4's gapless trim hid become audio.
-  Raw ADTS has no field for it, so this is not an upstream ask; it predates
-  this change and applies to every cut and copy landing in such a container.
-  Picking it up means saying so, as a warning when the output container cannot
-  carry a gapless trim the source stated.
-- `[in-repo]` **Two access-denial guarantees go untested on Windows.** That an
-  unreadable album member is an I/O failure rather than bad input, and that an
-  unwritable `--temp-dir` is a usage error, are both proved by staging a `0000`
-  file or directory. Windows has no such mode: `syscall.Mkdir` drops its mode
-  argument entirely, and `Open` maps only the write bit onto the read-only
-  attribute, which still opens for reading. Both tests asserted a denial that
-  cannot happen there, so both now skip on Windows and the two classifications
-  are covered on unix alone. Picking it up means denying access the way Windows
-  does, through an ACL or a handle held open without sharing, behind one helper
-  the two tests share.
+- `[in-repo]` **A format-named extension still re-encodes a URL it could have
+  copied.** The container rule now runs against the staged download
+  (`pipeline.Spec.ContainerChosen`), so `transcode <url> out.mka` copies an
+  Opus delivery. It never reaches an extension that names a format rather than
+  a container: `inferOutputFormatProbed` answers such a name from the name
+  alone (`.opus`, `.aac`, `.mp3`), leaves `FromContainer` false, and the
+  pipeline encodes, so `transcode <url> out.opus` on an Opus delivery is a
+  second generation nobody asked for. A local file is spared by the CLI's
+  same-format shortcut, which probes first; a URL cannot be probed before the
+  download. Picking it up means deciding what the extension means for a source
+  nobody has seen yet, since `.opus` names an encoder in a way `.mka` does not,
+  and `implicit-lossy` must not start firing on a request that named its
+  format.
+- `[in-repo]` **A cut that falls back to a same-family re-encode says
+  nothing.** WaxFlow packet-cuts Opus and AAC; every other lossy source
+  (`cut in.mp3 out.mp3`, `cut in.ogg out.ogg`) declines the copy cut and
+  renders the cut in the source's own family, which is a second lossy
+  generation. `implicit-lossy` does not cover it: that warning asks whether
+  the output container could carry the source codec, and here it can, so the
+  early return fires and the run reports only `transcoded: true`. It predates
+  the container rule and is not part of it. Picking it up means a report for
+  "the cut had to decode", which is a different fact from "the container chose
+  the encoder" and may want its own code.

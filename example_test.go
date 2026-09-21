@@ -220,11 +220,11 @@ func ExampleClient_Measure() {
 		log.Fatal(err)
 	}
 
-	loud, err := client.Measure(context.Background(), "song.flac")
+	m, err := client.Measure(context.Background(), "song.flac")
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("%.1f LUFS\n", loud.IntegratedLUFS)
+	fmt.Printf("%.1f LUFS\n", m.Loudness.IntegratedLUFS)
 }
 
 // ExampleClient_MeasureAlbum measures several files as one album, useful for

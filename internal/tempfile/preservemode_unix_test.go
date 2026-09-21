@@ -344,6 +344,41 @@ func TestResolveLinkTakesDotDotAfterTheParentLink(t *testing.T) {
 	}
 }
 
+// macOS spells every temp directory through a link (/var is /private/var),
+// so a ".." that leaves the link's own directory resolves to a path under a
+// prefix the caller never spelled. The answer keeps the caller's spelling of
+// the nearest directory the target is still under. The tree is reached
+// through a root link here, which is that shape on any platform.
+func TestResolveLinkKeepsTheCallersSpellingPastTheParent(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	root := filepath.Join(t.TempDir(), "root") // the caller's spelling: a link to real
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"big/music", "big/storage"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(root, "big", "storage", "out.flac")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "big", "music"), filepath.Join(root, "music")); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "music", "out.flac")
+	if err := os.Symlink(filepath.Join("..", "storage", "out.flac"), link); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveLink(link); got != target {
+		t.Errorf("ResolveLink(%q) = %q, want %q: the caller's spelling of the root, not the resolved one", link, got, target)
+	}
+}
+
 // A relative output path stays relative, as "-o out.flac" gives it. The
 // resolve runs through EvalSymlinks, which keeps a relative path relative, so
 // the prefix handed back has to be the caller's relative one rather than an

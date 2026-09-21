@@ -10,7 +10,7 @@ import (
 // it, which is what catches a constant added without a String arm: the walk
 // below stops at the first code that spells "unknown", so a missing arm shows
 // up here as a short count rather than as a warning nobody can match on.
-const knownWarningCodes = 26
+const knownWarningCodes = 27
 
 // The codes are a closed vocabulary: each spells itself, no two spell the
 // same thing, and README documents every one. A consumer matching on the

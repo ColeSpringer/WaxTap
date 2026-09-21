@@ -89,18 +89,20 @@ func TestExtractExcluding_DeadlineKeepsAttemptCause(t *testing.T) {
 	})
 }
 
-// The default-budget shape of a dead proxy: the visitor bootstrap fails with
-// proxyconnect and is deliberately worked around (synthetic visitorData), its
-// dial timeouts consume the extraction budget, and the player request is then
-// cut off mid-dial, where net/http reports the bare context error with no
-// transport cause at all. The only request that named the proxy was the one
-// whose failure was swallowed, so the session has to carry it forward.
+// The default-budget shape of an unreachable host: the visitor bootstrap
+// fails on its dial and is deliberately worked around (synthetic
+// visitorData), its dial timeouts consume the extraction budget, and the
+// player request is then cut off mid-dial, where net/http reports the bare
+// context error with no transport cause at all. The only request that named
+// the failing step was the one whose failure was swallowed, so the session
+// has to carry it forward. A dead proxy no longer takes this path: it ends
+// the run at the bootstrap (TestExtract_BootstrapProxyFailureIsFatal).
 func TestExtractExcluding_BareDeadlineNamesSwallowedBootstrapCause(t *testing.T) {
-	proxyFail := func(u string) error {
+	dialFail := func(u string) error {
 		return &url.Error{
 			Op:  "Get",
 			URL: u,
-			Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("i/o timeout")},
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")},
 		}
 	}
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -109,7 +111,7 @@ func TestExtractExcluding_BareDeadlineNamesSwallowedBootstrapCause(t *testing.T)
 			// net/http reports the context error itself when it fires mid-dial.
 			return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: r.Context().Err()}
 		}
-		return nil, proxyFail(r.URL.String())
+		return nil, dialFail(r.URL.String())
 	})
 	// The bootstrap only runs on a jar-backed client, as in the real CLI.
 	jar, err := cookiejar.New(nil)
@@ -126,8 +128,8 @@ func TestExtractExcluding_BareDeadlineNamesSwallowedBootstrapCause(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	_, err = c.ExtractExcluding(ctx, "testVideo01", nil)
-	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "proxyconnect" {
-		t.Fatalf("err = %v, want the swallowed bootstrap's proxyconnect cause folded in", err)
+	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "dial" {
+		t.Fatalf("err = %v, want the swallowed bootstrap's dial cause folded in", err)
 	}
 	// Both truths survive: what stopped the run and what to fix.
 	if !errors.Is(err, context.DeadlineExceeded) {

@@ -410,15 +410,17 @@ func TestAnalyzeFileReportsReadDamage(t *testing.T) {
 	if pr, err := r.Probe(ctx, torn); err != nil || len(pr.Warnings) != 0 {
 		t.Fatalf("probe of the torn stream: warnings %v, err %v; want a clean probe, the damage lies past the headers", pr.Warnings, err)
 	}
-	_, found, err := r.AnalyzeFile(ctx, torn, 0)
+	res, err := r.AnalyzeFile(ctx, torn, 0)
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	if len(found) != 1 || !strings.Contains(found[0], "truncated") {
+	if found := res.InputWarnings; len(found) != 1 || !strings.Contains(found[0], "truncated") {
 		t.Errorf("AnalyzeFile damage = %v, want the torn final frame reported once", found)
+	} else if strings.HasPrefix(found[0], "member ") {
+		t.Errorf("the damage %q still carries a member prefix", found[0])
 	}
-	if _, found, err := r.AnalyzeFile(ctx, wav, 0); err != nil || len(found) != 0 {
-		t.Errorf("AnalyzeFile on a clean file: damage %v, err %v", found, err)
+	if clean, err := r.AnalyzeFile(ctx, wav, 0); err != nil || len(clean.InputWarnings) != 0 {
+		t.Errorf("AnalyzeFile on a clean file: damage %v, err %v", clean.InputWarnings, err)
 	}
 }
 
@@ -438,12 +440,12 @@ func TestAnalyzeGroupMeasuresAnAdvisoryMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("measure the member: %v", err)
 	}
-	group, members, warnings, err := r.AnalyzeGroup(ctx, []string{wma, wav}, nil)
+	group, members, err := r.AnalyzeGroup(ctx, []string{wma, wav}, nil)
 	if err != nil {
 		t.Fatalf("AnalyzeGroup: %v", err)
 	}
-	if len(members) != 2 || len(warnings) != 2 {
-		t.Fatalf("members = %d, warnings = %d, want 2 each", len(members), len(warnings))
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
 	}
 	if members[0].Samples != length.Samples {
 		t.Errorf("the advisory member measured %d frames, want the %d its own decode delivers", members[0].Samples, length.Samples)
@@ -454,7 +456,7 @@ func TestAnalyzeGroupMeasuresAnAdvisoryMember(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, _, err := r.AnalyzeGroup(canceled, []string{wma, wav}, nil); !errors.Is(err, context.Canceled) {
+	if _, _, err := r.AnalyzeGroup(canceled, []string{wma, wav}, nil); !errors.Is(err, context.Canceled) {
 		t.Errorf("AnalyzeGroup under a canceled context = %v, want context.Canceled", err)
 	}
 }

@@ -95,7 +95,10 @@ and chapters via a token-free watch-page fetch.
 
 `transcode` and `normalize` also take directories: `-r` recurses, `--dir` sets
 an output directory, and `--force` re-encodes files already in the target
-codec. Album normalization applies one gain to every track: `--peak-mode cap`
+codec, naming the container's encoder for an output named by extension alone,
+so `implicit-lossy` is not raised.
+
+Album normalization applies one gain to every track: `--peak-mode cap`
 leaves the true-peak limiter idle and reproduces the input's track-to-track
 spacing exactly, at the cost of landing short; the default `limit` reaches for
 the target and lets the per-track limiter compress that spacing. Every track is
@@ -154,8 +157,10 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   `.mka`/`.mkv`, `.webm`, `.mp4`/`.m4a`/`.m4b`, `.aac`) keeps the source codec
   when it can carry it (a copy, or under `normalize --peak-mode cap` the Opus
   header gain) and otherwise runs the container's usual encoder (`.ogg` Vorbis,
-  `.mka`/`.webm` Opus, `.mp4` AAC), reported as `implicit-lossy`. `--format ogg`
-  still means Vorbis.
+  `.mka`/`.webm` Opus, `.mp4` AAC), reported as `implicit-lossy`. A URL's codec
+  is checked after the download, so `transcode <url> out.mka` copies an Opus
+  stream, cuts it at the packet grid like `cut` does when a cut is asked for,
+  and `out.m4a` encodes it. `--format ogg` still means Vorbis.
 - `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
   Names are case-insensitive and trimmed, and a few spellings are aliases:
   `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, `wv` for
@@ -370,6 +375,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `cut-snapped` | a packet-level copy cut moved interior joins to the packet grid; the detail counts them and names the largest move |
 | `bitrate-adjusted` | the encoder used the nearest bit rate it supports; the detail names the requested and the delivered rate |
 | `watch-page-no-token` | a WEB run fell back to the watch page, so the PO token it minted was never exercised |
+| `gapless-dropped` | a copy into raw ADTS (`.aac`) delivered the source's encoder delay and padding as audio, since ADTS states no gapless trim and no length |
 
 | Note | Meaning |
 |---|---|
@@ -529,7 +535,9 @@ the retry needs a per-request bound to be reachable.
 
 A proxy dial is bounded at 10 s and not retried, so a proxy that never answers
 fails inside any budget with the proxy named rather than consuming the whole
-extraction budget and reporting a bare timeout.
+extraction budget and reporting a bare timeout. A proxy the first request
+cannot dial at all ends the run there, with exit 9, rather than paying a
+second dial to learn the same thing.
 
 `procs` bounds the concurrent audio-processing operations. Zero, the default,
 follows `GOMAXPROCS`; a negative value disables the limit entirely. Both are

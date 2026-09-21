@@ -101,6 +101,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
+	warnGaplessDropped(em, pres)
 	warnBitrateAdjusted(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
 	warnInputDamage(em, pres)
@@ -233,24 +234,35 @@ type AlbumLoudnessResult struct {
 	Warnings []Warning
 }
 
-// Measure reports EBU R128 integrated loudness for a single local audio file. It
-// uses Process with a measure-only spec and no Output, so no output or scratch
-// file is created.
+// MeasureResult reports a single file's loudness and what the read found in
+// the file.
+type MeasureResult struct {
+	Loudness LoudnessInfo // the file's EBU R128 measurement
+	// Warnings are what the measurement found in the input: damage, the
+	// engine's remarks, an empty track, and a figure no gain could be derived
+	// from. The same set Process reports for a measure-only spec, since the
+	// reading is the same reading.
+	Warnings []Warning
+}
+
+// Measure reports EBU R128 loudness for a single local audio file, and what
+// the read found in it. It uses Process with a measure-only spec and no
+// Output, so no output or scratch file is created.
 //
 // Use MeasureAlbum to measure several files as one album, or Process with a
 // LoudnessApply spec to normalize and write audio.
-func (c *Client) Measure(ctx context.Context, path string) (LoudnessInfo, error) {
+func (c *Client) Measure(ctx context.Context, path string) (*MeasureResult, error) {
 	res, err := c.Process(ctx, ProcessRequest{
 		Input:       path,
 		ProcessSpec: ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly}},
 	})
 	if err != nil {
-		return LoudnessInfo{}, err
+		return nil, err
 	}
 	if res.Loudness == nil || res.Loudness.Input == nil {
-		return LoudnessInfo{}, fmt.Errorf("waxtap.Measure: no loudness measured for %s", path)
+		return nil, fmt.Errorf("waxtap.Measure: no loudness measured for %s", path)
 	}
-	return *res.Loudness.Input, nil
+	return &MeasureResult{Loudness: *res.Loudness.Input, Warnings: res.Warnings}, nil
 }
 
 // MeasureAlbum measures local audio files as one album and also returns each
@@ -926,7 +938,7 @@ func albumDelivered(ctx context.Context, runner *media.Runner, outputs []string,
 	// written, so a failed measurement must not fail the album. Each output is
 	// measured at the width it was written at (no fold), and the group's gates
 	// run over every one of them at once.
-	group, _, _, err := runner.AnalyzeGroup(ctx, outputs, nil)
+	group, _, err := runner.AnalyzeGroup(ctx, outputs, nil)
 	if err != nil {
 		return nil
 	}

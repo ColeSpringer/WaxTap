@@ -494,7 +494,7 @@ func TestAnalyzeFileCancellationNotBadInput(t *testing.T) {
 	in := wavFixture(t, 2, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := r.AnalyzeFile(ctx, in, 0)
+	_, err := r.AnalyzeFile(ctx, in, 0)
 	if err == nil {
 		// WaxFlow's AnalyzeMedia checks ctx.Err() per chunk, so a context
 		// canceled before the call fails on the first chunk. Skipping here
@@ -1955,5 +1955,97 @@ func TestPlanEncodeReportsTheEncodersRate(t *testing.T) {
 
 	if _, _, err := r.PlanEncode(ctx, in, filepath.Join(dir, "floor.opus"), Spec{Codec: CodecOpus, Bitrate: 2000}); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
 		t.Errorf("PlanEncode at 2000 b/s Opus = %v, want ErrIncompatibleSpec", err)
+	}
+}
+
+// A copy into raw ADTS keeps every packet and loses the trim: ADTS states
+// no gapless fields, so WaxFlow's muxer accepts and discards the trailer,
+// and the priming the MP4's edit list hid plays as audio. The copy reports
+// what it dropped; the same copy into .m4a drops nothing.
+func TestRemuxIntoADTSReportsTheDroppedTrim(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRunner(RunnerConfig{})
+	wav := writeFixture(t, dir, "src.wav", mediatest.SineWAV(3, 2))
+	src := filepath.Join(dir, "src.m4a") // the .m4a extension puts the AAC in progressive MP4, not ADTS
+	if _, err := r.Transcode(context.Background(), wav, src, Spec{Codec: CodecAAC}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := r.Probe(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := p.AudioStream()
+	if a.Delay <= 0 {
+		t.Fatalf("the AAC source declares no encoder delay (%d); the fixture cannot show a dropped trim", a.Delay)
+	}
+	res, err := r.Transcode(context.Background(), src, filepath.Join(dir, "out.aac"), Spec{Codec: CodecCopy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TrimDropped.Delay != a.Delay || res.TrimDropped.Padding != a.Padding {
+		t.Errorf("TrimDropped = %+v, want delay %d padding %d", res.TrimDropped, a.Delay, a.Padding)
+	}
+	kept, err := r.Transcode(context.Background(), src, filepath.Join(dir, "out2.m4a"), Spec{Codec: CodecCopy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.TrimDropped != (Trim{}) {
+		t.Errorf("a copy into .m4a reports %+v dropped, want nothing", kept.TrimDropped)
+	}
+}
+
+// The rule containerDropsTrims states, held against every container WaxTap
+// writes rather than against its own one-arm list: a copy either delivers
+// the same audio the source did, or refuses, or reports what it dropped. A
+// destination that quietly turns a source's gapless trim into audio fails
+// here, which is what keeps the list in step with WaxFlow's muxers.
+func TestCopyEitherKeepsTheTrimRefusesOrReportsIt(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	r := NewRunner(RunnerConfig{})
+	wav := writeFixture(t, dir, "src.wav", mediatest.SineWAV(1, 2))
+	decoded := func(path string) int64 {
+		t.Helper()
+		l, err := r.MeasureLength(ctx, path)
+		if err != nil {
+			t.Fatalf("length %s: %v", path, err)
+		}
+		return l.Samples
+	}
+	// The two codecs that carry a trim: AAC primes 1024 samples and pads its
+	// last frame, Opus states a pre-skip. Each is written into the container
+	// that declares the trim, so the copies below start from one.
+	for _, src := range []struct {
+		codec Codec
+		name  string
+		path  string
+	}{
+		{CodecAAC, "aac", filepath.Join(dir, "src.m4a")},
+		{CodecOpus, "opus", filepath.Join(dir, "src.opus")},
+	} {
+		if _, err := r.Transcode(ctx, wav, src.path, Spec{Codec: src.codec}); err != nil {
+			t.Fatal(err)
+		}
+		want := decoded(src.path)
+		for _, ext := range OutputContainerExts() {
+			ext = strings.TrimPrefix(ext, ".")
+			if !ContainerAccepts(ext, src.name) {
+				continue
+			}
+			t.Run(src.name+"-to-"+ext, func(t *testing.T) {
+				out := filepath.Join(dir, src.name+"-copy."+ext)
+				res, err := r.Transcode(ctx, src.path, out, Spec{Codec: CodecCopy})
+				if err != nil {
+					return // a refusal is a safe answer: nothing was written to mislead
+				}
+				if res.TrimDropped != (Trim{}) {
+					return // it said so, which is the whole point of the field
+				}
+				if got := decoded(out); got != want {
+					t.Errorf("a copy into .%s delivers %d samples where the source delivers %d, and reported nothing dropped; containerDropsTrims does not know about it",
+						ext, got, want)
+				}
+			})
+		}
 	}
 }

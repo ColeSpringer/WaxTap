@@ -319,3 +319,12 @@ func OutputContainerExts() []string {
 	slices.Sort(out)
 	return out
 }
+
+// containerDropsTrims reports whether a WaxFlow output container accepts a
+// gapless trim and then states none, so a copy into it plays the source's
+// encoder delay and padding as audio. Raw ADTS is the one: it has no field
+// for a trim or a length, and its muxer discards the trailer rather than
+// refuse it. Every other trim-less container WaxTap writes (FLAC, WAV, AIFF,
+// WavPack, APE) refuses a nonzero trim outright, and a lossless source
+// carries none, so a copy into those never reaches this question.
+func containerDropsTrims(container string) bool { return container == "adts" }

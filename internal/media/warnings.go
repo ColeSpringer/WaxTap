@@ -37,6 +37,10 @@ func sourceWarnings(found []string) []string {
 // own terms (see Result.InputWarnings): complete once the read has reached
 // the end. A Media assembled from several spans of one file (a composed cut)
 // reports each span's findings under a member index, which this folds away.
+//
+// An analysis carries its own list (waxflow.AnalyzeResult.InputWarnings,
+// already folded by the same rule), so this serves a read that ends outside
+// one: countFrames, which walks a file to its end for a frame count.
 func InputWarnings(med format.Media) []string {
 	return sourceWarnings(med.Info().Warnings)
 }

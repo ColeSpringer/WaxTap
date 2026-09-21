@@ -367,6 +367,18 @@ func TestRemuxedFormat(t *testing.T) {
 	if got := remuxedFormat(Format{Codec: "vorbis", Extension: "webm"}, "ogg"); got.Extension != "ogg" || got.MIMEType != `audio/ogg; codecs="vorbis"` {
 		t.Errorf("a Vorbis remux = %+v, want .ogg", got)
 	}
+	// The containers a copy of a delivery can land in each name their own
+	// type rather than leaving it blank or keeping the one they came from.
+	m4a := Format{Codec: "mp4a.40.2", Extension: "m4a", MIMEType: `audio/mp4; codecs="mp4a.40.2"`, Itag: 140}
+	for _, tc := range []struct{ ext, want string }{
+		{"m4b", `audio/mp4; codecs="mp4a.40.2"`},
+		{"mka", "audio/x-matroska"},
+		{"aac", "audio/aac"},
+	} {
+		if got := remuxedFormat(m4a, tc.ext); got.Extension != tc.ext || got.MIMEType != tc.want {
+			t.Errorf("a copy into .%s = %+v, want %q", tc.ext, got, tc.want)
+		}
+	}
 }
 
 func mustProbeFile(t *testing.T, c *Client, path string) media.ProbeResult {

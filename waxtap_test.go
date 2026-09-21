@@ -1383,11 +1383,11 @@ func TestMeasure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
 	}
-	if math.IsNaN(got.IntegratedLUFS) || math.IsInf(got.IntegratedLUFS, 0) {
-		t.Errorf("Measure returned non-finite loudness for a steady sine: %+v", got)
+	if math.IsNaN(got.Loudness.IntegratedLUFS) || math.IsInf(got.Loudness.IntegratedLUFS, 0) {
+		t.Errorf("Measure returned non-finite loudness for a steady sine: %+v", got.Loudness)
 	}
-	if got.IntegratedLUFS >= 0 {
-		t.Errorf("Measure integrated LUFS = %v, want a negative value for audio with signal", got.IntegratedLUFS)
+	if got.Loudness.IntegratedLUFS >= 0 {
+		t.Errorf("Measure integrated LUFS = %v, want a negative value for audio with signal", got.Loudness.IntegratedLUFS)
 	}
 	// Measure neither writes nor removes anything.
 	if !fileExists(in) {

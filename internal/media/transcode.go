@@ -28,6 +28,18 @@ type Spec struct {
 	GainDB   float64 // scalar normalization gain in dB; 0 is a no-op
 }
 
+// Trim is a gapless trim in samples: the encoder delay at the head and the
+// padding at the tail, as the source's container states them when it is
+// opened.
+//
+// It is a floor, not a total. A container that carries its end trim on the
+// last packet rather than in its headers (Matroska, waxflow.
+// StatesTrimsPerPacket) states no Padding until a walk has reached that
+// packet, so a copy out of one reports the delay alone. Settling it would
+// cost a second pass over the payload for a number the warning only counts,
+// so the reporting says what the source states and no more.
+type Trim struct{ Delay, Padding int64 }
+
 // Result reports a completed transcode.
 type Result struct {
 	Output string // final output path
@@ -44,6 +56,11 @@ type Result struct {
 	// list ProbeResult.Warnings carries, the probe's entries included, each
 	// once; nil for a clean source.
 	InputWarnings []string
+	// TrimDropped is the source's gapless trim a copy could not carry: the
+	// output container states none, so those samples play as audio. Zero
+	// for an encode, which applies the trim while decoding, and for a copy
+	// into a container that states it.
+	TrimDropped Trim
 }
 
 // Levels carries WaxFlow's level measurement of one encode as numbers, so the
@@ -120,10 +137,11 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 
 	var levels Levels
 	var found []string
+	var dropped Trim
 	if spec.Codec == CodecCopy {
 		// remux classifies its own failures; classifying again here would wrap an
 		// already-mapped error a second time.
-		found, err = r.remux(ctx, src, input, output, staged)
+		found, dropped, err = r.remux(ctx, src, input, output, staged)
 		if err != nil {
 			return Result{}, err
 		}
@@ -141,7 +159,7 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 	if err := staged.Commit(); err != nil {
 		return Result{}, err
 	}
-	res := Result{Output: output, Codec: spec.Codec, Levels: levels, InputWarnings: found}
+	res := Result{Output: output, Codec: spec.Codec, Levels: levels, InputWarnings: found, TrimDropped: dropped}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}
@@ -201,26 +219,36 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 // names, choosing WaxFlow's output format from the source codec (the codec must
 // survive the trip) so no re-encode happens. It takes the paths rather than their
 // container hints so its failures can name the file they are about. It
-// returns the damage the packet walk found; see Result.InputWarnings.
-func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) ([]string, error) {
+// returns the damage the packet walk found (see Result.InputWarnings) and the
+// gapless trim the destination container could not state (see
+// Result.TrimDropped).
+func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) ([]string, Trim, error) {
 	demux, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return nil, classifyInputError(err, input)
+		return nil, Trim{}, classifyInputError(err, input)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return nil, remuxDeclined(track.Codec)
+		return nil, Trim{}, remuxDeclined(track.Codec)
 	}
 	opts := waxflow.TranscodeOptions{
 		Format:    outFormat,
 		Container: containerFor(outFormat, hintFor(output)),
 	}
+	// The packets move unchanged, so a container with nowhere to state the
+	// source's trim delivers those samples as audio. WaxFlow's ADTS muxer
+	// takes the trailer and discards it rather than refusing it, which is
+	// right for a fresh encode's own priming and silent about this.
+	var dropped Trim
+	if containerDropsTrims(opts.Container) {
+		dropped = Trim{Delay: track.Delay, Padding: track.Padding}
+	}
 	tres, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts)
 	if err != nil {
-		return nil, classifyEngineError(err, input, output)
+		return nil, Trim{}, classifyEngineError(err, input, output)
 	}
-	return sourceWarnings(tres.InputWarnings), nil
+	return sourceWarnings(tres.InputWarnings), dropped, nil
 }
 
 // remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own

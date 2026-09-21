@@ -238,6 +238,10 @@ func New(finalPath string) (*File, error) {
 // the rename stays on one filesystem, which is the whole point of the link in
 // that case.
 //
+// The answer is spelled under the nearest ancestor of the given path that
+// still contains the target, so a parent that is itself a link keeps the
+// caller's spelling.
+//
 // A dangling link resolves to nothing, so the path is left alone and the
 // rename replaces the link itself: there is no target to write through, and
 // that is the only answer the filesystem offers.
@@ -250,16 +254,25 @@ func ResolveLink(finalPath string) string {
 	if err != nil {
 		return finalPath // dangling, or a loop: replace the link
 	}
-	dir := filepath.Dir(finalPath)
-	realDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return target
+	// The link's own directory first, then each ancestor: the nearest
+	// directory the target is still under, spelled the caller's way, with
+	// the resolved remainder joined on. A ".." that leaves the link's
+	// directory lands under a parent, and that parent's spelling is still
+	// the caller's (on macOS every temp directory is reached through the
+	// /var link, so the resolved spelling is never theirs). A target under
+	// none of them (another disk) is answered as the kernel spells it.
+	for dir := filepath.Dir(finalPath); ; dir = filepath.Dir(dir) {
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return target
+		}
+		if rel, err := filepath.Rel(realDir, target); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.Join(dir, rel)
+		}
+		if filepath.Dir(dir) == dir {
+			return target
+		}
 	}
-	rel, err := filepath.Rel(realDir, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return target
-	}
-	return filepath.Join(dir, rel)
 }
 
 // chmodUmask changes a staged file from os.CreateTemp's private mode to the mode

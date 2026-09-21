@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
@@ -127,6 +128,11 @@ func (c *Client) resolveChannelID(ctx context.Context, channelURL string) (strin
 		return "", ctxErr
 	}
 	if errors.Is(err, waxerr.ErrRateLimited) {
+		return "", err
+	}
+	if httpx.IsProxyConnect(err) {
+		// The scrape would bootstrap again and dial the same dead proxy; the
+		// chain stops on this failure (ExtractExcluding) and so does this.
 		return "", err
 	}
 	c.log.DebugContext(ctx, "resolve_url channel resolution failed; scraping the channel page", "url", channelURL, "err", err)

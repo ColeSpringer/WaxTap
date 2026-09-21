@@ -460,7 +460,7 @@ func (c *Client) Extract(ctx context.Context, videoID string) (*Extraction, erro
 func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[AttemptID]bool) (*Extraction, error) {
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
-		return nil, err // fatal only under adoption; otherwise newBootstrappedSession never errors
+		return nil, err // fatal under adoption or a dead proxy; otherwise the bootstrap never errors
 	}
 	var bestErr error
 

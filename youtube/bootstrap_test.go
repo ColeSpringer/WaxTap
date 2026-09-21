@@ -3,10 +3,14 @@ package youtube
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,6 +120,62 @@ func TestExtract_BootstrapFailureFallsBack(t *testing.T) {
 	}
 	if homepageHits == 0 || playerHits == 0 {
 		t.Errorf("expected both a bootstrap attempt and a player call (homepage=%d player=%d)", homepageHits, playerHits)
+	}
+}
+
+// A bootstrap whose dial to the configured proxy fails ends the extraction
+// there: the proxy is a fixed setting, so the chain's own dials would fail
+// the same way after paying a second timeout. Only the proxy dial is fatal;
+// TestExtract_BootstrapFailureFallsBack keeps a 500 best-effort.
+func TestExtract_BootstrapProxyFailureIsFatal(t *testing.T) {
+	var player atomic.Int32
+	c := jarClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "www.youtube.com" && r.URL.Path == "/" {
+			return nil, &url.Error{Op: "Get", URL: r.URL.String(), Err: &net.OpError{
+				Op: "proxyconnect", Net: "tcp", Err: errors.New("dial tcp 127.0.0.1:1: i/o timeout"),
+			}}
+		}
+		if strings.Contains(r.URL.Path, "/player") {
+			player.Add(1)
+		}
+		return nil, errors.New("unexpected request: " + r.URL.String())
+	}))
+	_, err := c.Extract(context.Background(), "dummyVideo0")
+	if !httpx.IsProxyConnect(err) {
+		t.Fatalf("err = %v, want the proxy dial failure", err)
+	}
+	if !strings.Contains(err.Error(), "visitor bootstrap") {
+		t.Errorf("err = %v, want it to name the bootstrap", err)
+	}
+	if n := player.Load(); n != 0 {
+		t.Errorf("%d /player requests after the proxy failed, want none", n)
+	}
+}
+
+// A channel URL resolves through InnerTube and falls back to a page scrape
+// on most failures; each path bootstraps, and a failed bootstrap load is
+// never cached, so without a guard a dead proxy would be dialled once per
+// path. The proxy failure ends the resolve at the first.
+func TestResolveChannelID_DeadProxyIsNotScraped(t *testing.T) {
+	var homepage atomic.Int32
+	c := jarClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "www.youtube.com" && r.URL.Path == "/" {
+			homepage.Add(1)
+			return nil, &url.Error{Op: "Get", URL: r.URL.String(), Err: &net.OpError{
+				Op: "proxyconnect", Net: "tcp", Err: errors.New("dial tcp 127.0.0.1:1: i/o timeout"),
+			}}
+		}
+		return nil, errors.New("unexpected request: " + r.URL.String())
+	}))
+	_, err := c.resolveChannelID(context.Background(), "https://www.youtube.com/@dummyChannel0")
+	if !httpx.IsProxyConnect(err) {
+		t.Fatalf("err = %v, want the proxy dial failure", err)
+	}
+	if !strings.Contains(err.Error(), "visitor bootstrap") {
+		t.Errorf("err = %v, want it to name the bootstrap", err)
+	}
+	if n := homepage.Load(); n != 1 {
+		t.Errorf("the homepage was dialled %d times, want once: the scrape must not bootstrap again", n)
 	}
 }
 

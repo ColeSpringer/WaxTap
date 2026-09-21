@@ -495,4 +495,27 @@ func TestProcessWarnsImplicitLossyPromotion(t *testing.T) {
 	if w, ok := findWarning(res.Warnings, WarnImplicitLossy); ok {
 		t.Errorf("warned %q, want silence: Matroska carries Opus", w.Detail)
 	}
+	if res.Transcoded {
+		t.Errorf("a carried source was re-encoded")
+	}
+
+	// The same rule into .ogg, whose usual encoder is Vorbis: the container
+	// carries Opus, so the packets move and the file is still Opus.
+	ogg := filepath.Join(dir, "carried.ogg")
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: opus,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(ogg),
+			Transcode: &TranscodeSpec{Format: FormatVorbis, FromContainer: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("opus into .ogg: %v", err)
+	}
+	if res.Transcoded {
+		t.Errorf("a carried source was re-encoded to vorbis")
+	}
+	if p, perr := c.ProbeAudio(ctx, ogg); perr != nil || p.Codec != "opus" {
+		t.Errorf("the .ogg holds %q (%v), want opus", p.Codec, perr)
+	}
 }

@@ -104,6 +104,17 @@ type Spec struct {
 	// re-encode or cut already runs.
 	Remux bool
 
+	// ContainerChosen says Codec is the output container's usual encoder,
+	// chosen because the caller named an extension and could not see the
+	// source (a URL, whose codec only the download settles). Run then
+	// applies the container rule to the staged source's real codec: a
+	// container that carries it keeps it, as a copy when nothing else needs
+	// an encode and as the same-family encoder when Bitrate, BitDepth, or a
+	// loudness apply does; a container that cannot carry it encodes to
+	// Codec. Ignored when Codec is CodecCopy, which takes the copy rule
+	// below on its own.
+	ContainerChosen bool
+
 	// Loudness controls measurement/normalization. Nil means no loudness work.
 	Loudness *Loudness
 }
@@ -223,6 +234,10 @@ type Result struct {
 	// always describes the file left at OutputPath. Zero for every copy path
 	// and when no output pass ran; warning policy belongs to the caller.
 	Levels media.Levels
+
+	// TrimDropped is the source's gapless trim the copy could not carry; see
+	// media.Result.TrimDropped. Zero for every other path.
+	TrimDropped media.Trim
 }
 
 // Run processes input per spec, writing any output to output. It returns a
@@ -346,6 +361,57 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	res.SourceWarnings = slices.Clone(probe.Warnings)
 	res.SourceNotes = slices.Clone(probe.Notes)
 	res.SourceEmpty = sourceEmpty
+
+	// The container chose the codec, before the source could be seen. Now
+	// that it can, the rule the caller would have applied runs against the
+	// real codec (media.OutputCodecFor): a container that carries it keeps
+	// it, so an Opus download into .ogg or .mka stays Opus and a normalize
+	// of it can take the header gain below, and one that cannot takes the
+	// encoder the caller passed, which is that container's own.
+	if spec.ContainerChosen && transcoding {
+		// An extension naming no container WaxTap writes is left to the
+		// caller's format, which then picks the muxer, exactly as the copy
+		// rule below leaves such a path alone (media.needsForcedMuxer). The
+		// bit is a fallback, so it never turns a spec that would have been
+		// written into a refusal; CheckOutputContainer refuses the names
+		// that must be refused, before the pipeline is reached.
+		c, kept, cerr := media.OutputCodecFor(containerExt(output), res.SourceCodec)
+		switch {
+		case cerr != nil:
+			// Nothing to apply the rule against; spec.Codec stands.
+		case !kept:
+			spec.Codec = c
+		case c == media.CodecWAV || c == media.CodecAIFF:
+			// The container carries the source, but the source is PCM,
+			// whose sample layout belongs to its container: the packets
+			// cannot move unchanged (media.Runner.remux declines every PCM
+			// copy, remuxDeclined). The family row is an encode, and a PCM
+			// encode is bit exact, so nothing is lost by taking it.
+			spec.Codec = c
+		case (spec.Bitrate > 0 && media.TakesBitRate(c)) || (spec.BitDepth > 0 && c.IsLossless()) || apply:
+			// Only a knob the family encoder honours forces the encode: a
+			// bit depth on Opus or a bit rate on FLAC is ignored by that
+			// encoder and would buy a generation for nothing, which is what
+			// the CLI's same-format shortcut already decides for a local file
+			// (specChangesAudio). A fold needs nothing here: the downmix
+			// promotion below turns a copy into the family encode itself.
+			spec.Codec = c
+		default:
+			spec.Codec = media.CodecCopy
+			// A copy has no encoder to hand a knob to; an ignored one is
+			// zeroed as the CLI's shortcut zeroes it, so it neither reaches
+			// the remux nor a re-encode a later promotion makes of this copy.
+			spec.Bitrate, spec.BitDepth = 0, 0
+			transcoding = false
+			// What gets a plain copy past the no-op return below. Not set for
+			// a cut: copyOnly in the copy rule and RequireCopyFormat in the
+			// cut render both read this flag as "--format copy", which would
+			// refuse a crossfade the caller never asked to forbid. A cut
+			// writes regardless, as a packet copy where the codec allows and
+			// a same-family re-encode where it does not.
+			remux = !effectiveCut
+		}
+	}
 
 	// Reduce the channel count only when the source exceeds the requested target.
 	fold := 0
@@ -596,6 +662,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		tres, err := r.Transcode(ctx, input, output, enc)
 		if err == nil {
 			res.Levels = tres.Levels
+			res.TrimDropped = tres.TrimDropped
 			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, tres.InputWarnings)
 		}
 		return err

@@ -90,6 +90,11 @@ type ProbeStream struct {
 	// frames). Both false is a counted total whose mismatch would be damage.
 	SamplesExact    bool
 	SamplesAdvisory bool
+	// Delay and Padding are the gapless trim the container states, in
+	// samples: the encoder priming a decoder skips at the head and the
+	// padding it drops at the tail (an MP4 edit list, an MP3 LAME tag, an
+	// Opus pre-skip). Zero when the container states none.
+	Delay, Padding int64
 }
 
 // AudioStream returns the first audio track and true, or a zero stream and false
@@ -189,6 +194,8 @@ func mapProbe(info *format.Info, size int64) ProbeResult {
 			Samples:         t.Samples,
 			SamplesExact:    t.SamplesExact,
 			SamplesAdvisory: t.SamplesAdvisory,
+			Delay:           t.Delay,
+			Padding:         t.Padding,
 		}
 	}
 	if len(info.Tracks) == 0 {

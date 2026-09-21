@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	rand "math/rand/v2"
 	"net/http"
 	"net/url"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 )
 
 // YouTube's no-PO-token clients, including VISIONOS and ANDROID_VR, usually need a coherent
@@ -20,7 +23,8 @@ import (
 // When the HTTP client has a cookie jar, WaxTap loads a YouTube page once, caches
 // the visitorData it exposes, and lets the jar retain the matching Set-Cookie
 // values. The bootstrap is best-effort; extraction falls back to the synthetic
-// visitorData if the page fetch fails.
+// visitorData if the page fetch fails, except when the page fetch failed on the
+// configured proxy, which ends the run.
 
 const (
 	// visitorTTL bounds how long a bootstrapped visitorData is reused.
@@ -38,10 +42,12 @@ var visitorDataRe = regexp.MustCompile(`"(?:visitorData|VISITOR_DATA)"\s*:\s*"([
 // skipped; otherwise a cookie-backed guest identity is bootstrapped, falling back
 // to synthetic visitorData.
 //
-// The error is non-nil only under adoption: a failed adoption is fatal because
+// The error is non-nil under adoption, where a failed adoption is fatal because
 // falling back to a random synthetic visitorData would send the wrong
-// content_binding to the PO-token minter and guarantee a GVS mismatch. Without
-// adoption a failed bootstrap is best-effort and never returns an error.
+// content_binding to the PO-token minter and guarantee a GVS mismatch, and when
+// the bootstrap's dial to a configured proxy fails (httpx.IsProxyConnect), which
+// no later request in the run could survive. Every other bootstrap failure is
+// best-effort and never returns an error.
 //
 // Bootstrapping is skipped without a cookie jar because the matching cookies
 // cannot be preserved. That also keeps injected, jarless test clients on the
@@ -68,6 +74,14 @@ func (c *Client) newBootstrappedSession(ctx context.Context) (*session, error) {
 	}
 	vd, gen, err := c.bootstrapVisitorData(ctx)
 	if err != nil {
+		if httpx.IsProxyConnect(err) {
+			// The proxy is a fixed setting, so every request this run would
+			// go on to make dials the same unreachable address; the chain
+			// stops on this failure (ExtractExcluding), and so does the
+			// bootstrap ahead of it, rather than paying a second dial timeout
+			// to learn the same thing.
+			return nil, fmt.Errorf("visitor bootstrap: %w", err)
+		}
 		c.log.DebugContext(ctx, "visitor bootstrap failed; using synthetic visitorData", "err", err)
 		// Keep what the workaround discards: if the budget this request spent
 		// dying leaves the rest of the extraction with bare deadlines, this is

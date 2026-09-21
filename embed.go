@@ -353,11 +353,15 @@ func pictureCapableExt(ext string) bool {
 	return true
 }
 
-// remuxedFormat reports f as the file the cover-art remux left behind: ext is
-// the extension it was delivered under, and the MIME type follows the codec in
+// remuxedFormat reports f as the file a remux left behind: ext is the
+// extension it was delivered under, and the MIME type follows the codec in
 // that container. Everything else about the format is the delivery's own,
 // because a remux moves packets and changes nothing about the audio. An empty
 // ext (no remux ran) returns f unchanged.
+//
+// The cover-art pass is one caller; a container copy the output extension
+// asked for is the other, and both leave the same file: the delivery's
+// packets in a wrapper the delivery did not name.
 func remuxedFormat(f Format, ext string) Format {
 	if ext == "" {
 		return f
@@ -378,6 +382,21 @@ func remuxedFormat(f Format, ext string) Format {
 		} else {
 			f.MIMEType = `audio/ogg; codecs="vorbis"`
 		}
+	case "mka", "mkv":
+		// Matroska states no codecs parameter the way the Ogg types do, so
+		// the codec stays on Format.Codec alone.
+		f.MIMEType = "audio/x-matroska"
+	case "m4a", "m4b", "mp4":
+		// The MP4 family, which a delivery of its own already names this
+		// way: an .m4a copied to .m4b is the same container under another
+		// name, so the type it arrived with is the type it keeps, codecs
+		// parameter included.
+		f.MIMEType = "audio/mp4"
+		if f.Codec != "" {
+			f.MIMEType += `; codecs="` + f.Codec + `"`
+		}
+	case "aac":
+		f.MIMEType = "audio/aac" // raw ADTS, which states no codecs parameter
 	default:
 		f.MIMEType = ""
 	}

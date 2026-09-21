@@ -7,13 +7,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
+	"github.com/colespringer/waxtap/v3/internal/testfs"
 )
 
 // TestProcessAlbumValidation covers checks that run before the engine is needed.
@@ -204,9 +204,11 @@ func TestProcessAlbumCapPreservesSpacing(t *testing.T) {
 	inSpacing := res.PerTrack[1].IntegratedLUFS - res.PerTrack[0].IntegratedLUFS
 	var out [2]LoudnessInfo
 	for i, p := range res.Outputs {
-		if out[i], err = c.Measure(ctx, p); err != nil {
+		m, err := c.Measure(ctx, p)
+		if err != nil {
 			t.Fatalf("Measure %s: %v", p, err)
 		}
+		out[i] = m.Loudness
 	}
 	outSpacing := out[1].IntegratedLUFS - out[0].IntegratedLUFS
 	if math.Abs(outSpacing-inSpacing) > 0.1 {
@@ -775,8 +777,8 @@ func TestAlbumMonoMemberIsNotCountedAsDualMono(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, res := range map[string]*AlbumProcessResult{"flac": flac, "opus": opus} {
-		if d := math.Abs(res.PerTrack[1].IntegratedLUFS - solo.IntegratedLUFS); d > 0.05 {
-			t.Errorf("%s: mono member measured %.2f in the album, %.2f alone", name, res.PerTrack[1].IntegratedLUFS, solo.IntegratedLUFS)
+		if d := math.Abs(res.PerTrack[1].IntegratedLUFS - solo.Loudness.IntegratedLUFS); d > 0.05 {
+			t.Errorf("%s: mono member measured %.2f in the album, %.2f alone", name, res.PerTrack[1].IntegratedLUFS, solo.Loudness.IntegratedLUFS)
 		}
 	}
 	// The group figure itself: over a set with nothing to fold, it is the
@@ -804,12 +806,6 @@ func TestAlbumMonoMemberIsNotCountedAsDualMono(t *testing.T) {
 // the same as the single-file path gives. It is not bad input: the file may
 // be perfectly good audio the run cannot read.
 func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("a 0000 file is merely read-only on Windows, and read-only files still open for reading")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 file")
-	}
 	ctx := context.Background()
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.wav")
@@ -817,10 +813,10 @@ func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	locked := filepath.Join(dir, "locked.wav")
-	if err := os.WriteFile(locked, mediatest.SineWAV(1, 2), 0o000); err != nil {
+	if err := os.WriteFile(locked, mediatest.SineWAV(1, 2), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+	testfs.DenyAccess(t, locked)
 
 	c := newOfflineClient(t)
 	_, err := c.MeasureAlbum(ctx, []string{good, locked})

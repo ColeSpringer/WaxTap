@@ -196,7 +196,10 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
 			if spec.requireCopy() {
-				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source (%s support a packet-level cut; HE-AAC only when the cut keeps the stream start); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"), spec.copyFlags())
+				// Both sides are named: WaxFlow's declines carry no reason,
+				// and the destination is as likely to be the one that
+				// refused as the source is.
+				return CutResult{}, fmt.Errorf("%w: cannot losslessly copy-cut this source into this container (%s support a packet-level cut; HE-AAC only when the cut keeps the stream start; raw ADTS (.aac) cannot state the cut's trims, so name a container that does, .m4a or .mka); drop %s to re-encode, which stays lossless for a lossless source", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"), spec.copyFlags())
 			}
 			// Fall through to a re-encode, which stays lossless for a lossless
 			// source. A copy spec whose source has no same-family encoder (WMA,

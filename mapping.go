@@ -457,6 +457,7 @@ func pipelineSpec(s ProcessSpec, ranges []cutrange.Range) pipeline.Spec {
 		// An explicit FormatCopy is a stream-copy remux (distinct from a nil
 		// Transcode, which keeps the source bytes untouched).
 		ps.Remux = s.Transcode.Format == FormatCopy
+		ps.ContainerChosen = s.Transcode.FromContainer
 	}
 	if s.Loudness != nil {
 		ps.Loudness = &pipeline.Loudness{
@@ -944,6 +945,31 @@ func warnImplicitLossy(em *emitter, spec ProcessSpec, pres pipeline.Result) {
 		detail += "; pass a lossless --format to avoid the quality loss"
 	}
 	em.warn(WarnImplicitLossy, detail)
+}
+
+// warnGaplessDropped reports a copy whose destination states no gapless
+// trim, so the samples the source trimmed are delivered as audio.
+//
+// Only the halves the source states are named. A zero is not reported as a
+// zero: a container that carries its end trim on the last packet rather than
+// in its headers (Matroska) states none until a walk has read that packet,
+// and "0 of padding" would be a claim rather than a silence (see
+// media.Trim).
+func warnGaplessDropped(em *emitter, pres pipeline.Result) {
+	d := pres.TrimDropped
+	var what string
+	switch {
+	case d.Delay > 0 && d.Padding > 0:
+		what = fmt.Sprintf("the %d samples of encoder delay and %d of padding the source trimmed", d.Delay, d.Padding)
+	case d.Delay > 0:
+		what = fmt.Sprintf("the %d samples of encoder delay the source trimmed", d.Delay)
+	case d.Padding > 0:
+		what = fmt.Sprintf("the %d samples of padding the source trimmed", d.Padding)
+	default:
+		return
+	}
+	ext := strings.TrimPrefix(filepath.Ext(pres.OutputPath), ".")
+	em.warn(WarnGaplessDropped, fmt.Sprintf("the .%s container states no gapless trim, so %s play as audio; keep the trim with .m4a, or re-encode", ext, what))
 }
 
 // namedAnEncode reports whether the caller asked for the encoder that ran. A

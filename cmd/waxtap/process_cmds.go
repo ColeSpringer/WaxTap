@@ -596,10 +596,12 @@ func newTranscodeCmd() *cobra.Command {
 			}
 			specLayout, specDownmix := downmixFields(layout, doDownmix)
 			spec := waxtap.ProcessSpec{
-				// FromContainer only when the container picked the encoder over
-				// the source, which is what the report it drives describes. A
-				// container that kept the source codec chose nothing.
-				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept},
+				// FromContainer when the container picked the encoder, which
+				// for a URL is every inferred extension: the pipeline then
+				// keeps the source codec if the staged file's container
+				// carries it. --force means an encode, so it names the
+				// container's encoder instead.
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept && !force},
 				Channels:  specLayout,
 				Downmix:   specDownmix,
 			}

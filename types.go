@@ -357,15 +357,16 @@ type TranscodeSpec struct {
 	// rejected with ErrIncompatibleSpec even on a preset that would ignore it,
 	// because it is a mistake about a value the caller believes will apply.
 	BitDepth int
-	// FromContainer says the output's container picked Format because it
-	// could not carry the source codec: media.OutputCodecFor's answer for an
-	// output named by extension alone, in the case where it kept nothing. A
-	// container that did keep the source codec chose nothing, so it leaves
-	// this false.
-	//
-	// It changes nothing about what is written. It changes what the run says
-	// about it: a lossy encode the caller never named is reported as
-	// [WarnImplicitLossy], where one they asked for is not.
+	// FromContainer says the output's container picked Format rather than
+	// the caller: the encoder an output named by extension alone runs when
+	// the source codec is not known up front (a URL, whose codec only the
+	// download settles). The run then keeps the source codec wherever the
+	// container carries it, as a copy when nothing else needs an encode and
+	// as the same-family encoder when Bitrate, BitDepth, or a loudness apply
+	// does (an Opus source normalizing under PeakCap takes the header gain
+	// and stays Opus), and encodes to Format only when the container cannot.
+	// A lossy encode that runs this way is reported as [WarnImplicitLossy];
+	// a caller that wants Format regardless leaves this false.
 	FromContainer bool
 }
 
@@ -964,6 +965,12 @@ const (
 	// else in the result says so: a delivery that worked reads as proof the
 	// token works, when the watch page needs none.
 	WarnWatchPageNoToken
+	// WarnGaplessDropped reports a copy into a container that states no
+	// gapless trim (raw ADTS): the packets moved unchanged, so the encoder
+	// delay and padding the source's container hid play as audio, and the
+	// file states no length. The detail counts the samples. An encode does
+	// not raise it, since decoding applies the trim.
+	WarnGaplessDropped
 )
 
 func (w WarningCode) String() string {
@@ -1020,6 +1027,8 @@ func (w WarningCode) String() string {
 		return "bitrate-adjusted"
 	case WarnWatchPageNoToken:
 		return "watch-page-no-token"
+	case WarnGaplessDropped:
+		return "gapless-dropped"
 	default:
 		return "unknown"
 	}

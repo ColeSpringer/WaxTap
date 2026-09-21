@@ -18,7 +18,13 @@ import (
 
 // warningDetail returns the detail of the first warning carrying code, or "".
 func warningDetail(res *Result, code WarningCode) string {
-	for _, w := range res.Warnings {
+	return warningIn(res.Warnings, code)
+}
+
+// warningIn returns the detail of the first warning in ws carrying code, or
+// "", for a result type that is not a *Result.
+func warningIn(ws []Warning, code WarningCode) string {
+	for _, w := range ws {
 		if w.Code == code {
 			return w.Detail
 		}
@@ -131,6 +137,71 @@ func TestMeasureOnlyWarnsReadDamage(t *testing.T) {
 	detail := warningDetail(res, WarnInputDamage)
 	if !strings.HasPrefix(detail, "the input is damaged: ") || !strings.Contains(detail, "truncated") {
 		t.Errorf("measure-only damage = %q, want the verdict and the torn frame the read found", detail)
+	}
+}
+
+// Measure is Process with a measure-only spec, and it reports what that
+// read found: a truncated payload the probe reads clean reaches the caller
+// as input-damage, and a whole file reports nothing.
+func TestMeasureReportsInputDamage(t *testing.T) {
+	dir := t.TempDir()
+	// "m.aac", not "m": damagedFixture writes the file under the name
+	// verbatim, and an extensionless AAC lands in flat MP4, which declares
+	// its length and does not have the probes-clean, read-finds-damage
+	// shape ADTS has (TestMeasureOnlyWarnsReadDamage uses "in.aac").
+	whole, truncated := damagedFixture(t, dir, "m.aac", FormatAAC)
+	c := newOfflineClient(t)
+	res, err := c.Measure(context.Background(), truncated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Loudness.IntegratedLUFS == 0 {
+		t.Errorf("no measurement came back: %+v", res.Loudness)
+	}
+	if d := warningIn(res.Warnings, WarnInputDamage); !strings.HasPrefix(d, "the input is damaged: ") {
+		t.Errorf("input-damage detail = %q, want the damage the read found", d)
+	}
+	clean, err := c.Measure(context.Background(), whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Warnings) != 0 {
+		t.Errorf("a whole file reports %v, want nothing", clean.Warnings)
+	}
+}
+
+// The dropped trim reaches the caller as gapless-dropped, once, naming the
+// container and the samples; a copy into a container that carries the trim
+// raises nothing.
+func TestProcessWarnsGaplessDroppedOnACopyIntoADTS(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	wav := filepath.Join(dir, "src.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(3, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An AAC in progressive MP4, the way damagedFixture writes its formats
+	// through the offline client; its edit list states the encoder delay.
+	src := filepath.Join(dir, "src.m4a")
+	if _, err := c.Process(ctx, ProcessRequest{Input: wav,
+		ProcessSpec: ProcessSpec{Output: ToFile(src), Transcode: &TranscodeSpec{Format: FormatAAC}}}); err != nil {
+		t.Fatal(err)
+	}
+	copyTo := func(out string) *Result {
+		t.Helper()
+		res, err := c.Process(ctx, ProcessRequest{Input: src,
+			ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, out)), Transcode: &TranscodeSpec{Format: FormatCopy}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	if d := warningDetail(copyTo("out.aac"), WarnGaplessDropped); !strings.Contains(d, ".aac") || !strings.Contains(d, "encoder delay") {
+		t.Errorf("gapless-dropped detail = %q, want the container and the samples named", d)
+	}
+	if d := warningDetail(copyTo("out.m4a"), WarnGaplessDropped); d != "" {
+		t.Errorf("a copy into .m4a warns %q, want nothing", d)
 	}
 }
 

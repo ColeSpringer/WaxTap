@@ -54,6 +54,9 @@ type session struct {
 	// right call for the bootstrap itself, but its request may be the only one
 	// in the session that named a transport cause before the budget ran out; a
 	// later bare-deadline failure folds it back in (see explainBareDeadline).
+	//
+	// A dial to a configured proxy that fails does not take the workaround: it
+	// ends the run at the bootstrap, so it is never stored here.
 	bootstrapErr error
 }
 

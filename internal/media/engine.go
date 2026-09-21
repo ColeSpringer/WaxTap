@@ -17,6 +17,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
 )
 
 // RunnerConfig configures a Runner.
@@ -35,13 +36,16 @@ type Runner struct {
 	engine *waxflow.Engine
 	sem    chan struct{}
 	log    *slog.Logger
+	// openMember opens one album member for AnalyzeGroup; nil means
+	// openFileMedia. A test sets it to count what the engine holds open.
+	openMember func(path, hint string) (format.Media, error)
 }
 
 // Concurrency is how many operations the Runner admits at once, for a caller
 // with independent work to size its own fan-out by. An unlimited Runner
 // answers GOMAXPROCS: the operations here are decodes, so that is the number
 // a caller should start anyway, and handing back "no limit" would invite one
-// goroutine and one open descriptor per album track.
+// goroutine per album track.
 //
 // It is a floor of one, so a caller can range over it without a guard.
 func (r *Runner) Concurrency() int {

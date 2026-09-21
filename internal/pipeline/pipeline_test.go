@@ -1377,6 +1377,109 @@ func TestNormalizeIntoAForeignContainerPromotesAndSaysSo(t *testing.T) {
 	}
 }
 
+// A format the container chose is a fallback: once the source is staged and
+// probed, a container that carries its codec keeps it, and only one that
+// cannot takes the encoder the caller passed. A knob or a gain that needs
+// an encode gets the same-family encoder, so an Opus source into .ogg
+// normalizes by its header gain rather than becoming Vorbis.
+func TestRunContainerChosenKeepsACarriedSource(t *testing.T) {
+	dir := t.TempDir()
+	src := synthSine(t, dir, "src.opus", 2, "opus")
+	r := newTestRunner(t)
+	keep := []cutrange.Range{{Start: 500 * time.Millisecond, End: time.Second}}
+	cases := []struct {
+		name       string
+		out        string
+		spec       Spec
+		transcoded bool
+		codec      media.Codec
+		cut        bool
+	}{
+		{"mka keeps opus", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true}, false, media.CodecCopy, false},
+		{"ogg keeps opus", "out.ogg", Spec{Codec: media.CodecVorbis, ContainerChosen: true}, false, media.CodecCopy, false},
+		{"m4a cannot carry opus", "out.m4a", Spec{Codec: media.CodecAAC, ContainerChosen: true}, true, media.CodecAAC, false},
+		{"a bitrate the codec takes needs an encode", "out.mka", Spec{Codec: media.CodecOpus, Bitrate: 96000, ContainerChosen: true}, true, media.CodecOpus, false},
+		{"a bit depth the codec ignores keeps the copy", "out.mka", Spec{Codec: media.CodecOpus, BitDepth: 16, ContainerChosen: true}, false, media.CodecCopy, false},
+		{"named opus still encodes", "out.mka", Spec{Codec: media.CodecOpus}, true, media.CodecOpus, false},
+		// A cut is not copy-only: it copies packets where the codec allows,
+		// as a local cut into this container does, and the flag that gets a
+		// plain copy past the no-op return must not make it one.
+		{"a cut stays a packet copy", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true, Remove: keep}, false, media.CodecCopy, true},
+		{"a crossfade re-encodes in the family", "out.mka", Spec{Codec: media.CodecOpus, ContainerChosen: true, Remove: keep, Crossfade: 50 * time.Millisecond}, true, media.CodecOpus, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(dir, tc.name+"-"+tc.out)
+			res, err := Run(context.Background(), r, src, out, tc.spec, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Transcoded != tc.transcoded || res.OutputCodec != tc.codec || res.Cut != tc.cut {
+				t.Errorf("transcoded=%v codec=%v cut=%v, want %v %v %v", res.Transcoded, res.OutputCodec, res.Cut, tc.transcoded, tc.codec, tc.cut)
+			}
+			p, err := r.Probe(context.Background(), out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a, _ := p.AudioStream(); tc.codec == media.CodecCopy && a.CodecName != "opus" {
+				t.Errorf("kept copy holds %s, want opus", a.CodecName)
+			}
+		})
+	}
+	// The gain rides in the head of a kept Opus copy under cap.
+	res, err := Run(context.Background(), r, src, filepath.Join(dir, "gain.ogg"),
+		Spec{Codec: media.CodecVorbis, ContainerChosen: true, Loudness: &Loudness{Apply: true, Target: -18}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Transcoded || !res.GainInHeader {
+		t.Errorf("transcoded=%v gainInHeader=%v, want a header-gain copy", res.Transcoded, res.GainInHeader)
+	}
+}
+
+// The chosen-container bit is a fallback, so it never makes a spec that
+// would have been written fail. Two sources take the family encoder rather
+// than the copy the container rule would otherwise reach for: PCM, whose
+// packets belong to their container and cannot move, and an output naming
+// no container at all, where there is no rule to apply and the muxer comes
+// from the format.
+func TestRunContainerChosenNeverRefusesWhatItCannotKeep(t *testing.T) {
+	dir := t.TempDir()
+	r := newTestRunner(t)
+	wav := filepath.Join(dir, "src.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(1, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Matroska carries PCM through WaxFlow's wav row, so the container rule
+	// keeps the source; a copy of it would be declined by the remux.
+	out := filepath.Join(dir, "pcm.mka")
+	res, err := Run(context.Background(), r, wav, out, Spec{Codec: media.CodecOpus, ContainerChosen: true}, nil)
+	if err != nil {
+		t.Fatalf("PCM into .mka: %v", err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecWAV {
+		t.Errorf("transcoded=%v codec=%v, want the lossless wav row, not a copy the remux declines", res.Transcoded, res.OutputCodec)
+	}
+	if p, perr := r.Probe(context.Background(), out); perr != nil {
+		t.Fatal(perr)
+	} else if a, _ := p.AudioStream(); a.CodecName != "pcm" {
+		t.Errorf("the .mka holds %s, want pcm", a.CodecName)
+	}
+
+	// No extension: nothing names a container, so the caller's format stands
+	// and its own muxer writes the file.
+	opus := synthSine(t, dir, "in.opus", 1, "opus")
+	bare := filepath.Join(dir, "bare")
+	res, err = Run(context.Background(), r, opus, bare, Spec{Codec: media.CodecOpus, ContainerChosen: true}, nil)
+	if err != nil {
+		t.Fatalf("an extensionless output: %v", err)
+	}
+	if !res.Transcoded || res.OutputCodec != media.CodecOpus {
+		t.Errorf("transcoded=%v codec=%v, want the format the caller passed", res.Transcoded, res.OutputCodec)
+	}
+}
+
 // A packet copy reports the spans it landed on, and the short-decode note
 // measures the output against them rather than against the request: the joins
 // move inward by under one packet each, which is not input damage.

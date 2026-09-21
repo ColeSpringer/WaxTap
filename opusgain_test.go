@@ -255,7 +255,7 @@ func TestNormalizeOpusZeroGainKeepsTheGainTags(t *testing.T) {
 	out := filepath.Join(dir, "same.opus")
 	res, err := c.Process(ctx, ProcessRequest{Input: src, ProcessSpec: ProcessSpec{
 		Output: ToFile(out), Transcode: &TranscodeSpec{Format: FormatOpus},
-		Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: measured.IntegratedLUFS},
+		Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: measured.Loudness.IntegratedLUFS},
 	}})
 	if err != nil {
 		t.Fatal(err)
