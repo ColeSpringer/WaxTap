@@ -2,9 +2,10 @@
 // platform does, so a test can prove what a run reports when the filesystem
 // refuses it. On unix that is a 0000 mode. Windows ignores the mode bits
 // (Mkdir drops its argument; Open maps only the write bit onto the
-// read-only attribute, which still opens for reading), so there it is a
-// deny ACE written with icacls, the in-box tool, which keeps the module
-// free of a dependency it would use in tests alone.
+// read-only attribute, which still opens for reading, and a stat reads back
+// 0666 whatever it was written with), so there it is a deny ACE written with
+// icacls, the in-box tool, which keeps the module free of a dependency it
+// would use in tests alone.
 package testfs
 
 import (

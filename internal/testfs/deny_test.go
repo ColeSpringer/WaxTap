@@ -13,6 +13,13 @@ import (
 // new file, and both come back once the subtest's cleanup has run, which is
 // what lets the TempDir go.
 func TestDenyAccessRefusesTheCaller(t *testing.T) {
+	// Both denials happen in subtests, so a helper that skips under root
+	// would leave the closing checks passing over a path nothing ever
+	// denied. Geteuid is -1 on Windows, where the deny ACE refuses even the
+	// administrator who wrote it.
+	if os.Geteuid() == 0 {
+		t.Skip("root is not refused by a 0000 mode")
+	}
 	dir := t.TempDir()
 	file := filepath.Join(dir, "f")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
@@ -51,13 +58,6 @@ func TestDenyAccessRefusesTheCaller(t *testing.T) {
 		t.Errorf("after cleanup, Open = %v, want the file readable again", err)
 	} else {
 		f.Close()
-	}
-	// What it was staged with, not a mode the helper decided on: a test that
-	// asserts on the mode it wrote has to see that mode again.
-	if fi, err := os.Stat(file); err != nil {
-		t.Error(err)
-	} else if got := fi.Mode().Perm(); got != 0o644 {
-		t.Errorf("after cleanup the file is %v, want the 0644 it was staged with", got)
 	}
 	if f, err := os.CreateTemp(sub, "y"); err != nil {
 		t.Errorf("after cleanup, CreateTemp = %v, want the directory writable again", err)
