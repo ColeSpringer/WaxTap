@@ -215,3 +215,31 @@ func TestResolve_IndexOutOfRange(t *testing.T) {
 		t.Fatalf("err = %v, want ErrExtractionFailed", err)
 	}
 }
+
+// A plain-URL format resolves with no I/O at all, so an expired
+// Timeouts.Resolve would otherwise pass through unobserved: the budget would
+// only bite on the ciphered formats. It is checked on entry instead.
+func TestResolve_ChecksTheDeadlineOnEntry(t *testing.T) {
+	fr := &fakeResolver{stream: resolver.Stream{URL: "https://signed/"}}
+	c := New(Config{Resolver: fr})
+	ext := newExtraction(makeProfile(profileAndroidVR))
+	// A plain URL: nothing here needs the resolver or the network.
+	ext.rawAudio = []rawFormat{{Itag: 140, URL: "https://plain/", ContentLength: "10"}}
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := c.Resolve(expired, ext, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Resolve under an expired deadline = %v, want context.DeadlineExceeded", err)
+	}
+
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := c.Resolve(canceled, ext, 0); !errors.Is(err, context.Canceled) {
+		t.Errorf("Resolve under a canceled context = %v, want context.Canceled", err)
+	}
+
+	// A live context still resolves.
+	if _, err := c.Resolve(context.Background(), ext, 0); err != nil {
+		t.Errorf("Resolve under a live context = %v, want nil", err)
+	}
+}

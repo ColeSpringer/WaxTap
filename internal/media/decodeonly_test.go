@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -421,38 +422,39 @@ func TestAnalyzeFileReportsReadDamage(t *testing.T) {
 	}
 }
 
-// The album opener measures a member whose headers only estimate its length
-// when no count is handed over (MeasureLength: a walk when the container
-// allows it, a decode otherwise; this WMA fixture has no walk, so it
-// decodes), on a concurrency slot and under the caller's context, so a
-// cancellation stops the count where it stops every other decode.
-func TestOpenAlbumConcatCountsUnmeasuredMembers(t *testing.T) {
+// A member whose headers only estimate its length is measured to its end,
+// with no declaration to hold it to: the group measurement decodes each
+// member itself. The WMA fixture is the advisory case (ASF has no walk, so
+// MeasureLength decodes it), and the group's count for it is what that decode
+// delivers.
+func TestAnalyzeGroupMeasuresAnAdvisoryMember(t *testing.T) {
 	r := NewRunner(RunnerConfig{MaxProcs: 1})
 	ctx := context.Background()
 	dir := t.TempDir()
-	wma := writeFixture(t, dir, "in.wma", mediatest.ChapteredWMA())
-	for name, measured := range map[string][]int64{"short slice": nil, "negative entry": {-1}} {
-		t.Run(name, func(t *testing.T) {
-			med, closer, err := r.OpenAlbumConcat(ctx, []string{wma}, measured, 0)
-			if err != nil {
-				t.Fatalf("open: %v", err)
-			}
-			defer closer()
-			res, err := r.AnalyzeMedia(ctx, med, "", 0)
-			if err != nil {
-				t.Fatalf("analyze the timeline: %v", err)
-			}
-			if res.Samples < mediatest.ChapteredWMASamples || res.Samples > mediatest.ChapteredWMASamples+mediatest.ChapteredWMAFrame {
-				t.Errorf("timeline delivered %d frames, want the member's own decode (%d up to a frame more)", res.Samples, mediatest.ChapteredWMASamples)
-			}
-		})
+	wma := writeFixture(t, dir, "in.wma", mediatest.LosslessWMA())
+	wav := writeFixture(t, dir, "in.wav", mediatest.SineWAV(1, 2))
+
+	length, err := r.MeasureLength(ctx, wma)
+	if err != nil {
+		t.Fatalf("measure the member: %v", err)
 	}
+	group, members, warnings, err := r.AnalyzeGroup(ctx, []string{wma, wav}, nil)
+	if err != nil {
+		t.Fatalf("AnalyzeGroup: %v", err)
+	}
+	if len(members) != 2 || len(warnings) != 2 {
+		t.Fatalf("members = %d, warnings = %d, want 2 each", len(members), len(warnings))
+	}
+	if members[0].Samples != length.Samples {
+		t.Errorf("the advisory member measured %d frames, want the %d its own decode delivers", members[0].Samples, length.Samples)
+	}
+	if math.IsNaN(group.IntegratedLUFS) {
+		t.Errorf("group loudness = %v, want a figure", group.IntegratedLUFS)
+	}
+
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, closer, err := r.OpenAlbumConcat(canceled, []string{wma}, nil, 0); !errors.Is(err, context.Canceled) {
-		if err == nil {
-			closer()
-		}
-		t.Errorf("open under a canceled context = %v, want context.Canceled from the count", err)
+	if _, _, _, err := r.AnalyzeGroup(canceled, []string{wma, wav}, nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("AnalyzeGroup under a canceled context = %v, want context.Canceled", err)
 	}
 }

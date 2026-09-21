@@ -267,6 +267,7 @@ func TestClassifyPlayability(t *testing.T) {
 		{"AGE_CHECK_REQUIRED", "", waxerr.ErrAgeRestricted},
 		{"CONTENT_CHECK_REQUIRED", "", waxerr.ErrLoginRequired},
 		{"LIVE_STREAM_OFFLINE", "", waxerr.ErrLiveNotStarted},
+		{"LIVE_BROADCAST", "broadcast is on air; WaxSeal serves finished videos only", waxerr.ErrLiveContent},
 		{"UNPLAYABLE", "Join this channel to get access to members-only content", waxerr.ErrMembersOnly},
 		{"UNPLAYABLE", "The uploader has not made this video available in your country", waxerr.ErrGeoBlocked},
 		{"ERROR", "Video unavailable", waxerr.ErrVideoUnavailable},

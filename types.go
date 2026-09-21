@@ -199,9 +199,12 @@ type ProcessSpec struct {
 	// Channels is the Downmix target layout, applied after probing. When Downmix is
 	// set it must be LayoutMono or LayoutStereo; pairing Downmix with LayoutAny is a
 	// hard error. LayoutAny, the zero value, means no downmix target, so Downmix must
-	// be false. For YouTube requests, prefer setting the layout on Audio with
-	// WithChannels to pick a native track; audio selection already defaults to stereo,
-	// so downmix is only needed when a caller opts into a surround source.
+	// be false: a layout without Downmix folds nothing, and setting one is a
+	// mistake about a value the caller believes will apply, so it is refused
+	// rather than ignored. For YouTube requests, prefer setting the layout on
+	// Audio with WithChannels to pick a native track; audio selection already
+	// defaults to stereo, so downmix is only needed when a caller opts into a
+	// surround source.
 	Channels ChannelLayout
 	// Downmix reduces a source with more channels to Channels after probing. It
 	// never adds channels and does nothing when the source already fits the
@@ -275,7 +278,9 @@ type Request struct {
 	// plus Download. It requires IncludeMetadata or EmbedMetadata, the two consumers
 	// of the enrichment, and feeds whichever is set: the fields reach Result.Metadata
 	// only with IncludeMetadata (which is what populates it at all) and the written
-	// tags only with EmbedMetadata. It is
+	// tags only with EmbedMetadata. The combination with neither is refused with
+	// ErrIncompatibleSpec, since it pays for a round trip whose answer nothing
+	// reads. It is
 	// a no-op with NoFallback (which forbids the watch page). The extra fetch is
 	// skipped when extraction already scraped the watch page. Enrichment is
 	// best-effort: a failure leaves the base metadata and never fails the download.
@@ -287,8 +292,10 @@ type Request struct {
 // ProcessRequest processes a local audio file through the same pipeline as a
 // YouTube download (transcode/cut/normalize), with no YouTube access.
 type ProcessRequest struct {
-	// Input is the local file path. Reader-based inputs will use a separate
-	// request type; non-seekable inputs are staged before processing.
+	// Input is the local file path, which must name a regular file: a
+	// directory, pipe, FIFO, device, or socket is refused with
+	// ErrUnsupportedInput naming what it is. Reader inputs are not supported;
+	// stage them to a file first.
 	Input string
 
 	ProcessSpec
@@ -350,6 +357,16 @@ type TranscodeSpec struct {
 	// rejected with ErrIncompatibleSpec even on a preset that would ignore it,
 	// because it is a mistake about a value the caller believes will apply.
 	BitDepth int
+	// FromContainer says the output's container picked Format because it
+	// could not carry the source codec: media.OutputCodecFor's answer for an
+	// output named by extension alone, in the case where it kept nothing. A
+	// container that did keep the source codec chose nothing, so it leaves
+	// this false.
+	//
+	// It changes nothing about what is written. It changes what the run says
+	// about it: a lossy encode the caller never named is reported as
+	// [WarnImplicitLossy], where one they asked for is not.
+	FromContainer bool
 }
 
 // CutMode selects how cuts are rendered.
@@ -368,6 +385,16 @@ const (
 	CutCopy
 	// CutAccurate decodes, cuts sample-exactly, and re-encodes.
 	CutAccurate
+	// CutCopyExact is CutCopy with spliced interior joins: each interior tail
+	// is exact, and the pre-roll packets ahead of each interior head are
+	// decoded and discarded so the decoder has converged when the kept audio
+	// starts. Interior heads still land within one packet inside the request,
+	// since no container states a front trim; Result.CutSnaps counts them.
+	// Only Matroska can state the trims, so the Output must end in .mka,
+	// .mkv, or .webm (ErrIncompatibleSpec otherwise), and Firefox rejects a
+	// file carrying more than one discard. A single-span cut has no interior
+	// edge and behaves as CutCopy.
+	CutCopyExact
 )
 
 // SponsorBlockErrorPolicy governs SponsorBlock fetch failures only (cut and
@@ -390,6 +417,10 @@ type CutSpec struct {
 	Ranges []TimeRange
 	// SponsorBlock lists categories to fetch and remove. Nil disables
 	// SponsorBlock; a non-nil empty slice uses [DefaultCategories].
+	//
+	// It applies to a YouTube request only: segments are keyed by video ID,
+	// which a local file has none of. [Client.Process] refuses a non-nil value
+	// with ErrIncompatibleSpec rather than ignoring it.
 	SponsorBlock []Category
 	// Mode selects copy/accurate/smart rendering.
 	Mode CutMode
@@ -515,7 +546,9 @@ type LoudnessResult struct {
 	HeaderGain bool
 }
 
-// TimeRange is a half-open [Start, End) span. End must be greater than Start.
+// TimeRange is a half-open [Start, End) span. Start must be at or after zero
+// and End greater than Start; both rules are checked by ValidateProcessSpec,
+// since a range that keeps nothing describes no cut.
 type TimeRange struct {
 	Start time.Duration // inclusive start offset
 	End   time.Duration // exclusive end offset
@@ -543,8 +576,13 @@ type Output struct {
 	renumber  bool
 }
 
-// ToFile delivers to an exact file path (written atomically via a temp + rename),
-// replacing an existing file.
+// ToFile delivers to an exact file path (written atomically via a temp +
+// rename), replacing an existing file.
+//
+// A path whose last component is a symlink is written through the link: the
+// staged file is placed beside the link's target and renamed over it, so the
+// link survives and the target is replaced. A dangling link has no target to
+// write through and is replaced by the file itself.
 func ToFile(path string) Output { return Output{kind: outputFile, path: path} }
 
 // ToNewFile delivers to a file path that must not already exist, failing with
@@ -573,7 +611,8 @@ func ToNewNumberedFile(path string) Output {
 }
 
 // ToWriter delivers to a caller-provided writer (bounded memory, no atomicity
-// guarantee).
+// guarantee). A nil writer is refused with ErrIncompatibleSpec before any work
+// runs, rather than panicking once the audio is ready.
 func ToWriter(w io.Writer) Output { return Output{kind: outputWriter, writer: w} }
 
 // SourceKind distinguishes a YouTube download from local-file processing.
@@ -615,8 +654,23 @@ type Result struct {
 	SourceBytes int64 // bytes read from the acquired or local source
 	OutputBytes int64 // bytes delivered to the output sink
 
-	Transcoded          bool            // audio was re-encoded (not stream-copied); a copy/remux stays false
-	CutApplied          bool            // at least one time range was removed
+	Transcoded bool // audio was re-encoded (not stream-copied); a copy/remux stays false
+	// Skipped says the output already existed and SkipIfExists left it alone:
+	// nothing else in the result describes work, because none was done.
+	Skipped    bool
+	CutApplied bool // at least one time range was removed
+	// CutMode is the mode that rendered the cut: CutCopy for a packet copy,
+	// CutCopyExact for one with spliced joins, CutAccurate for a decode.
+	// Meaningful only when CutApplied.
+	CutMode CutMode
+	// CutSnaps counts the interior joins a packet copy moved inward to the
+	// packet grid and CutSnapMax is the largest single move, so a consumer
+	// reads figures rather than [WarnCutSnapped]'s sentence. A join is a cut
+	// point, so one removed range is one join however many of its two edges
+	// moved. Both are zero for a decode and for a copy whose edges already sat
+	// on the grid.
+	CutSnaps            int
+	CutSnapMax          time.Duration
 	SponsorBlockApplied bool            // SponsorBlock contributed a removed range
 	LoudnessMeasured    bool            // measured != normalized
 	LoudnessApplied     bool            // normalization was applied
@@ -832,12 +886,13 @@ const (
 	// waveform between stored samples crosses full scale and playback can clip
 	// it. Detail carries WaxFlow's measurement of the delivered encode.
 	WarnOutputClipping
-	// WarnImplicitLossy reports that a lossless source was re-encoded to a
-	// lossy codec the request never named: the spec asked for a copy (or
-	// nothing), and automatic processing picked the output container's default
-	// encoder because the source codec cannot enter that container. The result
-	// line already names the codec written; this is the signal that quality was
-	// lost where none of the request said it would be.
+	// WarnImplicitLossy reports that audio was re-encoded to a lossy codec the
+	// request never named: the spec asked for a copy (or nothing), and
+	// automatic processing picked the output container's default encoder
+	// because the source codec cannot enter that container. The result line
+	// already names the codec written; this is the signal that quality was
+	// lost where none of the request said it would be. A lossy source pays a
+	// second generation and is reported the same way.
 	WarnImplicitLossy
 	// WarnInputDamage reports problems in a local input the decoder worked
 	// around: a header declaring more audio than the file holds, bytes that did
@@ -888,6 +943,27 @@ const (
 	// plays, and a listener who wants to know why the output is not quite the
 	// input's shape reads it here. Only local processing raises it.
 	WarnInputNote
+	// WarnCutSnapped reports that a packet-level copy cut moved interior joins
+	// inward to the packet grid, so under one packet of wanted audio is
+	// missing at each; Detail counts the joins and names the largest move and
+	// the modes that avoid it. Nothing from a removed span is ever delivered,
+	// which is the trade: the alternative is up to one packet of the audio the
+	// request asked to remove, audible at every join. [Result.CutSnaps] and
+	// [Result.CutSnapMax] carry the figures.
+	WarnCutSnapped
+	// WarnBitrateAdjusted reports that the encoder cannot run at the requested
+	// bit rate and used the nearest it supports; Detail names both. Each
+	// encoder has its own range and grid: MP3 keeps to its CBR table, Opus
+	// tops out at its frame ceiling, AAC has a per-channel floor. A rate
+	// under an encoder's floor is refused outright instead, with
+	// ErrIncompatibleSpec and nothing written.
+	WarnBitrateAdjusted
+	// WarnWatchPageNoToken reports a run that fell back to the watch page
+	// after its player request failed, so the configured PO token was minted
+	// and never used; Detail quotes the failure. It matters because nothing
+	// else in the result says so: a delivery that worked reads as proof the
+	// token works, when the watch page needs none.
+	WarnWatchPageNoToken
 )
 
 func (w WarningCode) String() string {
@@ -938,6 +1014,12 @@ func (w WarningCode) String() string {
 		return "empty-input"
 	case WarnInputNote:
 		return "input-note"
+	case WarnCutSnapped:
+		return "cut-snapped"
+	case WarnBitrateAdjusted:
+		return "bitrate-adjusted"
+	case WarnWatchPageNoToken:
+		return "watch-page-no-token"
 	default:
 		return "unknown"
 	}
@@ -952,8 +1034,12 @@ type Warning struct {
 
 // Event is a best-effort progress signal. Callbacks are invoked synchronously
 // from the worker and are panic-recovered. A terminal event always fires:
-// StageDone on success or StageFailed with Err. For Stream, the terminal event
-// is emitted when the returned reader is closed.
+// StageDone on success or StageFailed with Err.
+//
+// For Stream, the terminal event is emitted when the returned reader is
+// closed: StageDone, carrying Bytes delivered and Total, whether or not the
+// caller read to EOF (closing early is the caller's choice, not a failure), or
+// StageFailed when a read failed.
 type Event struct {
 	Stage   Stage  // current pipeline stage
 	VideoID string // empty for local-file processing

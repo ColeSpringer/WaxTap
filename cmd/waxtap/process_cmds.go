@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 
-// isLocalFile reports whether arg names an existing regular file (so a process
-// command treats it as a local input rather than a URL).
+// isLocalFile reports whether arg names an existing path that is not a
+// directory (so a process command treats it as a local input rather than a
+// URL). A pipe or device passes here and is refused by the engine by name.
 func isLocalFile(arg string) bool {
 	fi, err := os.Stat(arg)
 	return err == nil && !fi.IsDir()
@@ -263,6 +265,33 @@ func warnBitDepthIgnored(env *appEnv, tf waxtap.TranscodeFormat, bitDepth int) {
 	warnKnob(env, "--bit-depth", bitDepth, bitDepthEffect(tf))
 }
 
+// noteKnobFlags validates the encoder knobs and then reports the ones this
+// format ignores. The order is the point: a value the encoder could never
+// take is a usage error, and noting that it would have been ignored first
+// tells the user their mistake does not matter, a moment before the run
+// refuses it for exactly that mistake.
+//
+// One call rather than a validate-then-warn pair at each site, so the order
+// cannot drift back apart.
+func noteKnobFlags(env *appEnv, tf waxtap.TranscodeFormat, bitrate, bitDepth int) error {
+	// The library's own check, on a spec carrying nothing but the knobs, so
+	// every rule it applies to them applies here and none can be missed by
+	// restating a subset: the plausibility bounds matter as much as the sign,
+	// and it was an out-of-range rate on a knob-ignoring format (a Vorbis
+	// --bitrate) that the restated pair let through to note-then-refuse.
+	//
+	// This moves where the check runs, not what it accepts, so a caller
+	// matching on ErrIncompatibleSpec keeps working.
+	if err := waxtap.ValidateProcessSpec(waxtap.ProcessSpec{
+		Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth},
+	}); err != nil {
+		return err
+	}
+	warnBitrateIgnored(env, tf, bitrate)
+	warnBitDepthIgnored(env, tf, bitDepth)
+	return nil
+}
+
 func newCutCmd() *cobra.Command {
 	var (
 		out          string
@@ -288,7 +317,12 @@ func newCutCmd() *cobra.Command {
 		Long: "Cut time ranges out of a local audio file or a YouTube video. Provide one\n" +
 			"or more --cut-range, and/or --sponsorblock (YouTube only). Smart mode\n" +
 			"stream-copies when cutting alone and fuses the cut into a transcode when\n" +
-			"one is requested.",
+			"one is requested.\n\n" +
+			"A packet-level copy keeps whole packets: the first and last cut points are\n" +
+			"exact, and each interior join moves inward to the packet grid, so under one\n" +
+			"frame of wanted audio goes at each and nothing from a removed span is kept.\n" +
+			"The run reports it as cut-snapped. --cut-mode copy-exact keeps the copy and\n" +
+			"makes each interior tail exact on a .mka, .mkv, or .webm output.",
 		Args: sponsorblockArgs(cobra.RangeArgs(1, 2), true),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			env, err := setup(cmd)
@@ -357,6 +391,13 @@ func newCutCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// An explicit copy mode and a crossfade contradict each other: the
+			// crossfade decodes, which is what copy forbids. Named here rather
+			// than let the format inference below report a missing --format,
+			// which blames the wrong flag.
+			if (mode == waxtap.CutCopy || mode == waxtap.CutCopyExact) && crossfade > 0 {
+				return usagef("--cut-mode %s cannot be combined with --crossfade, which re-encodes; drop one", cutMode)
+			}
 			cs := &waxtap.CutSpec{Ranges: rangeList, Mode: mode, Crossfade: crossfade}
 			if sbSet {
 				cats, err := parseCategories(sbCats)
@@ -366,7 +407,8 @@ func newCutCmd() *cobra.Command {
 				cs.SponsorBlock, cs.OnError = cats, pol
 			}
 
-			spec := waxtap.ProcessSpec{Cut: cs, Channels: layout, Downmix: doDownmix}
+			specLayout, specDownmix := downmixFields(layout, doDownmix)
+			spec := waxtap.ProcessSpec{Cut: cs, Channels: specLayout, Downmix: specDownmix}
 			newExt := ""
 			var tf waxtap.TranscodeFormat // FormatCopy when no transcode is requested
 			// Choose the transcode format once. An explicit --format wins. Re-encoding
@@ -411,8 +453,9 @@ func newCutCmd() *cobra.Command {
 				return emitSkip(env, "exists", outPath)
 			}
 			warnALACToAlacExt(env, outPath, tf)
-			warnBitrateIgnored(env, tf, bitrate)
-			warnBitDepthIgnored(env, tf, bitDepth)
+			if err := noteKnobFlags(env, tf, bitrate, bitDepth); err != nil {
+				return err
+			}
 			spec.Output = outputFor(outPath, mc)
 
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
@@ -467,13 +510,17 @@ func newTranscodeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "transcode <input> [output]",
 		Short: "Transcode a local file or YouTube audio to another format",
-		Long: "Re-encode audio to a target format. The format comes from --format or is\n" +
-			"inferred from the output file extension. FLAC/ALAC/WAV/WavPack/APE are\n" +
-			"lossless re-encodes (no further loss); copy/remux is the only no-re-encode\n" +
-			"path.\n" +
+		Long: "Re-encode audio to a target format. The format comes from --format or from\n" +
+			"the output file extension. FLAC/ALAC/WAV/WavPack/APE are lossless re-encodes\n" +
+			"(no further loss); copy/remux is the only no-re-encode path.\n\n" +
+			"Without --format the extension names a container: one that holds several\n" +
+			"codecs (.ogg, .mka, .webm, .mp4, .m4a, .aac) keeps the source codec when it\n" +
+			"can carry it and otherwise runs its own usual encoder, reported as\n" +
+			"implicit-lossy. A format-named extension (.flac, .mp3, .opus, .wav, .aiff,\n" +
+			".wv, .ape) names that format.\n" +
 			"When both --format and an output extension are given, the extension must be\n" +
-			"a container that can hold the format (for example, mp3 uses .mp3 or .mka,\n" +
-			"not .flac).\n\n" +
+			"a container that can hold the format (for example, mp3 uses .mp3 only, not\n" +
+			".mka or .flac).\n\n" +
 			"Decoding runs in float, so output depth follows the decoded stream: a lossy\n" +
 			"source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than\n" +
 			"plain AIFF. That is lossless but larger, and some older players reject float\n" +
@@ -527,7 +574,19 @@ func newTranscodeCmd() *cobra.Command {
 			if err := rejectDirOutput(explicit); err != nil {
 				return err
 			}
-			tf, err := transcodeFormatFor(format, explicit)
+			var tf waxtap.TranscodeFormat
+			inferred, kept := false, false
+			var inferProbe waxtap.AudioProbe
+			if format != "" {
+				tf, err = parseTranscodeFormat(format)
+			} else {
+				// No --format: the output extension names a container, which
+				// keeps the source codec when it can hold it and otherwise
+				// runs its own usual encoder. The probe it takes is kept for
+				// the same-format shortcut below, which asks the same
+				// question of the same file.
+				tf, kept, inferred, inferProbe, err = inferOutputFormatProbed(cmd.Context(), env, source, filepath.Ext(explicit))
+			}
 			if err != nil {
 				return err
 			}
@@ -535,10 +594,14 @@ func newTranscodeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			specLayout, specDownmix := downmixFields(layout, doDownmix)
 			spec := waxtap.ProcessSpec{
-				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth},
-				Channels:  layout,
-				Downmix:   doDownmix,
+				// FromContainer only when the container picked the encoder over
+				// the source, which is what the report it drives describes. A
+				// container that kept the source codec chose nothing.
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept},
+				Channels:  specLayout,
+				Downmix:   specDownmix,
 			}
 
 			mc, err := collisionFor(cmd, collisionStr)
@@ -553,8 +616,9 @@ func newTranscodeCmd() *cobra.Command {
 				return emitSkip(env, "exists", outPath)
 			}
 			warnALACToAlacExt(env, outPath, tf)
-			warnBitrateIgnored(env, tf, bitrate)
-			warnBitDepthIgnored(env, tf, bitDepth)
+			if err := noteKnobFlags(env, tf, bitrate, bitDepth); err != nil {
+				return err
+			}
 			spec.Output = outputFor(outPath, mc)
 
 			// If a local file already uses the requested codec and no other transform
@@ -576,8 +640,11 @@ func newTranscodeCmd() *cobra.Command {
 				}
 				// If probing fails, or the file is a different codec family, or the spec
 				// would still change its audio, run the normal encode path.
-				if p, perr := env.client.ProbeAudio(cmd.Context(), source); perr == nil &&
-					matchesTargetFamily(p.Codec, tf) && !specChangesAudio(spec, p.Channels) {
+				p, perr := inferProbe, error(nil)
+				if p.Codec == "" {
+					p, perr = env.client.ProbeAudio(cmd.Context(), source)
+				}
+				if perr == nil && matchesTargetFamily(p, tf, containerExtOf(outPath)) && !specChangesAudio(spec, p.Channels) {
 					// Zero the knobs with the format: a copy has no encoder to hand them
 					// to. Only an inert knob can have reached here, since a honored one
 					// sets audioChangeIsCertain.
@@ -586,8 +653,18 @@ func newTranscodeCmd() *cobra.Command {
 					// pipeline reaches the same fold = 0 from its own; leaving it means a
 					// source that turns out to have more channels than seen here is still
 					// folded, rather than silently delivered wide.
-					spec.Transcode.Format = waxtap.FormatCopy
-					spec.Transcode.Bitrate, spec.Transcode.BitDepth = 0, 0
+					//
+					// PCM takes no stage at all rather than FormatCopy: its
+					// packets are raw samples whose layout belongs to the
+					// container, so the engine declines every PCM remux, and a
+					// spec with no stage delivers the file verbatim, which is
+					// what "already this format" means here.
+					if tf == waxtap.FormatWAV || tf == waxtap.FormatAIFF {
+						spec.Transcode = nil
+					} else {
+						spec.Transcode.Format = waxtap.FormatCopy
+						spec.Transcode.Bitrate, spec.Transcode.BitDepth = 0, 0
+					}
 					remuxNoop = true
 					probedCodec = p.Codec
 				}
@@ -606,7 +683,16 @@ func newTranscodeCmd() *cobra.Command {
 				// The probed codec, not the requested family: an HE-AAC file
 				// satisfies --format aac by copying, and calling it "aac" here
 				// while the result line says he-aac would have the two disagree.
-				env.note(noteSameFormatCopied, "%s is already %s; copied without re-encoding (use --force to re-encode)", source, probedCodec)
+				//
+				// A kept codec written into a different container is a remux, not
+				// a copy of the file: the packets are the same and the wrapper is
+				// not, and saying "copied" of an .opus that came from a .webm
+				// would have the user looking for a byte-identical file.
+				if to := containerExtOf(res.OutputPath); to != "" && to != containerExtOf(source) {
+					env.note(noteSameFormatCopied, "%s is already %s; remuxed into .%s without re-encoding (use --force to re-encode)", source, probedCodec, to)
+				} else {
+					env.note(noteSameFormatCopied, "%s is already %s; copied without re-encoding (use --force to re-encode)", source, probedCodec)
+				}
 			}
 			return emitResult(env, res)
 		},
@@ -631,16 +717,101 @@ func newTranscodeCmd() *cobra.Command {
 	return cmd
 }
 
-// transcodeFormatFor resolves the transcode format from --format, falling back to
-// the output file's extension.
-func transcodeFormatFor(format, output string) (waxtap.TranscodeFormat, error) {
-	if format != "" {
-		return parseTranscodeFormat(format)
+// containerExtOf is path's extension, lowercased and undotted, or "" when it
+// has none.
+func containerExtOf(path string) string {
+	return strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+}
+
+// multiCodecExt reports whether ext names a container that holds several
+// codecs, so the source's own codec decides what the output takes. A
+// format-named extension (.flac, .mp3, .opus, .wav, .aiff, .wv, .ape) names
+// its format and never reaches the probe. .aac and .m4a parse as AAC, and
+// listing them here lets an HE-AAC or ALAC source keep its codec.
+func multiCodecExt(ext string) bool {
+	switch ext {
+	case "ogg", "oga", "mka", "mkv", "webm", "mp4", "m4a", "m4b", "aac":
+		return true
 	}
-	if ext := strings.TrimPrefix(filepath.Ext(output), "."); ext != "" {
-		return parseTranscodeFormat(ext)
+	return false
+}
+
+// inferOutputFormat resolves the format an extension-named output takes when
+// --format is absent: media.OutputCodecFor on the probed source codec, mapped
+// to the public format. kept says the source codec was kept, so the caller
+// knows a copy (or the Opus header-gain path) is what will run, and inferred
+// says the answer came from a container that holds several codecs rather than
+// from an extension that names its own format.
+//
+// An unprobeable source keeps nothing, which lands on the container's usual
+// encoder: the same answer the run gives when the source codec has no place
+// in the container.
+func inferOutputFormat(ctx context.Context, env *appEnv, source, ext string) (tf waxtap.TranscodeFormat, kept, inferred bool, err error) {
+	tf, kept, inferred, _, err = inferOutputFormatProbed(ctx, env, source, ext)
+	return tf, kept, inferred, err
+}
+
+// inferOutputFormatProbed is inferOutputFormat plus the probe it took, for a
+// caller that needs the same facts again: transcode's same-format shortcut
+// asks the identical question of the identical file a moment later, and
+// reading the headers twice in one run is work nothing needs.
+//
+// probed is the zero AudioProbe when no probe ran (a format-named extension,
+// or a source that is not a local file), which the shortcut treats as "cannot
+// confirm a match" exactly as a failed probe.
+func inferOutputFormatProbed(ctx context.Context, env *appEnv, source, ext string) (tf waxtap.TranscodeFormat, kept, inferred bool, probed waxtap.AudioProbe, err error) {
+	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
+	if ext == "" {
+		return 0, false, false, probed, usagef("specify --format or an output file with an extension")
 	}
-	return 0, usagef("specify --format or an output file with an extension")
+	if tf, perr := parseTranscodeFormat(ext); perr == nil && !multiCodecExt(ext) {
+		return tf, false, false, probed, nil // a format-named extension names its format
+	}
+	if isLocalFile(source) {
+		if p, perr := env.client.ProbeAudio(ctx, source); perr == nil {
+			probed = p
+		}
+	}
+	c, kept, err := media.OutputCodecFor(ext, probed.Codec)
+	if err != nil {
+		return 0, false, false, probed, usagef("%v; or pass --format (%s)", err, formatChoices(true))
+	}
+	return formatForCodec(c, ext), kept, true, probed, nil
+}
+
+// formatForCodec is transcodeCodec's inverse: the public format that asks for
+// codec c. ext picks between PCM's two containers, which share one codec
+// family and differ only in the file they are written into.
+func formatForCodec(c media.Codec, ext string) waxtap.TranscodeFormat {
+	switch c {
+	case media.CodecFLAC:
+		return waxtap.FormatFLAC
+	case media.CodecALAC:
+		return waxtap.FormatALAC
+	case media.CodecWAV:
+		if media.IsAIFFExt(ext) {
+			return waxtap.FormatAIFF
+		}
+		return waxtap.FormatWAV
+	case media.CodecAIFF:
+		return waxtap.FormatAIFF
+	case media.CodecMP3:
+		return waxtap.FormatMP3
+	case media.CodecAAC:
+		return waxtap.FormatAAC
+	case media.CodecHEAAC:
+		return waxtap.FormatHEAAC
+	case media.CodecOpus:
+		return waxtap.FormatOpus
+	case media.CodecVorbis:
+		return waxtap.FormatVorbis
+	case media.CodecWavPack:
+		return waxtap.FormatWavPack
+	case media.CodecAPE:
+		return waxtap.FormatAPE
+	default:
+		return waxtap.FormatCopy
+	}
 }
 
 // urlSelection builds the audio selector and source policy used when a process

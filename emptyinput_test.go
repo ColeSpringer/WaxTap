@@ -133,3 +133,29 @@ func TestOrdinaryInputDoesNotWarnEmpty(t *testing.T) {
 		t.Errorf("an ordinary tone warned: %q", d)
 	}
 }
+
+// An empty input's only tag is the encoder stamp a re-encode excludes as its
+// own, so there is nothing to carry and nothing lost: no carry runs and no
+// warning is raised about one. A file the run could not tag is a different
+// thing, and TagCarry.Error is where that is said.
+func TestEmptyInputCarriesNothingSilently(t *testing.T) {
+	dir := t.TempDir()
+	in := wavFrom(t, dir, "empty.wav", emptyWAV())
+
+	res, err := newOfflineClient(t).Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "out.flac")),
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if _, ok := findWarning(res.Warnings, WarnTagCarry); ok {
+		t.Errorf("warnings = %+v, want no tag-carry warning: there was nothing to carry", res.Warnings)
+	}
+	if res.TagCarry != nil {
+		t.Errorf("TagCarry = %+v, want nil: no carry ran", res.TagCarry)
+	}
+}

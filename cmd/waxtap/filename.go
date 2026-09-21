@@ -103,10 +103,17 @@ func resolveOutputName(tmpl string, d templateData) string {
 	var expanded []string
 	var finalTmpl string
 	for _, part := range strings.FieldsFunc(tmpl, isPathSeparator) {
-		if e := strings.TrimSpace(expandTemplate(part, d)); e != "" {
-			expanded = append(expanded, e)
-			finalTmpl = part
+		e := strings.TrimSpace(expandTemplate(part, d))
+		// A component that is only dots names the current or parent
+		// directory, which a template must not be able to reach. Skipping it
+		// makes "../{id}.{ext}" land flat, the way "/{id}.{ext}" does;
+		// substituting "untitled" instead would create a directory of that
+		// name out of a component the user meant as navigation.
+		if e == "" || strings.Trim(e, ".") == "" {
+			continue
 		}
+		expanded = append(expanded, e)
+		finalTmpl = part
 	}
 	if len(expanded) == 0 {
 		// Keep the detected extension even when every placeholder expands empty.

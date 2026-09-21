@@ -644,7 +644,7 @@ func TestDoctorJSONPingEntry(t *testing.T) {
 		return arr
 	}
 	arr := decode(&doctorReport{Healthy: true, Sidecars: []doctorSidecarProbe{
-		{Endpoint: "ping", OK: true, LatencyMs: 12, Via: "session", Probe: "tenant", Reason: "no-session", BrowserRelaunched: true},
+		{Endpoint: "ping", OK: true, LatencyMs: 12, Via: "session", Probe: "tenant", Reason: "no-session", BrowserRelaunched: true, Keyed: true},
 		{Endpoint: "ping", OK: true, LatencyMs: 3},
 		{Endpoint: "session", OK: true, LatencyMs: 300},
 	}})
@@ -652,15 +652,92 @@ func TestDoctorJSONPingEntry(t *testing.T) {
 		t.Fatalf("sidecars = %v, want three entries", arr)
 	}
 	first, _ := arr[0].(map[string]any)
-	if first["via"] != "session" || first["probe"] != "tenant" || first["reason"] != "no-session" || first["browserRelaunched"] != true {
-		t.Errorf("sidecars[0] = %v, want via, probe, reason, and browserRelaunched", first)
+	if first["via"] != "session" || first["probe"] != "tenant" || first["reason"] != "no-session" || first["browserRelaunched"] != true || first["keyed"] != true {
+		t.Errorf("sidecars[0] = %v, want via, probe, reason, browserRelaunched, and keyed", first)
 	}
 	for i := 1; i < 3; i++ {
 		entry, _ := arr[i].(map[string]any)
-		for _, key := range []string{"via", "probe", "reason", "browserRelaunched"} {
+		for _, key := range []string{"via", "probe", "reason", "browserRelaunched", "keyed"} {
 			if _, ok := entry[key]; ok {
 				t.Errorf("sidecars[%d] = %v, want %q omitted when the daemon said nothing", i, entry, key)
 			}
 		}
+	}
+}
+
+// The ping's verdict is one word, so a consumer reads it instead of deriving
+// it from ok, statusCode, and the health fields.
+func TestDoctorPingStatus(t *testing.T) {
+	cases := []struct {
+		name  string
+		probe doctorSidecarProbe
+		want  string
+	}{
+		{"health body", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "ok"}, "healthy"},
+		{"benign window", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "busy"}, "healthy"},
+		{"no health body", doctorSidecarProbe{Endpoint: "ping", OK: true}, "answered"},
+		{"missing route", doctorSidecarProbe{Endpoint: "ping", OK: true, StatusCode: 404}, "not-offered"},
+		{"failed", doctorSidecarProbe{Endpoint: "ping", Probe: "tenant", Reason: "probe-failed"}, "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pingStatus(tc.probe); got != tc.want {
+				t.Errorf("pingStatus = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// Only the ping carries one: an endpoint probe's entry is unchanged.
+	var out bytes.Buffer
+	env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
+	if err := emitDoctorJSON(env, &doctorReport{Healthy: true, Sidecars: []doctorSidecarProbe{
+		{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "ok", Status: "healthy"},
+		{Endpoint: "session", OK: true},
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	arr, _ := m["sidecars"].([]any)
+	if first, _ := arr[0].(map[string]any); first["status"] != "healthy" {
+		t.Errorf("ping status = %v, want healthy", arr[0])
+	}
+	if second, _ := arr[1].(map[string]any); second["status"] != nil {
+		t.Errorf("session entry = %v, want no status", arr[1])
+	}
+}
+
+// The run's --api-key and the daemon's own keying are reported when they
+// disagree, in either direction, and a daemon that said nothing about its
+// keying produces neither caveat.
+func TestDoctorKeyingCaveats(t *testing.T) {
+	cases := []struct {
+		name   string
+		apiKey string
+		probe  doctorSidecarProbe
+		want   string
+	}{
+		{"keyed daemon, no key", "", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "daemon", Keyed: true}, "no --api-key was given"},
+		{"keyless daemon, a key", "bogus", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant"}, "not checked"},
+		{"keyed daemon with a key", "k", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Keyed: true}, ""},
+		{"no health body", "k", doctorSidecarProbe{Endpoint: "ping", OK: true}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var errOut bytes.Buffer
+			env := &appEnv{out: io.Discard, errOut: &errOut, cfg: &appConfig{apiKey: tc.apiKey}, notes: &noteCollector{}}
+			noteSidecarKeying(env, []doctorSidecarProbe{tc.probe})
+			notes := env.notesJSON()
+			if tc.want == "" {
+				if len(notes) != 0 {
+					t.Fatalf("notes = %v, want none", notes)
+				}
+				return
+			}
+			if len(notes) != 1 || notes[0].Code != string(noteDoctorCaveat) || !strings.Contains(notes[0].Detail, tc.want) {
+				t.Fatalf("notes = %v, want one doctor-caveat containing %q", notes, tc.want)
+			}
+		})
 	}
 }

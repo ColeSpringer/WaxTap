@@ -46,6 +46,11 @@ type Extraction struct {
 	// substitutedFrom names a forced non-WEB client replaced by the watch-page
 	// WEB fallback.
 	substitutedFrom string
+	// fallbackCause is the failure the profile attempts left behind when the
+	// watch page answered instead, so a caller can say why the fallback ran.
+	// Nil on a profile extraction, and on a watch-page one no profile
+	// preceded.
+	fallbackCause error
 	// rawAudio stores the resolver input for each public Format. It is kept in
 	// the same order as Video.Formats because itag is not unique on videos with
 	// multiple languages or DRC variants.
@@ -135,6 +140,20 @@ func (e *Extraction) SubstitutedFrom() string {
 		return ""
 	}
 	return e.substitutedFrom
+}
+
+// FallbackCause is the failure the profile attempts left behind when the watch
+// page answered instead. It is nil on a profile extraction, and on a
+// watch-page one no profile preceded.
+//
+// A caller reports it to explain why a configured PO token was never
+// exercised: the watch page needs none, so a run that fell back to it minted a
+// token nothing used.
+func (e *Extraction) FallbackCause() error {
+	if e == nil {
+		return nil
+	}
+	return e.fallbackCause
 }
 
 // rawFormatByIndex returns the raw resolver input for Video.Formats[i].

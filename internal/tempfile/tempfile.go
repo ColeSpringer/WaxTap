@@ -206,7 +206,11 @@ func (f *File) close() error {
 
 // New creates a staging file for eventual atomic rename to finalPath. The
 // returned *File embeds *os.File, so callers write to it directly.
+//
+// A finalPath whose last component is a symlink is written through the link:
+// see resolveLink.
 func New(finalPath string) (*File, error) {
+	finalPath = ResolveLink(finalPath)
 	dir := filepath.Dir(finalPath)
 	base := filepath.Base(finalPath)
 	f, err := os.CreateTemp(dir, base+".*.part")
@@ -219,6 +223,34 @@ func New(finalPath string) (*File, error) {
 		return nil, WrapOutput("chmod", retargetPathError(finalPath, err))
 	}
 	return &File{File: f, finalPath: finalPath, tmpPath: f.Name()}, nil
+}
+
+// ResolveLink follows a final path whose last component is a symlink to the
+// file it names, so a publish replaces the target and the link survives. A
+// user who symlinks an output name onto another disk keeps their redirection
+// rather than having it silently replaced by the first run that writes there.
+//
+// It is exported because the staged writes here are not the only publish: the
+// facade's rename path has to answer the same way, or whether the link
+// survives would depend on which filesystem the staging landed on.
+//
+// It also keeps the staging beside the target rather than beside the link, so
+// the rename stays on one filesystem, which is the whole point of the link in
+// that case.
+//
+// A dangling link resolves to nothing, so the path is left alone and the
+// rename replaces the link itself: there is no target to write through, and
+// that is the only answer the filesystem offers.
+func ResolveLink(finalPath string) string {
+	fi, err := os.Lstat(finalPath)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return finalPath
+	}
+	target, err := filepath.EvalSymlinks(finalPath)
+	if err != nil {
+		return finalPath // dangling, or a loop: replace the link
+	}
+	return target
 }
 
 // chmodUmask changes a staged file from os.CreateTemp's private mode to the mode
@@ -324,6 +356,7 @@ type External struct {
 // non-empty ext, with or without a leading dot, overrides the staged extension
 // without changing the path used by Commit.
 func NewExternal(finalPath, ext string) (*External, error) {
+	finalPath = ResolveLink(finalPath)
 	dir := filepath.Dir(finalPath)
 	base := filepath.Base(finalPath)
 	switch {

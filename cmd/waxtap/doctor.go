@@ -54,6 +54,9 @@ func newDoctorCmd() *cobra.Command {
 		Long: "Runs a quick end-to-end health check: extract a known-good video,\n" +
 			"resolve its best audio, and read a few KiB to prove byte delivery.\n" +
 			"Use --full to download a whole track instead of a small range.\n\n" +
+			"A --session-url needs a uniform client chain: a single --client (of any\n" +
+			"name), or a single-client --profile-override. The default chain tries\n" +
+			"several clients, which an adopted session cannot span.\n\n" +
 			"With sidecar URLs configured, the daemon behind them is asked for its\n" +
 			"health first (WaxSeal's /ping, one round trip, shown with its reason),\n" +
 			"then each endpoint is probed once (session, PO token, player-context),\n" +
@@ -90,6 +93,7 @@ func newDoctorCmd() *cobra.Command {
 				env.info("probing sidecars\n")
 			}
 			rep.Sidecars = probeSidecars(cmd.Context(), env.sidecars, probeID, env.cfg.webContextTimeout)
+			noteSidecarKeying(env, rep.Sidecars)
 
 			var lastErr error
 			for _, id := range candidates {
@@ -323,10 +327,20 @@ type doctorSidecarProbe struct {
 	// whether the probe found the browser gone and relaunched it. Only the
 	// ping sets them, and a daemon that answered without a health body leaves
 	// them empty.
-	Probe             string     `json:"probe,omitempty"`
-	Reason            string     `json:"reason,omitempty"`
-	BrowserRelaunched bool       `json:"browserRelaunched,omitempty"`
-	Error             *errorJSON `json:"error,omitempty"`
+	Probe             string `json:"probe,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	BrowserRelaunched bool   `json:"browserRelaunched,omitempty"`
+	// Keyed reports that the daemon requires an API key, which the ping says
+	// whatever scope it answered at. Only the ping sets it.
+	Keyed bool `json:"keyed,omitempty"`
+	// Status is the ping's verdict in one word, so a consumer reads it
+	// instead of deriving it from ok, statusCode, and the health fields:
+	// "healthy" (a health body whose reason is ok or a benign window),
+	// "answered" (200 with no health body: a daemon that is not WaxSeal),
+	// "not-offered" (a status naming a missing route), or "failed". Only the
+	// ping sets it.
+	Status string     `json:"status,omitempty"`
+	Error  *errorJSON `json:"error,omitempty"`
 	// err is the failure Error renders, kept so the command can return the
 	// refusal itself and let it decide the exit code.
 	err error
@@ -405,7 +419,7 @@ func probeSidecars(ctx context.Context, s sidecarProviders, videoID string, budg
 			return err
 		})
 		p.Via = s.pingVia
-		p.Probe, p.Reason, p.BrowserRelaunched = health.Probe, health.Reason, health.BrowserRelaunched
+		p.Probe, p.Reason, p.BrowserRelaunched, p.Keyed = health.Probe, health.Reason, health.BrowserRelaunched, health.Keyed
 		// A daemon that offers no /ping, or a proxy in front of one that routes
 		// only the endpoints, says so with a status that names a missing route.
 		// That says nothing about its health, so the entry keeps the status and
@@ -414,6 +428,7 @@ func probeSidecars(ctx context.Context, s sidecarProviders, videoID string, budg
 		if pingNotOffered(p.StatusCode) {
 			p.OK, p.Error, p.err, p.RetryAfterSeconds = true, nil, nil, 0
 		}
+		p.Status = pingStatus(p)
 		probes = append(probes, p)
 	}
 	if s.session != nil {
@@ -555,6 +570,45 @@ func renderSidecarProbes(env *appEnv, probes []doctorSidecarProbe) {
 	}
 }
 
+// noteSidecarKeying reports the two ways the run's --api-key and the daemon's
+// own keying disagree. Neither is a failure: a keyless daemon ignores the key
+// it was given (so a wrong one passes silently), and a keyed daemon answers a
+// keyless ping at daemon scope, where the endpoint probes that follow ask
+// about the shared browser rather than about the tenant a key would select.
+func noteSidecarKeying(env *appEnv, probes []doctorSidecarProbe) {
+	for _, p := range probes {
+		// A health body arrived, by either field: healthDetail prints "keyed"
+		// off the same data, and gating on the scope alone left a daemon that
+		// reports a reason and no scope printing the flag with no caveat.
+		if p.Endpoint != doctorProbePing || (p.Probe == "" && p.Reason == "") {
+			continue
+		}
+		switch {
+		case p.Keyed && env.cfg.apiKey == "":
+			env.note(noteDoctorCaveat, "the daemon is keyed and no --api-key was given; the endpoint probes answer at daemon scope")
+		case !p.Keyed && env.cfg.apiKey != "":
+			env.note(noteDoctorCaveat, "the daemon is keyless, so --api-key is not checked")
+		}
+		return
+	}
+}
+
+// pingStatus is the ping's verdict in one word; see
+// doctorSidecarProbe.Status.
+func pingStatus(p doctorSidecarProbe) string {
+	switch {
+	case !p.OK:
+		return "failed"
+	case p.notOffered():
+		return "not-offered"
+	case p.Probe == "" && p.Reason == "":
+		// No health body: the daemon answered, and that is all it said.
+		return "answered"
+	default:
+		return "healthy"
+	}
+}
+
 // healthDetail renders what a ping's health body said, after the latency: the
 // daemon's scope and reason in its own words ("tenant ok", "daemon ok",
 // "tenant no-session"), a reason alone as "reason busy" (a daemon that
@@ -569,6 +623,9 @@ func healthDetail(p doctorSidecarProbe) string {
 		parts = append(parts, "reason "+p.Reason)
 	case p.Probe != "":
 		parts = append(parts, p.Probe+" probe")
+	}
+	if p.Keyed {
+		parts = append(parts, "keyed")
 	}
 	if p.BrowserRelaunched {
 		parts = append(parts, "browser relaunched")

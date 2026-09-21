@@ -448,6 +448,9 @@ func TestDownloadSkipIfExists(t *testing.T) {
 	if res.OutputPath != out {
 		t.Errorf("skipped OutputPath = %q, want %q", res.OutputPath, out)
 	}
+	if !res.Skipped {
+		t.Error("Skipped = false; nothing else in the result says no work was done")
+	}
 }
 
 func TestProcessValidation(t *testing.T) {
@@ -483,8 +486,8 @@ func TestProcessSkipIfExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process skip: %v", err)
 	}
-	if res.SourceKind != SourceLocalFile || res.OutputPath != out {
-		t.Errorf("skipped result = %+v", res)
+	if res.SourceKind != SourceLocalFile || res.OutputPath != out || !res.Skipped {
+		t.Errorf("skipped result = %+v, want a local-file result at %s marked Skipped", res, out)
 	}
 }
 
@@ -736,9 +739,13 @@ func TestValidateProcessSpec_Downmix(t *testing.T) {
 			t.Errorf("Downmix+%s = %v, want nil", layout, err)
 		}
 	}
-	// Without Downmix the layout is only a selection hint, never rejected.
-	if err := validateProcessSpec(ProcessSpec{Channels: LayoutSurround}); err != nil {
-		t.Errorf("no downmix = %v, want nil", err)
+	// Without Downmix the layout folds nothing, so setting one is a mistake
+	// about a value the caller believes will apply, not a hint to ignore.
+	if err := validateProcessSpec(ProcessSpec{Channels: LayoutSurround}); !errors.Is(err, ErrIncompatibleSpec) {
+		t.Errorf("no downmix = %v, want ErrIncompatibleSpec", err)
+	}
+	if err := validateProcessSpec(ProcessSpec{Channels: LayoutAny}); err != nil {
+		t.Errorf("LayoutAny without downmix = %v, want nil", err)
 	}
 }
 
@@ -801,8 +808,13 @@ func TestValidateProcessSpec_CopyCutWithTranscode(t *testing.T) {
 }
 
 func TestValidateProcessSpec_LoudnessAndBitrate(t *testing.T) {
+	// Applying a gain needs an encode, so every row carries one; the encode
+	// requirement itself is covered by TestValidateProcessSpecRefusesWhatProcessRefuses.
 	apply := func(target float64) ProcessSpec {
-		return ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: target}}
+		return ProcessSpec{
+			Loudness:  &LoudnessSpec{Mode: LoudnessApply, Target: target},
+			Transcode: &TranscodeSpec{Format: FormatFLAC},
+		}
 	}
 	for _, target := range []float64{-4, -71, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		if err := validateProcessSpec(apply(target)); !errors.Is(err, ErrIncompatibleSpec) {
@@ -1671,4 +1683,83 @@ func findWarning(ws []Warning, code WarningCode) (Warning, bool) {
 		}
 	}
 	return Warning{}, false
+}
+
+// A directory, pipe, device, or socket is not a file WaxTap can read, and the
+// refusal says which it is rather than leaving the caller a bare open error.
+func TestProcessRefusesADirectoryAsUnsupportedInput(t *testing.T) {
+	c := newOfflineClient(t)
+	dir := t.TempDir()
+	_, err := c.Process(context.Background(), ProcessRequest{Input: dir, ProcessSpec: ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC}, Output: ToFile(filepath.Join(dir, "o.flac"))}})
+	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("err = %v, want ErrUnsupportedInput naming a directory", err)
+	}
+}
+
+// Every combination Process refuses, ValidateProcessSpec refuses first. A
+// caller that validates a batch up front and then runs it must not meet a
+// refusal the check said nothing about.
+func TestValidateProcessSpecRefusesWhatProcessRefuses(t *testing.T) {
+	out := ToFile("x.flac")
+	apply := &LoudnessSpec{Mode: LoudnessApply, Target: -14}
+	cases := []struct {
+		name string
+		spec ProcessSpec
+		want string
+	}{
+		{"nil writer", ProcessSpec{Output: ToWriter(nil), Transcode: &TranscodeSpec{Format: FormatFLAC}}, "nil writer"},
+		{"format 200", ProcessSpec{Output: out, Transcode: &TranscodeSpec{Format: TranscodeFormat(200)}}, "transcode format 200"},
+		{"cut mode 9", ProcessSpec{Output: out, Cut: &CutSpec{Ranges: []TimeRange{{0, time.Second}}, Mode: CutMode(9)}}, "cut mode 9"},
+		{"loudness mode 9", ProcessSpec{Output: out, Loudness: &LoudnessSpec{Mode: LoudnessMode(9), Target: -14}, Transcode: &TranscodeSpec{Format: FormatMP3}}, "loudness mode 9"},
+		{"peak mode 9", ProcessSpec{Output: out, Loudness: &LoudnessSpec{Mode: LoudnessApply, Target: -14, PeakMode: PeakMode(9)}, Transcode: &TranscodeSpec{Format: FormatMP3}}, "peak mode 9"},
+		{"sponsorblock policy 9", ProcessSpec{Output: out, Cut: &CutSpec{SponsorBlock: []Category{}, OnError: SponsorBlockErrorPolicy(9)}}, "SponsorBlock error policy 9"},
+		{"layout 99 without downmix", ProcessSpec{Output: out, Channels: ChannelLayout(99)}, "channel layout"},
+		{"channels without downmix", ProcessSpec{Output: out, Channels: LayoutStereo, Transcode: &TranscodeSpec{Format: FormatWAV}}, "Downmix"},
+		{"apply with copy", ProcessSpec{Output: out, Loudness: apply, Transcode: &TranscodeSpec{Format: FormatCopy}}, "requires an encode"},
+		{"apply without transcode", ProcessSpec{Output: out, Loudness: apply}, "requires an encode"},
+		{"reversed range", ProcessSpec{Output: out, Cut: &CutSpec{Ranges: []TimeRange{{5 * time.Second, 2 * time.Second}}}}, "end must be after"},
+		{"empty range", ProcessSpec{Output: out, Cut: &CutSpec{Ranges: []TimeRange{{2 * time.Second, 2 * time.Second}}}}, "end must be after"},
+		{"negative start", ProcessSpec{Output: out, Cut: &CutSpec{Ranges: []TimeRange{{-time.Second, 2 * time.Second}}}}, "must be >= 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProcessSpec(tc.spec)
+			if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want ErrIncompatibleSpec containing %q", err, tc.want)
+			}
+		})
+	}
+	// Apply with a downmix is an encode the pipeline chooses, so it stays valid.
+	if err := ValidateProcessSpec(ProcessSpec{Output: out, Loudness: apply, Downmix: true, Channels: LayoutStereo}); err != nil {
+		t.Errorf("apply with downmix: %v", err)
+	}
+}
+
+// SponsorBlock segments are keyed by video ID, which a local file has none of.
+// Process refuses the spec rather than ignoring the field.
+func TestProcessRefusesSponsorBlockOnALocalFile(t *testing.T) {
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.wav", 1, "wav")
+	_, err := newOfflineClient(t).Process(context.Background(), ProcessRequest{
+		Input: in,
+		ProcessSpec: ProcessSpec{
+			Output: ToFile(filepath.Join(dir, "out.flac")),
+			Cut:    &CutSpec{SponsorBlock: []Category{}},
+		},
+	})
+	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "SponsorBlock") {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec naming SponsorBlock", err)
+	}
+}
+
+// A nil writer is refused before any work, on Download as well as Process, so
+// it can never reach the copy and panic.
+func TestDownloadRefusesANilWriter(t *testing.T) {
+	_, err := newOfflineClient(t).Download(context.Background(), Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: ProcessSpec{Output: ToWriter(nil)},
+	})
+	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "nil writer") {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec naming the nil writer", err)
+	}
 }

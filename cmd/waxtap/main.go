@@ -12,10 +12,14 @@ import (
 )
 
 func main() {
-	// A first interrupt cancels in-flight work. A second uses the default signal
-	// behavior and exits immediately.
+	// A first SIGINT or SIGTERM cancels in-flight work. A second uses the
+	// default signal behavior and exits immediately.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Published so a per-item record, which classifies its own error with no
+	// access to this context, can still tell an interrupt from a cancellation
+	// WaxTap made itself.
+	setRunSignal(ctx)
 
 	root := newRootCmd()
 	err := root.ExecuteContext(ctx)
@@ -26,8 +30,10 @@ func main() {
 	// matches on the message prefix, which a cancellation join would push out of
 	// place.
 	err = normalizeExecuteError(err, os.Args[1:])
-	// A failure that followed the signal is a cancellation, whatever it reports.
-	// stop() is deferred and cannot have run, so ctx.Err() is set only by a signal.
+	// A failure that followed the signal is a cancellation, whatever it reports,
+	// and is marked as one: stop() is deferred and cannot have run, so ctx.Err()
+	// is set only by a signal. Without the marker the renderer cannot tell this
+	// from a cancellation WaxTap made itself, which is exit 1 and a defect.
 	err = finalError(ctx, err)
 	os.Exit(report(os.Stdout, os.Stderr, os.Args[1:], outputFlags(root).json, err))
 }

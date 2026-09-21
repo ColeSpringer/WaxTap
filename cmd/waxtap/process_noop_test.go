@@ -485,3 +485,56 @@ func TestTranscodeForceBitrateDownmixBypassRemux(t *testing.T) {
 		})
 	}
 }
+
+// A PCM file asked for the container it is already in is delivered verbatim:
+// the samples are the same bytes, so there is nothing to encode. It takes no
+// stage at all rather than --format copy, which the engine declines for PCM
+// (the packets' layout belongs to the container).
+func TestTranscodePCMSameContainerCopies(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	synthAudio(t, in, "pcm_s16le")
+	out := filepath.Join(dir, "out.wav")
+
+	stdout, stderr, err := runTranscode(t, in, "-o", out, "--json")
+	if err != nil {
+		t.Fatalf("transcode wav to wav: %v\nstderr:\n%s", err, stderr)
+	}
+	if !transcodedFalse(t, stdout) {
+		t.Errorf("a PCM file into its own container should copy:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "already pcm; copied without re-encoding") {
+		t.Errorf("stderr = %q, want the same-format-copied note", stderr)
+	}
+	src, derr := os.ReadFile(in)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	got, derr := os.ReadFile(out)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if !bytes.Equal(src, got) {
+		t.Errorf("output is %d bytes, source %d; want a byte-for-byte copy", len(got), len(src))
+	}
+
+	// A knob the encoder reads is still a real request, so it re-encodes.
+	deep := filepath.Join(dir, "deep.wav")
+	stdout, stderr, err = runTranscode(t, in, "-o", deep, "--bit-depth", "24", "--json")
+	if err != nil {
+		t.Fatalf("--bit-depth 24: %v\nstderr:\n%s", err, stderr)
+	}
+	if transcodedFalse(t, stdout) {
+		t.Errorf("--bit-depth on a PCM source should re-encode:\n%s", stdout)
+	}
+
+	// A different PCM container is a real conversion, not a copy.
+	aiff := filepath.Join(dir, "out.aiff")
+	stdout, stderr, err = runTranscode(t, in, "-o", aiff, "--json")
+	if err != nil {
+		t.Fatalf("wav to aiff: %v\nstderr:\n%s", err, stderr)
+	}
+	if transcodedFalse(t, stdout) {
+		t.Errorf("wav to aiff should re-encode; PCM's layout belongs to its container:\n%s", stdout)
+	}
+}

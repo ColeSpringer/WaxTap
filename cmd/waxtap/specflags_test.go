@@ -548,3 +548,60 @@ func TestParseTimestampDotDecimals(t *testing.T) {
 		t.Error(`parseTimestamp(".") accepted a bare dot`)
 	}
 }
+
+func TestParseCutMode(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    waxtap.CutMode
+		wantErr bool
+	}{
+		{"", waxtap.CutSmart, false},
+		{"smart", waxtap.CutSmart, false},
+		{"copy", waxtap.CutCopy, false},
+		{"copy-exact", waxtap.CutCopyExact, false},
+		{"COPY-EXACT", waxtap.CutCopyExact, false},
+		{"accurate", waxtap.CutAccurate, false},
+		{"exact", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := parseCutMode(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseCutMode(%q) = %v, want a usage error", tc.in, got)
+			} else if !strings.Contains(err.Error(), "copy-exact") {
+				t.Errorf("parseCutMode(%q) error = %v, want the choices listed", tc.in, err)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("parseCutMode(%q) = %v, %v, want %v", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+// --codec is a hard filter, so a value that can never bind is a usage error
+// rather than a run that fails with "no format matched". An exact codec id,
+// which the selector matches literally, is accepted as one.
+func TestAudioSelectorValidatesCodec(t *testing.T) {
+	for _, ok := range []string{"aac", "AAC", "opus", "mp4a.40.2", "vp9-audio"} {
+		if _, err := audioSelector(0, ok, waxtap.LayoutStereo); err != nil {
+			t.Errorf("audioSelector(--codec %q) = %v, want nil", ok, err)
+		}
+	}
+	// "flacc" is not one: codecFamily's prefix match reads it as flac, the
+	// same leniency prefer:<codec> has.
+	for _, bad := range []string{"bogus", "wavpack"} {
+		_, err := audioSelector(0, bad, waxtap.LayoutStereo)
+		if err == nil {
+			t.Errorf("audioSelector(--codec %q) = nil, want a usage error", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "known codecs") {
+			t.Errorf("err = %v, want the known codecs listed", err)
+		}
+	}
+	// An empty --codec is "no filter", not a bad one.
+	if _, err := audioSelector(0, "", waxtap.LayoutStereo); err != nil {
+		t.Errorf("empty --codec = %v, want nil", err)
+	}
+}

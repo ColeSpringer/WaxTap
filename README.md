@@ -49,7 +49,9 @@ and run `waxtap --help`. Unsigned macOS binaries may need
 
 Media commands accept a YouTube URL or bare video or playlist ID. `download`
 also accepts a channel URL or bare `UC` ID, resolving to the channel's uploads
-feed. `cut`, `transcode`, and `normalize` also take local files. Every command
+feed; a channel with no uploads feed reports the missing playlist by the
+channel's own name, not by the `UU` id it resolved to. `cut`, `transcode`, and
+`normalize` also take local files. Every command
 has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 3).
 
 `--quiet` and `--verbose` are mutually exclusive; passing both is exit 2.
@@ -69,8 +71,8 @@ one-item playlist whose video needs a PO token exits 8 rather than a generic 1.
 
 ```sh
 waxtap info <video-url>                         # metadata and best audio
-waxtap info <video-url> --itag 251 --probe       # preview what a selection picks
-waxtap formats <video-url>                      # all audio formats
+waxtap info <video-url> --itag 251 --probe       # read the stream's own headers (--json marks it probed)
+waxtap formats <video-url>                      # all audio formats (--json names the client they came from)
 waxtap download <video-url> -o track            # keep source
 waxtap download <video-url> --format flac -o track.flac
 waxtap download <video-url> --sponsorblock --normalize --format mp3 -o track.mp3
@@ -98,15 +100,14 @@ leaves the true-peak limiter idle and reproduces the input's track-to-track
 spacing exactly, at the cost of landing short; the default `limit` reaches for
 the target and lets the per-track limiter compress that spacing. Every track is
 measured at the width its own encode delivers, so a lossy target's fold of a
-surround master is in the figures the gain comes from. The group is built at
-that width too, each wider member folded before it meets the others, so the
-album figure is the members' own folds and not a fold of their mix. An album
-that mixes widths and folds none of them is measured at its widest, each
-narrower member placed into that layout with its missing positions silent;
-either way the group figure is what every member contributes at the width it
-delivers. A member whose positions have no place in the layout it is placed
-into (a side pair beside a back pair) is refused, naming the track. Loudness
-uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
+surround master is in the figures the gain comes from, and the album figure is
+EBU R128's gates run over every track's blocks at once rather than over a
+concatenation: a mono track is measured as mono, not as the dual-mono a stereo
+timeline would make of it, and a track whose channel positions differ from its
+neighbours' is measured as it is. A track that does not read to the length its
+container states exactly is refused, naming the file: every track shares one
+gain, and one derived from part of a track describes nothing. Loudness uses
+EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
 
@@ -114,8 +115,19 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   in one flag. Times are `[HH:]MM:SS[.frac]`, a Go duration (`90s`, `1m30s`), or
   bare seconds, never signed. `--cut-mode smart|copy|accurate` picks how the
   cut is rendered: `smart` (the default) stream-copies when it can, `copy`
-  refuses anything that would need a decode, `accurate` always decodes.
-  `--crossfade` blends each join and forces a decode. Ranges are clamped to the
+  refuses anything that would need a decode, `accurate` always decodes. A
+  packet-level copy (`smart` on an Opus or AAC source, and `copy`) keeps whole
+  packets: the first cut point and the last are exact, and every interior join
+  moves inward to the packet grid, so up to one frame (20 ms Opus, 21 to 23 ms
+  AAC) of wanted audio is missing at each join and nothing from a removed span
+  is delivered; the run reports it as `cut-snapped`, and `--json` carries
+  `cutMode`, `cutSnaps`, and `cutSnapMaxMs`. `copy-exact` keeps the copy and
+  makes each interior tail exact, with the decoder converged across the join,
+  through per-packet trims that only `.mka`/`.mkv`/`.webm` can carry (Firefox
+  rejects such a file; other players honour it); the heads still land within one
+  frame. `--crossfade` blends each join and forces a decode; `accurate` and
+  `--crossfade` re-encode, so they need `--format` or an output extension that
+  names a format. Ranges are clamped to the
   media and merged; ranges that fall entirely outside it are a request error.
 - `split` cuts a single-file rip into one file per track at the sheet's
   `INDEX 01` positions, exact to the CD frame (1/75 s). Pieces are named
@@ -136,6 +148,14 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   target layout it is a no-op that costs no re-encode. `--itag` names an exact
   encoding, so it overrides `--channels`; the run prints a note when the
   delivered layout is not the one asked for.
+- An output extension names a container. Without `--format`, a format-named
+  extension (`.flac`, `.mp3`, `.opus`, `.wav`, `.aiff`, `.wv`, `.ape`) selects
+  that format; a container that holds several codecs (`.ogg`/`.oga`,
+  `.mka`/`.mkv`, `.webm`, `.mp4`/`.m4a`/`.m4b`, `.aac`) keeps the source codec
+  when it can carry it (a copy, or under `normalize --peak-mode cap` the Opus
+  header gain) and otherwise runs the container's usual encoder (`.ogg` Vorbis,
+  `.mka`/`.webm` Opus, `.mp4` AAC), reported as `implicit-lossy`. `--format ogg`
+  still means Vorbis.
 - `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
   Names are case-insensitive and trimmed, and a few spellings are aliases:
   `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff, `wv` for
@@ -150,14 +170,25 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   MP4/MOV. WMA, Musepack, G.711, and ADPCM are decode-only, so
   `--format copy` on one is refused; an MP3 carried in a WAV or MP4 copies
   out to a bare `.mp3`. Chapters (ASF markers, SV8 chapter packets) carry
-  like any other input's.
+  like any other input's. `--format copy` is refused on WAV and AIFF (PCM
+  belongs to its container), and a same-container PCM request is delivered as a
+  byte copy with `same-format-copied`; `--bit-depth`, `--downmix`, and
+  `--force` still re-encode. `--bitrate` is what the encoder is asked for; each
+  encoder has its own range and grid, and a rate it cannot use exactly is
+  snapped to the nearest it supports and reported as `bitrate-adjusted`: MP3
+  keeps to its CBR table (32 to 320 kbps at 32, 44.1, and 48 kHz; 8 to
+  160 kbps below), Opus takes 6 to 510 kbps (a lower request is refused), AAC
+  and HE-AAC 8 kbps per channel and up. Vorbis is quality-driven and ignores
+  `--bitrate` (noted as `flag-inert`).
 - `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
   and `{index}`. `{index}` numbers playlist items and expands empty for a single
   video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
   gives `Song.opus`. It takes only one, so a placeholder padded on both sides
   (`{index} - {title}.{ext}`) leaves the other separator behind as `- Song.opus`.
 - `--no-fallback` disables watch-page, WEB-context, and incomplete-download
-  fallbacks. Results report the client that actually delivered. A delivery that
+  fallbacks. Results report the client that actually delivered: the attested
+  player-context path reports its client as `WEB_CONTEXT`, while the session
+  and static adoption paths report `WEB`. A delivery that
   came from the watch-page scrape rather than the player endpoint is labeled
   `via watch page` beside the client (`viaWatchPage: true` in `--json`), since
   the client name alone reads as a player delivery.
@@ -171,17 +202,21 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   up to 4 times to land within 0.3 LU of the target, and reports
   `loudness-target-missed` when the limiter saturates before reaching it. Ordinary
   material costs one extra encode pass. `--album` applies one gain in a single
-  pass and defaults to `limit`; correcting per track would undo the spacing album
+  pass and defaults to `limit`, and takes files, not a directory; correcting per track would undo the spacing album
   mode exists to keep. Its `cap` clamps the one gain by the album's least
   true-peak headroom rather than per track, so the loudest track sets the
   headroom for all of them and the miss can be large. The reporting threshold
   follows the mode's own promise: `limit` iterates onto the target, so it reports
   any miss past the 0.3 LU it converges to, while the single-pass policies
   (`cap`, and `--album` in either mode) report a miss over 1 LU, below which the
-  clamp they can name is inside the noise of the encode.
+  clamp they can name is inside the noise of the encode. `normalize` re-encodes
+  whatever codec the output keeps or names, so a lossy source kept by its
+  extension (an MP3 to `.mp3`, an AAC to `.mka`) pays a second lossy generation;
+  the Opus header-gain path is the one normalize that does not.
 - On an Opus source that stays Opus, `--peak-mode cap` writes the gain into the
   Opus header (the `OpusHead` output gain, which every compliant player applies)
-  and copies the packets untouched, in whichever container the output names, so
+  and copies the packets untouched, in whichever container the output names
+  (`.opus`, `.ogg`, `.mka`, `.webm`), so
   the run costs no generation of loss; `--json` reports `loudness.headerGain`
   beside `loudness.gainDb`, and the result is a remux (`transcoded: false`),
   which like every other local copy omits `outputFormat`: the delivered codec
@@ -208,7 +243,9 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   content was removed. Both flags are best-effort: a failure warns and still
   delivers valid audio. WebM cannot hold a
   picture, so a cover-art request remuxes Opus-in-WebM to Ogg-Opus (lossless) when
-  the output extension allows it. The image comes from the largest rung YouTube
+  the output extension allows it, reported as the `cover-art-remuxed` note;
+  `--json` then names the Ogg container under `outputFormat`, since that is the
+  file on disk. The image comes from the largest rung YouTube
   lists, and WaxTap also probes the deterministic 1280x720 endpoints when that
   ladder falls short of them.
 - `--cover-art square` crops the embedded picture to the release art. A music
@@ -224,16 +261,24 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   reported as the `tag-carry-incomplete` warning, never dropped silently; the
   summary prints a `Metadata:` receipt (a column per track under `--album`)
   and `--json` itemizes the carry as `tagCarry`. Chapter marks follow a cut the
-  same way the embed flags do. Synced lyric
-  lines follow a cut too, and a line whose timestamp lands in removed audio is
-  dropped - including a line at 0:00 when the cut starts at zero - and reported
-  through the same warning. Tags describing
+  same way the embed flags do. Synced lyric lines follow a cut too, whether
+  they are stored as a synced set or as LRC text in the plain lyrics field: a
+  line whose timestamp lands in removed audio is dropped - including a line at
+  0:00 when the cut starts at zero - and reported through the same warning.
+  Prose in that field is carried verbatim, since it has no timestamps to move. Tags describing
   the source audio itself (ReplayGain, encoder stamps) carry only on a pure
   `--format copy` remux; a re-encode or cut invalidates them, so they are left
   off. WavPack and APE outputs are tagged the same way as every other format:
   their APEv2 block holds text tags and cover art (a Cover Art item), while
   chapters and synced lyrics have no APEv2 form and are reported as carry
   losses.
+- SponsorBlock cuts on a download take the same packet-level path, so the same
+  snap and `cut-snapped` warning apply.
+- The `sponsorblock` preview fetches the video's length and marks segments the
+  database holds past its end, leaving them out of the removal total. `--json`
+  carries `durationSeconds` and a per-segment `pastEnd`; a length it could not
+  fetch omits `durationSeconds`, counts every segment at its word, and is
+  reported as the `length-unchecked` note.
 - SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
   exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
   outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal
@@ -255,9 +300,16 @@ uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   Two exceptions: `normalize --album` writes its tracks with a replacing rename,
   and on a filesystem without hard links (FAT, exFAT, some network shares) the
   publish degrades to a check-then-rename that a concurrent writer can still
-  beat.
+  beat. `split` refuses `--collision skip`: a partly written set is worse than
+  a refusal.
 - `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
-  cache; `--no-cache` disables it.
+  cache; `--no-cache` disables it. `cache clean` removes only what WaxTap wrote
+  (the entry directories it marks with a `CACHEDIR.TAG` naming WaxTap as the
+  writer, which is read rather than taken on the file's name) and then the
+  cache directory itself when that empties it, so a mistyped `--cache-dir`
+  cannot cost you files: a path that is not a directory is a usage error, and
+  one holding nothing of WaxTap's is left alone. `cache dir --json` reports
+  `exists` for the path and `populated` for a WaxTap cache inside it.
 
 ### Exit codes
 
@@ -275,9 +327,10 @@ as `error.code`. Run `waxtap exit-codes` for the built-in table.
 | 6 | retired (formerly ffmpeg/ffprobe not found) |
 | 7 | incomplete stream or expired stream URL |
 | 8 | PO token required, missing, rejected, or not minted |
-| 9 | network failure, including a proxy that is unreachable or rejects CONNECT, an unreachable sidecar, or an upstream HTTP error response |
+| 9 | network failure, including a proxy that is unreachable, never answers, or rejects CONNECT, an unreachable sidecar, or an upstream HTTP error response |
 | 10 | local I/O failure |
-| 130 | canceled with SIGINT |
+| 130 | canceled by SIGINT or SIGTERM |
+| 141 | the stdout reader closed the pipe (`download -o -`); the shell reports the SIGPIPE, WaxTap prints nothing |
 
 Malformed targets exit 2; a well-formed but nonexistent or private video can
 only be classified after a network request and exits 3.
@@ -298,7 +351,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `rate-limited-retried` | a request was retried after a 429 |
 | `sponsorblock-empty` | SponsorBlock matched no segments |
 | `ranges-empty` | every SponsorBlock segment fell outside the media |
-| `throttled` | a rate limiter or cooldown delayed the run |
+| `throttled` | a host rate-limited the run; further requests to it are held back for the stated wait |
 | `web-context-fallback` | the WEB player context failed; the configured chain took over |
 | `incomplete-fallback` | a client returned an incomplete stream; another client was tried |
 | `web-context-retry` | the WEB player context was capped; it was retried once with a fresh one |
@@ -308,12 +361,15 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `tag-carry-incomplete` | some of the input's embedded metadata did not reach the output |
 | `implicit-downmix` | the encoder folded channels the request never asked to lose |
 | `output-clipping` | the delivered file's level is past full scale |
-| `implicit-lossy` | a lossless source was re-encoded to a lossy codec the request never named |
+| `implicit-lossy` | the output container could not carry the source codec, so a lossy encoder the request never named ran (a `cut`, or an extension-named output with no `--format`) |
 | `input-damage` | the decoder worked around problems in the input; the readable audio was delivered |
 | `loudness-unmeasurable` | an integrated loudness came back non-finite; the detail names the side and the cause |
 | `source-policy-unmatched` | `--source-policy prefer:<codec>` named a family this video does not offer |
 | `empty-input` | the input's audio track holds no frames |
 | `input-note` | the engine's own remarks on an undamaged input |
+| `cut-snapped` | a packet-level copy cut moved interior joins to the packet grid; the detail counts them and names the largest move |
+| `bitrate-adjusted` | the encoder used the nearest bit rate it supports; the detail names the requested and the delivered rate |
+| `watch-page-no-token` | a WEB run fell back to the watch page, so the PO token it minted was never exercised |
 
 | Note | Meaning |
 |---|---|
@@ -323,21 +379,22 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `channels-unavailable` | the requested layout was not available; the delivered one is named |
 | `concurrency-clamped` | `--concurrency` exceeded the maximum and was clamped |
 | `container-ext-mismatch` | the output extension does not match the source container, which was copied unchanged |
+| `cover-art-remuxed` | a source whose container cannot hold a picture was remuxed into its codec's own so the cover art could be embedded; packets unchanged |
 | `cue-file-mismatch` | the CUE sheet names another file than the rip being split |
 | `doctor-caveat` | a `doctor` check passed with a caveat; the detail says what it did not prove |
 | `enumeration-error` | a playlist page failed to enumerate; the run continued |
 | `flag-inert` | a flag had no effect on this run |
 | `forced-client-risky` | a forced `--client` is known to deliver unreliably |
 | `kept-output` | a finished file was kept after a failure elsewhere in the run |
+| `length-unchecked` | the SponsorBlock preview could not fetch the video's length, so segments were not checked against it |
 | `playlist-ignored` | a playlist URL was passed to a video command; the video was used |
 | `probe-skipped` | `--probe` read nothing: the selected stream is SABR-only |
 | `same-format-copied` | the input is already the target format and was copied; `--force` re-encodes |
 | `selection-unmatched` | no audio format matched the requested selection |
 | `sidecar-write-failed` | the `--write-info-json` sidecar could not be written |
 | `unaltered-copy` | the output is a byte-for-byte copy of the source |
-| `watch-page-formats` | the format list came from the watch-page fallback |
-| `watch-page-metadata` | WEB metadata came from the watch-page fallback, with no PO token |
-| `web-sources` | the run used WEB-family sources, which need a PO token |
+| `watch-page-formats` | the format list came from the watch-page fallback, which needs no PO token |
+| `web-sources` | a single WEB identity source is configured; it fires before info/formats and after a download a second source could have helped, including a WEB delivery that fell back to the watch page |
 
 ## Library
 
@@ -414,7 +471,9 @@ playlists, SponsorBlock, album measurement, metadata, and WEB SABR.
 CLI precedence, highest to lowest: explicit flag, `WAXTAP_*` environment
 variable, JSON config file, built-in default. The default file is `config.json`
 under `os.UserConfigDir()/waxtap`; override with `--config` or `WAXTAP_CONFIG`.
-Unknown JSON keys and malformed environment values are errors.
+A file named by `--config` or `WAXTAP_CONFIG` must exist; only the default
+location is optional. Unknown JSON keys and malformed environment values are
+errors.
 
 `--json`, `--quiet`, and `--verbose` are global. Other flags appear only on the
 commands that use them. Timeout values are seconds; keys with no flag are
@@ -453,6 +512,12 @@ config/environment only.
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
 | `chunkTimeoutSeconds` | `WAXTAP_CHUNK_TIMEOUT` | - |
 
+`tempDir` names where downloaded sources and processed downloads are staged
+before delivery; a local file is processed beside its own output, so the
+setting does not apply to it. A path that exists must be a writable directory,
+checked at startup; a missing one is created on first use, so a command that
+stages nothing creates nothing.
+
 Timeouts default to 45 s extraction, 30 s resolve, 60 s web context, 60 s per
 sidecar request, 10 s SponsorBlock, 120 s per chunk. The web-context timeout
 bounds one attested handoff as a whole, a `/player-context` call or a `/session`
@@ -461,6 +526,10 @@ sidecar timeout bounds each request inside it. Setting
 `sidecarTimeoutSeconds` to 0 selects its default rather than "no deadline",
 unlike the other timeout keys: the handoff budget already bounds the call, and
 the retry needs a per-request bound to be reachable.
+
+A proxy dial is bounded at 10 s and not retried, so a proxy that never answers
+fails inside any budget with the proxy named rather than consuming the whole
+extraction budget and reporting a bare timeout.
 
 `procs` bounds the concurrent audio-processing operations. Zero, the default,
 follows `GOMAXPROCS`; a negative value disables the limit entirely. Both are
@@ -508,12 +577,16 @@ contracts and SABR diagnostics.
 ## Maintenance
 
 `waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
-check; `waxtap doctor --full` verifies complete delivery. With sidecar URLs
-configured, the daemon behind them is asked for its health first (WaxSeal's
-`/ping`, one round trip, reported with its reason: `ok`, `no-session`, `busy`,
-or `probe-failed`), then each endpoint is probed once (session, PO token,
-player-context), so a cold daemon's first-call cost and any refusal code are
-visible; the token and context probe latencies include WaxSeal's separation
+check; `waxtap doctor --full` verifies complete delivery. A `--session-url`
+needs a uniform client chain: a single `--client` of any name, or a
+single-client `--profile-override`, since an adopted session cannot span the
+several clients the default chain tries. With
+sidecar URLs configured, the daemon behind them is asked for its health first
+(WaxSeal's `/ping`, one round trip, reported with its reason: `ok`,
+`no-session`, `busy`, or `probe-failed`, and whether the daemon is keyed), then
+each endpoint is probed once (session, PO token, player-context), so a cold
+daemon's first-call cost and any refusal code are visible; the `--json` ping
+entry carries a one-word `status`: healthy, answered, not-offered, or failed; the token and context probe latencies include WaxSeal's separation
 waits, which is the cost a first download pays, not a relaunch. A probe that
 relays the video's own playability verdict still counts as a healthy sidecar. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher

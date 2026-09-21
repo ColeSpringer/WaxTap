@@ -129,13 +129,25 @@ func validateProcessSpec(s ProcessSpec) error {
 	if s.Cut != nil && s.Cut.Crossfade < 0 {
 		return fmt.Errorf("%w: crossfade must be non-negative, got %v", waxerr.ErrIncompatibleSpec, s.Cut.Crossfade)
 	}
+	if err := validateWriter(s.Output); err != nil {
+		return err
+	}
+	if err := validateEnums(s); err != nil {
+		return err
+	}
+	if s.Channels != LayoutAny && !s.Downmix {
+		return fmt.Errorf("%w: Channels names a downmix target, so it needs Downmix; leave it LayoutAny for no fold", waxerr.ErrIncompatibleSpec)
+	}
+	if err := validateRanges(s.Cut); err != nil {
+		return err
+	}
 	if err := validateOutputContainer(s); err != nil {
 		return err
 	}
 	if err := validateCutEncodeNeed(s); err != nil {
 		return err
 	}
-	if err := validateLoudness(s.Loudness); err != nil {
+	if err := validateLoudness(s); err != nil {
 		return err
 	}
 	if err := validateBitrate(s.Transcode); err != nil {
@@ -145,6 +157,76 @@ func validateProcessSpec(s ProcessSpec) error {
 		return err
 	}
 	return validateCoverArt(s)
+}
+
+// validateWriter rejects a ToWriter sink with no writer behind it: the copy
+// would panic at the moment the audio was ready, after every byte of work.
+func validateWriter(o Output) error {
+	if o.kind == outputWriter && o.writer == nil {
+		return fmt.Errorf("%w: ToWriter was given a nil writer", waxerr.ErrIncompatibleSpec)
+	}
+	return nil
+}
+
+// validateEnums refuses a value none of the constants spell, the way
+// validateCoverArt does: allow-lists, not range checks, so a constant added
+// later has to be listed here rather than slipping in under a bound.
+func validateEnums(s ProcessSpec) error {
+	if s.Transcode != nil {
+		switch s.Transcode.Format {
+		case FormatCopy, FormatFLAC, FormatALAC, FormatWAV, FormatMP3, FormatAAC, FormatOpus, FormatVorbis, FormatAIFF, FormatHEAAC, FormatWavPack, FormatAPE:
+		default:
+			return fmt.Errorf("%w: transcode format %d is not supported", waxerr.ErrIncompatibleSpec, s.Transcode.Format)
+		}
+	}
+	if s.Cut != nil {
+		switch s.Cut.Mode {
+		case CutSmart, CutCopy, CutAccurate, CutCopyExact:
+		default:
+			return fmt.Errorf("%w: cut mode %d is not supported", waxerr.ErrIncompatibleSpec, s.Cut.Mode)
+		}
+		switch s.Cut.OnError {
+		case ProceedUncut, FailDownload:
+		default:
+			return fmt.Errorf("%w: SponsorBlock error policy %d is not supported", waxerr.ErrIncompatibleSpec, s.Cut.OnError)
+		}
+	}
+	if s.Loudness != nil {
+		switch s.Loudness.Mode {
+		case LoudnessMeasureOnly, LoudnessApply:
+		default:
+			return fmt.Errorf("%w: loudness mode %d is not supported", waxerr.ErrIncompatibleSpec, s.Loudness.Mode)
+		}
+		switch s.Loudness.PeakMode {
+		case PeakCap, PeakLimit:
+		default:
+			return fmt.Errorf("%w: peak mode %d is not supported", waxerr.ErrIncompatibleSpec, s.Loudness.PeakMode)
+		}
+	}
+	switch s.Channels {
+	case LayoutAny, LayoutMono, LayoutStereo, LayoutSurround:
+	default:
+		return fmt.Errorf("%w: channel layout %d is not supported", waxerr.ErrIncompatibleSpec, s.Channels)
+	}
+	return nil
+}
+
+// validateRanges rejects a cut range the timeline cannot mean: a negative
+// start, and an end at or before its start. Both leave nothing to keep, and
+// the pipeline's clamp would silently drop them.
+func validateRanges(c *CutSpec) error {
+	if c == nil {
+		return nil
+	}
+	for _, r := range c.Ranges {
+		if r.Start < 0 {
+			return fmt.Errorf("%w: cut range start %v must be >= 0", waxerr.ErrIncompatibleSpec, r.Start)
+		}
+		if r.End <= r.Start {
+			return fmt.Errorf("%w: cut range %v-%v: end must be after start", waxerr.ErrIncompatibleSpec, r.Start, r.End)
+		}
+	}
+	return nil
 }
 
 // validateCoverArt rejects an unknown CoverArt value, and a cover-art mode set
@@ -195,9 +277,16 @@ func validateCutEncodeNeed(s ProcessSpec) error {
 	// dropping the copy request. FormatCopy is media.CodecCopy, so the coherent
 	// cut-plus-remux case is not caught. This sits ahead of the s.Downmix term, so
 	// --cut-mode copy --downmix --format flac fails here too, which is correct.
-	if cut && s.Cut.Mode == CutCopy && target != media.CodecCopy {
-		return fmt.Errorf("%w: --cut-mode copy cannot be combined with --format %s, which re-encodes; drop one",
-			waxerr.ErrIncompatibleSpec, target)
+	if cut && (s.Cut.Mode == CutCopy || s.Cut.Mode == CutCopyExact) && target != media.CodecCopy {
+		return fmt.Errorf("%w: --cut-mode %s cannot be combined with --format %s, which re-encodes; drop one",
+			waxerr.ErrIncompatibleSpec, cutModeName(s.Cut.Mode), target)
+	}
+	// Only Matroska states a trim per packet, which is what an exact interior
+	// splice is written as, so the output has to be one.
+	if cut && s.Cut.Mode == CutCopyExact {
+		if s.Output.kind != outputFile || !exactSpliceExt(s.Output.path) {
+			return fmt.Errorf("%w: copy-exact needs a .mka, .mkv, or .webm output, the containers that state a trim per packet", waxerr.ErrIncompatibleSpec)
+		}
 	}
 	if !cut || s.Downmix || target != media.CodecCopy {
 		return nil
@@ -213,6 +302,25 @@ func validateCutEncodeNeed(s ProcessSpec) error {
 	return nil
 }
 
+// cutModeName is the flag spelling of a copy mode, for a refusal that names
+// what the caller actually passed.
+func cutModeName(m CutMode) string {
+	if m == CutCopyExact {
+		return "copy-exact"
+	}
+	return "copy"
+}
+
+// exactSpliceExt reports whether path ends in a container that can state a
+// trim per packet, which is what an exact interior splice is written as.
+func exactSpliceExt(path string) bool {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	case "mka", "mkv", "webm":
+		return true
+	}
+	return false
+}
+
 // copyCutNeedsExtension reports whether a stream-copy cut to path lacks a usable
 // container extension. It mirrors the pipeline's runtime guard (ext "" or "copy").
 func copyCutNeedsExtension(path string) bool {
@@ -222,7 +330,26 @@ func copyCutNeedsExtension(path string) bool {
 
 // validateLoudness checks targets used for loudness application. Measure-only
 // specs do not use a target.
-func validateLoudness(l *LoudnessSpec) error {
+func validateLoudness(s ProcessSpec) error {
+	if err := validateLoudnessTarget(s.Loudness); err != nil {
+		return err
+	}
+	l := s.Loudness
+	if l == nil || l.Mode != LoudnessApply {
+		return nil
+	}
+	// Applying a gain rewrites samples, which needs an encoder. A Downmix is
+	// one: the pipeline promotes a copy spec to the source's own family to
+	// fold it, and the gain rides that encode.
+	if !s.Downmix && (s.Transcode == nil || s.Transcode.Format == FormatCopy) {
+		return fmt.Errorf("%w: loudness apply requires an encode: a Transcode target other than copy, or a Downmix", waxerr.ErrIncompatibleSpec)
+	}
+	return nil
+}
+
+// validateLoudnessTarget checks the target alone, which is all an album has to
+// offer: ProcessAlbum takes a bare target and chooses the encode itself.
+func validateLoudnessTarget(l *LoudnessSpec) error {
 	if l == nil || l.Mode != LoudnessApply {
 		return nil
 	}
@@ -289,10 +416,26 @@ func cutMode(m CutMode) media.Mode {
 	switch m {
 	case CutCopy:
 		return media.ModeCopy
+	case CutCopyExact:
+		return media.ModeCopyExact
 	case CutAccurate:
 		return media.ModeAccurate
 	default:
 		return media.ModeSmart
+	}
+}
+
+// publicCutMode is cutMode's inverse, for reporting the mode a cut really ran
+// in. ModeSmart never reaches a result: the pipeline resolves it to the mode
+// that ran, so a smart cut reports the copy or the decode it chose.
+func publicCutMode(m media.Mode) CutMode {
+	switch m {
+	case media.ModeCopy:
+		return CutCopy
+	case media.ModeCopyExact:
+		return CutCopyExact
+	default:
+		return CutAccurate
 	}
 }
 
@@ -354,6 +497,46 @@ func warnEmptyCut(em *emitter, cs *CutSpec, pres pipeline.Result, sbHadSegments 
 	if cs != nil && cs.SponsorBlock != nil && sbHadSegments && len(cs.Ranges) == 0 && !pres.Cut && pres.SourceDuration > 0 {
 		em.warn(WarnRangesEmpty, "SponsorBlock segments fell outside the media; delivered uncut")
 	}
+}
+
+// warnCutSnapped reports the interior joins a packet copy moved inward to the
+// packet grid. It fires on nearly every multi-span packet cut, SponsorBlock on
+// Opus included: that is the point, since the alternative policy delivered
+// audio from inside a removed span. Result.CutSnaps and Result.CutSnapMax
+// carry the same figures for a consumer that wants numbers.
+func warnCutSnapped(em *emitter, pres pipeline.Result) {
+	if pres.CutSnaps == 0 {
+		return
+	}
+	// The remedy has to fit the mode that ran. Under copy-exact the tails are
+	// already exact and what moved is the heads, which no container can state
+	// a trim for, so only a decode fixes them; telling that run to use
+	// copy-exact would name the mode it is already in.
+	remedy := "--cut-mode accurate re-encodes with exact joins, and copy-exact keeps the copy exact on a .mka/.webm output"
+	if pres.CutMode == media.ModeCopyExact {
+		remedy = "these are the heads, which no container can state a trim for, so only --cut-mode accurate places them exactly"
+	}
+	em.warn(WarnCutSnapped, fmt.Sprintf("the packet copy moved %s inward to the packet grid (largest move %s), so under one packet of wanted audio is missing at each; %s",
+		plural(pres.CutSnaps, "join"), pres.CutSnapMax.Round(time.Millisecond), remedy))
+}
+
+// plural renders "1 join" / "3 joins"; the CLI's countOf is not importable here.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// warnBitrateAdjusted reports the rate the encoder really ran at when it is
+// not the one the request named. The figure is WaxFlow's own plan of the
+// encode, so the two cannot disagree.
+func warnBitrateAdjusted(em *emitter, spec ProcessSpec, pres pipeline.Result) {
+	if spec.Transcode == nil || spec.Transcode.Bitrate <= 0 || pres.EncodeBitRate <= 0 || pres.EncodeBitRate == spec.Transcode.Bitrate {
+		return
+	}
+	em.warn(WarnBitrateAdjusted, fmt.Sprintf("the %s encoder cannot run at %d b/s; it encoded at %d b/s, the nearest rate it supports",
+		pres.OutputCodec, spec.Transcode.Bitrate, pres.EncodeBitRate))
 }
 
 // loudnessMissWarnDB is the miss, in LU, that turns a loudness shortfall from a
@@ -570,7 +753,7 @@ func warnLoudnessUnmeasurable(em *emitter, pres pipeline.Result) {
 // A preference that was present but outranked stays silent. Ranking a better
 // source above a preferred codec is what the soft bias documents itself as
 // doing, so warning there would fire on correct behavior.
-func warnUnboundSourcePolicy(em *emitter, policy SourcePolicy, formats []Format, chosen Format) {
+func warnUnboundSourcePolicy(em *emitter, policy SourcePolicy, formats []Format, chosen Format, verb string) {
 	want := policy.Preferred()
 	if want == "" {
 		return
@@ -587,8 +770,8 @@ func warnUnboundSourcePolicy(em *emitter, policy SourcePolicy, formats []Format,
 		have = "none reported"
 	}
 	em.warn(WarnSourcePolicyUnmatched, fmt.Sprintf(
-		"--source-policy prefer:%s matched no available source (available codecs: %s); delivering %s",
-		want, have, codecOrUnknown(chosen.Codec)))
+		"--source-policy prefer:%s matched no available source (available codecs: %s); %s %s",
+		want, have, verb, codecOrUnknown(chosen.Codec)))
 }
 
 // codecOrUnknown names a delivered codec for a warning, standing in when the
@@ -720,28 +903,58 @@ func losslessSource(codec string) bool {
 	return strings.HasPrefix(codec, "pcm")
 }
 
-// warnImplicitLossy reports a lossy re-encode of a lossless source that the
-// request never named: the spec asked for a copy (or nothing at all), and
-// automatic processing promoted it to the output container's default encoder
-// because the source codec cannot enter that container. A cut of in.wv written
-// to out.mka re-encodes to Opus this way, correctly, and used to say so only in
-// the result's codec field. A request that names any encode took its cost
-// knowingly, lossy targets included, and does not warn.
+// warnImplicitLossy reports a lossy re-encode the request never named: the
+// spec asked for a copy (or nothing at all), and automatic processing promoted
+// it to the output container's default encoder because the source codec cannot
+// enter that container. A cut of in.wv written to out.mka re-encodes to Opus
+// this way, correctly, and used to say so only in the result's codec field.
+//
+// A lossy source counts too. It loses a generation rather than its first, and
+// the request said no more about it than it did about a lossless one; an MP3
+// cut into a .mka is a second generation nobody asked for. A request that
+// names an encode took its cost knowingly and does not warn.
 func warnImplicitLossy(em *emitter, spec ProcessSpec, pres pipeline.Result) {
-	if transcodeCodec(specFormat(spec.Transcode)) != media.CodecCopy {
+	if namedAnEncode(spec.Transcode) {
 		return
 	}
-	if !pres.Transcoded || pres.OutputCodec.IsLossless() || !losslessSource(pres.SourceCodec) {
+	if !pres.Transcoded || pres.OutputCodec.IsLossless() {
 		return
 	}
-	detail := fmt.Sprintf("the request named no encode, but %s audio cannot enter the output container, so it was re-encoded to %s (lossy)",
-		pres.SourceCodec, pres.OutputCodec)
+	// The claim below is that the container could not carry the source, so it
+	// is checked rather than inferred from how the request was built. A caller
+	// that could not learn the source codec up front (a URL, whose codec only
+	// selection settles) leaves the same flags set as one whose container
+	// really does refuse it, and this warning would then tell a user that Opus
+	// cannot enter a Matroska file.
+	if ext := strings.TrimPrefix(filepath.Ext(pres.OutputPath), "."); ext != "" &&
+		media.ContainerAccepts(ext, pres.SourceCodec) {
+		return
+	}
+	var detail string
+	if losslessSource(pres.SourceCodec) {
+		detail = fmt.Sprintf("the request named no encode, but %s audio cannot enter the output container, so it was re-encoded to %s (lossy)",
+			pres.SourceCodec, pres.OutputCodec)
+	} else {
+		detail = fmt.Sprintf("the request named no encode, but %s audio cannot enter the output container, so it was re-encoded to %s: a second lossy generation",
+			pres.SourceCodec, pres.OutputCodec)
+	}
 	if exts := media.ContainersFor(pres.SourceCodec); len(exts) > 0 {
 		detail += fmt.Sprintf("; keep the codec with a matching extension (%s) or pass a lossless --format", strings.Join(exts, "/"))
 	} else {
 		detail += "; pass a lossless --format to avoid the quality loss"
 	}
 	em.warn(WarnImplicitLossy, detail)
+}
+
+// namedAnEncode reports whether the caller asked for the encoder that ran. A
+// nil spec asks for nothing, FormatCopy asks for a copy, and a format taken
+// from the output's container (TranscodeSpec.FromContainer) is the container's
+// choice rather than the caller's; anything else is a target they named.
+func namedAnEncode(t *TranscodeSpec) bool {
+	if t == nil || t.FromContainer {
+		return false
+	}
+	return transcodeCodec(t.Format) != media.CodecCopy
 }
 
 // clipRemedy picks the suffix for an output-clipping detail: the knob the run
@@ -912,11 +1125,21 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 		OutputFormat:     srcFmt,
 		Transcoded:       p.Transcoded,
 		CutApplied:       p.Cut,
+		CutSnaps:         p.CutSnaps,
+		CutSnapMax:       p.CutSnapMax,
 		LoudnessMeasured: p.LoudnessMeasured,
 		LoudnessApplied:  p.LoudnessApplied,
 	}
 	if p.Transcoded {
 		res.OutputFormat = outputFormat(p.OutputCodec, srcFmt)
+		// The container the file is really in, when the caller named one.
+		// outputFormat derives the extension from the codec's usual container
+		// (Opus gives ".opus"), which is right for a path that named none and
+		// wrong for one that did: an encode into a .mka would otherwise be
+		// reported as an .opus that is nowhere on disk.
+		if ext := strings.TrimPrefix(filepath.Ext(p.OutputPath), "."); ext != "" {
+			res.OutputFormat.Extension = strings.ToLower(ext)
+		}
 	} else if ext := strings.TrimPrefix(filepath.Ext(p.OutputPath), "."); p.OutputPath != "" && ext != "" {
 		// A copy keeps the codec and takes the container the output was
 		// named for, which is the one it was written into: the pipeline
@@ -929,6 +1152,7 @@ func newProcessResult(kind SourceKind, p pipeline.Result, srcFmt Format, target 
 		res.OutputFormat.Extension = strings.ToLower(ext)
 	}
 	if p.Cut {
+		res.CutMode = publicCutMode(p.CutMode)
 		// A cut shrinks the output. For a copy cut OutputFormat is still srcFmt, whose
 		// Duration and ContentLength describe the uncut source; for a fused cut+encode
 		// it is the codec/extension target with zero numerics. Either way, set the
@@ -1166,6 +1390,11 @@ func copyFile(src, dst string, out Output) (string, error) {
 // moveFile renames src to dst, falling back to a copy when they live on different
 // filesystems (a temp dir versus the destination).
 func moveFile(src, dst string) error {
+	// Through a symlinked destination, as tempfile's own staged publish goes:
+	// this is the same publish reached by a different route (a staging file on
+	// another filesystem), and without it whether the link survives would
+	// depend on which filesystem the job directory happened to be on.
+	dst = tempfile.ResolveLink(dst)
 	// A replacing publish keeps the destination's permission bits: overwriting a
 	// file replaces its content, which is what was asked for, not the mode its
 	// owner chose. tempfile does the same on the paths that go through it.

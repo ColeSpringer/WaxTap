@@ -333,8 +333,12 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 		return "wavpack"
 	case waxtap.FormatAPE:
 		return "ape"
+	case waxtap.FormatWAV:
+		return "wav"
+	case waxtap.FormatAIFF:
+		return "aiff"
 	default:
-		return "" // WAV, AIFF, copy, and unknown formats cannot be confirmed as matches.
+		return "" // copy and unknown formats cannot be confirmed as matches.
 	}
 }
 
@@ -347,12 +351,30 @@ func targetCodecFamily(tf waxtap.TranscodeFormat) string {
 // "already matches" here means the file is copied through rather than lossily
 // re-encoded to AAC-LC, the same choice the engine makes. The reverse does not
 // hold: an he-aac target on an AAC-LC source is a real (down)encode request.
-func matchesTargetFamily(codec string, tf waxtap.TranscodeFormat) bool {
+func matchesTargetFamily(p waxtap.AudioProbe, tf waxtap.TranscodeFormat, outExt string) bool {
+	// PCM belongs to its container, not to a codec family: the same samples
+	// are RIFF in a WAV and big-endian in an AIFF, so the container decides
+	// whether a request is already satisfied.
+	//
+	// Three things have to agree, because the answer here is a verbatim byte
+	// copy rather than a remux: the codec, the container the source is in,
+	// and the container the output is named for. Without the last, a request
+	// to put a WAV into a .mka would copy RIFF bytes under a Matroska name.
+	if tf == waxtap.FormatWAV || tf == waxtap.FormatAIFF {
+		if !strings.HasPrefix(strings.ToLower(p.Codec), "pcm") {
+			return false
+		}
+		out := strings.ToLower(strings.TrimPrefix(outExt, "."))
+		if tf == waxtap.FormatAIFF {
+			return media.IsAIFFExt(strings.ToLower(p.Container)) && media.IsAIFFExt(out)
+		}
+		return strings.EqualFold(p.Container, "wav") && out == "wav"
+	}
 	fam := targetCodecFamily(tf)
 	if fam == "" {
 		return false
 	}
-	got := format.CodecFamily(codec)
+	got := format.CodecFamily(p.Codec)
 	if tf == waxtap.FormatAAC && got == "he-aac" {
 		return true
 	}
@@ -436,8 +458,10 @@ func extPossiblyCodec(ext, family string) bool {
 		return family == "wavpack"
 	case ".ape":
 		return family == "ape"
-	case ".wav", ".aiff", ".aif", ".aifc", ".afc":
-		return false // PCM is not one of the comparable target families.
+	case ".wav":
+		return family == "wav"
+	case ".aiff", ".aif", ".aifc", ".afc":
+		return family == "aiff"
 	case ".mp4", ".mkv":
 		// The video spellings of MP4 and Matroska. A match makes a file a
 		// copy-through candidate, and a copy-through delivers the whole container.
@@ -530,7 +554,7 @@ func planBatchOutputs(ctx context.Context, inputs []string, root, dir string, re
 	jobs := make([]batchJob, 0, len(inputs))
 	for i, in := range inputs {
 		noop := false
-		if p, ok := probes[in]; ok && matchesTargetFamily(p.Codec, tf) && !specChangesAudio(spec, p.Channels) {
+		if p, ok := probes[in]; ok && matchesTargetFamily(p, tf, transcodeExt(tf)) && !specChangesAudio(spec, p.Channels) {
 			noop = true
 		}
 

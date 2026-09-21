@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -204,15 +205,21 @@ func TestReadConfigFileMissingExplicitErrors(t *testing.T) {
 	}
 }
 
-func TestReadConfigFileMissingEnvIsSoft(t *testing.T) {
+// A file the user named must exist: a typo in WAXTAP_CONFIG silently ran on
+// built-in defaults, and the run then looked like the config had no effect.
+// Only the default location stays optional.
+func TestReadConfigFileMissingEnvErrors(t *testing.T) {
 	t.Setenv("WAXTAP_CONFIG", filepath.Join(t.TempDir(), "nonexistent.json"))
 	cmd := newConfigTestCmd()
-	fc, err := readConfigFile(cmd)
-	if err != nil {
-		t.Fatalf("missing WAXTAP_CONFIG should be soft, got err = %v", err)
+	_, err := readConfigFile(cmd)
+	if err == nil {
+		t.Fatal("a missing WAXTAP_CONFIG must error; it names a file the user chose")
 	}
-	if fc.HL != nil {
-		t.Errorf("expected an empty fileConfig, got %+v", fc)
+	if !strings.Contains(err.Error(), "WAXTAP_CONFIG") {
+		t.Errorf("err = %v, want it to name where the path came from", err)
+	}
+	if _, ok := errors.AsType[*usageError](err); !ok {
+		t.Errorf("err = %v (%T), want a usage error", err, err)
 	}
 }
 
@@ -365,9 +372,16 @@ func TestHTTPClientBuiltForEnvProxy(t *testing.T) {
 	if c == nil {
 		t.Fatal("an env proxy should build a transport so the CONNECT hook is installed")
 	}
-	tr, ok := c.Transport.(*http.Transport)
+	// The proxy transport wraps the real one whenever a proxy is configured,
+	// environment proxies included: a proxy that never answers has to be named
+	// there as much as one given on the command line.
+	pt, ok := c.Transport.(*proxyTransport)
 	if !ok {
-		t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+		t.Fatalf("Transport = %T, want *proxyTransport", c.Transport)
+	}
+	tr, ok := pt.RoundTripper.(*http.Transport)
+	if !ok {
+		t.Fatalf("wrapped Transport = %T, want *http.Transport", pt.RoundTripper)
 	}
 	if tr.OnProxyConnectResponse == nil {
 		t.Error("OnProxyConnectResponse not installed")
@@ -777,5 +791,80 @@ func TestLoadConfigRecordsSidecarTimeoutSet(t *testing.T) {
 	}
 	if !cfg.sidecarTimeoutSet || cfg.sidecarTimeout != 5*time.Second {
 		t.Errorf("env: set = %v, timeout = %v; want 5s, recorded as set", cfg.sidecarTimeoutSet, cfg.sidecarTimeout)
+	}
+}
+
+// --temp-dir is refused at setup when the run could not stage into it: a job
+// that downloads for a minute and then cannot place its staging file has
+// wasted the download. A missing directory is created on first use, so a
+// command that stages nothing creates nothing.
+func TestCheckTempDir(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := checkTempDir(""); err != nil {
+		t.Errorf("unset --temp-dir = %v, want nil", err)
+	}
+	if err := checkTempDir(dir); err != nil {
+		t.Errorf("a writable directory = %v, want nil", err)
+	}
+	missing := filepath.Join(dir, "not-yet")
+	if err := checkTempDir(missing); err != nil {
+		t.Errorf("a missing directory = %v, want nil: it is created on first use", err)
+	}
+	if _, serr := os.Stat(missing); !errors.Is(serr, fs.ErrNotExist) {
+		t.Error("the check created a directory the run may never use")
+	}
+
+	file := filepath.Join(dir, "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := checkTempDir(file)
+	if _, ok := errors.AsType[*usageError](err); !ok {
+		t.Errorf("a regular file = %v (%T), want a usage error", err, err)
+	}
+}
+
+// An unwritable directory is refused too, which needs a real filesystem check
+// rather than a stat: a directory can exist and still take no files.
+func TestCheckTempDirUnwritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a 0000 directory")
+	}
+	dir := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, ok := errors.AsType[*usageError](checkTempDir(dir)); !ok {
+		t.Error("an unwritable --temp-dir must be a usage error")
+	}
+}
+
+// The proxy dial bound and the naming wrapper belong to runs that use a proxy.
+// tr.Proxy is never nil (it defaults to ProxyFromEnvironment, which simply
+// answers nil per request), so --insecure alone must not pick them up: it
+// dials googlevideo directly, where the shorter bound is wrong.
+func TestHTTPClientInsecureAloneKeepsTheDirectDialBound(t *testing.T) {
+	for _, v := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		t.Setenv(v, "")
+	}
+	a := &appConfig{insecure: true}
+	c, err := a.httpClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c == nil {
+		t.Fatal("--insecure should build a transport")
+	}
+	if _, wrapped := c.Transport.(*proxyTransport); wrapped {
+		t.Error("--insecure alone should not take the proxy-naming wrapper")
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+	}
+	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
+		t.Error("--insecure did not reach the TLS config")
 	}
 }

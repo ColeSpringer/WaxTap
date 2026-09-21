@@ -2,9 +2,12 @@ package diskcache
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,4 +213,191 @@ func TestConcurrentPutGet(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// The first write marks the cache directory, so a clean can tell WaxTap's
+// cache from a directory that merely shares its name.
+func TestPutWritesTheCacheTag(t *testing.T) {
+	base := t.TempDir()
+	s := New(Options{Dir: filepath.Join(base, "players"), SchemaVersion: 1})
+	tag := filepath.Join(base, "players", TagFile)
+	if _, err := os.Stat(tag); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a Store that has written nothing left %s: %v", TagFile, err)
+	}
+	s.Put("k", []byte("v"))
+	body, err := os.ReadFile(tag)
+	if err != nil {
+		t.Fatalf("read the tag: %v", err)
+	}
+	if !strings.HasPrefix(string(body), TagSignature) {
+		t.Errorf("tag = %q, want it to lead with the specification's signature", body)
+	}
+}
+
+// Clean removes WaxTap's own entries and nothing else.
+func TestClean(t *testing.T) {
+	t.Run("a tagged cache goes, and the base with it", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cache")
+		New(Options{Dir: filepath.Join(base, "players"), SchemaVersion: 1}).Put("k", []byte("v"))
+		removed, err := Clean(base)
+		if err != nil || !removed {
+			t.Fatalf("Clean = %v, %v, want true, nil", removed, err)
+		}
+		if _, serr := os.Stat(base); !errors.Is(serr, fs.ErrNotExist) {
+			t.Errorf("base survived: %v", serr)
+		}
+	})
+
+	t.Run("a pre-tag layout is still recognized", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cache")
+		if err := os.MkdirAll(filepath.Join(base, "players", "v1"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "players", "v1", "abc"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		removed, err := Clean(base)
+		if err != nil || !removed {
+			t.Fatalf("Clean = %v, %v, want true, nil", removed, err)
+		}
+	})
+
+	t.Run("a foreign players directory is left alone", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cache")
+		if err := os.MkdirAll(filepath.Join(base, "players"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		keep := filepath.Join(base, "players", "README")
+		if err := os.WriteFile(keep, []byte("mine"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removed, err := Clean(base)
+		if err != nil || removed {
+			t.Fatalf("Clean = %v, %v, want false, nil", removed, err)
+		}
+		if _, serr := os.Stat(keep); serr != nil {
+			t.Errorf("Clean removed a file it did not write: %v", serr)
+		}
+	})
+
+	t.Run("a base holding other things keeps it", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cache")
+		New(Options{Dir: filepath.Join(base, "players"), SchemaVersion: 1}).Put("k", []byte("v"))
+		other := filepath.Join(base, "notes.txt")
+		if err := os.WriteFile(other, []byte("mine"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Clean(base); err != nil {
+			t.Fatal(err)
+		}
+		if _, serr := os.Stat(other); serr != nil {
+			t.Errorf("Clean removed a file beside the cache: %v", serr)
+		}
+	})
+
+	t.Run("a regular file is an error", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "precious.txt")
+		if err := os.WriteFile(file, []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Clean(file); err == nil {
+			t.Error("Clean on a regular file = nil, want an error")
+		}
+		if _, serr := os.Stat(file); serr != nil {
+			t.Errorf("Clean removed a regular file: %v", serr)
+		}
+	})
+
+	t.Run("a missing base is nothing to do", func(t *testing.T) {
+		removed, err := Clean(filepath.Join(t.TempDir(), "absent"))
+		if err != nil || removed {
+			t.Fatalf("Clean = %v, %v, want false, nil", removed, err)
+		}
+	})
+}
+
+func TestDescribe(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cache")
+	if exists, dir, pop := Describe(base); exists || dir || pop {
+		t.Errorf("Describe(absent) = %v, %v, %v, want all false", exists, dir, pop)
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if exists, dir, pop := Describe(base); !exists || !dir || pop {
+		t.Errorf("Describe(empty dir) = %v, %v, %v, want true, true, false", exists, dir, pop)
+	}
+	New(Options{Dir: filepath.Join(base, "players"), SchemaVersion: 1}).Put("k", []byte("v"))
+	if exists, dir, pop := Describe(base); !exists || !dir || !pop {
+		t.Errorf("Describe(populated) = %v, %v, %v, want all true", exists, dir, pop)
+	}
+}
+
+// CACHEDIR.TAG is a shared convention, so the file's name says only that
+// something caches there. Clean reads the writer line under the signature, so
+// another tool's cache under a directory called players is left alone.
+func TestCleanReadsTheTagRatherThanItsName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"waxtap's own", tagBody, true},
+		{"another tool's", TagSignature + "# created by some other cache\n", false},
+		{"the signature alone", TagSignature, false},
+		{"an empty file", "", false},
+		{"not a tag at all", "hello\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := filepath.Join(t.TempDir(), "cache")
+			players := filepath.Join(base, "players")
+			if err := os.MkdirAll(players, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// A file that is not a schema directory, so only the tag can
+			// make this look like WaxTap's.
+			keep := filepath.Join(players, "someone-elses-entry")
+			if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(players, TagFile), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			removed, err := Clean(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if removed != tc.want {
+				t.Errorf("Clean = %v, want %v", removed, tc.want)
+			}
+			_, serr := os.Stat(keep)
+			if gone := errors.Is(serr, fs.ErrNotExist); gone != tc.want {
+				t.Errorf("the foreign entry removed = %v, want %v", gone, tc.want)
+			}
+		})
+	}
+}
+
+// A base reached through a symlink is left alone: os.Remove would unlink the
+// link itself whatever the target holds, so a user who points --cache-dir at a
+// directory through a link would lose the link and keep the directory.
+func TestCleanLeavesASymlinkedBaseAlone(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	New(Options{Dir: filepath.Join(real, "players"), SchemaVersion: 1}).Put("k", []byte("v"))
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	removed, err := Clean(link)
+	if err != nil || !removed {
+		t.Fatalf("Clean = %v, %v, want true, nil", removed, err)
+	}
+	if _, serr := os.Stat(filepath.Join(real, "players")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Error("the entries were not removed through the link")
+	}
+	if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link is gone (%v); removing it would leave the directory behind", lerr)
+	}
 }

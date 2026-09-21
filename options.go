@@ -141,9 +141,12 @@ type Locale struct {
 // New time.
 type Concurrency struct {
 	// Downloads is the max simultaneous downloads (e.g. across a playlist run).
+	// It must be >= 0; zero selects the default. A negative value is
+	// ErrInvalidConfig, not a request to disable the bound.
 	Downloads int
 	// Chunks is the max parallel ranged chunks within a single download. Kept
-	// low by default, especially for CLI playlist runs.
+	// low by default, especially for CLI playlist runs. It must be >= 0; zero
+	// selects the default.
 	Chunks int
 	// Procs limits concurrent in-process audio operations (transcode, remux,
 	// analyze), guarding local CPU independently from network parallelism. Each
@@ -157,7 +160,10 @@ type Concurrency struct {
 // means WaxTap adds no extra deadline for that operation.
 type Timeouts struct {
 	Extraction time.Duration // player-response fetch + parse
-	Resolve    time.Duration // stream-URL resolution (incl. cipher JS)
+	// Resolve bounds stream-URL resolution (including the cipher JS). A plain
+	// URL does no I/O, so the deadline is checked on entry: an expired budget
+	// is reported there rather than passing through unobserved.
+	Resolve time.Duration
 	// WebContext bounds one attested handoff, a /player-context call or the
 	// /session resolution an extraction runs ahead of its own budget, including
 	// the wait the sidecar asks for and the one retry; mid-stream re-fetches
@@ -165,7 +171,11 @@ type Timeouts struct {
 	// only by the caller's context.
 	WebContext   time.Duration
 	SponsorBlock time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
-	ChunkRetry   time.Duration // per-chunk deadline for ranged downloads
+	// ChunkRetry bounds each ranged chunk request of a file download. A
+	// sequential delivery (a writer sink, Stream, SABR) makes no ranged
+	// requests, so it is bounded by the stall guard and the caller's context
+	// instead.
+	ChunkRetry time.Duration
 }
 
 // RetryPolicy tunes HTTP retry/backoff.

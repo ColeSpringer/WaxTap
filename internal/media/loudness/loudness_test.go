@@ -9,16 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/colespringer/waxflow"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
-	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 func TestGainForNormal(t *testing.T) {
@@ -249,7 +245,7 @@ func TestMeasureAlbum(t *testing.T) {
 		os.WriteFile(p, mediatest.SineWAV(2, 2), 0o644)
 		inputs = append(inputs, p)
 	}
-	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs, nil, []int{2, 2})
+	album, perTrack, err := MeasureAlbum(context.Background(), r, inputs, nil)
 	if err != nil {
 		t.Fatalf("measure album: %v", err)
 	}
@@ -262,7 +258,7 @@ func TestMeasureAlbum(t *testing.T) {
 
 	// A uniform fold moves both the tracks and the group: a stereo source
 	// folded to mono is the audio a mono encode of the album would meter.
-	mono, monoTracks, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 1}, []int{2, 2})
+	mono, monoTracks, err := MeasureAlbum(context.Background(), r, inputs, []int{1, 1})
 	if err != nil {
 		t.Fatalf("measure album folded: %v", err)
 	}
@@ -271,22 +267,14 @@ func TestMeasureAlbum(t *testing.T) {
 	}
 }
 
-// TestMeasureAlbumNamesTheFirstBadTrack pins that the per-track pass reports by
-// position and not by whichever read failed first. The pass runs the tracks
-// concurrently, so several unreadable members finish in no fixed order; the
-// album is a list and its failure has to be the same one every time.
+// TestMeasureAlbumNamesTheFirstBadTrack pins that the failure is reported by
+// position and not by whichever read failed first. The album is a list and its
+// failure has to name the earliest member a pass down it would have hit. The
+// members are read in order, and the failure carries the member index, which
+// the facade's albumTrackError turns into a file name.
 //
-// Six identical bad tracks racing each other is the discriminator, and it is a
-// statistical one rather than a proof: a pass that reported the read that
-// happened to win, or that cancelled its siblings and lost their errors to the
-// cancellation, still names the first track most of the time, because the
-// indexes go out in order and the first one usually fails first. One album is
-// therefore weak evidence and the repeat count is what makes it strong. It is
-// set from the measured rate: reinstating the cancelling pass makes this fail
-// every time over 30 runs, where at five repeats it failed about two in three.
-//
-// The fixtures are tiny so the repeats cost nothing: the tracks fail on their
-// first header read, and the one good member is 50 ms of tone.
+// The fixtures are tiny: the bad tracks fail on their first header read, and
+// the one good member is 50 ms of tone.
 func TestMeasureAlbumNamesTheFirstBadTrack(t *testing.T) {
 	r := media.NewRunner(media.RunnerConfig{})
 	dir := t.TempDir()
@@ -301,251 +289,64 @@ func TestMeasureAlbumNamesTheFirstBadTrack(t *testing.T) {
 		}
 		inputs = append(inputs, p)
 	}
-	for n := range 200 {
-		_, _, err := MeasureAlbum(context.Background(), r, inputs, nil, nil)
+	for n := range 20 {
+		_, _, err := MeasureAlbum(context.Background(), r, inputs, nil)
 		if err == nil {
 			t.Fatalf("album %d: measured an album of unreadable tracks", n)
 		}
-		if want := "track 1-bad.wav"; !strings.Contains(err.Error(), want) {
+		if want := "group member 1"; !strings.Contains(err.Error(), want) {
 			t.Fatalf("album %d: err = %v, want it to name %s, the earliest unreadable track", n, err, want)
 		}
 	}
 }
 
-// countingAnalyzer is a trackAnalyzer that decodes nothing. It reports a fixed
-// budget and holds every call until want of them are in flight together, so
-// peak ends up being the pass's real width rather than a timing artifact.
-type countingAnalyzer struct {
-	budget, want     int
-	admitted, giveUp chan struct{}
-
-	mu       sync.Mutex
-	inFlight int
-	peak     int
-	calls    int
-	opened   bool
-}
-
-func (a *countingAnalyzer) Concurrency() int { return a.budget }
-
-func (a *countingAnalyzer) AnalyzeFile(context.Context, string, int) (*waxflow.AnalyzeResult, []string, error) {
-	a.mu.Lock()
-	a.inFlight++
-	a.calls++
-	a.peak = max(a.peak, a.inFlight)
-	fills := a.inFlight == a.want && !a.opened
-	a.opened = a.opened || fills
-	a.mu.Unlock()
-	if fills {
-		close(a.admitted)
-	}
-	select {
-	case <-a.admitted:
-	case <-a.giveUp:
-	}
-	a.mu.Lock()
-	a.inFlight--
-	a.mu.Unlock()
-	return &waxflow.AnalyzeResult{}, nil, nil
-}
-
-// TestMeasureTracksRunsAcrossTheRunnersBudget pins that the per-track pass
-// asks the runner what it admits and runs that many tracks at once, instead of
-// walking the list. The tracks are independent decodes, and taking them one
-// after another was the dominant cost of measuring an album.
-//
-// It counts the calls in flight rather than timing a wide pass against a
-// serial one. A stopwatch here measures the machine and not the code: "go test
-// ./..." runs package binaries -p at a time, which defaults to GOMAXPROCS, so
-// on a three- or four-core runner the sibling packages hold every core this
-// pass would have widened onto, and a correctly concurrent pass finishes no
-// sooner than a serial one. The count is the property itself, it covers the
-// budget the pass asks for rather than only the fan-out beneath it, and it
-// holds on one core.
-func TestMeasureTracksRunsAcrossTheRunnersBudget(t *testing.T) {
-	for _, tc := range []struct{ budget, tracks int }{
-		{4, 8}, // a budget under the album: the budget is the width
-		{8, 4}, // a budget over it: every track still runs at once
-		{1, 4}, // a budget of one is the serial pass, and stays serial
-		{0, 4}, // a budget of none is floored, not read as an album already done
-	} {
-		t.Run(fmt.Sprintf("%d at a time over %d tracks", tc.budget, tc.tracks), func(t *testing.T) {
-			a := &countingAnalyzer{
-				budget:   tc.budget,
-				want:     min(max(tc.budget, 1), tc.tracks),
-				admitted: make(chan struct{}),
-				giveUp:   make(chan struct{}),
-			}
-			// A narrower pass never fills the barrier. Releasing the waiters
-			// on a timer ends the run with a count to report, rather than
-			// leaving the test deadline to kill it with no message.
-			timer := time.AfterFunc(30*time.Second, func() { close(a.giveUp) })
-			defer timer.Stop()
-
-			inputs := make([]string, tc.tracks)
-			for i := range inputs {
-				inputs[i] = fmt.Sprintf("/a/%d.wav", i)
-			}
-			if _, _, err := measureTracks(context.Background(), a, inputs, nil); err != nil {
-				t.Fatalf("measure tracks: %v", err)
-			}
-			// Read after measureTracks has joined its workers.
-			if a.calls != tc.tracks {
-				t.Errorf("%d of %d tracks were analyzed; an album measured short reports no error against the tracks it skipped", a.calls, tc.tracks)
-			}
-			if a.peak != a.want {
-				t.Errorf("at most %d tracks ran at once against a runner admitting %d over %d tracks; want %d",
-					a.peak, tc.budget, tc.tracks, a.want)
-			}
-		})
-	}
-}
-
-// TestGroupPass pins how the group timeline is built and measured: a uniform
-// set folds the measurement, anything else is built at the fold's width,
-// widths the probe could not read never pass for a uniform set, and a set
-// with two delivered widths is refused as a spec conflict naming the track.
-func TestGroupPass(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		folds       []int
-		widths      []int
-		build, fold int
-		err         bool
-	}{
-		{"nothing folds", nil, []int{2, 2}, 0, 0, false},
-		{"zero folds", []int{0, 0}, []int{6, 2}, 0, 0, false},
-		{"uniform: the measurement folds", []int{2, 2}, []int{6, 6}, 0, 2, false},
-		{"two widths: built at the fold", []int{2, 2}, []int{6, 8}, 2, 0, false},
-		{"one member folds: built at the fold", []int{2, 0}, []int{6, 2}, 2, 0, false},
-		{"a narrower member is placed: built at the fold", []int{2, 0}, []int{6, 1}, 2, 0, false},
-		{"widths unknown: built at the fold", []int{2, 2}, nil, 2, 0, false},
-		{"two folds: refused", []int{2, 1}, []int{6, 6}, 0, 0, true},
-		{"an unfolded member wider than the fold: refused", []int{2, 0}, []int{8, 6}, 0, 0, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			inputs := []string{"/a/first.wav", "/a/second.wav"}
-			build, fold, err := groupPass(inputs, tc.folds, tc.widths)
-			if (err != nil) != tc.err || build != tc.build || fold != tc.fold {
-				t.Errorf("groupPass = build %d, fold %d, err %v; want %d, %d, err=%v", build, fold, err, tc.build, tc.fold, tc.err)
-			}
-			if tc.err && (!errors.Is(err, waxerr.ErrIncompatibleSpec) || !strings.Contains(err.Error(), "track second.wav")) {
-				t.Errorf("err = %v, want an incompatible-spec refusal naming the second track", err)
-			}
-		})
-	}
-}
-
-// TestGroupPassReadsAShortOrNonsenseFoldAsNoFold pins that groupPass and the
-// per-track pass take one reading of folds: an entry that is not a width keeps
-// the track's source layout in both, rather than the group deciding one thing
-// and AnalyzeFile being handed another.
-func TestGroupPassReadsAShortOrNonsenseFoldAsNoFold(t *testing.T) {
-	inputs := []string{"/a/first.wav", "/a/second.wav"}
-	for _, folds := range [][]int{nil, {}, {2}, {2, 0}, {2, -1}} {
-		if got := foldAt(folds, 1); got != 0 {
-			t.Errorf("foldAt(%v, 1) = %d, want 0", folds, got)
-		}
-	}
-	// A negative entry beside a fold is the unfolded member, not a second
-	// width, so the set is built at the fold rather than refused.
-	build, fold, err := groupPass(inputs, []int{2, -1}, []int{6, 2})
-	if err != nil || build != 2 || fold != 0 {
-		t.Errorf("groupPass = build %d, fold %d, err %v; want build 2, fold 0, no error", build, fold, err)
-	}
-}
-
-// TestMeasureAlbumFoldsEachMemberBeforeTheSeam pins what building the group
-// timeline at the fold's width buys: the mixer normalizes each output row by
-// the energy of every source coefficient, silent positions included, so folding
-// a member after the timeline widened it is not the member's own fold. The
-// group figure must match a concatenation of the members already folded, and
-// the fold-after-widen shape must be refused rather than answered.
-func TestMeasureAlbumFoldsEachMemberBeforeTheSeam(t *testing.T) {
+// Each member is measured at its own width, not through an envelope: the
+// per-track figures equal a standalone measurement of the same file at the
+// same fold, and the group figure is a real number over the set. That is the
+// property the Concat pass could not hold, because a timeline is built at one
+// width: a mono member widened into a stereo envelope read 3 dB hot, and a
+// 5.1 member widened to 7.1 and then folded landed about 1 dB under its own
+// fold.
+func TestMeasureAlbumMeasuresEachMemberAtItsOwnWidth(t *testing.T) {
 	ctx := context.Background()
 	r := media.NewRunner(media.RunnerConfig{})
 	dir := t.TempDir()
 
 	// A wide member's energy sits in its front pair, with the rest silent.
 	// Every channel carrying the same tone folds back coherently to the same
-	// loudness, which would hide what the widening does to the normalization.
-	write := func(name string, channels int) string {
-		p := filepath.Join(dir, name)
-		body := mediatest.SineWAV(2, channels)
-		if channels > 2 {
-			body = mediatest.FrontsOnlyWAV(2, channels)
-		}
-		if err := os.WriteFile(p, body, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
+	// loudness, which would hide what a widening does to the figure.
+	wide := filepath.Join(dir, "wide.wav")
+	if err := os.WriteFile(wide, mediatest.FrontsOnlyWAV(2, 6), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	mono := filepath.Join(dir, "mono.wav")
+	if err := os.WriteFile(mono, mediatest.SineWAV(2, 1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inputs := []string{wide, mono}
+	folds := []int{2, 0}
 
-	for _, tc := range []struct {
-		name     string
-		channels []int
-		folds    []int
-		// widths is what the caller probed; nil stands for a set whose widths
-		// could not be read, which must not be mistaken for a set that shares
-		// one width, since that is the condition the fold-once shape rests on.
-		widths []int
-	}{
-		{"5.1 beside 7.1, both folded", []int{6, 8}, []int{2, 2}, []int{6, 8}},
-		{"5.1 beside stereo, one folded", []int{6, 2}, []int{2, 0}, []int{6, 2}},
-		// The narrower member is placed into the fold's width, the way the
-		// envelope always placed it; only the wider one is folded.
-		{"5.1 beside mono, one folded", []int{6, 1}, []int{2, 0}, []int{6, 1}},
-		{"widths unknown", []int{6, 8}, []int{2, 2}, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			inputs := make([]string, len(tc.channels))
-			for i, ch := range tc.channels {
-				inputs[i] = write(fmt.Sprintf("%d-%d.wav", i, ch), ch)
-			}
-			group, _, err := MeasureAlbum(ctx, r, inputs, tc.folds, tc.widths)
-			if err != nil {
-				t.Fatalf("measure album: %v", err)
-			}
-
-			// The reference: each member folded on its own, then concatenated.
-			folded := make([]string, len(inputs))
-			for i, in := range inputs {
-				if tc.folds[i] == 0 {
-					folded[i] = in
-					continue
-				}
-				out := filepath.Join(t.TempDir(), fmt.Sprintf("f%d.wav", i))
-				if _, terr := r.Transcode(ctx, in, out, media.Spec{Codec: media.CodecWAV, Channels: tc.folds[i]}); terr != nil {
-					t.Fatalf("fold %d: %v", i, terr)
-				}
-				folded[i] = out
-			}
-			med, closer, err := r.OpenAlbumConcat(ctx, folded, nil, 0)
-			if err != nil {
-				t.Fatalf("concat of folded members: %v", err)
-			}
-			want, err := r.AnalyzeMedia(ctx, med, "", 0)
-			closer()
-			if err != nil {
-				t.Fatalf("analyze folded concat: %v", err)
-			}
-			if d := math.Abs(group.IntegratedLUFS - want.IntegratedLUFS); d > 0.05 {
-				t.Errorf("group = %.3f, folded-members concat = %.3f, off by %.3f LU", group.IntegratedLUFS, want.IntegratedLUFS, d)
-			}
-
-			// The trap, folding the group after the timeline widened it, is
-			// refused by the engine now: the members do not share the
-			// envelope's width, so no fold of the whole is any member's own.
-			wide, closeWide, err := r.OpenAlbumConcat(ctx, inputs, nil, 0)
-			if err != nil {
-				t.Fatalf("concat of sources: %v", err)
-			}
-			_, err = r.AnalyzeMedia(ctx, wide, "", 2)
-			closeWide()
-			if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
-				t.Errorf("fold after widening = %v, want the mixed-width refusal (an invalid request against the set)", err)
-			}
-		})
+	group, perTrack, err := MeasureAlbum(ctx, r, inputs, folds)
+	if err != nil {
+		t.Fatalf("measure album: %v", err)
+	}
+	if !group.Finite() {
+		t.Errorf("group = %+v, want a finite figure", group)
+	}
+	for i, in := range inputs {
+		solo, merr := Measure(ctx, r, in, folds[i])
+		if merr != nil {
+			t.Fatalf("measure %s alone: %v", filepath.Base(in), merr)
+		}
+		if d := math.Abs(perTrack[i].IntegratedLUFS - solo.IntegratedLUFS); d > 0.05 {
+			t.Errorf("%s measured %.3f in the album, %.3f alone (%.3f LU apart)",
+				filepath.Base(in), perTrack[i].IntegratedLUFS, solo.IntegratedLUFS, d)
+		}
+	}
+	// The album's length is the members', since a group carries no format of
+	// its own.
+	if want := perTrack[0].Duration + perTrack[1].Duration; group.Duration != want {
+		t.Errorf("group duration = %v, want the members' total %v", group.Duration, want)
 	}
 }
 

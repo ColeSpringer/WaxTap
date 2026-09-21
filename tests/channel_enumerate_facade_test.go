@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -93,5 +94,42 @@ func TestFacade_EnumerateChannelURLWithListHonorsPlaylist(t *testing.T) {
 	}
 	if resolveCalls != 0 {
 		t.Errorf("resolveCalls = %d, want 0 (no channel resolution when list= is present)", resolveCalls)
+	}
+}
+
+// A channel whose uploads feed YouTube will not list is refused by the
+// channel's own name. The caller asked for a channel; "playlist unavailable"
+// about a UU id they never typed leaves them nothing to connect it to.
+func TestFacade_EnumerateChannelNamesTheChannelWhenUploadsAreUnlistable(t *testing.T) {
+	const handle = "@fixturechannel"
+	const channelID = "UCabcdefghijklmnopqrstuv"
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/navigation/resolve_url"):
+			return resp(http.StatusOK, []byte(`{"endpoint":{"browseEndpoint":{"browseId":"`+channelID+`"}}}`)), nil
+		case strings.HasSuffix(r.URL.Path, "/browse"):
+			return resp(http.StatusOK, []byte(`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"This playlist does not exist."}]}}}]}`)), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Enumerate(context.Background(), handle, waxtap.EnumerateOptions{})
+	if !errors.Is(err, waxtap.ErrPlaylistUnavailable) {
+		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), handle) {
+		t.Errorf("err = %q, want it to name the channel the caller gave", err)
+	}
+	if !strings.Contains(err.Error(), "uploads playlist") {
+		t.Errorf("err = %q, want it to say what is missing", err)
+	}
+	// The original reason is kept, so the cause is not lost to the rewording.
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("err = %q, want YouTube's own reason kept", err)
 	}
 }

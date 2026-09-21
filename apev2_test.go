@@ -441,4 +441,58 @@ func TestProcessWarnsImplicitLossyPromotion(t *testing.T) {
 			t.Errorf("explicit lossy format warned: %v", w)
 		}
 	}
+
+	// A lossy source pays a second generation, which the request said no more
+	// about than it said about a first, so it warns too and the detail names
+	// it as a second generation.
+	mp3 := filepath.Join(dir, "in.mp3")
+	if _, terr := c.Process(ctx, ProcessRequest{
+		Input:       in,
+		ProcessSpec: ProcessSpec{Output: ToFile(mp3), Transcode: &TranscodeSpec{Format: FormatMP3}},
+	}); terr != nil {
+		t.Fatalf("mp3 fixture: %v", terr)
+	}
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: mp3,
+		ProcessSpec: ProcessSpec{
+			Output: ToFile(filepath.Join(dir, "second.mka")),
+			Cut:    &CutSpec{Ranges: []TimeRange{{Start: 0, End: 500 * time.Millisecond}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cut an mp3 into .mka: %v", err)
+	}
+	w, ok := findWarning(res.Warnings, WarnImplicitLossy)
+	if !ok {
+		t.Fatalf("warnings = %v, want WarnImplicitLossy for a lossy source too", res.Warnings)
+	}
+	if !strings.Contains(w.Detail, "second lossy generation") {
+		t.Errorf("detail = %q, want it to name the second generation", w.Detail)
+	}
+
+	// The warning claims the container could not carry the source, so it stays
+	// quiet when the container can. A caller that could not learn the source
+	// codec before it chose a format sets FromContainer on a format the source
+	// is already in: the URL shape, where nothing is probed before selection.
+	// Warning there would tell a user that Opus cannot enter a Matroska file.
+	opus := filepath.Join(dir, "in.opus")
+	if _, terr := c.Process(ctx, ProcessRequest{
+		Input:       in,
+		ProcessSpec: ProcessSpec{Output: ToFile(opus), Transcode: &TranscodeSpec{Format: FormatOpus}},
+	}); terr != nil {
+		t.Fatalf("opus fixture: %v", terr)
+	}
+	res, err = c.Process(ctx, ProcessRequest{
+		Input: opus,
+		ProcessSpec: ProcessSpec{
+			Output:    ToFile(filepath.Join(dir, "carried.mka")),
+			Transcode: &TranscodeSpec{Format: FormatOpus, FromContainer: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("opus into .mka: %v", err)
+	}
+	if w, ok := findWarning(res.Warnings, WarnImplicitLossy); ok {
+		t.Errorf("warned %q, want silence: Matroska carries Opus", w.Detail)
+	}
 }

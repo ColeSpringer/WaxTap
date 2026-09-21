@@ -46,10 +46,11 @@ func bindSponsorBlockURLFlag(f *pflag.FlagSet) {
 }
 
 // bindPlayerExtractionFlags registers flags used to resolve and stage streams.
-// SponsorBlock does not use them because it fetches segment metadata by video ID
-// without resolving a player.
+// The sponsorblock preview takes them too: it fetches segments by video ID, but
+// it also extracts once for the video's length, so a segment the database holds
+// past the end can be marked as one.
 func bindPlayerExtractionFlags(f *pflag.FlagSet) {
-	f.String("temp-dir", "", "directory for intermediate/staging files (default: OS temp)")
+	f.String("temp-dir", "", "directory for staging downloaded sources and processed downloads before delivery (default: OS temp; created on first use); a local file is processed beside its output, so the flag does not apply to it")
 	f.String("profile-override", "", "path to a JSON client-profile override file (refresh client versions without a rebuild)")
 	f.Int("chrome-major", 0, "Chrome major for built-in WEB clients (0 = built-in default; conflicts with --profile-override)")
 	f.String("potoken-url", "", "base or full URL of a bgutil PO-token endpoint (enables WEB/GVS tokens; bypasses --proxy)")
@@ -158,7 +159,7 @@ func isCategoryList(s string) bool {
 // bindCutFlags registers the time-range cut flags shared by download and cut.
 func bindCutFlags(f *pflag.FlagSet, ranges *[]string, cutMode *string, crossfade *time.Duration, sbOnError *string) {
 	f.StringArrayVar(ranges, "cut-range", nil, "remove a time range start-end, each SS[.sss], MM:SS, HH:MM:SS, or a Go duration like 1m30s (repeatable, or several comma-separated)")
-	f.StringVar(cutMode, "cut-mode", "smart", "cut rendering: smart|copy (rejects --format/--downmix, which re-encode)|accurate")
+	f.StringVar(cutMode, "cut-mode", "smart", "cut rendering: smart|copy (rejects --format/--downmix, which re-encode)|copy-exact (copy with exact tails and converged joins; .mka/.webm only)|accurate")
 	f.DurationVar(crossfade, "crossfade", 0, "crossfade duration at splice points (default off)")
 	f.StringVar(sbOnError, "sponsorblock-on-error", "proceed", "on SponsorBlock fetch failure: proceed|fail")
 }

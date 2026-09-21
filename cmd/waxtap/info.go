@@ -246,28 +246,32 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		}
 	}
 	out := struct {
-		SchemaVersion   int           `json:"schemaVersion"`
-		VideoID         string        `json:"videoId"`
-		Title           string        `json:"title"`
-		Author          string        `json:"author"`
-		Client          string        `json:"client,omitempty"`
-		ViaWatchPage    bool          `json:"viaWatchPage,omitempty"`
-		SubstitutedFrom string        `json:"substitutedFrom,omitempty"`
-		ChannelID       string        `json:"channelId,omitempty"`
-		DurationSecs    float64       `json:"durationSeconds,omitempty"` // absent when the source reported none
-		PublishDate     string        `json:"publishDate,omitempty"`
-		IsLive          bool          `json:"isLive"`
-		IsUpcoming      bool          `json:"isUpcoming"`
-		LiveStatus      string        `json:"liveStatus,omitempty"`
-		Availability    string        `json:"availability,omitempty"`
-		FullMetadata    bool          `json:"fullMetadata"`
-		ChapterCount    *int          `json:"chapterCount,omitempty"`
-		Chapters        []chapterJSON `json:"chapters,omitempty"`
-		Formats         []formatJSON  `json:"formats"`
-		BestAudioItag   *int          `json:"bestAudioItag,omitempty"`
-		Resolved        *resolvedJSON `json:"resolved,omitempty"`
-		Warnings        []warningJSON `json:"warnings,omitempty"`
-		Notes           []noteJSON    `json:"notes,omitempty"`
+		SchemaVersion   int     `json:"schemaVersion"`
+		VideoID         string  `json:"videoId"`
+		Title           string  `json:"title"`
+		Author          string  `json:"author"`
+		Client          string  `json:"client,omitempty"`
+		ViaWatchPage    bool    `json:"viaWatchPage,omitempty"`
+		SubstitutedFrom string  `json:"substitutedFrom,omitempty"`
+		ChannelID       string  `json:"channelId,omitempty"`
+		DurationSecs    float64 `json:"durationSeconds,omitempty"` // absent when the source reported none
+		PublishDate     string  `json:"publishDate,omitempty"`
+		IsLive          bool    `json:"isLive"`
+		IsUpcoming      bool    `json:"isUpcoming"`
+		LiveStatus      string  `json:"liveStatus,omitempty"`
+		Availability    string  `json:"availability,omitempty"`
+		FullMetadata    bool    `json:"fullMetadata"`
+		// Probed says --probe ran and the selected stream's headers were read,
+		// so the rate, channels, and length in its row are the stream's own
+		// rather than the listing's. Omitted when it did not.
+		Probed        bool          `json:"probed,omitempty"`
+		ChapterCount  *int          `json:"chapterCount,omitempty"`
+		Chapters      []chapterJSON `json:"chapters,omitempty"`
+		Formats       []formatJSON  `json:"formats"`
+		BestAudioItag *int          `json:"bestAudioItag,omitempty"`
+		Resolved      *resolvedJSON `json:"resolved,omitempty"`
+		Warnings      []warningJSON `json:"warnings,omitempty"`
+		Notes         []noteJSON    `json:"notes,omitempty"`
 	}{
 		SchemaVersion:   schemaVersion,
 		VideoID:         v.ID,
@@ -292,6 +296,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		// signal behind the three keys that depend on it: chapterCount below, and
 		// liveStatus/availability, which a consumer should not trust without it.
 		FullMetadata: info.FullMetadata,
+		Probed:       info.Probed,
 		Chapters:     chaptersToJSON(v.Chapters),
 		Formats:      formats,
 	}

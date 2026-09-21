@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxtap/v3"
 )
@@ -311,7 +312,11 @@ func effectSummary(res *waxtap.Result) string {
 		parts = append(parts, "transcode")
 	}
 	if res.CutApplied {
-		parts = append(parts, "cut")
+		cut := "cut (" + cutModeName(res.CutMode)
+		if res.CutSnaps > 0 {
+			cut += ", " + countOf(res.CutSnaps, "join") + " snapped"
+		}
+		parts = append(parts, cut+")")
 	}
 	if res.SponsorBlockApplied {
 		parts = append(parts, "sponsorblock")
@@ -322,6 +327,21 @@ func effectSummary(res *waxtap.Result) string {
 		parts = append(parts, "loudness-measure")
 	}
 	return strings.Join(parts, ", ")
+}
+
+// cutModeName spells a CutMode for the human line and the --json document.
+// CutSmart never reaches a result: the library reports the mode that ran.
+func cutModeName(m waxtap.CutMode) string {
+	switch m {
+	case waxtap.CutCopy:
+		return "copy"
+	case waxtap.CutCopyExact:
+		return "copy-exact"
+	case waxtap.CutAccurate:
+		return "accurate"
+	default:
+		return "smart"
+	}
 }
 
 func formatLabel(f waxtap.Format) string {
@@ -413,11 +433,18 @@ type resultJSON struct {
 	SourceBytes int64 `json:"sourceBytes"`
 	OutputBytes int64 `json:"outputBytes"`
 
-	Transcoded          bool `json:"transcoded"`
-	CutApplied          bool `json:"cutApplied"`
-	SponsorBlockApplied bool `json:"sponsorBlockApplied"`
-	LoudnessMeasured    bool `json:"loudnessMeasured"`
-	LoudnessApplied     bool `json:"loudnessApplied"`
+	Transcoded bool `json:"transcoded"`
+	CutApplied bool `json:"cutApplied"`
+	// CutMode is how the cut was rendered ("copy", "copy-exact", or
+	// "accurate"), and CutSnaps/CutSnapMaxMs the interior joins a packet copy
+	// moved inward to the packet grid and the largest single move. Set only
+	// when a cut applied; the two figures are omitted when nothing moved.
+	CutMode             string  `json:"cutMode,omitempty"`
+	CutSnaps            int     `json:"cutSnaps,omitempty"`
+	CutSnapMaxMs        float64 `json:"cutSnapMaxMs,omitempty"`
+	SponsorBlockApplied bool    `json:"sponsorBlockApplied"`
+	LoudnessMeasured    bool    `json:"loudnessMeasured"`
+	LoudnessApplied     bool    `json:"loudnessApplied"`
 
 	Loudness *loudnessJSON `json:"loudness,omitempty"`
 	// TagCarry itemizes a local process's metadata carry; see tagCarryJSON.
@@ -446,6 +473,11 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 		SponsorBlockApplied: res.SponsorBlockApplied,
 		LoudnessMeasured:    res.LoudnessMeasured,
 		LoudnessApplied:     res.LoudnessApplied,
+	}
+	if res.CutApplied {
+		out.CutMode = cutModeName(res.CutMode)
+		out.CutSnaps = res.CutSnaps
+		out.CutSnapMaxMs = float64(res.CutSnapMax) / float64(time.Millisecond)
 	}
 	out.SourceFormat, out.OutputFormat = formatDTOs(res)
 	out.TagCarry = tagCarryToJSON(res.TagCarry)
@@ -482,7 +514,12 @@ func localFormatToJSON(f waxtap.Format) localFormatJSON {
 func formatDTOs(res *waxtap.Result) (src, out any) {
 	if res.SourceKind == waxtap.SourceLocalFile {
 		src = localFormatToJSON(res.SourceFormat)
-		if res.Transcoded {
+		// A copy that changed container reports one too. Omitting it made
+		// sense while a local copy could only ever leave the file as it found
+		// it; an output extension can now name a container the source codec
+		// is carried into, and sourceFormat alone would then name a file that
+		// is not on disk.
+		if res.Transcoded || !strings.EqualFold(res.OutputFormat.Extension, res.SourceFormat.Extension) {
 			out = localFormatToJSON(res.OutputFormat)
 		}
 		return src, out

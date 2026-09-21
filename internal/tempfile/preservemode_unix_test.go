@@ -127,11 +127,15 @@ func TestCommitDirectoryDestinationKeepsUmask(t *testing.T) {
 	}
 }
 
-// os.Rename over a symlink replaces the link itself and leaves its target
-// untouched, so there is no replaced file whose mode could be preserved:
-// following the link would copy permissions from a file this run never
-// modifies.
-func TestCommitSymlinkDestinationKeepsUmask(t *testing.T) {
+// A destination whose last component is a symlink is written through the link:
+// the staged file is placed beside the target and renamed over it, so the link
+// survives and the target is replaced. A user who symlinks an output name onto
+// another disk keeps their redirection rather than having the first run that
+// writes there silently replace it.
+//
+// There is a replaced file now, the target, so its mode is preserved through
+// the rename the way every other replacement's is.
+func TestCommitSymlinkDestinationWritesThroughTheLink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.bin")
 	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
@@ -158,20 +162,71 @@ func TestCommitSymlinkDestinationKeepsUmask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Fatal("the rename should have replaced the symlink with a regular file")
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the link was replaced; the write must go through it")
 	}
-	if want := 0o666 &^ readUmask(t); fi.Mode().Perm() != want {
-		t.Errorf("mode = %v, want the umask default %v, not the link target's 0777", fi.Mode().Perm(), want)
-	}
-	ti, err := os.Stat(target)
+	ti, err := os.Lstat(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ti.Mode().Perm() != 0o777 {
-		t.Errorf("target mode = %v; the target must be untouched", ti.Mode().Perm())
+		t.Errorf("target mode = %v, want the replaced file's 0777 preserved through the rename", ti.Mode().Perm())
 	}
-	if b, _ := os.ReadFile(target); string(b) != "target" {
-		t.Error("target content changed; the rename must replace the link, not the target")
+	if b, _ := os.ReadFile(target); string(b) != "" {
+		t.Errorf("target content = %q, want the newly written (empty) file", b)
+	}
+}
+
+// A dangling link has no target to write through, so the rename replaces the
+// link itself: that is the only answer the filesystem offers.
+func TestCommitDanglingSymlinkIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.bin")
+	if err := os.Symlink(filepath.Join(dir, "absent.bin"), dst); err != nil {
+		t.Fatal(err)
+	}
+	f, err := New(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Discard()
+	if err := f.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("a dangling link must be replaced by the written file")
+	}
+}
+
+// The rename publish answers the same way as the staged one. They are the same
+// publish reached by different routes (a staging file on another filesystem
+// takes the rename path), so a link that survives one must survive the other.
+func TestResolveLinkIsSharedByBothPublishRoutes(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.bin")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "out.bin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveLink(link); got != target {
+		t.Errorf("ResolveLink(%q) = %q, want the target %q", link, got, target)
+	}
+	// A plain path and a dangling link are their own answers.
+	if got := ResolveLink(target); got != target {
+		t.Errorf("ResolveLink on a regular file = %q, want it unchanged", got)
+	}
+	dangling := filepath.Join(dir, "dangling.bin")
+	if err := os.Symlink(filepath.Join(dir, "absent"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveLink(dangling); got != dangling {
+		t.Errorf("ResolveLink on a dangling link = %q, want it unchanged", got)
 	}
 }

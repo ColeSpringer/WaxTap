@@ -58,12 +58,14 @@ func runDirectoryTranscode(cmd *cobra.Command, env *appEnv, p directoryTranscode
 		return err
 	}
 
-	warnBitrateIgnored(env, tf, p.bitrate)
-	warnBitDepthIgnored(env, tf, p.bitDepth)
+	if err := noteKnobFlags(env, tf, p.bitrate, p.bitDepth); err != nil {
+		return err
+	}
+	specLayout, specDownmix := downmixFields(layout, doDownmix)
 	spec := waxtap.ProcessSpec{
 		Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth},
-		Channels:  layout,
-		Downmix:   doDownmix,
+		Channels:  specLayout,
+		Downmix:   specDownmix,
 	}
 	ctx := cmd.Context()
 	inputs, ignored, err := collectAudioInputs(p.root, p.recursive, p.dir)
@@ -175,13 +177,15 @@ func runDirectoryNormalize(cmd *cobra.Command, env *appEnv, p directoryNormalize
 	if err != nil {
 		return err
 	}
-	warnBitrateIgnored(env, tf, p.bitrate)
-	warnBitDepthIgnored(env, tf, p.bitDepth)
+	if err := noteKnobFlags(env, tf, p.bitrate, p.bitDepth); err != nil {
+		return err
+	}
+	specLayout, specDownmix := downmixFields(layout, doDownmix)
 	spec := waxtap.ProcessSpec{
 		Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth},
 		Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: p.target, PeakMode: p.peakMode},
-		Channels:  layout,
-		Downmix:   doDownmix,
+		Channels:  specLayout,
+		Downmix:   specDownmix,
 	}
 	jobs, err := planBatchOutputs(ctx, inputs, p.root, p.dir, p.recursive, tf, spec, mode, false, "normalized", env.client.ProbeAudio)
 	if err != nil {

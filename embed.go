@@ -38,18 +38,22 @@ func embedRequested(s ProcessSpec) bool {
 // dest is the path warnings name. The pass runs on a staged or job-temp file
 // whose name the user never asked for and will never see, so warnings report
 // the destination instead; "" falls back to path.
-func (c *Client) embedMetadata(ctx context.Context, path, dest, targetExt string, v *youtube.Video, o embedOptions, em *emitter) {
+// It returns the container extension the pass left the file in when it remuxed
+// for the picture ("" when it did not), so the caller can report the delivered
+// format as what is really on disk rather than as the source's.
+func (c *Client) embedMetadata(ctx context.Context, path, dest, targetExt string, v *youtube.Video, o embedOptions, em *emitter) (remuxedTo string) {
 	if v == nil || (!o.thumbnail && !o.metadata) {
-		return
+		return ""
 	}
-	skipReason, err := c.doEmbed(ctx, path, targetExt, v, o)
+	remuxedTo, skipReason, err := c.doEmbed(ctx, path, targetExt, v, o)
 	if err != nil {
 		em.warn(WarnMetadataEmbed, fmt.Sprintf("could not embed metadata into %s: %v", warnName(dest, path), err))
-		return
+		return ""
 	}
 	if skipReason != "" {
 		em.warn(WarnMetadataEmbed, skipReason)
 	}
+	return remuxedTo
 }
 
 // doEmbed performs the WaxLabel edit. It returns a non-empty skipReason when a
@@ -66,7 +70,7 @@ func (c *Client) embedMetadata(ctx context.Context, path, dest, targetExt string
 //     subset YouTube ships, carries tags but not cover art) and the delivered
 //     extension can carry a picture, the audio is remuxed to its codec's native
 //     container (Opus-in-WebM to Ogg-Opus), which can.
-func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube.Video, o embedOptions) (skipReason string, err error) {
+func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube.Video, o embedOptions) (remuxedTo, skipReason string, err error) {
 	// work is the file the edits run against; while it differs from path it is a
 	// scratch copy, so a mid-flight failure leaves the original untouched.
 	work := path
@@ -95,13 +99,13 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 
 	if c.isMP4File(ctx, path) {
 		if err := remux(media.ContainerProgressive); err != nil {
-			return "", fmt.Errorf("flatten MP4 for tagging: %w", err)
+			return "", "", fmt.Errorf("flatten MP4 for tagging: %w", err)
 		}
 	}
 
 	doc, err := waxlabel.ParseFile(ctx, work)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	caps := doc.Capabilities()
 
@@ -111,13 +115,26 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 			// written and the delivered extension still matches the content. A remux
 			// or re-parse failure is fatal to the edit, not a silent skip.
 			if err := remux(""); err != nil {
-				return "", fmt.Errorf("remux for cover art: %w", err)
+				return "", "", fmt.Errorf("remux for cover art: %w", err)
 			}
 			d2, perr := waxlabel.ParseFile(ctx, work)
 			if perr != nil {
-				return "", perr
+				return "", "", perr
 			}
 			doc, caps = d2, d2.Capabilities()
+			// The file is now in its codec's native container, which is not
+			// the one the source arrived in, so the caller reports the
+			// delivered format from this: "webm" would name a file that no
+			// longer exists. The MP4 flatten above is not one of these, since
+			// it stays in the same container family.
+			//
+			// targetExt is the answer, and it needs no probe to find: the
+			// remux runs only when pictureCapableExt(targetExt) holds, and
+			// that is precisely the test that the codec's native container is
+			// the one this extension names. It is also the extension the file
+			// is delivered under, so nothing here can name a file that is not
+			// on disk.
+			remuxedTo = strings.ToLower(strings.TrimPrefix(targetExt, "."))
 		} else {
 			// A remux would leave the content mismatched with the target extension
 			// (e.g. Ogg bytes in a .webm file). Skip the picture and report it.
@@ -186,11 +203,11 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 	if changed {
 		plan, perr := ed.Prepare()
 		if perr != nil {
-			return "", perr
+			return "", "", perr
 		}
 		_, note, perr := executeSaveBack(ctx, plan)
 		if perr != nil {
-			return "", perr
+			return "", "", perr
 		}
 		if note != "" {
 			skipReason = joinSkip(skipReason, "metadata written, but "+note)
@@ -202,11 +219,11 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 	// delivered content, matching the extension the caller named.
 	if scratch != "" {
 		if err := os.Rename(scratch, path); err != nil {
-			return "", err
+			return "", "", err
 		}
 		committed = true
 	}
-	return skipReason, nil
+	return remuxedTo, skipReason, nil
 }
 
 // executeSaveBack runs plan against its parsed file in place, applying
@@ -334,4 +351,35 @@ func pictureCapableExt(ext string) bool {
 		return false
 	}
 	return true
+}
+
+// remuxedFormat reports f as the file the cover-art remux left behind: ext is
+// the extension it was delivered under, and the MIME type follows the codec in
+// that container. Everything else about the format is the delivery's own,
+// because a remux moves packets and changes nothing about the audio. An empty
+// ext (no remux ran) returns f unchanged.
+func remuxedFormat(f Format, ext string) Format {
+	if ext == "" {
+		return f
+	}
+	// The container changed, so the byte count no longer describes the file:
+	// a remux rewrites the wrapper around the same packets. Result.OutputBytes
+	// carries the delivered size, so clearing this leaves one true answer
+	// rather than two that disagree. The codec's own rate is unchanged, since
+	// the packets are.
+	f.ContentLength = 0
+	// The delivered extension as the caller named it, never a canonical
+	// spelling of the codec's: this has to name the file that is on disk.
+	f.Extension = strings.ToLower(strings.TrimPrefix(ext, "."))
+	switch f.Extension {
+	case "opus", "ogg", "oga":
+		if strings.EqualFold(f.Codec, "opus") {
+			f.MIMEType = `audio/ogg; codecs="opus"`
+		} else {
+			f.MIMEType = `audio/ogg; codecs="vorbis"`
+		}
+	default:
+		f.MIMEType = ""
+	}
+	return f
 }

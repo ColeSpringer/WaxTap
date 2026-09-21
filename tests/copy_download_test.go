@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -83,13 +84,13 @@ func TestFacade_CopyDownloadPreservesBytesAndFillsMetadata(t *testing.T) {
 	}
 }
 
-// TestFacade_FullMetadataRequiresIncludeMetadata checks Request.FullMetadata is a
-// no-op without IncludeMetadata: no wasted watch-page fetch and no Metadata. A
-// forced ANDROID_VR client isolates the applyFullMetadata fetch (no WEB base.js
+// TestFacade_FullMetadataRequiresIncludeMetadata checks Request.FullMetadata is
+// refused without a consumer, and does its watch-page fetch with one. A forced
+// ANDROID_VR client isolates the applyFullMetadata fetch (no WEB base.js
 // discovery hits /watch).
 func TestFacade_FullMetadataRequiresIncludeMetadata(t *testing.T) {
 	umpBody := fSabrHappyBody([]byte("INIT-"), []byte("MEDIA-DATA"))
-	run := func(includeMetadata bool) (*waxtap.Result, int) {
+	run := func(includeMetadata bool) (*waxtap.Result, int, error) {
 		var watchCalls int
 		rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
 			switch {
@@ -113,13 +114,13 @@ func TestFacade_FullMetadataRequiresIncludeMetadata(t *testing.T) {
 			URL: "dummyVideo0", FullMetadata: true,
 			ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out), IncludeMetadata: includeMetadata},
 		})
-		if err != nil {
-			t.Fatalf("download (includeMetadata=%v): %v", includeMetadata, err)
-		}
-		return res, watchCalls
+		return res, watchCalls, err
 	}
 
-	withMeta, watchWith := run(true)
+	withMeta, watchWith, err := run(true)
+	if err != nil {
+		t.Fatalf("download with IncludeMetadata: %v", err)
+	}
 	if watchWith != 1 {
 		t.Errorf("watchCalls with IncludeMetadata = %d, want 1", watchWith)
 	}
@@ -127,11 +128,13 @@ func TestFacade_FullMetadataRequiresIncludeMetadata(t *testing.T) {
 		t.Errorf("Metadata = %+v, want Availability public", withMeta.Metadata)
 	}
 
-	noMeta, watchWithout := run(false)
-	if watchWithout != 0 {
-		t.Errorf("watchCalls without IncludeMetadata = %d, want 0 (the guard skips the fetch)", watchWithout)
+	// With no consumer the enrichment is a round trip whose answer nothing
+	// reads, so the request is refused rather than quietly skipped.
+	_, watchWithout, err := run(false)
+	if !errors.Is(err, waxtap.ErrIncompatibleSpec) || !strings.Contains(err.Error(), "FullMetadata") {
+		t.Fatalf("err = %v, want ErrIncompatibleSpec naming FullMetadata", err)
 	}
-	if noMeta.Metadata != nil {
-		t.Errorf("Metadata = %+v, want nil without IncludeMetadata", noMeta.Metadata)
+	if watchWithout != 0 {
+		t.Errorf("watchCalls = %d, want 0: the refusal precedes any fetch", watchWithout)
 	}
 }

@@ -25,6 +25,7 @@ import (
 	rand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,26 @@ func preferNamedCause(err, earlier error) error {
 		return err
 	}
 	return earlier
+}
+
+// IsProxyConnect reports whether err is a failure of the dial to the
+// configured proxy, which net/http words as a "proxyconnect" operation
+// anywhere in the chain.
+//
+// It is the one transport failure no retry can fix: the proxy is a fixed
+// setting, so every later attempt dials the same unreachable address. Do stops
+// on it, and so does the extraction chain.
+func IsProxyConnect(err error) bool {
+	// errors.As walks the chain itself, so there is no loop to write here.
+	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "proxyconnect" {
+		return true
+	}
+	// A transport that does not expose the typed operation still spells it in
+	// the message net/http wraps.
+	if ue, ok := errors.AsType[*url.Error](err); ok && ue.Err != nil {
+		return strings.Contains(ue.Err.Error(), "proxyconnect")
+	}
+	return false
 }
 
 // NamesTransportCause reports whether err identifies a failing network step (a
@@ -263,7 +284,10 @@ func New(cfg Config) *Client {
 
 // Do executes req with retry/backoff and rate-limit handling. The request
 // context governs cancellation and per-operation deadlines; a context error is
-// never retried. On a capped-out Retry-After it returns *waxerr.RateLimitError.
+// never retried. A failure to reach the configured proxy is not retried
+// either: the proxy is a fixed setting, so the next attempt would dial the
+// same unreachable address. On a capped-out Retry-After it returns
+// *waxerr.RateLimitError.
 //
 // On success the caller owns the returned response body. On retried or
 // rate-limited responses the intermediate bodies are drained and closed here.
@@ -310,6 +334,15 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				return nil, preferNamedCause(err, lastErr)
 			}
 			lastErr = err
+			// A proxy is a fixed setting, so a dial that could not reach it
+			// will not reach it on the next try either. It matters more than
+			// it reads: Do runs four attempts with jittered backoff, so a
+			// 10 s dial bound still costs 40 s per request without this, and
+			// with it a dead proxy fails inside any budget with the proxy
+			// named.
+			if IsProxyConnect(err) {
+				return nil, err
+			}
 			if attempt < attempts-1 {
 				wait := c.backoffDuration(attempt)
 				// The deadline would swallow the retry: report the transport error.

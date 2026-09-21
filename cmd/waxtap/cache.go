@@ -1,12 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/colespringer/waxtap/v3/internal/diskcache"
 )
 
 func newCacheCmd() *cobra.Command {
@@ -16,9 +15,10 @@ func newCacheCmd() *cobra.Command {
 		Long: "Manage the WaxTap cache directory.\n\n" +
 			"WaxTap persists YouTube's player JS (base.js) here so a fresh run can\n" +
 			"compile the cipher from disk instead of re-downloading several megabytes.\n" +
-			"Entries are size-capped and schema-versioned. `cache clean` is safe to run\n" +
-			"any time. WaxTap re-fetches whatever it needs. Disable persistence with\n" +
-			"--no-cache.",
+			"Entries are size-capped and schema-versioned. `cache clean` removes WaxTap's\n" +
+			"own entries and the directory when that empties it; it never removes\n" +
+			"anything else, so it is safe to run any time. WaxTap re-fetches whatever it\n" +
+			"needs. Disable persistence with --no-cache.",
 		// A bare cache command prints help, but an unknown subcommand is a usage
 		// error rather than a successful help request.
 		Args: cobra.ArbitraryArgs,
@@ -49,14 +49,18 @@ func newCacheDirCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, statErr := os.Stat(dir)
-			exists := statErr == nil
+			exists, _, populated := diskcache.Describe(dir)
 			if outputFlags(cmd).json {
 				return writeJSON(cmd.OutOrStdout(), struct {
 					SchemaVersion int    `json:"schemaVersion"`
 					Dir           string `json:"dir"`
-					Exists        bool   `json:"exists"`
-				}{schemaVersion, dir, exists})
+					// Exists keeps its original meaning, the path is there at
+					// all, since consumers read it at this schema version.
+					Exists bool `json:"exists"`
+					// Populated says a WaxTap cache is there, which is what
+					// `cache clean` would remove.
+					Populated bool `json:"populated"`
+				}{schemaVersion, dir, exists, populated})
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), dir)
 			return nil
@@ -67,7 +71,7 @@ func newCacheDirCmd() *cobra.Command {
 func newCacheCleanCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "clean",
-		Short: "Remove the cache directory",
+		Short: "Remove WaxTap's cached entries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(cmd)
@@ -78,9 +82,12 @@ func newCacheCleanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, statErr := os.Stat(dir)
-			removed := statErr == nil
-			if err := os.RemoveAll(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			exists, isDir, _ := diskcache.Describe(dir)
+			if exists && !isDir {
+				return usagef("%s is not a directory; --cache-dir names the cache directory", dir)
+			}
+			removed, err := diskcache.Clean(dir)
+			if err != nil {
 				return fmt.Errorf("remove cache %s: %w", dir, err)
 			}
 			if outputFlags(cmd).json {
@@ -90,10 +97,15 @@ func newCacheCleanCmd() *cobra.Command {
 					Removed       bool   `json:"removed"`
 				}{schemaVersion, dir, removed})
 			}
-			if removed {
-				fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", dir)
-			} else {
+			switch {
+			case removed:
+				// "cleaned", not "removed <dir>": the entries always go, and
+				// the directory itself only when that emptied it.
+				fmt.Fprintf(cmd.OutOrStdout(), "cleaned %s\n", dir)
+			case !exists:
 				fmt.Fprintf(cmd.OutOrStdout(), "nothing to clean (%s does not exist)\n", dir)
+			default:
+				fmt.Fprintf(cmd.OutOrStdout(), "nothing to clean (%s holds no WaxTap cache)\n", dir)
 			}
 			return nil
 		},

@@ -505,6 +505,13 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 		if errors.Is(perr, waxerr.ErrRateLimited) {
 			return nil, perr // throttling won't differ across clients; surface it
 		}
+		if httpx.IsProxyConnect(perr) {
+			// The proxy is a fixed setting, so every remaining client dials
+			// the same unreachable address. Without this a dead proxy costs
+			// one dial timeout per profile and the run reports the budget
+			// rather than the proxy.
+			return nil, perr
+		}
 		bestErr = waxerr.PreferErr(bestErr, perr)
 	}
 
@@ -525,6 +532,9 @@ func (c *Client) ExtractExcluding(ctx context.Context, videoID string, skip map[
 			if substituting {
 				ext.substitutedFrom = c.profiles[0].Name
 			}
+			// What the profiles left behind, so a caller can say why the
+			// fallback ran. Nil when no profile ran at all.
+			ext.fallbackCause = bestErr
 			c.log.DebugContext(ctx, "extracted via watch-page fallback")
 			return ext, nil
 		}

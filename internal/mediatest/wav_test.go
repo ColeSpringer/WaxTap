@@ -73,3 +73,27 @@ func TestFrontsOnlyWAVLeavesTheRearSilent(t *testing.T) {
 		t.Errorf("front carries signal = %v, rear carries signal = %v; want true/false", front, rear)
 	}
 }
+
+// A segment with no frequency is digital silence, which is what makes a
+// removed span detectable in a cut's output.
+func TestSegmentedWAVSilentSegment(t *testing.T) {
+	const rate = 48000
+	b := SegmentedWAV(2, rate, Segment{Seconds: 1, FreqHz: 440}, Segment{Seconds: 1}, Segment{Seconds: 1, FreqHz: 880})
+	if want := 44 + 3*rate*2*2; len(b) != want {
+		t.Fatalf("len = %d, want %d (3 s of stereo 16-bit at %d Hz plus the header)", len(b), want, rate)
+	}
+	if gotRate := binary.LittleEndian.Uint32(b[24:28]); gotRate != rate {
+		t.Errorf("rate = %d, want %d", gotRate, rate)
+	}
+	mid := b[44+rate*2*2 : 44+2*rate*2*2]
+	for i := 0; i < len(mid); i += 2 {
+		if s := int16(binary.LittleEndian.Uint16(mid[i:])); s != 0 {
+			t.Fatalf("frame %d of the middle second = %d, want silence", i/4, s)
+		}
+	}
+	// The segments around it are not silent, so the fixture is not silent throughout.
+	first := b[44 : 44+rate*2*2]
+	if bytes.Equal(first, make([]byte, len(first))) {
+		t.Error("the first second is silent too")
+	}
+}

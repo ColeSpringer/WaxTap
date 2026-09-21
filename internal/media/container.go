@@ -212,3 +212,110 @@ func CheckOutputContainer(codec Codec, output string) error {
 	return fmt.Errorf("%w: the output extension .%s cannot hold %s audio; use one of %s",
 		waxerr.ErrIncompatibleSpec, ext, codec, strings.Join(ContainersFor(codec.String()), ", "))
 }
+
+// ContainerCodec returns the encoder a container extension usually takes when
+// nothing else names one: the codec a file of that name is expected to hold.
+// It reports false for an extension that names no container WaxTap writes.
+func ContainerCodec(ext string) (Codec, bool) {
+	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
+	if IsAIFFExt(ext) {
+		return CodecAIFF, true
+	}
+	switch ext {
+	case "flac":
+		return CodecFLAC, true
+	case "wav":
+		return CodecWAV, true
+	case "mp3":
+		return CodecMP3, true
+	case "m4a", "mp4", "m4b", "aac":
+		return CodecAAC, true
+	case "ogg", "oga":
+		return CodecVorbis, true
+	case "opus":
+		return CodecOpus, true
+	case "webm", "mka", "mkv":
+		return CodecOpus, true
+	case "wv":
+		return CodecWavPack, true
+	case "ape":
+		return CodecAPE, true
+	}
+	return CodecCopy, false
+}
+
+// SourceFamilyCodec maps a probed codec name to the encoder of its own family,
+// for a request that keeps the source codec but has to re-encode (a downmix, a
+// gain). outExt picks between PCM's two containers. It reports false for a
+// codec WaxTap has no encoder for.
+func SourceFamilyCodec(name, outExt string) (Codec, bool) {
+	switch strings.ToLower(name) {
+	case "opus":
+		return CodecOpus, true
+	case "aac":
+		return CodecAAC, true
+	case "he-aac":
+		return CodecHEAAC, true
+	case "vorbis":
+		return CodecVorbis, true
+	case "mp3":
+		return CodecMP3, true
+	case "flac":
+		return CodecFLAC, true
+	case "alac":
+		return CodecALAC, true
+	case "wavpack":
+		return CodecWavPack, true
+	case "ape":
+		return CodecAPE, true
+	}
+	if strings.HasPrefix(strings.ToLower(name), "pcm") {
+		if IsAIFFExt(strings.ToLower(strings.TrimPrefix(outExt, "."))) {
+			return CodecAIFF, true
+		}
+		return CodecWAV, true
+	}
+	return CodecCopy, false
+}
+
+// OutputCodecFor is the container rule for an output the request named by
+// extension alone: the codec the output takes and whether it is the source's
+// own.
+//
+// A format-named extension (.flac, .mp3, .opus, .wav, .aiff, .wv, .ape) names
+// its format. A container that holds several codecs (.ogg/.oga, .mka/.mkv,
+// .webm, .mp4/.m4a/.m4b, .aac) keeps sourceCodec when it can carry it, else
+// takes the container's usual encoder (ContainerCodec). sourceCodec is a probe
+// name ("opus", "pcm", ...); "" means unknown, which keeps nothing.
+//
+// An extension WaxTap does not write is an error naming the choices; a
+// decode-only source codec into a container that cannot hold it falls to the
+// container's encoder like any other.
+func OutputCodecFor(ext, sourceCodec string) (c Codec, kept bool, err error) {
+	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
+	if name, decodeOnly := DecodeOnlyContainer(ext); decodeOnly {
+		return CodecCopy, false, fmt.Errorf("%w: cannot write a .%s file: WaxTap reads %s but does not write it", waxerr.ErrIncompatibleSpec, ext, name)
+	}
+	container, ok := ContainerCodec(ext)
+	if !ok {
+		return CodecCopy, false, fmt.Errorf("%w: .%s names no container WaxTap writes (choose one of %s)",
+			waxerr.ErrIncompatibleSpec, ext, strings.Join(OutputContainerExts(), ", "))
+	}
+	if sourceCodec != "" && ContainerAccepts(ext, sourceCodec) {
+		if c, ok := SourceFamilyCodec(sourceCodec, ext); ok {
+			return c, true, nil
+		}
+	}
+	return container, false, nil
+}
+
+// OutputContainerExts lists the container extensions WaxTap writes, dotted and
+// sorted, for a refusal that names the choices.
+func OutputContainerExts() []string {
+	out := make([]string, 0, len(inferableContainers))
+	for ext := range inferableContainers {
+		out = append(out, "."+ext)
+	}
+	slices.Sort(out)
+	return out
+}

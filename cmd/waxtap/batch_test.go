@@ -58,23 +58,51 @@ func TestExtPossiblyCodec(t *testing.T) {
 // file is a real encode request and must not match.
 func TestMatchesTargetFamilyHEAAC(t *testing.T) {
 	cases := []struct {
-		codec string
-		tf    waxtap.TranscodeFormat
-		want  bool
+		codec     string
+		container string
+		outExt    string // "" takes the format's canonical extension
+		tf        waxtap.TranscodeFormat
+		want      bool
 	}{
-		{"he-aac", waxtap.FormatAAC, true},
-		{"aac", waxtap.FormatAAC, true},
-		{"he-aac", waxtap.FormatHEAAC, true},
-		{"aac", waxtap.FormatHEAAC, false},
-		{"wavpack", waxtap.FormatWavPack, true},
-		{"ape", waxtap.FormatAPE, true},
-		{"wavpack", waxtap.FormatAPE, false},
-		{"wma", waxtap.FormatAAC, false},
-		{"musepack", waxtap.FormatAAC, false},
+		{codec: "he-aac", tf: waxtap.FormatAAC, want: true},
+		{codec: "aac", tf: waxtap.FormatAAC, want: true},
+		{codec: "he-aac", tf: waxtap.FormatHEAAC, want: true},
+		{codec: "aac", tf: waxtap.FormatHEAAC, want: false},
+		{codec: "wavpack", tf: waxtap.FormatWavPack, want: true},
+		{codec: "ape", tf: waxtap.FormatAPE, want: true},
+		{codec: "wavpack", tf: waxtap.FormatAPE, want: false},
+		{codec: "wma", tf: waxtap.FormatAAC, want: false},
+		{codec: "musepack", tf: waxtap.FormatAAC, want: false},
+		// PCM belongs to its container, not to a codec family: the same
+		// samples are RIFF in a WAV and big-endian in an AIFF, so both the
+		// codec and the container have to match.
+		{codec: "pcm_s16le", container: "wav", tf: waxtap.FormatWAV, want: true},
+		{codec: "pcm_s16be", container: "aiff", tf: waxtap.FormatAIFF, want: true},
+		{codec: "pcm_s16be", container: "aifc", tf: waxtap.FormatAIFF, want: true},
+		{codec: "pcm_s16le", container: "wav", tf: waxtap.FormatAIFF, want: false},
+		{codec: "pcm_s16be", container: "aiff", tf: waxtap.FormatWAV, want: false},
+		// PCM carried in an MP4 is not a file either target already holds.
+		{codec: "pcm_s16le", container: "mp4", tf: waxtap.FormatWAV, want: false},
+		{codec: "flac", container: "flac", tf: waxtap.FormatWAV, want: false},
+		// The answer for PCM is a verbatim byte copy, so the output's own
+		// container has to agree too: a WAV asked for under a Matroska name
+		// is a conversion, not a file that already exists.
+		{codec: "pcm_s16le", container: "wav", outExt: "mka", tf: waxtap.FormatWAV, want: false},
+		{codec: "pcm_s16le", container: "wav", outExt: "mp4", tf: waxtap.FormatWAV, want: false},
+		{codec: "pcm_s16be", container: "aiff", outExt: "wav", tf: waxtap.FormatAIFF, want: false},
+		{codec: "pcm_s16be", container: "aiff", outExt: "aifc", tf: waxtap.FormatAIFF, want: true},
+		// A remux carries the packets into the named container, so a codec
+		// the container holds still matches whatever the output is called.
+		{codec: "opus", container: "ogg", outExt: "mka", tf: waxtap.FormatOpus, want: true},
 	}
 	for _, c := range cases {
-		if got := matchesTargetFamily(c.codec, c.tf); got != c.want {
-			t.Errorf("matchesTargetFamily(%q, %v) = %v, want %v", c.codec, c.tf, got, c.want)
+		p := waxtap.AudioProbe{Codec: c.codec, Container: c.container}
+		ext := c.outExt
+		if ext == "" {
+			ext = transcodeExt(c.tf)
+		}
+		if got := matchesTargetFamily(p, c.tf, ext); got != c.want {
+			t.Errorf("matchesTargetFamily(%q in %q -> .%s, %v) = %v, want %v", c.codec, c.container, ext, c.tf, got, c.want)
 		}
 	}
 }

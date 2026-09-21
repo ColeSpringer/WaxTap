@@ -187,47 +187,51 @@ func TestInfoSubstitutionBreadcrumb(t *testing.T) {
 	})
 }
 
-// TestWatchPageBreadcrumb covers forced WEB metadata served from the watch-page
-// fallback. The note belongs only on a forced WEB read; on the default chain it
-// would imply a token issue when the client fallback simply settled on WEB.
-//
-// info replaced this with the Client line's "(via watch page)" suffix, but
-// formats prints no Client line, so the breadcrumb is its only watch-page
-// signal and has to stay. TestFormatsKeepsWatchPageBreadcrumb pins the call
-// site; this covers the gating.
-func TestWatchPageBreadcrumb(t *testing.T) {
-	webViaWatch := &waxtap.InfoResult{
-		Video:        &waxtap.Video{ID: "dummyVideo0", Title: "T", Author: "A"},
-		Client:       "WEB",
-		ViaWatchPage: true,
+// A formats listing that came from the watch page says so, on every client:
+// the watch page needs no PO token, which is the fact worth reporting, and a
+// client substitution is a detail of it rather than a separate note.
+func TestFormatsWatchPageNote(t *testing.T) {
+	cases := []struct {
+		name  string
+		info  *waxtap.InfoResult
+		want  string // "" means no note
+		avoid string
+	}{
+		{
+			name: "forced web fell back",
+			info: &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB", ViaWatchPage: true},
+			want: "listing WEB formats from the watch-page fallback (no PO token)",
+		},
+		{
+			name:  "a substitution names what was asked for",
+			info:  &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB", ViaWatchPage: true, SubstitutedFrom: "WEB_EMBEDDED_PLAYER"},
+			want:  "requested WEB_EMBEDDED_PLAYER; listing WEB formats from the watch-page fallback (no PO token)",
+			avoid: "",
+		},
+		{
+			name: "a direct read says nothing",
+			info: &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB"},
+		},
 	}
-
-	t.Run("forced web prints breadcrumb", func(t *testing.T) {
-		var errBuf bytes.Buffer
-		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{client: "web"}}
-		emitWatchPageBreadcrumb(env, webViaWatch)
-		if !strings.Contains(errBuf.String(), "watch-page fallback (no PO token)") {
-			t.Errorf("want the watch-page breadcrumb, got:\n%s", errBuf.String())
-		}
-	})
-
-	t.Run("default chain does not", func(t *testing.T) {
-		var errBuf bytes.Buffer
-		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{}}
-		emitWatchPageBreadcrumb(env, webViaWatch)
-		if errBuf.Len() != 0 {
-			t.Errorf("unforced client must print no breadcrumb, got:\n%s", errBuf.String())
-		}
-	})
-
-	t.Run("forced web but not via watch page", func(t *testing.T) {
-		var errBuf bytes.Buffer
-		env := &appEnv{out: io.Discard, errOut: &errBuf, cfg: &appConfig{client: "web"}}
-		emitWatchPageBreadcrumb(env, &waxtap.InfoResult{Video: &waxtap.Video{ID: "dummyVideo0"}, Client: "WEB"})
-		if errBuf.Len() != 0 {
-			t.Errorf("a direct WEB read must print no breadcrumb, got:\n%s", errBuf.String())
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{}, notes: &noteCollector{}}
+			noteFormatsSource(env, tc.info)
+			notes := env.notesJSON()
+			if tc.want == "" {
+				if len(notes) != 0 {
+					t.Fatalf("notes = %v, want none", notes)
+				}
+				return
+			}
+			if len(notes) != 1 || notes[0].Code != string(noteWatchPageFormats) {
+				t.Fatalf("notes = %v, want one %s", notes, noteWatchPageFormats)
+			}
+			if notes[0].Detail != tc.want {
+				t.Errorf("detail = %q, want %q", notes[0].Detail, tc.want)
+			}
+		})
+	}
 }
 
 // TestInfoLiveStatusJSON covers the additive liveStatus/availability keys. They
@@ -373,19 +377,6 @@ func TestInfoJSONViaWatchPageAdditive(t *testing.T) {
 // errNoBestAudio stands in for the selector's "nothing eligible" error in
 // rendering tests, which never exercise format selection.
 var errNoBestAudio = errors.New("no best audio")
-
-// formats has no Client line to carry the "(via watch page)" suffix, so
-// removing its breadcrumb would leave a watch-page listing with no signal at
-// all. This pins the call site the way the info suffix pins its own.
-func TestFormatsKeepsWatchPageBreadcrumb(t *testing.T) {
-	src, err := os.ReadFile("formats.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "emitWatchPageBreadcrumb(env, info)") {
-		t.Error("formats.go no longer emits the watch-page breadcrumb; it has no Client line to carry the suffix instead")
-	}
-}
 
 // TestInfoSelectionFlags covers F15's CLI half: info can be asked what a
 // specific request would pick, and it validates that request through the helpers

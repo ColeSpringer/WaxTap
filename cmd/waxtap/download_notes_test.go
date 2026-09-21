@@ -117,6 +117,17 @@ func TestWarnContainerExtMismatch(t *testing.T) {
 		{"format transcode suppresses", &downloadFlags{format: "flac"}, res("/tmp/out.flac", "webm"), ""},
 		{"no output path", &downloadFlags{}, res("", "webm"), ""},
 		{"no source extension", &downloadFlags{}, res("/tmp/out.m4a", ""), ""},
+		// A cover-art embed remuxes a WebM into its codec's own Ogg and the
+		// result says which container the file is really in; the run reports
+		// that as the remux it is, not as a mismatch.
+		{"cover-art remux reports itself", &downloadFlags{embedThumbnail: true},
+			&waxtap.Result{OutputPath: "/tmp/out.opus", SourceFormat: waxtap.Format{Extension: "webm"}, OutputFormat: waxtap.Format{Extension: "opus"}},
+			"remuxed to Ogg so the cover art could be embedded"},
+		// An embed that did not remux still warns on a mismatch: the source
+		// container held the picture, so the bytes are the source's.
+		{"embed without a remux still warns", &downloadFlags{embedThumbnail: true},
+			&waxtap.Result{OutputPath: "/tmp/out.opus", SourceFormat: waxtap.Format{Extension: "webm"}, OutputFormat: waxtap.Format{Extension: "webm"}},
+			"output path uses .opus, but the source container is .webm"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

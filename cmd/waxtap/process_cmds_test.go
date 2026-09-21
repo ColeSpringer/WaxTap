@@ -281,6 +281,17 @@ func TestBitDepthSurfaceAndGuards(t *testing.T) {
 			t.Errorf("--bit-depth %s = %v, want ErrIncompatibleSpec", depth, err)
 		}
 	}
+	// A depth the encoder could never take is refused before the note saying
+	// this format would have ignored it. Noting that the mistake does not
+	// matter, a moment before refusing the run for that mistake, reads as two
+	// answers to one question.
+	_, stderr, code := runMain(t, "transcode", in, "--format", "mp3", "--bit-depth", "20", "-o", filepath.Join(dir, "x.mp3"))
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("stderr = %q, want the refusal alone: the inert note must not precede it", stderr)
+	}
 	for _, depth := range []string{"16", "24"} {
 		out := filepath.Join(dir, "ok"+depth+".flac")
 		if err := runProcessCmd(t, "transcode", in, "--format", "flac", "--bit-depth", depth, "-o", out); err != nil {
@@ -489,5 +500,36 @@ func TestDispatchProcessNotesDroppedPlaylist(t *testing.T) {
 		waxtap.ProcessSpec{Output: waxtap.ToFile(filepath.Join(t.TempDir(), "out.flac"))}, false)
 	if !strings.Contains(buf.String(), "ignoring playlist PLtest123456789") {
 		t.Errorf("errOut = %q, want a dropped-playlist note", buf.String())
+	}
+}
+
+// A knob the format ignores is still a knob the encoder's rules apply to. An
+// out-of-range Vorbis --bitrate is the case a restated subset of those rules
+// let through: the note said it would be ignored, and the run then refused it
+// for the very value the note called harmless.
+func TestKnobValidationPrecedesTheInertNote(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	synthAudio(t, in, "pcm_s16le")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"vorbis rate under the plausibility floor", []string{"--format", "vorbis", "--bitrate", "500"}},
+		{"flac depth off the table", []string{"--format", "flac", "--bit-depth", "20"}},
+		{"mp3 rate past the ceiling", []string{"--format", "mp3", "--bitrate", "9000000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"transcode", in}, tc.args...)
+			args = append(args, "-o", filepath.Join(dir, tc.name+".out"), "--json")
+			stdout, stderr, code := runMain(t, args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2: %s%s", code, stdout, stderr)
+			}
+			if strings.Contains(stderr, "note:") {
+				t.Errorf("stderr = %q, want the refusal alone: the inert note must not precede it", stderr)
+			}
+		})
 	}
 }

@@ -153,11 +153,22 @@ type Result struct {
 
 	Cut     bool          // an effective cut was rendered
 	Removed time.Duration // audio removed by the cut
-	// Keeps are the kept source spans the effective cut composed, in order, and
-	// Crossfade the join overlap used; nil and 0 when no effective cut ran.
-	// Callers remap source-timeline metadata (chapter marks) through them.
-	Keeps            []cutrange.Range
-	Crossfade        time.Duration
+	// Keeps are the spans the output really holds, in order, and Crossfade the
+	// join overlap used; nil and 0 when no effective cut ran. A packet copy
+	// snaps each interior join inward to the packet grid, so these are its
+	// landed spans; a re-encode keeps exactly what was asked. Callers remap
+	// source-timeline metadata (chapter marks) through them.
+	Keeps     []cutrange.Range
+	Crossfade time.Duration
+	// CutMode is how the cut was rendered: media.ModeCopy for a packet copy,
+	// ModeCopyExact for one with spliced joins, ModeAccurate for a decode.
+	// Meaningful only when Cut is set.
+	CutMode media.Mode
+	// CutSnaps counts the interior joins a packet copy moved inward to the
+	// packet grid and CutSnapMax is the largest single move; both zero for a
+	// decode and for a copy whose edges already sat on the grid.
+	CutSnaps         int
+	CutSnapMax       time.Duration
 	Transcoded       bool        // a re-encode ran (not a container copy)
 	OutputCodec      media.Codec // codec written to OutputPath
 	LoudnessMeasured bool        // input loudness was measured
@@ -198,6 +209,13 @@ type Result struct {
 	// nil when the probe failed. Callers read it for authoritative output
 	// rate/channels/duration/size.
 	OutputProbe *media.ProbeResult
+
+	// EncodeBitRate is the encoder's own rate for an encode that took a
+	// Bitrate: WaxFlow's plan (TranscodePlan.BitRate), which is the rate it
+	// really runs at when the request is not one it supports exactly. 0
+	// otherwise. WaxTap encodes Opus CBR (OpusVBR unset), so the Opus ceiling
+	// is what is reported there; Vorbis never carries a rate.
+	EncodeBitRate int
 
 	// Levels is WaxFlow's level measurement of the delivered file: clipped
 	// samples, output true peak, and whether a quantizer ran. It comes from the
@@ -340,7 +358,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// requested container copy must fail on an incompatible extension.
 	if spec.Codec == media.CodecCopy && (effectiveCut || remux || fold > 0) {
 		ext := containerExt(output)
-		copyOnly := remux || spec.CutMode == media.ModeCopy
+		copyOnly := remux || spec.CutMode == media.ModeCopy || spec.CutMode == media.ModeCopyExact
 		noContainer := effectiveCut && fold == 0 && (ext == "" || ext == "copy")
 		// A source WaxFlow only decodes has no packets any container can carry
 		// unchanged, so every request to keep them fails for the one reason,
@@ -355,19 +373,21 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			return Result{}, fmt.Errorf("%w: cannot copy %s without a container extension; choose one that fits the source (%s), or pass --format to re-encode",
 				waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), containerSuggestion(res.SourceCodec))
 		}
+		// The container rule, one statement of it in media.OutputCodecFor: a
+		// container that can carry the source codec keeps it (the copy above
+		// stands), and one that cannot takes its own usual encoder. An
+		// extension naming no container at all does not constrain the write,
+		// so it keeps the copy and the muxer is forced from the format.
 		if !containerAccepts(ext, res.SourceCodec) {
-			// A name WaxTap only reads is refused whatever the source: there is
-			// no "transcode instead" into it, and no encoder to infer for it.
-			if name, unwritable := media.DecodeOnlyContainer(ext); unwritable {
-				return Result{}, fmt.Errorf("%w: cannot write a .%s file: WaxTap reads %s but does not write it; choose an output extension WaxTap writes, or pass --format to re-encode",
-					waxerr.ErrIncompatibleSpec, ext, name)
+			c, _, cerr := media.OutputCodecFor(ext, res.SourceCodec)
+			if cerr != nil {
+				// A name WaxTap only reads is refused whatever the source:
+				// there is no "transcode instead" into it, and no encoder to
+				// infer for it.
+				return Result{}, fmt.Errorf("%w; choose an output extension WaxTap writes, or pass --format to re-encode", cerr)
 			}
 			if copyOnly {
 				return Result{}, fmt.Errorf("%w: cannot copy %s into a .%s container; transcode instead", waxerr.ErrIncompatibleSpec, sourceCodecLabel(res.SourceCodec), ext)
-			}
-			c, ok := containerCodec(ext)
-			if !ok {
-				return Result{}, fmt.Errorf("%w: cannot infer an encoder for the .%s container; pass --format", waxerr.ErrIncompatibleSpec, ext)
 			}
 			spec.Codec = c
 			transcoding = true
@@ -394,7 +414,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// reach the same silent downgrade. Placed after container resolution so the
 	// container-mismatch path (which already honors ModeCopy) reports its own
 	// clearer error first.
-	if effectiveCut && spec.CutMode == media.ModeCopy && spec.Codec != media.CodecCopy {
+	if effectiveCut && (spec.CutMode == media.ModeCopy || spec.CutMode == media.ModeCopyExact) && spec.Codec != media.CodecCopy {
 		return Result{}, fmt.Errorf("%w: a copy cut cannot re-encode, but this spec encodes to %s; drop the copy mode or the encode",
 			waxerr.ErrIncompatibleSpec, spec.Codec)
 	}
@@ -428,8 +448,43 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	headerGain := apply && !spec.Loudness.PeakLimit && !effectiveCut && fold == 0 && srcChannels <= 2 &&
 		res.SourceCodec == "opus" && spec.Codec == media.CodecOpus && spec.Bitrate == 0
 
+	// Ask WaxFlow what the encode really delivers, once, for the two questions
+	// that need it: the width a measurement has to fold to, and the rate the
+	// encoder runs at when one was requested. A plan error is an encode that
+	// would fail (a rate under the encoder's floor lands here), so it is
+	// returned before anything is written.
+	measureFold := fold
+	needFold := measure && transcoding && fold == 0 && srcChannels > 2
+	if transcoding && ((spec.Bitrate > 0 && media.TakesBitRate(spec.Codec)) || needFold) {
+		// Channels: fold, so the plan describes the encode that will really
+		// run. The AAC family's rate floor is per channel, so a plan taken at
+		// the source width would report a rate the folded encode never uses.
+		n, br, perr := r.PlanEncode(ctx, input, output, media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth, Channels: fold})
+		if perr != nil {
+			return Result{}, perr
+		}
+		if needFold && n > 0 && n < srcChannels {
+			measureFold = n
+		}
+		// Only where a rate was actually asked for and taken. A PCM or
+		// lossless plan still projects a BitRate (rate times channels times
+		// depth, for PCM), which describes the output rather than answering
+		// the request, and reporting it as an adjustment would claim the WAV
+		// encoder "cannot run at 128000 b/s" beside a note saying the flag
+		// was ignored.
+		if spec.Bitrate > 0 && media.TakesBitRate(spec.Codec) {
+			res.EncodeBitRate = br
+		}
+	}
+
 	// Measure after resolving the cut. The composed cut audio is measured, so the
 	// gain matches the encoded bytes.
+	//
+	// It measures the requested keeps, while a packet copy delivers the landed
+	// ones. The two can only differ by under one packet at each interior join,
+	// and the measurement has to precede the render that decides where they
+	// land, so closing the gap would mean cutting twice for a difference of
+	// milliseconds in an integrated figure over the whole programme.
 	var measured loudness.Loudness
 	if measure {
 		// The measurement folds to the width the encode delivers. An explicit
@@ -437,16 +492,6 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// the other, and the gain has to be computed on the audio the encoder
 		// meters either way, since a fold moves the integrated loudness and the
 		// true peak both. The plan is WaxFlow's own, so the two cannot disagree.
-		measureFold := fold
-		if transcoding && fold == 0 && srcChannels > 2 {
-			n, perr := r.PlanOutputChannels(ctx, input, output, media.Spec{Codec: spec.Codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth})
-			if perr != nil {
-				return Result{}, perr
-			}
-			if n > 0 && n < srcChannels {
-				measureFold = n
-			}
-		}
 		send(StageAnalyzing)
 		if effectiveCut {
 			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, measureFold, sourceSamples)
@@ -515,8 +560,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				Total:              total,
 				Crossfade:          spec.Crossfade,
 				CopyCut:            copyCut,
-				RequireCopyCutMode: spec.CutMode == media.ModeCopy,
+				RequireCopyCutMode: spec.CutMode == media.ModeCopy || spec.CutMode == media.ModeCopyExact,
 				RequireCopyFormat:  remux,
+				SpliceTrims:        spec.CutMode == media.ModeCopyExact,
 				Encode:             fallback,
 				SourceSamples:      sourceSamples,
 			})
@@ -525,6 +571,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			}
 			res.Cut = cres.Applied
 			res.Removed = cres.Removed
+			res.Keeps = cres.Keeps
+			res.CutMode = cres.Mode
+			res.CutSnaps, res.CutSnapMax = cres.Snaps, cres.SnapMax
 			res.Levels = cres.Levels
 			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, cres.InputWarnings)
 			// A copy cut that fell back to a re-encode (cut-remux declined the source
@@ -613,7 +662,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		if res.Transcoded || res.Cut {
 			want := total
 			if effectiveCut {
-				want = cutrange.OutputDuration(keeps, spec.Crossfade)
+				// The landed keeps, not the request: a packet copy gives up
+				// under one packet at each interior join, so a many-join cut
+				// measured against the request would read as input damage.
+				want = cutrange.OutputDuration(res.Keeps, spec.Crossfade)
 			}
 			if note := media.ShortDecodeNote(op.Format.Duration, want); note != "" {
 				res.SourceWarnings = append(res.SourceWarnings, note)
@@ -862,33 +914,7 @@ func clampFloat(v, lo, hi float64) float64 {
 // default. Without it these fallbacks write RIFF bytes into an AIFF file. outExt
 // comes from containerExt, already lowercased.
 func sourceEncodeCodec(name, outExt string) (media.Codec, bool) {
-	switch strings.ToLower(name) {
-	case "opus":
-		return media.CodecOpus, true
-	case "aac":
-		return media.CodecAAC, true
-	case "he-aac":
-		return media.CodecHEAAC, true
-	case "vorbis":
-		return media.CodecVorbis, true
-	case "mp3":
-		return media.CodecMP3, true
-	case "flac":
-		return media.CodecFLAC, true
-	case "alac":
-		return media.CodecALAC, true
-	case "wavpack":
-		return media.CodecWavPack, true
-	case "ape":
-		return media.CodecAPE, true
-	}
-	if strings.HasPrefix(strings.ToLower(name), "pcm") {
-		if media.IsAIFFExt(outExt) {
-			return media.CodecAIFF, true
-		}
-		return media.CodecWAV, true
-	}
-	return media.CodecCopy, false
+	return media.SourceFamilyCodec(name, outExt)
 }
 
 // sourceCodecLabel formats a probed codec name for error messages.
@@ -927,33 +953,4 @@ func containerSuggestion(codec string) string {
 		return strings.Join(exts, "/")
 	}
 	return ".webm/.m4a/.ogg/.mka"
-}
-
-// containerCodec returns the default encoder for a container extension. It
-// reports false for an unknown extension.
-func containerCodec(ext string) (media.Codec, bool) {
-	if media.IsAIFFExt(ext) {
-		return media.CodecAIFF, true
-	}
-	switch ext {
-	case "flac":
-		return media.CodecFLAC, true
-	case "wav":
-		return media.CodecWAV, true
-	case "mp3":
-		return media.CodecMP3, true
-	case "m4a", "mp4", "m4b", "aac":
-		return media.CodecAAC, true
-	case "ogg", "oga":
-		return media.CodecVorbis, true
-	case "opus":
-		return media.CodecOpus, true
-	case "webm", "mka", "mkv":
-		return media.CodecOpus, true
-	case "wv":
-		return media.CodecWavPack, true
-	case "ape":
-		return media.CodecAPE, true
-	}
-	return media.CodecCopy, false
 }

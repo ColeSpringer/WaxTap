@@ -183,7 +183,10 @@ func TestExitCodeFor(t *testing.T) {
 		want int
 	}{
 		{nil, 0},
-		{context.Canceled, 130},
+		{errors.Join(errInterrupted, context.Canceled), 130},
+		// A cancellation with no signal marker came from inside WaxTap: it is a
+		// defect, not an interrupt, and reporting 130 would blame the user.
+		{context.Canceled, 1},
 		{waxtap.ErrVideoUnavailable, 3},
 		{waxtap.ErrLiveNotStarted, 3}, // availability verdicts share exit 3
 		{waxtap.ErrAgeRestricted, 3},
@@ -212,6 +215,9 @@ func TestExitCodeFor(t *testing.T) {
 		// A proxy that answers CONNECT with 407 arrives untyped from net/http; the
 		// transport hook makes it classifiable instead of exit 1 (F7).
 		{&url.Error{Op: "Get", URL: "x", Err: &proxyStatusError{status: http.StatusProxyAuthRequired}}, 9},
+		// A proxy that answered nothing before the budget: the deadline is
+		// there too, and only the proxy case's position decides between them.
+		{&url.Error{Err: &proxyDeadlineError{host: "http://p:1", err: context.DeadlineExceeded}}, 9},
 		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},
 		{&fs.PathError{Op: "mkdir", Path: "/root/x", Err: errFake("permission denied")}, 10},
 		{errFake("other"), 1},
@@ -534,11 +540,21 @@ func TestFinalError(t *testing.T) {
 	if finalError(canceled, nil) != nil {
 		t.Error("finalError(nil) must stay nil")
 	}
-	// An error that already reports the cancellation is left alone rather than
-	// joined onto a duplicate of itself.
+	// An error that already reports the cancellation still gains the signal
+	// marker: without it the renderer cannot tell a cancellation a signal
+	// produced from one WaxTap made itself.
 	plain := fmt.Errorf("download: %w", context.Canceled)
-	if got := finalError(canceled, plain); got != plain {
-		t.Errorf("err = %v, want the already-canceled error returned unwrapped", got)
+	marked := finalError(canceled, plain)
+	if !errors.Is(marked, errInterrupted) || !errors.Is(marked, plain) {
+		t.Errorf("err = %v, want the cause marked as a signal", marked)
+	}
+	if c := classifyError(marked); c.exitCode != 130 || c.code != "canceled" {
+		t.Errorf("classify = %+v, want canceled/130", c)
+	}
+	// The same error without the marker is a defect WaxTap made, not an
+	// interrupt, and says so.
+	if c := classifyError(plain); c.exitCode != 1 || c.code != "error" || !strings.Contains(c.message, "no signal") {
+		t.Errorf("unmarked classify = %+v, want exit 1 naming the absent signal", c)
 	}
 
 	// Joining, not wrapping: main still needs to see an already-rendered marker
@@ -972,7 +988,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// Human form: the existing error line, then a note naming the file.
 	var human bytes.Buffer
-	renderErrorKept(&human, false, context.Canceled, nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&human, false, errors.Join(errInterrupted, context.Canceled), nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
 	got := human.String()
 	if !strings.HasPrefix(got, "waxtap: canceled\n") {
 		t.Errorf("human output does not start with the usual error line:\n%q", got)
@@ -987,7 +1003,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// JSON form: additive fields on the existing envelope.
 	var doc bytes.Buffer
-	renderErrorKept(&doc, true, context.Canceled, nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&doc, true, errors.Join(errInterrupted, context.Canceled), nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
 	var envelope struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		OutputPath    string `json:"outputPath"`
@@ -1203,5 +1219,40 @@ func TestSidecarHint_StatedWait(t *testing.T) {
 	moved := &waxtap.SidecarResponseError{StatusCode: 307, Reason: "redirected to http://127.0.0.1:4416/player-context/"}
 	if h := sidecarHint(moved); !strings.Contains(h, "canonical URL") {
 		t.Errorf("hint = %q, want the redirect explained", h)
+	}
+}
+
+// A per-item record classifies its own error with no access to main's signal
+// context, and a cancellation is the one class whose meaning depends on it. On
+// a real Ctrl-C every item must read as canceled, not as a defect claiming no
+// signal arrived beside a top-level exit 130.
+func TestPerItemCancellationFollowsTheRunsSignal(t *testing.T) {
+	err := fmt.Errorf("item 2: %w", context.Canceled)
+
+	// No signal: a cancellation from inside WaxTap is a defect, and says so.
+	setRunSignal(nil)
+	t.Cleanup(func() { setRunSignal(nil) })
+	if c := classifyError(err); c.exitCode != 1 || c.code != "error" || !strings.Contains(c.message, "no signal") {
+		t.Errorf("without a signal: classify = %+v, want exit 1 naming the absent signal", c)
+	}
+
+	// A signal fired: the same error is the interrupt it really was.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	setRunSignal(ctx)
+	c := classifyError(err)
+	if c.exitCode != 130 || c.code != "canceled" {
+		t.Errorf("after a signal: classify = %+v, want canceled/130", c)
+	}
+	if c.message != "canceled" {
+		t.Errorf("message = %q, want the plain canceled message", c.message)
+	}
+
+	// A live signal context is a run nobody interrupted.
+	live, stop := context.WithCancel(context.Background())
+	defer stop()
+	setRunSignal(live)
+	if c := classifyError(err); c.exitCode != 1 {
+		t.Errorf("with a live signal context: classify = %+v, want exit 1", c)
 	}
 }

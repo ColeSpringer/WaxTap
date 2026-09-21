@@ -14,10 +14,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/media"
+	"github.com/colespringer/waxtap/v3/internal/mediatest"
 	"github.com/colespringer/waxtap/v3/potoken"
 )
 
@@ -1250,6 +1253,151 @@ func TestFacade_StreamReadReportsIncompleteCap(t *testing.T) {
 	}
 }
 
+// A reader the caller closes before EOF still ends in StageDone: abandoning a
+// stream is the caller's decision, not a failure. The terminal event carries
+// what was taken and what was there, so a partial read is legible as one.
+func TestFacade_StreamCloseBeforeEOFIsDone(t *testing.T) {
+	body := bytes.Repeat([]byte("A"), 300_000)
+	umpBody := fSabrHappyBody([]byte("INIT"), body)
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "1" {
+				return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			return resp(http.StatusOK, umpBody), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, POTokenProvider: fProvider{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var terminal waxtap.Event
+	rc, info, err := c.Stream(context.Background(), waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Events: func(e waxtap.Event) {
+			if e.Stage == waxtap.StageDone || e.Stage == waxtap.StageFailed {
+				mu.Lock()
+				terminal = e
+				mu.Unlock()
+			}
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Stream open: %v", err)
+	}
+	// io.Copy, not ReadFull: a reader that embedded *os.File would promote its
+	// WriteTo, and io.Copy would take that path instead of the Read that does
+	// the counting, leaving the terminal event at zero bytes.
+	const take = 64 << 10
+	if _, rerr := io.Copy(io.Discard, io.LimitReader(rc, take)); rerr != nil {
+		t.Fatalf("read %d bytes: %v", take, rerr)
+	}
+	if cerr := rc.Close(); cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+
+	mu.Lock()
+	got := terminal
+	mu.Unlock()
+	if got.Stage != waxtap.StageDone {
+		t.Fatalf("terminal stage = %v, want StageDone: closing early is the caller's choice", got.Stage)
+	}
+	if got.Bytes != take {
+		t.Errorf("terminal Bytes = %d, want %d (what the caller took)", got.Bytes, take)
+	}
+	if got.Total != info.ContentLength || got.Total == 0 {
+		t.Errorf("terminal Total = %d, want the content length %d", got.Total, info.ContentLength)
+	}
+}
+
+// The same contract on the processed path, whose reader wraps a temp file.
+// It is the one that could regress: *os.File carries WriteTo, so a reader
+// embedding one promotes it and io.Copy never calls the Read that counts.
+func TestFacade_StreamProcessedCopyCountsItsBytes(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "src.wav")
+	if err := os.WriteFile(wav, mediatest.SineWAV(4, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	webm := filepath.Join(dir, "src.webm")
+	if _, err := media.NewRunner(media.RunnerConfig{}).Transcode(ctx, wav, webm, media.Spec{Codec: media.CodecOpus}); err != nil {
+		t.Fatalf("synth webm: %v", err)
+	}
+	body, err := os.ReadFile(webm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	umpBody := fSabrHappyBody(body[:len(body)/2], body[len(body)/2:])
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "1" {
+				return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			return resp(http.StatusOK, umpBody), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}, POTokenProvider: fProvider{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var terminal waxtap.Event
+	// A cut forces the processed path, so the reader is the temp-file one.
+	rc, info, err := c.Stream(ctx, waxtap.Request{
+		URL: "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{
+			Cut: &waxtap.CutSpec{Ranges: []waxtap.TimeRange{{Start: time.Second, End: 2 * time.Second}}},
+			Events: func(e waxtap.Event) {
+				if e.Stage == waxtap.StageDone || e.Stage == waxtap.StageFailed {
+					mu.Lock()
+					terminal = e
+					mu.Unlock()
+				}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream open: %v", err)
+	}
+	// Straight from the reader, with nothing wrapping it: a LimitReader would
+	// mask the very promotion this is here to catch, since it implements no
+	// WriteTo of its own.
+	n, rerr := io.Copy(io.Discard, rc)
+	if rerr != nil {
+		t.Fatalf("copy: %v", rerr)
+	}
+	if cerr := rc.Close(); cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+
+	mu.Lock()
+	got := terminal
+	mu.Unlock()
+	if got.Stage != waxtap.StageDone {
+		t.Fatalf("terminal stage = %v, want StageDone", got.Stage)
+	}
+	if got.Bytes != n || got.Bytes == 0 {
+		t.Errorf("terminal Bytes = %d, want the %d io.Copy moved: the copy must go through the counting Read", got.Bytes, n)
+	}
+	if got.Total != info.ContentLength || got.Total == 0 {
+		t.Errorf("terminal Total = %d, want the content length %d", got.Total, info.ContentLength)
+	}
+}
+
 // Test-only HTTP and UMP helpers.
 
 type roundTripFn func(*http.Request) (*http.Response, error)
@@ -1730,5 +1878,56 @@ func TestFacade_DeliveredStreamDisprovesRelayedVerdict(t *testing.T) {
 	// The verdict is still on the record for diagnosis.
 	if !strings.Contains(derr.Error(), "not a bot") {
 		t.Errorf("err = %v, want the demoted verdict kept in the per-attempt detail", derr)
+	}
+}
+
+// A forced WEB run whose player request failed is delivered by the watch page,
+// which needs no PO token: the token was minted and never exercised, and
+// nothing else in the result says so. A delivery that worked reads as proof
+// the token works, when it proves only that the watch page answered.
+func TestFacade_WatchPageDeliveryReportsTheUnexercisedToken(t *testing.T) {
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			return resp(http.StatusForbidden, []byte(`{"error":"denied"}`)), nil
+		case r.URL.Path == "/watch":
+			return resp(http.StatusOK, []byte(fullMetaWatchHTML)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			return resp(http.StatusOK, bytes.Repeat([]byte("A"), 1000)), nil
+		default:
+			return resp(http.StatusOK, nil), nil
+		}
+	})
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:      &http.Client{Transport: rt},
+		Client:          "web",
+		POTokenProvider: fProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "t.webm")
+	res, err := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToFile(out)},
+	})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if !res.ViaWatchPage {
+		t.Fatalf("ViaWatchPage = false; the fixture's /player refuses, so the watch page should have answered")
+	}
+	var detail string
+	for _, w := range res.Warnings {
+		if w.Code == waxtap.WarnWatchPageNoToken {
+			detail = w.Detail
+		}
+	}
+	if detail == "" {
+		t.Fatalf("warnings = %+v, want watch-page-no-token", res.Warnings)
+	}
+	if !strings.Contains(detail, "not exercised") {
+		t.Errorf("detail = %q, want it to say the token was not exercised", detail)
 	}
 }

@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -99,6 +100,28 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 			lyrics = &cutRemap{kept: len(kept), removed: dropped, input: lyricSets(sls)}
 		}
 	}
+	// A source holding nothing this transfer would either carry or lose has
+	// nothing to report, and running the write would report a failure about a
+	// file nobody asked to tag. That is the shape an empty input leaves: its
+	// only tag is an encoder stamp, which a re-encode excludes as its own.
+	// Anything the destination would drop is a real loss and still goes
+	// through, and a remux still runs whatever the report says, because it
+	// restores the very values the transfer excludes.
+	//
+	// A cut that remapped a set has something to say whatever the report
+	// holds, since an emptied replacement is not a report item at all; such a
+	// run reports the lines the cut took. Damage the parse found in the source
+	// is reported too, since it describes the input rather than the carry: a
+	// malformed entry beside nothing but own-audio values would otherwise go
+	// unsaid.
+	//
+	// The dry run costs no write: Transfer.Plan is a pure simulation.
+	if own == ownAudioDrop && chapters == nil && lyrics == nil && len(unprojectedSourceNotes(src)) == 0 {
+		if pre, perr := tr.Plan(dst.Capabilities().Format); perr == nil && nothingToSay(pre) {
+			c.log.Debug("tag carry: nothing the output could hold", "from", srcPath, "to", outPath)
+			return nil
+		}
+	}
 	plan, report, err := tr.Prepare(dst)
 	if err != nil {
 		return failed(err)
@@ -116,6 +139,16 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 
 	switch {
 	case cut != nil:
+		// A plain lyrics field whose lines are LRC is a synced set stored as
+		// text, so a cut moves it the same way. This runs after the transfer
+		// wrote, re-editing the document it returned, the way restoreOwnAudio
+		// does; a cut is always a drop of own-audio values, so the two arms
+		// cannot both run and the pass belongs here and nowhere else.
+		if dropped, lerr := c.remapLyricText(ctx, postDoc, outPath, src, cut, tc); lerr != nil {
+			notes = append(notes, fmt.Sprintf("timed lyric lines could not be remapped: %v", lerr))
+		} else if dropped > 0 {
+			notes = append(notes, lyricTextDropNote(dropped))
+		}
 		if chapters != nil {
 			tc.remapped(CarryChapters, *chapters, chaptersLanded(report))
 		}
@@ -157,6 +190,20 @@ func (c *Client) carryTags(ctx context.Context, srcPath, outPath, dest string, c
 	}
 	c.log.Debug("tag carry: metadata carried", "from", srcPath, "to", outPath)
 	return tc
+}
+
+// nothingToSay reports whether every piece of a transfer report is one the
+// transfer itself declines to move (Excluded: the source's own-audio values,
+// an encoder stamp among them). Such a report describes no carry to make and
+// no loss to warn about. A Dropped item is a loss the destination imposed and
+// is the user's to hear about, so it is not one of these.
+func nothingToSay(report waxlabel.TransferReport) bool {
+	for _, it := range report.Items {
+		if it.Disposition != waxlabel.Excluded {
+			return false
+		}
+	}
+	return true
 }
 
 // cutRemap is what a cut's remap of one set produced: the pieces handed to
@@ -308,6 +355,133 @@ func lyricsDropNote(dropped, setsDropped, origSets int) string {
 		note += fmt.Sprintf("; %d of %d sets were dropped", setsDropped, origSets)
 	}
 	return note
+}
+
+// remapLyricText moves the timed lines of a plain lyrics field through a cut,
+// the way a synced set is moved. Some taggers store LRC in the ordinary
+// LYRICS/UNSYNCEDLYRICS field rather than in a synced-lyrics structure, and
+// carried verbatim those timestamps point at audio the cut removed.
+//
+// Prose stays verbatim: a value whose lines do not parse as LRC has no
+// timestamps to move. It reports how many timed lines the cut dropped.
+func (c *Client) remapLyricText(ctx context.Context, postDoc *waxlabel.Document, outPath string, src *waxlabel.Document, cut *appliedCut, tc *TagCarry) (int, error) {
+	values, ok := src.Get(tag.Lyrics)
+	if !ok {
+		return 0, nil
+	}
+	texts := make([]string, 0, len(values))
+	dropped, changed, skippedOffset := 0, false, false
+	for _, v := range values {
+		if lrcHasOffset(v) {
+			// [offset:] shifts every timestamp in the sheet, and the parser
+			// applies it. Rewriting the times would bake it in while the tag
+			// stayed, so the next reader would apply it twice. Left alone and
+			// reported rather than quietly mangled.
+			texts = append(texts, v)
+			skippedOffset = true
+			continue
+		}
+		out, gone, moved := remapLRCLines(v, cut)
+		dropped += gone
+		changed = changed || moved
+		if out != "" || !moved {
+			texts = append(texts, out)
+		}
+	}
+	if skippedOffset {
+		return dropped, errLyricOffset
+	}
+	// Whether anything moved, not whether anything went: a cut that removes
+	// audio before every line drops none of them and shifts all of them, and
+	// leaving that value alone would point each timestamp past its own words.
+	if !changed {
+		return 0, nil
+	}
+	d, err := docOrParse(ctx, postDoc, outPath)
+	if err != nil {
+		return dropped, err
+	}
+	ed := d.Edit()
+	if len(texts) == 0 {
+		ed.Clear(tag.Lyrics)
+	} else {
+		ed.Set(tag.Lyrics, texts...)
+	}
+	plan, err := ed.Prepare()
+	if err != nil {
+		return dropped, err
+	}
+	if _, _, err := executeSaveBack(ctx, plan); err != nil {
+		return dropped, err
+	}
+	if dropped > 0 {
+		tc.countRemoved(CarryField, string(tag.Lyrics), dropped)
+	}
+	return dropped, nil
+}
+
+// errLyricOffset reports a sheet this pass will not touch; see remapLyricText.
+var errLyricOffset = errors.New("the sheet carries an [offset:] tag, which shifts every timestamp; its lines were left as they are")
+
+// remapLRCLines moves the timed lines of one LRC sheet through a cut, line by
+// line, and returns the rewritten sheet, how many timed lines the cut took,
+// and whether anything moved at all.
+//
+// Everything that is not a timed line is passed through untouched: ID tags
+// ([ar:], [ti:]), section headers ([Verse 1]), prose, and blanks all parse to
+// no timed line and are kept where they are. Rebuilding the sheet from
+// FormatLRC alone would delete every one of them.
+//
+// Parsing a line at a time is equivalent to parsing the sheet for the values
+// here, since the only document-scoped effect is [offset:], which the caller
+// has already excluded, and sorting, which does not change a timestamp.
+func remapLRCLines(text string, cut *appliedCut) (out string, dropped int, moved bool) {
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		parsed := waxlabel.ParseLRCFull(ln)
+		if len(parsed) == 0 {
+			kept = append(kept, ln) // not a timed line: leave it exactly as it is
+			continue
+		}
+		remapped, gone := remapSyncedLyrics([]waxlabel.SyncedLyrics{{Lines: parsed}}, cut)
+		dropped += gone
+		if len(remapped) == 0 {
+			moved = true // the cut took the whole line
+			continue
+		}
+		// Compared by time rather than by text: FormatLRC has its own
+		// spelling, so a sheet nothing moved would otherwise look rewritten
+		// and be written back reformatted for no reason.
+		if remapped[0].Lines[0].Time != parsed[0].Time || len(remapped[0].Lines) != len(parsed) {
+			moved = true
+		}
+		kept = append(kept, waxlabel.FormatLRC(remapped[0].Lines))
+	}
+	if !moved {
+		return text, dropped, false
+	}
+	return strings.Join(kept, "\n"), dropped, true
+}
+
+// lrcHasOffset reports an [offset:] tag, which applies to the whole sheet.
+func lrcHasOffset(text string) bool {
+	for _, ln := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "[") && strings.HasPrefix(strings.ToLower(strings.TrimPrefix(t, "[")), "offset:") {
+			return true
+		}
+	}
+	return false
+}
+
+// lyricTextDropNote is lyricsDropNote for lines stored as LRC in a plain
+// lyrics field, where there is no set to report dropped alongside them.
+func lyricTextDropNote(dropped int) string {
+	if dropped == 1 {
+		return "1 timed lyric line in LYRICS pointed at removed audio and was dropped"
+	}
+	return fmt.Sprintf("%d timed lyric lines in LYRICS pointed at removed audio and were dropped", dropped)
 }
 
 // restoreOwnAudio writes back the own-audio tags the transfer excluded. It

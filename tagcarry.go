@@ -24,6 +24,10 @@ type TagCarry struct {
 	// be read back, or the transfer could not be prepared or written. Items is
 	// then empty and the output holds none of the input's metadata. The same
 	// text reaches Warnings under WarnTagCarry.
+	//
+	// An output holding no audio cannot be tagged, so an empty input whose
+	// source carried tags reports its carry as failed here rather than
+	// silently.
 	Error string
 }
 
@@ -109,10 +113,11 @@ type CarryItem struct {
 	// DispositionRemoved, in the words the warning uses.
 	Reason string
 	// Removed counts what a cut took along with the audio it described:
-	// chapters whose whole span was removed, or synced-lyric lines whose
-	// instants were. They are not carry losses (the output has no audio for
-	// them), so a set that kept any piece stays DispositionCarried; one the
-	// cut emptied reports DispositionRemoved with Count 0.
+	// chapters whose whole span was removed, synced-lyric lines whose instants
+	// were, or the timed lines of a LYRICS text field whose lines are LRC.
+	// They are not carry losses (the output has no audio for them), so a set
+	// that kept any piece stays DispositionCarried; one the cut emptied
+	// reports DispositionRemoved with Count 0.
 	Removed int
 }
 
@@ -197,6 +202,19 @@ func (tc *TagCarry) remapped(kind CarryKind, r cutRemap, landed bool) {
 		}
 	}
 	tc.Items = out
+}
+
+// countRemoved records on an existing item what a cut took from it, for a
+// piece the transfer graded on its own (a field whose text a cut rewrote).
+// An item the report never produced gets none: there is nothing the output
+// holds to attach the count to.
+func (tc *TagCarry) countRemoved(kind CarryKind, key string, removed int) {
+	for i, it := range tc.Items {
+		if it.Kind == kind && it.Key == key {
+			tc.Items[i].Removed = removed
+			return
+		}
+	}
 }
 
 // insert places it before the first item of a later kind, so Items keeps the

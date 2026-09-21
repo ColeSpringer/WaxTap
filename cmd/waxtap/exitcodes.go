@@ -30,9 +30,13 @@ var exitCodeTable = []exitCodeEntry{
 	{6, "retired (formerly ffmpeg/ffprobe not found); never returned"},
 	{7, "incomplete stream or expired stream URL (another client may work)"},
 	{8, "PO token required (none configured, mint failed, or YouTube rejected it)"},
-	{9, "network failure (a proxy that is unreachable or rejects CONNECT, unreachable sidecar, connection error, or an upstream HTTP error response)"},
+	{9, "network failure (a proxy that is unreachable, never answers, or rejects CONNECT, unreachable sidecar, connection error, or an upstream HTTP error response)"},
 	{10, "local I/O failure (e.g. an unwritable output directory)"},
-	{130, "canceled (SIGINT)"},
+	{130, "canceled by SIGINT or SIGTERM"},
+	// 141 is the shell's report of the SIGPIPE that kills the process, not a
+	// code WaxTap returns. It is listed because a user of `download -o -` who
+	// pipes into `head` sees it and has nothing else to look it up in.
+	{141, "the stdout reader closed the pipe (download -o -); the shell reports the SIGPIPE, WaxTap prints nothing"},
 }
 
 // newExitCodesCmd prints the process exit codes.

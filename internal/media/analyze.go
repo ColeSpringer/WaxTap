@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -73,90 +74,70 @@ func (r *Runner) AnalyzeMedia(ctx context.Context, med format.Media, input strin
 	return res, classifyInputError(err, input)
 }
 
-// OpenAlbumConcat opens the gapless concatenation of inputs as one Media, for a
-// group loudness measurement. WaxFlow conforms members whose rate differs from
-// the envelope's, and opens each member lazily: only the track headers are read
-// up front (one descriptor at a time), and Concat opens and closes each member's
-// file as the timeline reaches it, so a large album holds one descriptor open
-// rather than one per track. The caller closes the returned Media via closer.
+// AnalyzeGroup measures inputs as one programme: each member decoded once at
+// channels[i] (its delivered width; 0 keeps its own) and the group's gates
+// run over every member's blocks at once (waxflow.Engine.AnalyzeGroup). It
+// returns the group figure, each member's own, and the damage each member's
+// read found. The members are decoded one after another inside the engine,
+// so the call takes one concurrency slot for its whole length; an album of
+// N tracks is N decodes, where the Concat pass this replaces was N decodes
+// on top of a per-track pass.
 //
-// measured is what a full decode of each input delivered, one frame count per
-// input in order; an entry below zero, or a slice too short to reach the
-// input, has this function measure the member itself (MeasureLength: a walk
-// when the container allows it, a decode otherwise). The timeline
-// holds every member to its declared length (it counts what the member
-// delivers and refuses a mismatch at the seam), so it refuses at plan time a
-// member whose headers state no length (raw ADTS) or only an advisory one: a
-// duration rounded to a time unit (ASF, a Matroska falling back to its Info
-// Duration) or a count exact about the wrong thing (a WAV carrying MP3
-// frames). A walk or a decode read to its end is the measurement the engine
-// asks for, and the per-track analysis that precedes the group measurement
-// is exactly that, so its count stands in for what such a member declared;
-// a member whose own length is countable keeps it. The seam check then
-// holds the run to the measurement rather than to the header, which is the
-// engine's design (see waxflow.ConcatSource.Track): the header was never a
-// number the decode could be held to.
+// No seam and no envelope: a member whose headers only estimate its length
+// (a WMA, a Matroska on its Info Duration) is measured to its end without a
+// declaration to be held to, and a mono member is measured as mono rather
+// than duplicated across a stereo pair. Errors name the member index, which
+// the album caller turns into a track name.
 //
-// channels, when nonzero, is the width the timeline is built at
-// (waxflow.ConcatOptions.Channels): every member whose count differs is
-// conformed to it by its own chain before it meets its siblings, a fold for a
-// wider member and a placement for a narrower one, which is the conversion the
-// member's own encode to that count applies. Zero keeps the envelope, the
-// widest member's layout, with narrower members placed into it. A fold applied
-// to the assembled timeline instead is what the engine refuses on a mixed-width
-// timeline (format.MixedWidth): dsp/mix normalizes each output row over every
-// source column, silent ones included, so that fold is not any member's own.
-func (r *Runner) OpenAlbumConcat(ctx context.Context, inputs []string, measured []int64, channels int) (format.Media, func() error, error) {
-	members := make([]waxflow.ConcatSource, len(inputs))
+// It holds one descriptor per member for the whole measurement, where the
+// Concat pass it replaces held one at a time: waxflow.GroupMember takes an
+// already-open Media the caller owns, with no lazy open to defer it, so an
+// album of N tracks is N open files. An ask for one is in
+// docs/upstream-requests.md.
+func (r *Runner) AnalyzeGroup(ctx context.Context, inputs []string, channels []int) (*waxflow.AnalyzeResult, []waxflow.AnalyzeResult, [][]string, error) {
+	if err := r.acquire(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	defer r.release()
+	members := make([]waxflow.GroupMember, 0, len(inputs))
+	medias := make([]format.Media, 0, len(inputs))
+	defer func() {
+		for _, m := range medias {
+			_ = m.Close()
+		}
+	}()
 	for i, in := range inputs {
-		track, err := r.albumTrack(in)
+		m, err := openFileMedia(in, hintFor(in))
 		if err != nil {
-			return nil, nil, err
+			// The member index, in the wording the engine uses for a member
+			// it could not read, so the album caller names the track from one
+			// pattern rather than two. The cause travels as it is: a file the
+			// filesystem would not open is an I/O failure (exit 10), not bad
+			// input, and openFileMedia has already classified the refusals
+			// that are.
+			return nil, nil, nil, fmt.Errorf("group member %d: %w", i, err)
 		}
-		path, hint := in, hintFor(in)
-		if track.Samples < 0 || track.SamplesAdvisory {
-			n := int64(-1)
-			if i < len(measured) {
-				n = measured[i]
-			}
-			if n < 0 {
-				length, err := r.MeasureLength(ctx, path)
-				if err != nil {
-					return nil, nil, err
-				}
-				n = length.Samples
-			}
-			track.Samples, track.SamplesAdvisory = n, false
+		medias = append(medias, m)
+		ch := 0
+		if i < len(channels) {
+			ch = channels[i]
 		}
-		members[i] = waxflow.ConcatSource{Track: track, Open: func() (format.Media, error) {
-			return openFileMedia(path, hint)
-		}}
+		members = append(members, waxflow.GroupMember{Media: m, Channels: ch})
 	}
-	med, err := waxflow.Concat(members, waxflow.ConcatOptions{Channels: channels})
+	res, err := r.engine.AnalyzeGroup(ctx, members, waxflow.AnalyzeOptions{})
 	if err != nil {
-		// A member the timeline cannot place or fold (a layout whose positions
-		// have no home in the target) comes back coded. Unclassified it exited 1;
-		// it is a statement about the set of files, so it exits 2 like every
-		// other input refusal. No file is named here: the member index is in
-		// the text, and the album caller turns that into a track name.
-		return nil, nil, classifyInputError(err, "")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, nil, nil, ctxErr
+		}
+		// No file is named here: the member index is in the text, and the
+		// album caller turns that into a track name.
+		return nil, nil, nil, classifyInputError(err, "")
 	}
-	return med, med.Close, nil
-}
-
-// albumTrack reads one input's default track headers, holding its descriptor only
-// for the read.
-func (r *Runner) albumTrack(input string) (container.Track, error) {
-	src, closeSrc, err := openSource(input)
-	if err != nil {
-		return container.Track{}, err
+	warnings := make([][]string, len(medias))
+	for i, m := range medias {
+		warnings[i] = InputWarnings(m)
 	}
-	defer closeSrc()
-	_, info, err := format.OpenDemuxer(src, hintFor(input), nil)
-	if err != nil {
-		return container.Track{}, classifyInputError(err, input)
-	}
-	return info.Default(), nil
+	return &res.Group, res.Members, warnings, nil
 }
 
 // Length is what a measurement of a file delivers: the frame count, its
@@ -331,20 +312,28 @@ func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, int
 
 // openFileMedia opens path as a Media whose Close also closes the underlying
 // file, so a lazily-opened Concat member releases its descriptor on advance.
+// It classifies what it opens the way openSource does: the open's own failure
+// travels untouched, so a permission or missing-file error stays an I/O
+// failure with its path, while a source the engine refuses to read (a
+// directory, FIFO, device, or socket) and a container it cannot parse come
+// back as bad input.
 func openFileMedia(path, hint string) (format.Media, error) {
-	f, err := os.Open(path)
+	// O_NONBLOCK keeps a FIFO with no writer from blocking the open; the
+	// engine's regular-file check then refuses it by name. Harmless on a
+	// regular file, and FileSource reads through the *os.File either way.
+	f, err := os.OpenFile(path, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
 		return nil, err
 	}
 	src, err := container.FileSource(f)
 	if err != nil {
 		_ = f.Close()
-		return nil, err
+		return nil, classifyInputError(err, path)
 	}
 	m, err := format.Open(src, hint, nil)
 	if err != nil {
 		_ = f.Close()
-		return nil, err
+		return nil, classifyInputError(err, path)
 	}
 	return &closingMedia{Media: m, closeFile: f.Close}, nil
 }

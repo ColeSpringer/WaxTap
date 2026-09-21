@@ -128,10 +128,12 @@ func parseCutMode(s string) (waxtap.CutMode, error) {
 		return waxtap.CutSmart, nil
 	case "copy":
 		return waxtap.CutCopy, nil
+	case "copy-exact":
+		return waxtap.CutCopyExact, nil
 	case "accurate":
 		return waxtap.CutAccurate, nil
 	default:
-		return 0, usagef("invalid --cut-mode %q (want smart|copy|accurate)", s)
+		return 0, usagef("invalid --cut-mode %q (want smart|copy|copy-exact|accurate)", s)
 	}
 }
 
@@ -242,6 +244,18 @@ func audioSelector(itag int, codec string, layout waxtap.ChannelLayout) (waxtap.
 	case itag > 0:
 		return waxtap.Itag(itag), nil
 	case codec != "":
+		// Validated up front like prefer:<codec>: a value that is neither a
+		// known family nor shaped like an exact codec id can never bind, and
+		// --codec is a hard filter, so it would fail the run with
+		// "no format matched" rather than naming the typo.
+		// An exact codec id is first-class here and matched verbatim, so the
+		// shape that names one (a dot or a dash, as in mp4a.40.2 or
+		// ec-3) passes whatever family it maps to.
+		known := format.KnownCodecFamilies()
+		if !slices.Contains(known, format.CodecFamily(codec)) && !strings.ContainsAny(codec, ".-") {
+			return waxtap.AudioSelector{}, usagef("invalid --codec %q (known codecs: %s; an exact codec id such as mp4a.40.2 is also accepted)",
+				codec, strings.Join(known, ", "))
+		}
 		return waxtap.Codec(codec).WithChannels(layout), nil
 	default:
 		return waxtap.BestAudio().WithChannels(layout), nil

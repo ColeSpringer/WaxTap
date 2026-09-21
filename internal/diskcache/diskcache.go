@@ -67,6 +67,44 @@ type Store struct {
 
 	mu  sync.Mutex       // serializes writes and eviction scans within the process
 	now func() time.Time // injectable clock for tests
+
+	tagOnce sync.Once // writes TagFile beside the entry directory, once per Store
+}
+
+// TagFile marks the directory WaxTap's disk cache lives in, in the form the
+// Cache Directory Tagging Specification gives (backup tools skip a directory
+// carrying it). It sits beside the schema-versioned entry directories, so a
+// clean can tell WaxTap's cache from a directory that merely shares its name.
+const TagFile = "CACHEDIR.TAG"
+
+// TagSignature is the specification's first line, which identifies the file.
+const TagSignature = "Signature: 8a477f597d28d172789f06886806bc55\n"
+
+// tagWriterLine names WaxTap as the tag's writer. CACHEDIR.TAG is a shared
+// convention, so the signature alone says only "something caches here"; this
+// is what tells WaxTap's cache from another tool's, and Clean reads it before
+// removing anything.
+const tagWriterLine = "# This file is a cache directory tag created by waxtap.\n"
+
+// tagBody is what the tag file holds: the signature the specification
+// requires, then two comment lines naming the writer.
+const tagBody = TagSignature + tagWriterLine +
+	"# For information about cache directory tags, see: https://bford.info/cachedir/\n"
+
+// writeTagOnce writes TagFile beside the entry directory if it is absent, once
+// per Store. Best-effort like every other write here: a cache that could not be
+// marked is still a cache, and Clean's fallback rule recognizes an unmarked one
+// by its entry directories.
+func (s *Store) writeTagOnce() {
+	s.tagOnce.Do(func() {
+		path := filepath.Join(filepath.Dir(s.dir), TagFile)
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if err := os.WriteFile(path, []byte(tagBody), 0o600); err != nil {
+			s.log.Debug("diskcache: write cache tag failed", "path", path, "err", err)
+		}
+	})
 }
 
 // New returns a Store with defaults applied. It never fails: directory creation
@@ -129,6 +167,7 @@ func (s *Store) Put(key string, data []byte) {
 		s.log.Debug("diskcache: create dir failed", "dir", s.dir, "err", err)
 		return
 	}
+	s.writeTagOnce()
 	path := s.pathFor(key)
 	if err := s.writeAtomic(path, data); err != nil {
 		s.log.Debug("diskcache: write failed", "err", err)

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,9 +21,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -245,18 +248,18 @@ func validateLocale(hl, gl string) error {
 }
 
 // readConfigFile loads the JSON config file: the --config flag, then
-// WAXTAP_CONFIG, then config.json in the user config dir. A missing default file
-// is not an error; an explicitly named file that is missing or malformed is.
+// WAXTAP_CONFIG, then config.json in the user config dir. Only the default
+// location is optional: a file the user named, by either --config or
+// WAXTAP_CONFIG, must exist, since a typo there silently runs on built-in
+// defaults and the run looks like the config had no effect.
 func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	var fc fileConfig
 	path, _ := cmd.Flags().GetString("config")
-	// Only --config requires the named file to exist. Missing environment and
-	// default paths use built-in defaults, while malformed files still return an
-	// error.
-	flagExplicit := cmd.Flags().Changed("config")
+	named := cmd.Flags().Changed("config")
+	from := "--config"
 	if path == "" {
 		if env := os.Getenv("WAXTAP_CONFIG"); env != "" {
-			path = env
+			path, named, from = env, true, "WAXTAP_CONFIG"
 		} else if dir, err := os.UserConfigDir(); err == nil {
 			path = filepath.Join(dir, cacheSubdir, "config.json")
 		}
@@ -266,8 +269,11 @@ func readConfigFile(cmd *cobra.Command) (fileConfig, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) && !flagExplicit {
-			return fc, nil // optional file is absent; use defaults
+		if errors.Is(err, fs.ErrNotExist) && !named {
+			return fc, nil // the default location is absent; use defaults
+		}
+		if named {
+			return fc, usagef("read config %s (from %s): %v", path, from, err)
 		}
 		return fc, usagef("read config %s: %v", path, err)
 	}
@@ -464,6 +470,17 @@ func effectiveDownmix(cmd *cobra.Command, cfg *appConfig, downmix bool) bool {
 // downmix setting for a processing command.
 func resolveChannels(cmd *cobra.Command, cfg *appConfig, channels string, downmix bool) (waxtap.ChannelLayout, bool, error) {
 	return channelsAndDownmix(resolveChannelsFlag(cmd, cfg, channels), effectiveDownmix(cmd, cfg, downmix))
+}
+
+// downmixFields is what a ProcessSpec should carry for a resolved layout: the
+// layout only when a fold is actually asked for. Channels without Downmix is
+// inert (the pipeline folds nothing without it) and is refused by
+// ValidateProcessSpec, so a command that is not folding must not send it.
+func downmixFields(layout waxtap.ChannelLayout, doDownmix bool) (waxtap.ChannelLayout, bool) {
+	if !doDownmix {
+		return waxtap.LayoutAny, false
+	}
+	return layout, true
 }
 
 // resolvedCacheDir returns the effective on-disk cache directory: the configured
@@ -741,6 +758,11 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 	if a.proxy == "" && !a.insecure && !envProxySet() {
 		return nil, nil
 	}
+	// Whether a proxy is really in play. tr.Proxy is never nil below (it
+	// defaults to ProxyFromEnvironment, which simply answers nil per request),
+	// so it cannot be the test: --insecure alone would otherwise take the
+	// proxy dial bound and the naming wrapper it has no use for.
+	proxied := a.proxy != "" || envProxySet()
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -771,10 +793,85 @@ func (a *appConfig) httpClient() (*http.Client, error) {
 	if a.insecure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit, diagnostics-only opt-in
 	}
+	if proxied {
+		// A dial through a proxy is a dial to one host on the local network
+		// or nearby, so 10 s is already a failure. It matters because the
+		// extraction budget is 45 s: a 30 s dial that hangs consumes it
+		// before anything can name the proxy. Only with a proxy: --insecure
+		// alone dials googlevideo directly, where 30 s is the right bound.
+		tr.DialContext = (&net.Dialer{Timeout: proxyDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	}
 	// The jar keeps the guest-session bootstrap cookies available behind a proxy.
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{Transport: tr, Jar: jar}, nil
+	var rt http.RoundTripper = tr
+	if proxied {
+		rt = &proxyTransport{RoundTripper: tr, proxyFor: tr.Proxy}
+	}
+	return &http.Client{Transport: rt, Jar: jar}, nil
 }
+
+// proxyDialTimeout bounds every dial made while a proxy is configured. A dial
+// through a proxy goes to one nearby host, so anything past this is a failure,
+// and the bound is what keeps a proxy that never accepts from eating a whole
+// extraction budget before it can be named.
+const proxyDialTimeout = 10 * time.Second
+
+// proxyTransport names the proxy in a failure the transport left bare. Go's
+// getConn returns the context error when the deadline wins the race against a
+// proxy dial or CONNECT, so a proxy that never answers under a short budget
+// surfaced as "context deadline exceeded" with nothing to act on.
+//
+// Whether the proxy ever answered is read off httptrace rather than off
+// responses: a slow first upstream request through a working proxy must not be
+// blamed on the proxy.
+//
+// Two hooks say it did. GotConn fires once a usable connection is in hand, but
+// for an HTTPS target that is after the origin's TLS handshake inside the
+// tunnel, so a handshake that hangs would never reach it. TLSHandshakeStart
+// fires as that handshake begins, which can only happen through a tunnel the
+// proxy opened. A deadline past either is the origin's, not the proxy's.
+// The flag is per request, not per transport: one RoundTripper serves the
+// whole run, so a sticky one would be set by the first connection any request
+// obtained and would silence every later proxy hang.
+//
+// A 407 needs no flag of its own. It comes back as proxyStatusError, which is
+// not a deadline, so the guard below returns it untouched.
+type proxyTransport struct {
+	http.RoundTripper
+	proxyFor func(*http.Request) (*url.URL, error) // tr.Proxy, for the name
+}
+
+func (p *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	var answered atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn:           func(httptrace.GotConnInfo) { answered.Store(true) },
+		TLSHandshakeStart: func() { answered.Store(true) },
+	}
+	r = r.WithContext(httptrace.WithClientTrace(r.Context(), trace))
+	resp, err := p.RoundTripper.RoundTrip(r)
+	if err == nil || answered.Load() || !errors.Is(err, context.DeadlineExceeded) || httpx.NamesTransportCause(err) {
+		return resp, err
+	}
+	u, perr := p.proxyFor(r)
+	if perr != nil || u == nil {
+		return resp, err // this request did not go through a proxy
+	}
+	return nil, &proxyDeadlineError{host: redactProxyValue(u.String()), err: err}
+}
+
+// proxyDeadlineError is a budget that expired before the proxy answered
+// anything: no connection was obtained, so the deadline is the proxy's to
+// explain rather than the upstream host's.
+type proxyDeadlineError struct {
+	host string
+	err  error
+}
+
+func (e *proxyDeadlineError) Error() string {
+	return fmt.Sprintf("no response from the proxy at %s before the deadline", e.host)
+}
+
+func (e *proxyDeadlineError) Unwrap() error { return e.err }
 
 func coalesceString(def string, layers ...*string) string {
 	v := def

@@ -87,6 +87,9 @@ func New(opts Options) (*Client, error) {
 	if q := opts.Politeness.PerHostQPS; math.IsNaN(q) || math.IsInf(q, 0) || q < 0 {
 		return nil, configErr("invalid PerHostQPS %v: must be a finite value >= 0", q)
 	}
+	if opts.Concurrency.Downloads < 0 || opts.Concurrency.Chunks < 0 {
+		return nil, configErr("invalid Concurrency: Downloads and Chunks must be >= 0 (0 selects the default); only Procs takes a negative value")
+	}
 	// The WEB player-context path mints its GVS token during SABR setup. Reject a
 	// missing provider during construction instead of failing each download.
 	if opts.PlayerContextProvider != nil && opts.POTokenProvider == nil {
@@ -466,16 +469,25 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 			return nil, err
 		}
 	}
+	// Pick the row the caller asked about (best audio by default, or the
+	// WithSelector row), with the caller's channel preference, so the content
+	// length and probed numbers land on the displayed row rather than a
+	// surround track that outranks it under no preference. The layout is
+	// applied as a default so a selector that named its own layout keeps it.
+	//
+	// It runs at every depth, ahead of the resolve gate, because a policy that
+	// named a codec nothing here carries is as worth saying on a listing as on
+	// a download: info reports the row a download would pick, so it must
+	// report the same reason the pick is not the one asked for.
+	idx, serr := selectIndex(ro.sel.WithDefaultChannels(ro.layout), ro.policy, format.Target{}, video.Formats)
+	if serr == nil {
+		pem := newEmitter(nil, "")
+		warnUnboundSourcePolicy(pem, ro.policy, video.Formats, video.Formats[idx], "the best audio is")
+		res.Warnings = append(res.Warnings, pem.collected()...)
+	}
 	if depth < InfoResolved {
 		return res, nil
 	}
-
-	// Resolve and probe the row the caller asked about (best audio by default, or
-	// the WithSelector row), with the caller's channel preference, so the content
-	// length and probed numbers land on the displayed row rather than a surround
-	// track that outranks it under no preference. The layout is applied as a
-	// default so a selector that named its own layout keeps it.
-	idx, serr := selectIndex(ro.sel.WithDefaultChannels(ro.layout), ro.policy, format.Target{}, video.Formats)
 	if serr != nil {
 		return res, nil // nothing resolvable; return the basic metadata
 	}
@@ -499,7 +511,7 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		em := newEmitter(nil, "")
 		refresh := c.directRefresh(Request{SourcePolicy: ro.policy}, id, format.Target{}, ext, video.Formats[idx].Itag, rs.ExpiresAt, em, &refreshStats{})
 		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx], refresh)
-		res.Warnings = em.collected()
+		res.Warnings = append(res.Warnings, em.collected()...)
 		if perr != nil {
 			return nil, perr
 		}
@@ -686,7 +698,7 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 		ChannelID: channelID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, channelEnumerateError(err, url, channelID)
 	}
 	if opts.Enrich {
 		if err := c.enrichEntries(ctx, pl, opts); err != nil {
@@ -694,6 +706,34 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 		}
 	}
 	return pl, nil
+}
+
+// channelEnumerateError names the channel behind an unavailable uploads feed.
+// A caller who asked for a channel gets "playlist unavailable" about a UU id
+// they never typed, and has no way to connect the two; the channel is what
+// they named, so the channel is what the refusal names.
+//
+// Only a channel reference is reworded: an explicit playlist is already the
+// thing the caller asked about.
+func channelEnumerateError(err error, url, channelID string) error {
+	if channelID == "" || !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
+		return err
+	}
+	// The handle or UC id the caller gave, not the resolved one: naming a
+	// channel back to them in terms they did not use helps nobody.
+	ref := channelID
+	if r, cerr := youtube.ExtractChannelRef(url); cerr == nil {
+		if r.ID != "" {
+			ref = r.ID
+		} else if r.URL != "" {
+			ref = r.URL
+		}
+	}
+	reason := fmt.Sprintf("channel %s has no uploads playlist that YouTube will list", ref)
+	if pu, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err); ok && pu.Reason != "" {
+		reason += " (" + pu.Reason + ")"
+	}
+	return &waxerr.PlaylistUnavailableError{Reason: reason}
 }
 
 // resolveEnumerateTarget maps an Enumerate URL to a playlist ID plus, for a

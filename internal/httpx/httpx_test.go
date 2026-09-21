@@ -572,10 +572,12 @@ func TestDoDeadlineFallsBackToEarlierCause(t *testing.T) {
 	var n atomic.Int32
 	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if n.Add(1) == 1 {
+			// A dial, not a proxyconnect: a proxy failure is not retried at
+			// all, so it could never reach the second attempt this shape needs.
 			return nil, &url.Error{
 				Op:  "Get",
 				URL: "http://example.invalid/audio",
-				Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("i/o timeout")},
+				Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")},
 			}
 		}
 		<-r.Context().Done()
@@ -593,8 +595,34 @@ func TestDoDeadlineFallsBackToEarlierCause(t *testing.T) {
 	if n.Load() < 2 {
 		t.Fatalf("only %d attempt(s) ran; the test never reached the second-attempt shape", n.Load())
 	}
+	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "dial" {
+		t.Fatalf("err = %v, want the earlier attempt's dial cause", err)
+	}
+}
+
+// A proxy is a fixed setting, so a dial that could not reach it will not reach
+// it on the next try. Retrying cost four attempts with backoff, which is how a
+// dead proxy consumed a whole extraction budget before anything named it.
+func TestDoDoesNotRetryAProxyDialFailure(t *testing.T) {
+	var n atomic.Int32
+	cause := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("i/o timeout")}
+	tr := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		n.Add(1)
+		return nil, &url.Error{Op: "Get", URL: "http://example.invalid/audio", Err: cause}
+	})
+	c := New(Config{
+		HTTPClient:  &http.Client{Transport: tr},
+		MaxRetries:  3,
+		BaseBackoff: time.Millisecond,
+		MaxBackoff:  time.Millisecond,
+	})
+
+	_, err := c.Do(newReq(t, context.Background(), "http://example.invalid/audio"))
+	if got := n.Load(); got != 1 {
+		t.Errorf("%d attempts ran, want 1: a proxy dial failure is not retried", got)
+	}
 	if op, ok := errors.AsType[*net.OpError](err); !ok || op.Op != "proxyconnect" {
-		t.Fatalf("err = %v, want the earlier attempt's proxyconnect cause", err)
+		t.Errorf("err = %v, want the proxyconnect cause returned as it is", err)
 	}
 }
 

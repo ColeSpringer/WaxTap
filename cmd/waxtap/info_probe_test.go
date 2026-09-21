@@ -76,6 +76,20 @@ func TestEmitInfoJSONOverlaysProbedBest(t *testing.T) {
 	if !strings.Contains(got, `"sampleRate": 48000`) || !strings.Contains(got, `"channels": 2`) {
 		t.Errorf("want the probed best row's numbers in formats[], got:\n%s", got)
 	}
+	// The document says the numbers are the stream's own, not the listing's.
+	if !strings.Contains(got, `"probed": true`) {
+		t.Errorf("want probed:true in the document, got:\n%s", got)
+	}
+
+	// A run without --probe omits the key rather than asserting false.
+	out.Reset()
+	info.Probed = false
+	if err := emitInfoJSON(env, info, 1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), `"probed"`) {
+		t.Errorf("want the probed key omitted without --probe, got:\n%s", out.String())
+	}
 }
 
 // A SABR-only pick cannot be staged, so --probe read nothing and the row still

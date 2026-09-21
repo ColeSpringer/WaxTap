@@ -75,6 +75,45 @@ func SilenceWAV(seconds, channels int) []byte {
 	return pcmWAV(seconds*44100, channels, 44100, func(int) float64 { return 0 })
 }
 
+// Segment is one stretch of a SegmentedWAV: Seconds long, a sine at FreqHz,
+// or digital silence when FreqHz is 0.
+type Segment struct {
+	Seconds float64
+	FreqHz  float64
+}
+
+// SegmentedWAV returns a 16-bit PCM WAV built from segments in order, channels
+// wide, at rate Hz, every tone at roughly -6 dBFS. It exists for the cut tests:
+// a removed span that is silent, or a tone the kept spans do not carry, is
+// detectable in the output where one long sine is not.
+func SegmentedWAV(channels, rate int, segments ...Segment) []byte {
+	if rate <= 0 {
+		rate = 44100
+	}
+	const amp = 0.5
+	type bound struct {
+		end  int
+		freq float64
+	}
+	var bounds []bound
+	frames := 0
+	for _, s := range segments {
+		frames += int(math.Round(s.Seconds * float64(rate)))
+		bounds = append(bounds, bound{frames, s.FreqHz})
+	}
+	return pcmWAV(frames, channels, rate, func(i int) float64 {
+		for _, b := range bounds {
+			if i < b.end {
+				if b.freq == 0 {
+					return 0
+				}
+				return amp * math.Sin(2*math.Pi*b.freq*float64(i)/float64(rate))
+			}
+		}
+		return 0
+	})
+}
+
 // QuietWithTransientWAV returns a 16-bit PCM WAV of a quiet 440 Hz sine (~-40
 // dBFS) carrying one half-millisecond full-scale transient, 44100 Hz.
 //

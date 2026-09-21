@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxtap/v3/internal/media"
 	"github.com/colespringer/waxtap/v3/internal/media/loudness"
@@ -39,6 +40,9 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	if err := validateProcessSpec(req.ProcessSpec); err != nil {
 		return nil, err
 	}
+	if req.Cut != nil && req.Cut.SponsorBlock != nil {
+		return nil, fmt.Errorf("%w: SponsorBlock needs a video ID, which a local file has none of; leave CutSpec.SponsorBlock nil on Process", waxerr.ErrIncompatibleSpec)
+	}
 	if req.Output.kind == outputFile {
 		// Ahead of the skip check: a directory at "d/a.wav/" stats as existing,
 		// and skip would answer "already done" to a path that never named a file.
@@ -50,7 +54,7 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 		}
 		if req.SkipIfExists && fileExists(req.Output.path) {
 			em.stage(StageSkipped)
-			return &Result{SourceKind: SourceLocalFile, InputPath: req.Input, OutputPath: req.Output.path}, nil
+			return &Result{SourceKind: SourceLocalFile, InputPath: req.Input, OutputPath: req.Output.path, Skipped: true}, nil
 		}
 		if err := ensureParentDir(req.Output.path); err != nil {
 			return nil, err
@@ -93,9 +97,11 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	// Local inputs have no SponsorBlock source, so no SponsorBlock segments were
 	// returned.
 	warnEmptyCut(em, req.Cut, pres, false)
+	warnCutSnapped(em, pres)
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
+	warnBitrateAdjusted(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
 	warnInputDamage(em, pres)
 	warnEmptyInput(em, pres)
@@ -192,6 +198,11 @@ type AudioProbe struct {
 	Codec string
 	// Channels is the channel count, or 0 when the probe did not report one.
 	Channels int
+	// Container is the container the audio was found in, as the engine names
+	// it ("wav", "ogg", "mka", ...), or "" when it could not be identified.
+	// A codec alone does not say which file the caller is looking at: PCM
+	// lives in WAV, AIFF, and MP4 alike.
+	Container string
 }
 
 // ProbeAudio reports the first audio stream in a local file. It returns
@@ -206,7 +217,7 @@ func (c *Client) ProbeAudio(ctx context.Context, path string) (AudioProbe, error
 	if !ok {
 		return AudioProbe{}, fmt.Errorf("%w: no audio stream in %s", ErrUnsupportedInput, path)
 	}
-	return AudioProbe{Codec: audio.CodecName, Channels: audio.Channels}, nil
+	return AudioProbe{Codec: audio.CodecName, Channels: audio.Channels, Container: probe.Format.Container}, nil
 }
 
 // AlbumLoudnessResult reports a group loudness measurement plus per-track
@@ -253,16 +264,17 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 	}
 	runner := c.engine()
 	probes := make([]albumProbe, len(paths))
-	widths := make([]int, len(paths))
 	for i, in := range paths {
 		probes[i] = probeAudio(ctx, runner, in)
-		widths[i] = probes[i].channels
 	}
 	// No folds: a measurement written to nothing is reported at the layout the
 	// files carry, and the caller chooses an encode later.
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths, nil, widths)
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, paths, nil)
 	if err != nil {
 		return nil, albumTrackError(err, paths)
+	}
+	if err := albumShortDecode(paths, probes, perTrack); err != nil {
+		return nil, err
 	}
 	res := &AlbumLoudnessResult{
 		Album:    loudnessInfo(album),
@@ -409,7 +421,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		return nil, fmt.Errorf("%w: album normalization requires an encode, not copy", waxerr.ErrIncompatibleSpec)
 	}
 	// Album processing always applies gain and does not build a ProcessSpec.
-	if err := validateLoudness(&LoudnessSpec{Mode: LoudnessApply, Target: target}); err != nil {
+	if err := validateLoudnessTarget(&LoudnessSpec{Mode: LoudnessApply, Target: target}); err != nil {
 		return nil, err
 	}
 	if err := validateBitrate(&spec); err != nil {
@@ -449,32 +461,45 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	for i, t := range tracks {
 		inputs[i] = t.Input
 	}
-	// Every input is probed before any measurement: the per-track fold is
-	// planned off the widths. The probes are kept for the write loop, which
-	// reads the same facts (damage, notes, emptiness, the source width the
-	// fold warning names).
+	// Every input is probed and planned before any measurement, in one pass:
+	// the probes are kept for the write loop, which reads the same facts
+	// (damage, notes, emptiness, the source width the fold warning names),
+	// and the plan says what each track's own encode delivers.
+	//
+	// Each track is measured at that width: a lossy row folds a source wider
+	// than stereo itself, and a gain derived from unfolded figures describes
+	// audio the encoder never meters.
 	probes := make([]albumProbe, len(tracks))
-	widths := make([]int, len(tracks))
+	folds := make([]int, len(tracks))
+	// The rate the encoder really runs at. The first track whose plan differs
+	// from the request supplies the figure; the warning's job is to say the
+	// album did not encode at the rate it was given. Any track, not track 0:
+	// the encoder's floor is per channel on the AAC family, so a mono member
+	// and a stereo one answer differently, and reading only the first made
+	// the warning depend on the order the caller listed its files in.
+	adjustedRate := 0
 	for i, t := range tracks {
 		probes[i] = probeAudio(ctx, runner, t.Input)
-		widths[i] = probes[i].channels
-	}
-	// Each track is measured at the width its own encode delivers: a lossy row
-	// folds a source wider than stereo itself, and a gain derived from
-	// unfolded figures describes audio the encoder never meters.
-	folds := make([]int, len(tracks))
-	for i, t := range tracks {
-		n, perr := runner.PlanOutputChannels(ctx, t.Input, t.Output, media.Spec{Codec: codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth})
+		n, br, perr := runner.PlanEncode(ctx, t.Input, t.Output, media.Spec{Codec: codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth})
 		if perr != nil {
-			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, perr)
+			// Named the way albumTrackError names one, so a single command
+			// cannot report a track two different ways; the index was
+			// zero-based besides, so the first file read as "track 0".
+			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %s: %w", filepath.Base(t.Input), perr)
 		}
-		if n > 0 && widths[i] > 0 && n < widths[i] {
+		if w := probes[i].channels; n > 0 && w > 0 && n < w {
 			folds[i] = n
 		}
+		if adjustedRate == 0 && spec.Bitrate > 0 && media.TakesBitRate(codec) && br > 0 && br != spec.Bitrate {
+			adjustedRate = br
+		}
 	}
-	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs, folds, widths)
+	album, perTrack, err := loudness.MeasureAlbum(ctx, runner, inputs, folds)
 	if err != nil {
 		return nil, albumTrackError(err, inputs)
+	}
+	if err := albumShortDecode(inputs, probes, perTrack); err != nil {
+		return nil, err
 	}
 
 	// One uniform gain for the whole album, capped or limited per the peak mode.
@@ -524,6 +549,10 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		res.PerTrack[i] = loudnessInfo(l)
 	}
 	em := newEmitter(nil, "")
+	if adjustedRate > 0 {
+		em.warn(WarnBitrateAdjusted, fmt.Sprintf("the %s encoder cannot run at %d b/s; it encoded at %d b/s, the nearest rate it supports",
+			codec, spec.Bitrate, adjustedRate))
+	}
 	var fold albumFold
 	var levels albumLevels
 	var carry albumCarryWarns
@@ -817,6 +846,12 @@ type albumProbe struct {
 	damage   []string
 	notes    []string
 	empty    bool
+	// duration is the length the container declares and advisory says the
+	// declaration is one a decode is not expected to match (ASF, a Matroska
+	// on its Info Duration). albumShortDecode holds a member to an exact
+	// declaration and lets an advisory one be whatever it reads.
+	duration time.Duration
+	advisory bool
 }
 
 func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
@@ -829,8 +864,32 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 		// Exactly 0 frames. -1 means the container states no length, which is
 		// not a claim that there is nothing there.
 		p.channels, p.codec, p.empty = a.Channels, a.CodecName, a.Samples == 0
+		p.duration, p.advisory = a.Duration, a.SamplesAdvisory || a.Samples < 0
 	}
 	return p
+}
+
+// albumShortDecode refuses a member that did not read to the length its
+// container states exactly. Every track in an album shares one gain, so a
+// figure computed over the 60% of a track that decodes would normalize the
+// whole record against a number that describes nothing; a single file warns
+// past the same damage and delivers what read, because there the user gets
+// the audio and the warning together.
+//
+// A declaration a decode is never expected to match (ASF, a Matroska on its
+// Info Duration) is not one to hold a member to; those read to their end and
+// the length they deliver is the length.
+func albumShortDecode(inputs []string, probes []albumProbe, perTrack []loudness.Loudness) error {
+	for i := range perTrack {
+		if i >= len(probes) || probes[i].advisory || probes[i].duration <= 0 {
+			continue
+		}
+		if note := media.ShortMeasureNote(perTrack[i].Duration, probes[i].duration); note != "" {
+			return fmt.Errorf("track %s: %w: %s; every track in an album shares one gain, so a measurement of part of one cannot derive it",
+				filepath.Base(inputs[i]), waxerr.ErrUnsupportedInput, note)
+		}
+	}
+	return nil
 }
 
 // albumDelivered reports the loudness of the normalized album, measuring it only
@@ -841,11 +900,10 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 // AlbumProcessResult.Delivered.
 //
 // The analytic shift is correct only because the group figure was measured at
-// the widths the encode delivers: loudness.MeasureAlbum folds a uniform set in
-// the measurement and builds a mixed set's timeline at the fold's width, each
-// folding member folded by its own chain before the seam, so album + gain
-// describes the files that were written rather than a wider mix of their
-// sources.
+// the widths the encode delivers: loudness.MeasureAlbum decodes each member at
+// its own delivered width and runs the gates over every member's blocks, so
+// album + gain describes the files that were written rather than a wider mix
+// of their sources.
 //
 // Deriving the analytic cases is not a shortcut: the measurement is a second
 // decode of every track in the album, and running it to confirm an answer that is
@@ -865,25 +923,17 @@ func albumDelivered(ctx context.Context, runner *media.Runner, outputs []string,
 		}
 	}
 	// Best-effort, like the pipeline's post-measure: every track is already
-	// written, so a failed measurement must not fail the album. No lengths
-	// are handed over: the outputs were just encoded, so all but a raw ADTS
-	// or a Matroska state a countable length, and the opener walks and
-	// counts those two itself. The write loop's Levels.Samples is not that
-	// number for ADTS, whose container carries no gapless trim, so the walk
-	// delivers the encoder's priming and padding on top of it.
-	med, closer, err := runner.OpenAlbumConcat(ctx, outputs, nil, 0)
-	if err != nil {
-		return nil
-	}
-	defer closer()
-	out, err := runner.AnalyzeMedia(ctx, med, "", 0)
+	// written, so a failed measurement must not fail the album. Each output is
+	// measured at the width it was written at (no fold), and the group's gates
+	// run over every one of them at once.
+	group, _, _, err := runner.AnalyzeGroup(ctx, outputs, nil)
 	if err != nil {
 		return nil
 	}
 	return &LoudnessInfo{
-		IntegratedLUFS: out.IntegratedLUFS,
-		TruePeakDBTP:   out.TruePeakDB,
-		LRA:            out.LoudnessRange,
-		SamplePeakDB:   out.SamplePeakDB,
+		IntegratedLUFS: group.IntegratedLUFS,
+		TruePeakDBTP:   group.TruePeakDB,
+		LRA:            group.LoudnessRange,
+		SamplePeakDB:   group.SamplePeakDB,
 	}
 }

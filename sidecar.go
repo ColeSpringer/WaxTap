@@ -250,6 +250,10 @@ type SidecarHealth struct {
 	// and relaunched it before answering, which otherwise shows only in the
 	// daemon's log.
 	BrowserRelaunched bool
+	// Keyed reports that the daemon requires an API key. Every health body
+	// carries it, tenant and daemon scope alike; false from a keyless daemon
+	// and from one that predates the field.
+	Keyed bool
 }
 
 // sidecarPingReasonProbeFailed is the one reason a strict ping maps to 503: a
@@ -342,6 +346,7 @@ type sidecarHealthBody struct {
 	Reason            string `json:"reason"`
 	Error             string `json:"error"`
 	BrowserRelaunched bool   `json:"browser_relaunched"`
+	Keyed             *bool  `json:"keyed"`
 }
 
 // pingSidecar is one strict ping of endpoint. A health body arrives with a 200
@@ -389,6 +394,7 @@ func pingSidecar(ctx context.Context, client *http.Client, endpoint, apiKey stri
 		Reason:            capRunes(strings.TrimSpace(body.Reason), sidecarCodeRunes),
 		Error:             capRunes(strings.TrimSpace(body.Error), sidecarReasonRunes),
 		BrowserRelaunched: body.BrowserRelaunched,
+		Keyed:             body.Keyed != nil && *body.Keyed,
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable || h.Reason == sidecarPingReasonProbeFailed {
 		// The loss the daemon confirmed, as the refusal it is: the reason where

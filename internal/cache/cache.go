@@ -12,6 +12,7 @@ package cache
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -146,6 +147,52 @@ func (s *Store[V]) GetOrLoad(ctx context.Context, key string, load func(context.
 	if fl, ok := s.flights[key]; ok {
 		// Someone else is already loading this key; wait for them.
 		s.mu.Unlock()
+		v, err := waitFlight(ctx, fl)
+		if !inheritedContextError(ctx, err) {
+			return v, err
+		}
+		// The leader's context ended and ours did not. Its error describes a
+		// cancellation this caller never made, and reporting it would blame
+		// the caller for one nobody sent. Load it ourselves instead, under our
+		// own context and as a fresh flight, so our own siblings share it.
+		//
+		// Exactly once. The retry is for a leader that walked away, not a
+		// cause that repeats, and an unbounded chain of followers each
+		// inheriting the next one's cancellation is the thundering herd the
+		// singleflight exists to prevent; a second inherited error is
+		// returned as the caller's answer.
+		return s.loadOnce(ctx, key, load)
+	}
+	fl := &flight[V]{done: make(chan struct{})}
+	s.flights[key] = fl
+	s.mu.Unlock()
+
+	fl.val, fl.err = load(ctx)
+
+	s.mu.Lock()
+	delete(s.flights, key)
+	if fl.err == nil {
+		s.putLocked(key, fl.val)
+	}
+	s.mu.Unlock()
+
+	close(fl.done)
+	return fl.val, fl.err
+}
+
+// loadOnce runs the loader for this caller alone, as a fresh flight its own
+// siblings can share, and returns whatever it answers. It is GetOrLoad's body
+// without the wait-for-a-leader branch, so a follower stepping in cannot start
+// a chain of followers.
+func (s *Store[V]) loadOnce(ctx context.Context, key string, load func(context.Context) (V, error)) (V, error) {
+	s.mu.Lock()
+	if v, ok := s.getLocked(key); ok {
+		s.mu.Unlock()
+		return v, nil
+	}
+	if fl, ok := s.flights[key]; ok {
+		// Another follower got here first; take its answer whatever it is.
+		s.mu.Unlock()
 		return waitFlight(ctx, fl)
 	}
 	fl := &flight[V]{done: make(chan struct{})}
@@ -163,6 +210,22 @@ func (s *Store[V]) GetOrLoad(ctx context.Context, key string, load func(context.
 
 	close(fl.done)
 	return fl.val, fl.err
+}
+
+// inheritedContextError reports that err is a context failure the caller's own
+// context did not have: a leader's cancellation or deadline handed to a
+// follower whose context is still live. The follower's own failure, and every
+// error that is not a context one, answer false.
+//
+// It cannot tell a leader's context ending from a loader hitting a deadline of
+// its own while doing I/O, since both arrive wrapping the same sentinels. The
+// second is a timeout a retry under a longer budget may well fix, so taking
+// both is the useful reading; what matters is that it happens once.
+func inheritedContextError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func waitFlight[V any](ctx context.Context, fl *flight[V]) (V, error) {

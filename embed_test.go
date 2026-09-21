@@ -85,7 +85,7 @@ func TestDoEmbedReportsAnUnshapeablePicture(t *testing.T) {
 	c, v := coverServer(t, webpBytes)
 	path := writeWAVFixture(t)
 
-	skip, err := c.doEmbed(context.Background(), path, "wav", v,
+	_, skip, err := c.doEmbed(context.Background(), path, "wav", v,
 		embedOptions{thumbnail: true, coverArt: CoverArtSquare})
 	if err != nil {
 		t.Fatalf("doEmbed: %v", err)
@@ -100,7 +100,7 @@ func TestDoEmbedSquaresWithoutWarning(t *testing.T) {
 	c, v := coverServer(t, sent)
 	path := writeWAVFixture(t)
 
-	skip, err := c.doEmbed(context.Background(), path, "wav", v,
+	_, skip, err := c.doEmbed(context.Background(), path, "wav", v,
 		embedOptions{thumbnail: true, metadata: true, coverArt: CoverArtSquare})
 	if err != nil {
 		t.Fatalf("doEmbed: %v", err)
@@ -145,7 +145,7 @@ func TestDoEmbedWritesCoverArtIntoWavPack(t *testing.T) {
 		t.Fatalf("synth wv: %v", err)
 	}
 
-	skip, err := c.doEmbed(ctx, path, "wv", v, embedOptions{thumbnail: true, metadata: true})
+	_, skip, err := c.doEmbed(ctx, path, "wv", v, embedOptions{thumbnail: true, metadata: true})
 	if err != nil {
 		t.Fatalf("doEmbed: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestDoEmbedRemapsChaptersThroughCut(t *testing.T) {
 		keeps: []cutrange.Range{{Start: 0, End: 1 * time.Second}, {Start: 2 * time.Second, End: 3 * time.Second}},
 		total: 3 * time.Second,
 	}
-	if _, err := c.doEmbed(ctx, flac, "flac", v, embedOptions{metadata: true, cut: cut}); err != nil {
+	if _, _, err := c.doEmbed(ctx, flac, "flac", v, embedOptions{metadata: true, cut: cut}); err != nil {
 		t.Fatalf("doEmbed: %v", err)
 	}
 
@@ -286,4 +286,94 @@ func TestDoEmbedRemapsChaptersThroughCut(t *testing.T) {
 	if chs[1].Title != "Three" || chs[1].Start != 1*time.Second {
 		t.Errorf("chapter 1 = %q@%v, want Three@1s", chs[1].Title, chs[1].Start)
 	}
+}
+
+// WebM holds no picture, so a cover-art request remuxes the Opus stream into
+// its own Ogg container and reports which container it left the file in: the
+// caller names the delivered format from that, since the source's ".webm"
+// would describe a file that no longer exists.
+func TestDoEmbedRemuxesWebMToOggForThePicture(t *testing.T) {
+	ctx := context.Background()
+	sent := mediatest.PNGBytes(mediatest.SolidCover(320, 180, color.RGBA{B: 200, A: 255}))
+	c, v := coverServer(t, sent)
+
+	wav := writeWAVFixture(t)
+	path := filepath.Join(t.TempDir(), "in.webm")
+	if _, err := c.engine().Transcode(ctx, wav, path, media.Spec{Codec: media.CodecOpus}); err != nil {
+		t.Fatalf("synth webm: %v", err)
+	}
+	// The precondition the remux exists for: the source container holds no
+	// picture. (The engine's probe names the whole Matroska family "mka", so
+	// it cannot tell a WebM from an MKA; what the picture path reads is this.)
+	fixture, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Capabilities().Pictures.Write != waxlabel.AccessNone {
+		t.Fatal("the fixture can hold a picture, so nothing would remux")
+	}
+
+	to, skip, err := c.doEmbed(ctx, path, "opus", v, embedOptions{thumbnail: true})
+	if err != nil {
+		t.Fatalf("doEmbed: %v", err)
+	}
+	if skip != "" {
+		t.Errorf("skipReason = %q, want the picture written", skip)
+	}
+	// The extension the file is delivered under, which is what the result has
+	// to name: a container name ("ogg") would not be a file on disk.
+	if to != "opus" {
+		t.Errorf("remuxedTo = %q, want the delivered extension opus", to)
+	}
+	pr := mustProbeFile(t, c, path)
+	if pr.Format.Container != "ogg" {
+		t.Errorf("container = %q, want ogg", pr.Format.Container)
+	}
+	if a, _ := pr.AudioStream(); a.CodecName != "opus" {
+		t.Errorf("codec = %q, want opus (the remux copies packets)", a.CodecName)
+	}
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatalf("parse remuxed file: %v", err)
+	}
+	if pics := doc.Pictures(); len(pics) != 1 {
+		t.Fatalf("pictures = %d, want the embedded cover", len(pics))
+	}
+}
+
+// The delivered format names the file on disk: the extension it was written
+// under, never a canonical spelling of the codec's container.
+func TestRemuxedFormat(t *testing.T) {
+	src := Format{Codec: "opus", Extension: "webm", MIMEType: `audio/webm; codecs="opus"`, Itag: 251, Bitrate: 128000, ContentLength: 999}
+	got := remuxedFormat(src, "opus")
+	if got.Extension != "opus" || got.MIMEType != `audio/ogg; codecs="opus"` {
+		t.Errorf("remuxedFormat = %+v, want the Ogg-Opus names", got)
+	}
+	if got.Itag != src.Itag || got.Codec != src.Codec || got.Bitrate != src.Bitrate {
+		t.Errorf("remuxedFormat = %+v, want the delivery's own itag, codec, and rate kept", got)
+	}
+	// The wrapper changed, so the source's byte count no longer describes the
+	// file; Result.OutputBytes carries the delivered size.
+	if got.ContentLength != 0 {
+		t.Errorf("ContentLength = %d, want it cleared: it described the pre-remux file", got.ContentLength)
+	}
+	if remuxedFormat(src, "") != src {
+		t.Error("no remux must leave the format alone")
+	}
+	// An .ogg output keeps its own name rather than being renamed .opus.
+	if got := remuxedFormat(src, ".ogg"); got.Extension != "ogg" || got.MIMEType != `audio/ogg; codecs="opus"` {
+		t.Errorf("an .ogg delivery = %+v, want the name it was written under", got)
+	}
+	if got := remuxedFormat(Format{Codec: "vorbis", Extension: "webm"}, "ogg"); got.Extension != "ogg" || got.MIMEType != `audio/ogg; codecs="vorbis"` {
+		t.Errorf("a Vorbis remux = %+v, want .ogg", got)
+	}
+}
+
+func mustProbeFile(t *testing.T, c *Client, path string) media.ProbeResult {
+	t.Helper()
+	pr, err := c.engine().Probe(context.Background(), path)
+	if err != nil {
+		t.Fatalf("probe %s: %v", filepath.Base(path), err)
+	}
+	return pr
 }

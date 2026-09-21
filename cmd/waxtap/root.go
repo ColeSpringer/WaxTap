@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -47,6 +48,34 @@ func setRunNotes(c *noteCollector) {
 	runNotesMu.Lock()
 	defer runNotesMu.Unlock()
 	runNotes = c
+}
+
+// runSignal is the signal context main installs, so any renderer can ask
+// whether a signal fired. A per-item record classifies its own error with no
+// access to main's context, and a cancellation is the one class whose meaning
+// depends on that: one a signal produced is an interrupt, one WaxTap made
+// itself is a defect.
+//
+// Process state for the same reason runNotes is, and read through a function
+// so the nil case (a test driving a command directly) answers "no signal".
+var (
+	runSignalMu sync.Mutex
+	runSignal   context.Context
+)
+
+func setRunSignal(ctx context.Context) {
+	runSignalMu.Lock()
+	defer runSignalMu.Unlock()
+	runSignal = ctx
+}
+
+// signalFired reports that the run's signal context is done, which only a
+// SIGINT or SIGTERM can do.
+func signalFired() bool {
+	runSignalMu.Lock()
+	ctx := runSignal
+	runSignalMu.Unlock()
+	return ctx != nil && ctx.Err() != nil
 }
 
 // currentRunNotes returns the notes collected by this run, or nil.

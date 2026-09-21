@@ -16,7 +16,18 @@ No open requests.
 
 ## WaxFlow
 
-No open requests.
+- **A lazy open on `GroupMember`, the way `ConcatSource` has one.**
+  `Engine.AnalyzeGroup` takes `[]GroupMember{Media: format.Media}`, an
+  already-open source the caller owns, so a caller must open every member
+  before the call and hold each descriptor and demuxer state until it
+  returns. `ConcatSource` solved the same problem with an `Open func()
+  (format.Media, error)` the timeline calls as it reaches each member, which
+  let the pass it replaced hold one descriptor at a time. An album of N
+  tracks is now N open files at once.
+
+  *Workaround WaxTap ships:* `media.Runner.AnalyzeGroup` opens all members up
+  front and closes them together. Album sizes in practice stay well under any
+  descriptor limit, so this is a cost rather than a failure.
 
 ## WaxLabel
 

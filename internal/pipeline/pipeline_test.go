@@ -802,17 +802,17 @@ func TestContainerTablesConsistent(t *testing.T) {
 		media.CodecAIFF:   "aiff",
 	}
 	for _, ext := range []string{"flac", "wav", "aiff", "aif", "aifc", "afc", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "mka", "mkv"} {
-		c, ok := containerCodec(ext)
+		c, ok := media.ContainerCodec(ext)
 		if !ok {
-			t.Errorf("containerCodec(%q) = not ok, want a default codec", ext)
+			t.Errorf("media.ContainerCodec(%q) = not ok, want a default codec", ext)
 			continue
 		}
 		name, known := codecName[c]
 		if !known {
-			t.Fatalf("test codecName map is missing %v (returned by containerCodec(%q))", c, ext)
+			t.Fatalf("test codecName map is missing %v (returned by media.ContainerCodec(%q))", c, ext)
 		}
 		if !containerAccepts(ext, name) {
-			t.Errorf("inconsistent tables: containerCodec(%q)=%v but containerAccepts(%q,%q)=false", ext, c, ext, name)
+			t.Errorf("inconsistent tables: media.ContainerCodec(%q)=%v but containerAccepts(%q,%q)=false", ext, c, ext, name)
 		}
 	}
 }
@@ -1248,8 +1248,8 @@ func TestSourceEncodeCodecNewFamilies(t *testing.T) {
 		}
 	}
 	for ext, want := range map[string]media.Codec{"wv": media.CodecWavPack, "ape": media.CodecAPE} {
-		if got, ok := containerCodec(ext); !ok || got != want {
-			t.Errorf("containerCodec(%q) = %v,%v want %v,true", ext, got, ok, want)
+		if got, ok := media.ContainerCodec(ext); !ok || got != want {
+			t.Errorf("media.ContainerCodec(%q) = %v,%v want %v,true", ext, got, ok, want)
 		}
 	}
 }
@@ -1374,5 +1374,39 @@ func TestNormalizeIntoAForeignContainerPromotesAndSaysSo(t *testing.T) {
 	// The source codec is what the caller's implicit-lossy warning reads.
 	if res.SourceCodec != "flac" {
 		t.Errorf("SourceCodec = %q, want flac", res.SourceCodec)
+	}
+}
+
+// A packet copy reports the spans it landed on, and the short-decode note
+// measures the output against them rather than against the request: the joins
+// move inward by under one packet each, which is not input damage.
+func TestRunCopyCutReportsTheLandedKeeps(t *testing.T) {
+	r := newTestRunner(t)
+	dir := t.TempDir()
+	in := synthSine(t, dir, "in.opus", 3, "opus")
+	out := filepath.Join(dir, "out.opus")
+
+	res, err := Run(context.Background(), r, in, out, Spec{
+		// Both edges sit off the 20 ms Opus grid, so both joins snap.
+		Remove:  []cutrange.Range{{Start: 1010 * time.Millisecond, End: 2010 * time.Millisecond}},
+		CutMode: media.ModeSmart,
+		Codec:   media.CodecCopy,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.CutMode != media.ModeCopy || res.Transcoded {
+		t.Fatalf("CutMode = %v, Transcoded = %v, want a packet copy", res.CutMode, res.Transcoded)
+	}
+	if res.CutSnaps != 1 || res.CutSnapMax <= 0 || res.CutSnapMax >= 20*time.Millisecond {
+		t.Errorf("CutSnaps = %d, CutSnapMax = %v, want 2 joins under 20 ms", res.CutSnaps, res.CutSnapMax)
+	}
+	if len(res.Keeps) != 2 || res.Keeps[1].Start <= 2010*time.Millisecond {
+		t.Errorf("Keeps = %v, want the second span's head landed above the requested 2.01s", res.Keeps)
+	}
+	for _, w := range res.SourceWarnings {
+		if strings.Contains(w, "ended at") {
+			t.Errorf("SourceWarnings = %v, want no short-decode note for a snapped copy cut", res.SourceWarnings)
+		}
 	}
 }

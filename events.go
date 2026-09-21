@@ -95,7 +95,13 @@ func (e *emitter) warnNth(code WarningCode, detail func(n int) string, alsoCount
 	e.raw(Event{Stage: StageWarning, Warning: &w})
 }
 
-func (e *emitter) done()            { e.raw(Event{Stage: StageDone}) }
+func (e *emitter) done() { e.raw(Event{Stage: StageDone}) }
+
+// doneBytes is done for a delivery whose length is known: the terminal event
+// of a Stream carries what the caller took and what was there to take, so a
+// reader closed before EOF is legible as the partial read it was.
+func (e *emitter) doneBytes(n, total int64) { e.raw(Event{Stage: StageDone, Bytes: n, Total: total}) }
+
 func (e *emitter) failed(err error) { e.raw(Event{Stage: StageFailed, Err: err}) }
 
 // throttleKey identifies a throttle warning for per-job deduplication.
@@ -134,7 +140,10 @@ func throttleDetail(code WarningCode, ev httpx.ThrottleEvent) string {
 		return fmt.Sprintf("retrying request to %s after HTTP %d", ev.Host, ev.StatusCode)
 	}
 	if ev.Penalty > 0 {
-		return fmt.Sprintf("rate limited by %s (HTTP %d); pausing %s", ev.Host, ev.StatusCode, ev.Penalty)
+		// "pausing" claimed a sleep WaxTap does not take: the penalty is a
+		// wait the limiter holds later requests to that host for, and this
+		// request is already past it.
+		return fmt.Sprintf("rate limited by %s (HTTP %d); further requests to it wait %s", ev.Host, ev.StatusCode, ev.Penalty)
 	}
 	return fmt.Sprintf("rate limited by %s (HTTP %d)", ev.Host, ev.StatusCode)
 }

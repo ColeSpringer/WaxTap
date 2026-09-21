@@ -19,11 +19,19 @@ func TestNew_InvalidConfigSentinel(t *testing.T) {
 		"chrome-major + override":      {ChromeMajor: 100, ProfileOverridePath: "x"},
 		"client + override":            {Client: "web", ProfileOverridePath: "x"},
 		"player-context without token": {PlayerContextProvider: potoken.PlayerContextProviderFunc(func(context.Context, string) (potoken.PlayerContext, error) { return potoken.PlayerContext{}, nil })},
+		// Only Procs takes a negative value (it disables the bound); a
+		// negative Downloads or Chunks would silently become the default.
+		"negative downloads": {Concurrency: Concurrency{Downloads: -1}},
+		"negative chunks":    {Concurrency: Concurrency{Chunks: -1}},
 	}
 	for name, opts := range cases {
 		if _, err := New(opts); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("%s: New err = %v, want ErrInvalidConfig", name, err)
 		}
+	}
+	// Procs keeps its meaning: negative disables the limit.
+	if _, err := New(Options{Concurrency: Concurrency{Procs: -1}}); err != nil {
+		t.Errorf("negative Procs = %v, want nil: it disables the limit", err)
 	}
 }
 

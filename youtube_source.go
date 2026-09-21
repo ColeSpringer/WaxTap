@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxtap/v3/download"
@@ -50,6 +51,9 @@ type acquired struct {
 	// substitutedFrom names the forced client replaced by the WEB watch-page
 	// fallback. It is reported only after delivery succeeds.
 	substitutedFrom string
+	// fallbackCause is what the profile attempts left behind when the watch
+	// page answered instead; see youtube.Extraction.FallbackCause.
+	fallbackCause error
 	// stats counts what this attempt's refresh callback did. It is nil for a SABR
 	// transfer, which has no signed URL to refresh.
 	stats *refreshStats
@@ -345,7 +349,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	if err != nil {
 		return nil, err
 	}
-	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom()}
+	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom(), fallbackCause: ext.FallbackCause()}
 	// Both branches record the identity the attempt runs under, SABR included: it
 	// refreshes no signed URL, but a whole-chain retry still has to know which
 	// identity to discard, and a zero there rotates nothing while reporting success.
@@ -367,10 +371,22 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 	return a, nil
 }
 
-// warnClientSubstitution reports a successful WEB watch-page fallback.
+// warnClientSubstitution reports a successful WEB watch-page fallback, and the
+// PO token such a fallback leaves unexercised.
+//
+// The second is the one a user acts on: they configured a token provider,
+// WaxTap minted a token, the WEB player request failed anyway, and the watch
+// page (which needs no token) answered. Nothing in the result says the token
+// was never tried, so a run that "worked with a token" looks like proof the
+// token works.
 func (c *Client) warnClientSubstitution(em *emitter, a *acquired) {
 	if a.substitutedFrom != "" {
 		em.warn(WarnFallbackProfile, fmt.Sprintf("forced client %s failed; used WEB through the watch-page fallback", a.substitutedFrom))
+	}
+	// A configured player context is a different path with its own reporting,
+	// so this covers the plain token case only.
+	if a.viaWatchPage() && a.fallbackCause != nil && c.opts.POTokenProvider != nil && c.opts.PlayerContextProvider == nil {
+		em.warn(WarnWatchPageNoToken, fmt.Sprintf("the WEB player request failed (%v); delivered through the watch page, which needs no PO token, so the configured token was not exercised", a.fallbackCause))
 	}
 }
 
@@ -729,7 +745,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// Once per job, on the acquisition that actually delivered: selection
 			// itself has no emitter and re-runs on every refresh, so warning there
 			// would duplicate.
-			warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
+			warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
 			// Use the more specific web-context fallback warning below.
 			if a.client != firstClient && !firstFromWebContext {
 				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
@@ -1199,6 +1215,9 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 	if err = validateProcessSpec(req.ProcessSpec); err != nil {
 		return nil, err
 	}
+	if err = validateRequest(req); err != nil {
+		return nil, err
+	}
 	// Report HTTP throttling as job warnings.
 	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
@@ -1212,7 +1231,7 @@ func (c *Client) Download(ctx context.Context, req Request) (res *Result, err er
 		}
 		if req.SkipIfExists && fileExists(req.Output.path) {
 			em.stage(StageSkipped)
-			return &Result{SourceKind: SourceYouTube, VideoID: id, OutputPath: req.Output.path}, nil
+			return &Result{SourceKind: SourceYouTube, VideoID: id, OutputPath: req.Output.path, Skipped: true}, nil
 		}
 		// Create the output directory before downloading so staging failures are
 		// reported early.
@@ -1288,7 +1307,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, derr
 		}
 		em.stage(StageFinalizing)
-		warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
+		warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
 		out := a.fmtSel
 		out.ContentLength = r.BytesWritten
 		return &Result{
@@ -1419,7 +1438,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// downmix needs the probe to decide whether to fold. An embed post-pass may
 	// still tag the staged source in place.
 	if len(ranges) == 0 && req.Transcode == nil && req.Loudness == nil && !req.Downmix {
-		c.embedMetadata(ctx, srcPath, req.Output.path, embedExt, a.video, eo, em)
+		to := c.embedMetadata(ctx, srcPath, req.Output.path, embedExt, a.video, eo, em)
 		res := &Result{
 			SourceKind:   SourceYouTube,
 			VideoID:      a.video.ID,
@@ -1427,7 +1446,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 			Client:       a.client,
 			ViaWatchPage: a.viaWatchPage(),
 			SourceFormat: a.fmtSel,
-			OutputFormat: a.fmtSel,
+			OutputFormat: remuxedFormat(a.fmtSel, to),
 			SourceBytes:  dlRes.BytesWritten,
 			Metadata:     videoMetadataFor(req, a.video),
 		}
@@ -1447,9 +1466,11 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 		return "", nil, err
 	}
 	warnEmptyCut(em, req.Cut, pres, len(sbRanges) > 0)
+	warnCutSnapped(em, pres)
 	warnLoudnessTargetMissed(em, req.Loudness, pres)
 	warnImplicitDownmix(em, req.ProcessSpec, pres)
 	warnImplicitLossy(em, req.ProcessSpec, pres)
+	warnBitrateAdjusted(em, req.ProcessSpec, pres)
 	warnOutputClipping(em, req.Loudness, pres)
 	// Input damage and an empty input are deliberately not reported here: a
 	// YouTube container either probes exactly or fails outright, so the only
@@ -1465,13 +1486,14 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// A rendered cut moved every later chapter mark; the embed pass remaps them
 	// onto the delivered timeline.
 	eo.cut = appliedCutFrom(pres)
-	c.embedMetadata(ctx, deliver, req.Output.path, embedExt, a.video, eo, em)
+	remuxedTo := c.embedMetadata(ctx, deliver, req.Output.path, embedExt, a.video, eo, em)
 
 	var explicit []cutrange.Range
 	if req.Cut != nil {
 		explicit = cutRanges(req.Cut.Ranges)
 	}
 	res := newProcessResult(SourceYouTube, pres, a.fmtSel, loudnessTarget(req.Loudness))
+	res.OutputFormat = remuxedFormat(res.OutputFormat, remuxedTo)
 	res.VideoID = a.video.ID
 	res.Title = a.video.Title
 	res.Client = a.client
@@ -1480,6 +1502,18 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	res.SponsorBlockApplied = sponsorBlockContributed(explicit, sbRanges, pres)
 	res.Metadata = videoMetadataFor(req, a.video)
 	return deliver, res, nil
+}
+
+// validateRequest checks the YouTube-only parts of a request, the ones a
+// ProcessSpec knows nothing about.
+func validateRequest(req Request) error {
+	if req.FullMetadata && !req.IncludeMetadata && !req.EmbedMetadata {
+		// The watch-page pass FullMetadata pays for fills Result.Metadata and
+		// the embed's tags. With neither consumer it is a round trip whose
+		// answer is discarded, which is a mistake about what the flag does.
+		return fmt.Errorf("%w: FullMetadata needs a consumer: set IncludeMetadata or EmbedMetadata", waxerr.ErrIncompatibleSpec)
+	}
+	return nil
 }
 
 // collectRanges merges explicit removal ranges with any SponsorBlock segments,
@@ -1553,6 +1587,9 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	if err = validateProcessSpec(req.ProcessSpec); err != nil {
 		return nil, StreamInfo{}, err
 	}
+	if err = validateRequest(req); err != nil {
+		return nil, StreamInfo{}, err
+	}
 	// Report HTTP throttling as job warnings.
 	ctx = httpx.WithThrottleHook(ctx, func(e httpx.ThrottleEvent) { emitThrottle(em, e) })
 
@@ -1573,9 +1610,9 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	if derr != nil {
 		return nil, StreamInfo{}, derr
 	}
-	warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel)
+	warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
 	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength, Client: a.client}
-	return &doneReader{ReadCloser: body, ctx: ctx, em: em}, info, nil
+	return &doneReader{ReadCloser: body, ctx: ctx, em: em, total: sinfo.ContentLength}, info, nil
 }
 
 // streamProcessed stages and processes to a temp file, then returns a reader over
@@ -1604,7 +1641,7 @@ func (c *Client) streamProcessed(ctx context.Context, req Request, id string, em
 	}
 	info := StreamInfo{VideoID: id, Title: res.Title, Format: res.OutputFormat, ContentLength: fileSize(deliver), Client: res.Client}
 	ok = true
-	return &dirCleanupReader{File: f, dir: jobDir, ctx: ctx, em: em}, info, nil
+	return &dirCleanupReader{f: f, dir: jobDir, ctx: ctx, em: em, total: info.ContentLength}, info, nil
 }
 
 // videoMetadataFor returns the requested result metadata, or nil when metadata
@@ -1712,8 +1749,10 @@ func (s *streamErr) record(ctx context.Context, err error) {
 }
 
 // terminal emits Done when the stream closed cleanly, or Failed with the first
-// read error.
-func (s *streamErr) terminal(em *emitter) {
+// read error. bytes is what the caller actually took and total what the
+// delivery holds: closing early is the caller's decision, not a failure, so it
+// is Done carrying a short count rather than Failed.
+func (s *streamErr) terminal(em *emitter, bytes, total int64) {
 	s.mu.Lock()
 	err := s.err
 	s.mu.Unlock()
@@ -1721,7 +1760,7 @@ func (s *streamErr) terminal(em *emitter) {
 		em.failed(err)
 		return
 	}
-	em.done()
+	em.doneBytes(bytes, total)
 }
 
 // doneReader fires the terminal event once when closed, for the zero-disk
@@ -1730,47 +1769,71 @@ type doneReader struct {
 	io.ReadCloser
 	// ctx is the request context, held because Read carries none and a read that
 	// fails after cancellation must report the cancellation. Required.
-	ctx  context.Context
-	em   *emitter
-	errs streamErr
-	once sync.Once
+	ctx context.Context
+	em  *emitter
+	// total is the delivery's content length, captured when the reader is
+	// built, so the terminal event can say what was there to take.
+	total int64
+	read  atomic.Int64
+	errs  streamErr
+	once  sync.Once
 }
 
 func (r *doneReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
+	r.read.Add(int64(n))
 	r.errs.record(r.ctx, err)
 	return n, err
 }
 
 func (r *doneReader) Close() error {
 	err := r.ReadCloser.Close()
-	r.once.Do(func() { r.errs.terminal(r.em) })
+	r.once.Do(func() { r.errs.terminal(r.em, r.read.Load(), r.total) })
 	return err
 }
 
 // dirCleanupReader streams a processed temp file, removes its job directory, and
 // fires the terminal event when closed (Failed if a read error occurred).
+//
+// The file is a named field, not embedded: *os.File carries WriteTo, and an
+// embedded one would promote it, so io.Copy would take that path and never
+// call the Read below. The byte count would stay zero and a read error would
+// go unrecorded.
 type dirCleanupReader struct {
-	*os.File
+	f   *os.File
 	dir string
 	// ctx is the request context; see doneReader.ctx.
-	ctx  context.Context
-	em   *emitter
-	errs streamErr
-	once sync.Once
+	ctx context.Context
+	em  *emitter
+	// total is the processed file's size; see doneReader.total.
+	total int64
+	read  atomic.Int64
+	errs  streamErr
+	once  sync.Once
 }
 
 func (r *dirCleanupReader) Read(p []byte) (int, error) {
-	n, err := r.File.Read(p)
+	n, err := r.f.Read(p)
+	r.read.Add(int64(n))
+	r.errs.record(r.ctx, err)
+	return n, err
+}
+
+// WriteTo forwards to the file's own, so io.Copy keeps the zero-copy path the
+// named field would otherwise have cost, and counts what it moved. Without it
+// every processed stream would fall back to a buffered Read loop.
+func (r *dirCleanupReader) WriteTo(w io.Writer) (int64, error) {
+	n, err := r.f.WriteTo(w)
+	r.read.Add(n)
 	r.errs.record(r.ctx, err)
 	return n, err
 }
 
 func (r *dirCleanupReader) Close() error {
-	err := r.File.Close()
+	err := r.f.Close()
 	r.once.Do(func() {
 		os.RemoveAll(r.dir)
-		r.errs.terminal(r.em)
+		r.errs.terminal(r.em, r.read.Load(), r.total)
 	})
 	return err
 }

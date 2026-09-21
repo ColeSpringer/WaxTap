@@ -237,6 +237,10 @@ func ClassifyPlayability(status, reason string) *waxerr.PlayabilityError {
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLoginRequired}
 	case "LIVE_STREAM_OFFLINE":
 		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLiveNotStarted}
+	case "LIVE_BROADCAST":
+		// WaxSeal's own token (not a playabilityStatus) for a broadcast on air:
+		// the player says OK, but there is no finished media to fetch.
+		return &waxerr.PlayabilityError{Status: status, Reason: reason, Sentinel: waxerr.ErrLiveContent}
 	case "":
 		// A relayed refusal can carry no status at all. It is still a refusal, so
 		// name it the way YouTube names an unexplained one.

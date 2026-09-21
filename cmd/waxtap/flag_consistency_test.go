@@ -164,14 +164,12 @@ func TestExtractionFlagsRelocated(t *testing.T) {
 		}
 	}
 
-	// SponsorBlock makes HTTP requests but does not resolve a player.
+	// The SponsorBlock preview extracts once for the video's length, so it
+	// takes the extraction flags like info and formats do.
 	sb := newSponsorBlockCmd().Flags()
-	if sb.Lookup("proxy") == nil {
-		t.Error("sponsorblock should expose the network flag --proxy")
-	}
-	for _, flag := range []string{"client", "potoken-url", "temp-dir"} {
-		if sb.Lookup(flag) != nil {
-			t.Errorf("sponsorblock should not expose the player flag --%s", flag)
+	for _, flag := range []string{"proxy", "client", "potoken-url", "cache-dir"} {
+		if sb.Lookup(flag) == nil {
+			t.Errorf("sponsorblock should expose --%s", flag)
 		}
 	}
 
@@ -341,10 +339,14 @@ func TestSponsorBlockURLOnCapableCommandsOnly(t *testing.T) {
 // heartbeat wanted neither. loadConfig now refuses the pair, so every command
 // that calls setup rejects it before doing any work.
 func TestQuietAndVerboseConflict(t *testing.T) {
-	// Point the optional config file at a path that does not exist, so a real one
-	// in the user's config dir cannot color the result. A missing WAXTAP_CONFIG is
-	// not an error; only an explicit --config demands the file.
-	t.Setenv("WAXTAP_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
+	// Point the config file at an empty one, so a real config in the user's
+	// config dir cannot color the result. It has to exist: a file the user
+	// named, by --config or WAXTAP_CONFIG, is required.
+	empty := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(empty, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXTAP_CONFIG", empty)
 
 	// The flags are persistent on the root, so loadConfig only sees them through a
 	// subcommand's merged flag set. Drive one rather than the root itself.

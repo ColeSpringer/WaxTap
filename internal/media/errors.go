@@ -99,6 +99,11 @@ func classifyEngineError(err error, input, output string) error {
 // unclassified failure there stays a statement about the file rather than
 // falling through to exit 1.
 //
+// The default also covers CodeUnsupportedSource, the refusal a source that is
+// not a regular file comes back with (a directory, FIFO, device, or socket).
+// WaxTap reads regular files only, and the refusal already names which kind
+// the path is, so it goes out as bad input with the engine's own wording.
+//
 // The default also covers CodeUnsupportedFormat, which at a site that only reads
 // is the input side of WaxFlow's "unsupported": a codec this build has no
 // decoder for, a channel configuration outside its scope. An encoder refusing a

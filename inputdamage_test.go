@@ -396,7 +396,8 @@ func TestMeasureOnlyWarnsShortDecode(t *testing.T) {
 // An album refuses a corrupt-middle track rather than warning past it: every
 // track shares one gain, and a gain computed over the 60% that decodes would
 // normalize the whole record against a number that describes nothing. The
-// refusal must name the file, not make the user count timeline members.
+// refusal must name the file, not make the user count members, and it must
+// keep the covered-vs-declared cause.
 func TestProcessAlbumRefusesShortDecodeNamingTrack(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -415,8 +416,8 @@ func TestProcessAlbumRefusesShortDecodeNamingTrack(t *testing.T) {
 	if !strings.Contains(err.Error(), "corrupt.flac") {
 		t.Errorf("err = %q, want it to name corrupt.flac", err)
 	}
-	if !strings.Contains(err.Error(), "delivered") {
-		t.Errorf("err = %q, want the delivered-vs-declared cause kept", err)
+	if !strings.Contains(err.Error(), "covered") || !strings.Contains(err.Error(), "declared") {
+		t.Errorf("err = %q, want the covered-vs-declared cause kept", err)
 	}
 }
 

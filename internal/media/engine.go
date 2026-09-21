@@ -150,14 +150,19 @@ func (r *Runner) release() {
 // openSource opens path as a WaxFlow source. The returned closer closes the
 // underlying file and must be called once the operation finishes.
 func openSource(path string) (container.Source, func() error, error) {
-	f, err := os.Open(path)
+	// O_NONBLOCK keeps a FIFO with no writer from blocking the open; the
+	// engine's regular-file check then refuses it by name. Harmless on a
+	// regular file, and FileSource reads through the *os.File either way.
+	f, err := os.OpenFile(path, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
 		return nil, nil, err
 	}
 	src, err := container.FileSource(f)
 	if err != nil {
 		_ = f.Close()
-		return nil, nil, err
+		// A directory, FIFO, device, or socket is a classification refusal
+		// (CodeUnsupportedSource), which is bad input, not a failing disk.
+		return nil, nil, classifyInputError(err, path)
 	}
 	return src, f.Close, nil
 }

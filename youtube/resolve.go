@@ -26,6 +26,12 @@ func (c *Client) Resolve(ctx context.Context, ext *Extraction, formatIndex int) 
 // passes nil. When refreshing an expired signed URL, call this with a fresh
 // Extraction; the old player response still contains the old URL.
 func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, formatIndex int, failure *potoken.HTTPFailure) (MediaPlan, error) {
+	// Checked on entry because a plain URL resolves with no I/O at all: without
+	// this an expired Timeouts.Resolve would pass through unobserved, and the
+	// budget would only bite on the ciphered formats.
+	if err := ctx.Err(); err != nil {
+		return MediaPlan{}, err
+	}
 	if ext == nil {
 		return MediaPlan{}, fmt.Errorf("%w: nil extraction", waxerr.ErrExtractionFailed)
 	}

@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	wferr "github.com/colespringer/waxflow/waxerr"
 	"github.com/colespringer/waxlabel"
@@ -1584,7 +1587,7 @@ func TestOpenComposedNoDeclaredLengthFallsBackToBounded(t *testing.T) {
 // The plan is the encoder's own: the lossy rows fold a source wider than
 // stereo to stereo themselves, the lossless ones keep every channel, and a
 // copy keeps the source layout.
-func TestPlanOutputChannelsFollowsTheEncoder(t *testing.T) {
+func TestPlanEncodeFollowsTheEncoder(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	in := wavFixture(t, 1, 6)
 	for _, tc := range []struct {
@@ -1599,12 +1602,12 @@ func TestPlanOutputChannelsFollowsTheEncoder(t *testing.T) {
 		{CodecWAV, "wav", 6},
 		{CodecCopy, "wav", 6},
 	} {
-		got, err := r.PlanOutputChannels(context.Background(), in, filepath.Join(t.TempDir(), "out."+tc.ext), Spec{Codec: tc.codec})
+		got, _, err := r.PlanEncode(context.Background(), in, filepath.Join(t.TempDir(), "out."+tc.ext), Spec{Codec: tc.codec})
 		if err != nil {
 			t.Fatalf("%s: %v", tc.codec, err)
 		}
 		if got != tc.want {
-			t.Errorf("%s: PlanOutputChannels = %d, want %d", tc.codec, got, tc.want)
+			t.Errorf("%s: PlanEncode = %d channels, want %d", tc.codec, got, tc.want)
 		}
 	}
 }
@@ -1694,7 +1697,7 @@ func overstatedSidx(t *testing.T, frag []byte) []byte {
 	return out
 }
 
-// TestPlanOutputChannelsCapsEveryCodecAtOneWidth pins the property an album's
+// TestPlanEncodeCapsEveryCodecAtOneWidth pins the property an album's
 // group measurement rests on: for one codec and one spec, every source wide
 // enough to be folded is folded to the same count.
 //
@@ -1709,7 +1712,7 @@ func overstatedSidx(t *testing.T, frag []byte) []byte {
 // them. This is the test that says so: a codec that folds 8 channels to 6 and
 // 3 to 2 would make an album of the two a set groupPass has to refuse, and the
 // fix then is per-member widths in the timeline, not a wider cap here.
-func TestPlanOutputChannelsCapsEveryCodecAtOneWidth(t *testing.T) {
+func TestPlanEncodeCapsEveryCodecAtOneWidth(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1723,7 +1726,7 @@ func TestPlanOutputChannelsCapsEveryCodecAtOneWidth(t *testing.T) {
 			out := filepath.Join(dir, "out"+c.Extension())
 			folds := map[int][]int{}
 			for _, w := range widths {
-				n, err := r.PlanOutputChannels(ctx, srcs[w], out, Spec{Codec: c})
+				n, _, err := r.PlanEncode(ctx, srcs[w], out, Spec{Codec: c})
 				if err != nil {
 					t.Fatalf("plan %d channels: %v", w, err)
 				}
@@ -1747,12 +1750,210 @@ func TestPlanOutputChannelsCapsEveryCodecAtOneWidth(t *testing.T) {
 					if w <= fold {
 						continue
 					}
-					n, err := r.PlanOutputChannels(ctx, srcs[w], out, Spec{Codec: c})
+					n, _, err := r.PlanEncode(ctx, srcs[w], out, Spec{Codec: c})
 					if err != nil || n != fold {
 						t.Errorf("a %d-channel source plans %d (err %v) beside a fold to %d; every source above the fold takes it", w, n, err, fold)
 					}
 				}
 			}
 		})
+	}
+}
+
+// A multi-span packet copy lands its interior joins on the packet grid, inside
+// the request, and reports where. The fixture puts silence in the removed
+// second: under the old policy the output carried up to 100 ms of it and ran
+// long; now it runs at most one packet short per interior edge and carries
+// none of it.
+func TestRenderCopyCutLandsInsideTheRequest(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "seg.wav")
+	if err := os.WriteFile(wav, mediatest.SegmentedWAV(2, 48000,
+		mediatest.Segment{Seconds: 1, FreqHz: 440}, mediatest.Segment{Seconds: 1}, mediatest.Segment{Seconds: 1, FreqHz: 880}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(dir, "seg.opus")
+	if _, err := r.Transcode(context.Background(), wav, in, Spec{Codec: CodecOpus}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "cut.opus")
+	// 1.01 s and 2.01 s sit off the 20 ms Opus grid, so both interior edges snap.
+	keeps := []cutrange.Range{{Start: 0, End: 1010 * time.Millisecond}, {Start: 2010 * time.Millisecond, End: 3 * time.Second}}
+	res, err := r.Render(context.Background(), in, out, CutSpec{Keeps: keeps, Total: 3 * time.Second, CopyCut: true, Encode: Spec{Codec: CodecOpus}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mode != ModeCopy {
+		t.Fatalf("mode = %v, want ModeCopy", res.Mode)
+	}
+	if len(res.Keeps) != 2 {
+		t.Fatalf("Keeps = %v, want the two landed spans", res.Keeps)
+	}
+	// Inside the request by under one packet at each interior edge.
+	if res.Keeps[0].Start != 0 || res.Keeps[0].End > keeps[0].End || keeps[0].End-res.Keeps[0].End >= 20*time.Millisecond {
+		t.Errorf("first span landed at %v, want [0, 1.01s) snapped down by under 20 ms", res.Keeps[0])
+	}
+	if res.Keeps[1].Start < keeps[1].Start || res.Keeps[1].Start-keeps[1].Start >= 20*time.Millisecond || res.Keeps[1].End != keeps[1].End {
+		t.Errorf("second span landed at %v, want [2.01s, 3s) snapped up by under 20 ms", res.Keeps[1])
+	}
+	// One removed range is one join, however many of its two edges moved.
+	if res.Snaps != 1 || res.SnapMax <= 0 || res.SnapMax >= 20*time.Millisecond {
+		t.Errorf("Snaps = %d, SnapMax = %v, want the 1 join moved by under 20 ms", res.Snaps, res.SnapMax)
+	}
+	if want := 3*time.Second - cutrange.OutputDuration(res.Keeps, 0); res.Removed != want {
+		t.Errorf("Removed = %v, want %v (from the landed spans)", res.Removed, want)
+	}
+	// The written file is the landed length, and the removed silence is not in it.
+	pr := mustProbe(t, r, out)
+	if got, want := pr.Format.Duration, cutrange.OutputDuration(res.Keeps, 0); got < want-time.Millisecond || got > want+time.Millisecond {
+		t.Errorf("output duration = %v, want %v", got, want)
+	}
+	dec := filepath.Join(dir, "dec.wav")
+	if _, err := r.Transcode(context.Background(), out, dec, Spec{Codec: CodecWAV}); err != nil {
+		t.Fatal(err)
+	}
+	if run := longestQuietRun(t, dec, 20*time.Millisecond); run > 40*time.Millisecond {
+		t.Errorf("the decoded cut holds %v of near-silence, so the removed span leaked in", run)
+	}
+}
+
+// An interior span narrower than the packet grid keeps no whole packet, which
+// the copy rung declines; the cut re-encodes exactly instead of delivering a
+// packet from outside the request. It has to be an interior span: the first
+// span's head and the last span's tail land exactly where they were asked for,
+// their slop carried as the synthesized gapless trims rather than delivered,
+// so a narrow final span is copied and only its head moves.
+func TestRenderCopyCutDeclinesASpanWithNoWholePacket(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	dir := t.TempDir()
+	in := encodeFixture(t, r, dir, "in.opus", CodecOpus)
+	narrow := cutrange.Range{Start: 1505 * time.Millisecond, End: 1515 * time.Millisecond}
+	render := func(t *testing.T, name string, keeps []cutrange.Range) CutResult {
+		t.Helper()
+		res, err := r.Render(context.Background(), in, filepath.Join(dir, name), CutSpec{
+			Keeps:   keeps,
+			Total:   3 * time.Second,
+			CopyCut: true,
+			Encode:  Spec{Codec: CodecOpus},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	res := render(t, "interior.opus", []cutrange.Range{{Start: 0, End: time.Second}, narrow, {Start: 2 * time.Second, End: 3 * time.Second}})
+	if res.Mode != ModeAccurate {
+		t.Errorf("interior: mode = %v, want ModeAccurate (the copy rung declined)", res.Mode)
+	}
+	if res.Snaps != 0 || !slices.Equal(res.Keeps, []cutrange.Range{{Start: 0, End: time.Second}, narrow, {Start: 2 * time.Second, End: 3 * time.Second}}) {
+		t.Errorf("interior: Keeps = %v, Snaps = %d, want the request back from a re-encode", res.Keeps, res.Snaps)
+	}
+	last := render(t, "last.opus", []cutrange.Range{{Start: 0, End: time.Second}, narrow})
+	if last.Mode != ModeCopy {
+		t.Errorf("last: mode = %v, want ModeCopy (the final tail is exact by trim)", last.Mode)
+	}
+	if last.Keeps[1].End != narrow.End {
+		t.Errorf("last: final span ended at %v, want the requested %v", last.Keeps[1].End, narrow.End)
+	}
+}
+
+// longestQuietRun reads wavPath and returns the longest stretch of near
+// silence in its first channel, measured in window-sized frames whose RMS
+// sits below -40 dBFS. The cut fixtures carry a -6 dBFS tone, so anything
+// quiet in the output came from the segment the cut removed.
+func longestQuietRun(t *testing.T, wavPath string, window time.Duration) time.Duration {
+	t.Helper()
+	f, err := os.Open(wavPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := format.Open(src, "wav", nil)
+	if err != nil {
+		t.Fatalf("open %s: %v", wavPath, err)
+	}
+	defer med.Close()
+	fm := med.Info().Default().Fmt
+	frames := int(window.Seconds() * float64(fm.Rate))
+	if frames <= 0 {
+		t.Fatalf("window %v is under one frame at %d Hz", window, fm.Rate)
+	}
+	full := float64(int64(1) << (fm.BitDepth - 1))
+	buf := audio.Get(fm, frames)
+	defer audio.Put(buf)
+	longest, run := 0, 0
+	for {
+		err := med.ReadChunk(buf)
+		if buf.N > 0 {
+			var sum float64
+			if buf.I != nil {
+				for _, s := range buf.ChanI(0) {
+					v := float64(s) / full
+					sum += v * v
+				}
+			} else {
+				for _, s := range buf.ChanF(0) {
+					sum += float64(s) * float64(s)
+				}
+			}
+			if math.Sqrt(sum/float64(buf.N)) < 0.01 {
+				run++
+				longest = max(longest, run)
+			} else {
+				run = 0
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", wavPath, err)
+		}
+	}
+	return time.Duration(longest) * window
+}
+
+// The rate an encode really runs at is the plan's, not the request's: each
+// encoder has its own range and grid, and a rate under its floor is refused
+// before anything is written.
+func TestPlanEncodeReportsTheEncodersRate(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	in := wavFixture(t, 1, 2)
+	dir := t.TempDir()
+
+	for _, tc := range []struct {
+		name      string
+		codec     Codec
+		ext       string
+		requested int
+		want      int
+	}{
+		{"mp3 off the CBR table snaps down", CodecMP3, "mp3", 200000, 192000},
+		{"mp3 on the table is kept", CodecMP3, "mp3", 192000, 192000},
+		{"opus over the frame cap clamps", CodecOpus, "opus", 512000, 510000},
+		{"flac carries no rate", CodecFLAC, "flac", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch, br, err := r.PlanEncode(ctx, in, filepath.Join(dir, tc.name+"."+tc.ext), Spec{Codec: tc.codec, Bitrate: tc.requested})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ch != 2 {
+				t.Errorf("channels = %d, want 2", ch)
+			}
+			if br != tc.want {
+				t.Errorf("bit rate = %d, want %d", br, tc.want)
+			}
+		})
+	}
+
+	if _, _, err := r.PlanEncode(ctx, in, filepath.Join(dir, "floor.opus"), Spec{Codec: CodecOpus, Bitrate: 2000}); !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Errorf("PlanEncode at 2000 b/s Opus = %v, want ErrIncompatibleSpec", err)
 	}
 }

@@ -28,11 +28,7 @@ func newFormatsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// A watch-page fallback returns formats from WEB.
-			if info.SubstitutedFrom != "" {
-				env.note(noteWatchPageFormats, "requested %s; listing %s formats from the watch-page fallback", info.SubstitutedFrom, info.Client)
-			}
-			emitWatchPageBreadcrumb(env, info)
+			noteFormatsSource(env, info)
 			noteDroppedPlaylist(env, args[0], "enumerate it with `download <url> --list`")
 			video := info.Video
 			formats := audioFormats(video.Formats)
@@ -42,12 +38,18 @@ func newFormatsCmd() *cobra.Command {
 					out[i] = formatToJSON(f)
 				}
 				return env.emitJSON(struct {
-					SchemaVersion int          `json:"schemaVersion"`
-					VideoID       string       `json:"videoId"`
-					Title         string       `json:"title"`
-					Formats       []formatJSON `json:"formats"`
-					Notes         []noteJSON   `json:"notes,omitempty"`
-				}{schemaVersion, video.ID, video.Title, out, env.notesJSON()})
+					SchemaVersion int    `json:"schemaVersion"`
+					VideoID       string `json:"videoId"`
+					Title         string `json:"title"`
+					// Client, ViaWatchPage, and SubstitutedFrom describe where
+					// the list came from, exactly as info reports them: a
+					// consumer reading formats has the same question.
+					Client          string       `json:"client,omitempty"`
+					ViaWatchPage    bool         `json:"viaWatchPage,omitempty"`
+					SubstitutedFrom string       `json:"substitutedFrom,omitempty"`
+					Formats         []formatJSON `json:"formats"`
+					Notes           []noteJSON   `json:"notes,omitempty"`
+				}{schemaVersion, video.ID, video.Title, info.Client, info.ViaWatchPage, info.SubstitutedFrom, out, env.notesJSON()})
 			}
 			if len(formats) == 0 {
 				env.printf("no audio formats found\n")
@@ -222,4 +224,19 @@ func sizeOrDash(n int64) string {
 		return "-"
 	}
 	return humanBytes(n)
+}
+
+// noteFormatsSource reports a listing that came from the watch-page fallback.
+// One note for the whole fact, on every client rather than only a forced WEB
+// one: the watch page needs no PO token, which is what a reader has to know,
+// and a client substitution is a detail of that rather than a note of its own.
+func noteFormatsSource(env *appEnv, info *waxtap.InfoResult) {
+	if !info.ViaWatchPage {
+		return
+	}
+	if info.SubstitutedFrom != "" {
+		env.note(noteWatchPageFormats, "requested %s; listing %s formats from the watch-page fallback (no PO token)", info.SubstitutedFrom, info.Client)
+		return
+	}
+	env.note(noteWatchPageFormats, "listing %s formats from the watch-page fallback (no PO token)", info.Client)
 }

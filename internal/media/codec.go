@@ -150,6 +150,19 @@ func (c Codec) IsLossless() bool {
 // transcode path routes CodecCopy to Engine.Remux, so a copy never reaches here.
 // Tags is never set: every output's metadata comes from the WaxLabel
 // post-pass on the finished file, which also carries pictures.
+// TakesBitRate reports whether an encode of c is given a bit rate at all:
+// only the rows encodeOptions sets one on. Everything else (the lossless
+// rows, PCM, and quality-driven Vorbis) ignores a requested rate, so the rate
+// their plan projects is a derived figure about the output rather than an
+// answer to a request, and reporting it as one would be nonsense.
+func TakesBitRate(c Codec) bool {
+	switch c {
+	case CodecMP3, CodecAAC, CodecHEAAC, CodecOpus:
+		return true
+	}
+	return false
+}
+
 func encodeOptions(spec Spec) waxflow.TranscodeOptions {
 	format, _ := codecFormat(spec.Codec)
 	opts := waxflow.TranscodeOptions{

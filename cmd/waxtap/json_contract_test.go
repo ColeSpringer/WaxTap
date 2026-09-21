@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -589,5 +590,165 @@ func TestSubcommandOutputModeIsItsOwn(t *testing.T) {
 		if got := buf.String(); strings.Contains(got, `"schemaVersion"`) {
 			t.Errorf("%s built on its own printed JSON; --json belongs to the root run that asked for it:\n%s", c.name, got)
 		}
+	}
+}
+
+// A cut document names the mode that rendered it, and carries the joins a
+// packet copy moved. A re-encoded cut names accurate and omits the figures.
+func TestJSONCutDocumentCarriesTheCutMode(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.opus")
+	synthChannels(t, in, "libopus", 2)
+
+	stdout, stderr, code := runMain(t, "cut", in, filepath.Join(dir, "copy.opus"),
+		"--cut-range", "0.21-0.41", "--cut-range", "0.61-0.81", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	doc := oneJSONDoc(t, stdout)
+	if doc["cutMode"] != "copy" {
+		t.Errorf("cutMode = %v, want copy", doc["cutMode"])
+	}
+	snaps, _ := doc["cutSnaps"].(float64)
+	if snaps < 1 {
+		t.Errorf("cutSnaps = %v, want the interior joins the copy moved", doc["cutSnaps"])
+	}
+	if _, ok := doc["cutSnapMaxMs"]; !ok {
+		t.Errorf("cutSnapMaxMs missing from a document that snapped: %v", doc)
+	}
+
+	stdout, stderr, code = runMain(t, "cut", in, filepath.Join(dir, "acc.flac"),
+		"--cut-range", "0.21-0.41", "--cut-mode", "accurate", "--format", "flac", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	doc = oneJSONDoc(t, stdout)
+	if doc["cutMode"] != "accurate" {
+		t.Errorf("cutMode = %v, want accurate", doc["cutMode"])
+	}
+	if _, ok := doc["cutSnaps"]; ok {
+		t.Errorf("cutSnaps = %v, want the key omitted when nothing moved", doc["cutSnaps"])
+	}
+}
+
+// `cache clean` reports truthfully in --json: a directory holding nothing of
+// WaxTap's is left alone and says so, and the file that shares its name
+// survives.
+func TestJSONCacheCleanReportsWhatItRemoved(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "notacache")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "sub", "data.bin")
+	if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runMain(t, "cache", "clean", "--cache-dir", dir, "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	doc := oneJSONDoc(t, stdout)
+	if doc["removed"] != false {
+		t.Errorf("removed = %v, want false", doc["removed"])
+	}
+	if _, serr := os.Stat(keep); serr != nil {
+		t.Fatalf("cache clean removed a file it did not write: %v", serr)
+	}
+}
+
+// assertJSONCodec checks the codec a result document reports: outputFormat's
+// when the run transcoded, sourceFormat's when it did not (a copy leaves both
+// describing the same audio).
+func assertJSONCodec(t *testing.T, doc map[string]any, wantCodec string, wantTranscoded bool) {
+	t.Helper()
+	if got, _ := doc["transcoded"].(bool); got != wantTranscoded {
+		t.Errorf("transcoded = %v, want %v", doc["transcoded"], wantTranscoded)
+	}
+	key := "sourceFormat"
+	if wantTranscoded {
+		key = "outputFormat"
+	}
+	f, _ := doc[key].(map[string]any)
+	if got, _ := f["codec"].(string); got != wantCodec {
+		t.Errorf("%s.codec = %v, want %q", key, f["codec"], wantCodec)
+	}
+}
+
+// assertJSONWarning checks a document's warnings for one code. An empty want
+// asserts that implicit-lossy is absent, which is the one the container rule
+// can raise by accident.
+func assertJSONWarning(t *testing.T, doc map[string]any, want string) {
+	t.Helper()
+	ws, _ := doc["warnings"].([]any)
+	var codes []string
+	for _, w := range ws {
+		m, _ := w.(map[string]any)
+		c, _ := m["code"].(string)
+		codes = append(codes, c)
+	}
+	if want == "" {
+		if slices.Contains(codes, "implicit-lossy") {
+			t.Errorf("warnings = %v, want no implicit-lossy", codes)
+		}
+		return
+	}
+	if !slices.Contains(codes, want) {
+		t.Errorf("warnings = %v, want %q", codes, want)
+	}
+}
+
+// D1: an extension names a container. With no --format the source codec is
+// kept when the container holds it, else the container's usual encoder runs
+// and says so. The same rule on every command.
+func TestExtensionNamesAContainer(t *testing.T) {
+	dir := t.TempDir()
+	opus := filepath.Join(dir, "in.opus")
+	mp3 := filepath.Join(dir, "in.mp3")
+	synthChannels(t, opus, "libopus", 2)
+	synthChannels(t, mp3, "libmp3lame", 2)
+	cases := []struct {
+		name       string
+		args       []string
+		wantCodec  string // outputFormat.codec, or sourceFormat.codec when transcoded is false
+		transcoded bool
+		wantWarn   string
+	}{
+		{"transcode opus to ogg keeps opus", []string{"transcode", opus, filepath.Join(dir, "a.ogg")}, "opus", false, ""},
+		{"transcode opus to mka keeps opus", []string{"transcode", opus, filepath.Join(dir, "b.mka")}, "opus", false, ""},
+		{"transcode mp3 to mka takes the container's encoder and says so", []string{"transcode", mp3, filepath.Join(dir, "c.mka")}, "opus", true, "implicit-lossy"},
+		{"cut mp3 to mka says so", []string{"cut", mp3, filepath.Join(dir, "d.mka"), "--cut-range", "0-0.5"}, "opus", true, "implicit-lossy"},
+		{"normalize opus to ogg takes the header gain", []string{"normalize", opus, filepath.Join(dir, "e.ogg")}, "opus", false, ""},
+		{"normalize opus to webm takes the header gain", []string{"normalize", opus, filepath.Join(dir, "f.webm")}, "opus", false, ""},
+		{"explicit --format ogg still means vorbis", []string{"transcode", opus, filepath.Join(dir, "g.ogg"), "--format", "ogg"}, "vorbis", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := runMain(t, append(tc.args, "--json")...)
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			doc := oneJSONDoc(t, stdout)
+			assertJSONCodec(t, doc, tc.wantCodec, tc.transcoded)
+			assertJSONWarning(t, doc, tc.wantWarn)
+		})
+	}
+}
+
+// A copy cut with a crossfade is refused on the contradiction it really is,
+// not on a missing --format: the crossfade decodes, which is what copy forbids.
+func TestCutCopyModeNamesTheRealConflict(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	synthChannels(t, in, "pcm_s16le", 2)
+	_, stderr, code := runMain(t, "cut", in, filepath.Join(dir, "out.wav"),
+		"--cut-range", "0.1-0.5", "--crossfade", "10ms", "--cut-mode", "copy")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--crossfade") {
+		t.Errorf("stderr = %q, want it to name --crossfade", stderr)
+	}
+	if strings.Contains(stderr, "--format") {
+		t.Errorf("stderr = %q, want it not to blame --format", stderr)
 	}
 }

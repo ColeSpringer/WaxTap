@@ -82,6 +82,9 @@ func setup(cmd *cobra.Command) (*appEnv, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkTempDir(cfg.tempDir); err != nil {
+		return nil, err
+	}
 	// The very providers options wired into the client: sidecarProviders builds
 	// one set per run, so a probe exercises what a download would use.
 	sidecars, err := cfg.sidecarProviders()
@@ -104,6 +107,37 @@ func setup(cmd *cobra.Command) (*appEnv, error) {
 	// not recorded in the archive) only ever fire on a failure path.
 	setRunNotes(env.notes)
 	return env, nil
+}
+
+// checkTempDir refuses a --temp-dir the run could not stage into, at setup
+// rather than at the first write: a job that downloads for a minute and then
+// cannot place its staging file has wasted the download.
+//
+// Only an existing path is checked. A missing one is created on first use by
+// the library's own job-directory call, so a command that stages nothing
+// (info, formats) creates no directories it will not use.
+func checkTempDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	fi, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // created on first use
+	}
+	if err != nil {
+		return usagef("--temp-dir %s: %v", dir, err)
+	}
+	if !fi.IsDir() {
+		return usagef("--temp-dir %s is not a directory", dir)
+	}
+	f, err := os.CreateTemp(dir, ".waxtap-check-*")
+	if err != nil {
+		return usagef("--temp-dir %s: %v", dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return nil
 }
 
 // newLogger builds a slog logger whose level follows --quiet/--verbose. Logs use
@@ -167,19 +201,24 @@ const (
 	noteContainerExtMismatch noteCode = "container-ext-mismatch"
 	noteCueFileMismatch      noteCode = "cue-file-mismatch"
 	noteDoctorCaveat         noteCode = "doctor-caveat"
-	noteFlagInert            noteCode = "flag-inert"
-	noteForcedClientRisky    noteCode = "forced-client-risky"
-	noteKeptOutput           noteCode = "kept-output"
-	notePlaylistIgnored      noteCode = "playlist-ignored"
-	noteProbeSkipped         noteCode = "probe-skipped"
-	noteEnumerationError     noteCode = "enumeration-error"
-	noteSameFormatCopied     noteCode = "same-format-copied"
-	noteSidecarWriteFailed   noteCode = "sidecar-write-failed"
-	noteSelectionUnmatched   noteCode = "selection-unmatched"
-	noteUnalteredCopy        noteCode = "unaltered-copy"
-	noteWatchPageFormats     noteCode = "watch-page-formats"
-	noteWatchPageMetadata    noteCode = "watch-page-metadata"
-	noteWebSources           noteCode = "web-sources"
+	// noteCoverArtRemuxed reports that a source whose container cannot hold a
+	// picture was remuxed into its codec's own so the cover art could go in.
+	noteCoverArtRemuxed   noteCode = "cover-art-remuxed"
+	noteFlagInert         noteCode = "flag-inert"
+	noteForcedClientRisky noteCode = "forced-client-risky"
+	noteKeptOutput        noteCode = "kept-output"
+	// noteLengthUnchecked reports that the SponsorBlock preview could not
+	// fetch the video's length, so segments were not checked against it.
+	noteLengthUnchecked    noteCode = "length-unchecked"
+	notePlaylistIgnored    noteCode = "playlist-ignored"
+	noteProbeSkipped       noteCode = "probe-skipped"
+	noteEnumerationError   noteCode = "enumeration-error"
+	noteSameFormatCopied   noteCode = "same-format-copied"
+	noteSidecarWriteFailed noteCode = "sidecar-write-failed"
+	noteSelectionUnmatched noteCode = "selection-unmatched"
+	noteUnalteredCopy      noteCode = "unaltered-copy"
+	noteWatchPageFormats   noteCode = "watch-page-formats"
+	noteWebSources         noteCode = "web-sources"
 )
 
 // allNoteCodes is every note the CLI can record. A new code is added here as
@@ -194,9 +233,11 @@ var allNoteCodes = []noteCode{
 	noteContainerExtMismatch,
 	noteCueFileMismatch,
 	noteDoctorCaveat,
+	noteCoverArtRemuxed,
 	noteFlagInert,
 	noteForcedClientRisky,
 	noteKeptOutput,
+	noteLengthUnchecked,
 	notePlaylistIgnored,
 	noteProbeSkipped,
 	noteEnumerationError,
@@ -205,7 +246,6 @@ var allNoteCodes = []noteCode{
 	noteSelectionUnmatched,
 	noteUnalteredCopy,
 	noteWatchPageFormats,
-	noteWatchPageMetadata,
 	noteWebSources,
 }
 
@@ -406,7 +446,10 @@ func alreadyRendered(cause error) error {
 // finalError makes a failure that followed a signal report as a cancellation.
 // Any error after the signal fired is treated as one, including an unrelated
 // failure from a moment earlier; the signal is the reason the process is exiting.
-// An error that already reports the cancellation is left alone.
+//
+// The marker goes on even when the error already reports a cancellation: it is
+// what separates a cancellation a signal produced from one WaxTap made itself,
+// and the second is a defect rather than the user's doing.
 //
 // It joins rather than wrapping (unlike the library's cancelCause, which wraps to
 // mask ErrIncompleteStream from a caller's retry logic) so an
@@ -417,11 +460,20 @@ func alreadyRendered(cause error) error {
 // context.Canceled: identical today, honest if a root deadline is ever wired in.
 func finalError(ctx context.Context, err error) error {
 	ce := ctx.Err()
-	if err == nil || ce == nil || errors.Is(err, ce) {
+	if err == nil || ce == nil {
 		return err
 	}
-	return errors.Join(ce, err)
+	// errInterrupted goes on even when err already reports the cancellation:
+	// it is the marker that says a signal produced it, and without it the
+	// renderer cannot tell this cancellation from one WaxTap made itself.
+	return errors.Join(errInterrupted, ce, err)
 }
+
+// errInterrupted marks a run the signal context ended, so exit 130 is claimed
+// only for a signal. A context.Canceled that reaches the renderer without it
+// came from inside WaxTap, and reporting it as an interrupt would blame the
+// user for a cancellation nobody sent.
+var errInterrupted = errors.New("interrupted by a signal")
 
 // errorJSON is how every WaxTap JSON document reports a failure: the classifier's
 // stable kebab code plus its human message. One shape everywhere, so a consumer
@@ -572,7 +624,10 @@ func classifyArgs(err error, args []string) classifiedError {
 	sre, hasSidecarResp := errors.AsType[*waxtap.SidecarResponseError](err)
 	hse, hasHTTPStatus := errors.AsType[*waxtap.HTTPStatusError](err)
 	switch {
-	case errors.Is(err, context.Canceled):
+	// A signal, by either of the two things that can say so: the marker
+	// finalError joins at the top level, or the run's own signal context,
+	// which a per-item record has no other way to consult.
+	case errors.Is(err, errInterrupted) || signalFired() && errors.Is(err, context.Canceled):
 		c.exitCode, c.code = 130, "canceled"
 
 	// Domain sentinels keep their classification even when they wrap another cause.
@@ -673,6 +728,12 @@ func classifyArgs(err error, args []string) classifiedError {
 	case errors.Is(err, context.DeadlineExceeded):
 		c.exitCode, c.code = 9, "timeout"
 
+	// A cancellation with no signal behind it came from inside WaxTap. It is a
+	// defect to report as one rather than an interrupt to blame the user for,
+	// so it keeps the unclassified exit and friendlyError says what it is.
+	case errors.Is(err, context.Canceled):
+		c.exitCode, c.code = 1, "error"
+
 	// Structural fallbacks apply only when no domain sentinel or timeout matched.
 	// Classify a sidecar response before checking for provider connection errors.
 	case hasSidecarResp:
@@ -721,19 +782,6 @@ func watchPageSuffix(via bool) string {
 		return " (via watch page)"
 	}
 	return ""
-}
-
-// emitWatchPageBreadcrumb notes on stderr that forced WEB metadata was served
-// from the watch page, which does not need a PO token. The note is limited to
-// forced WEB so the default client chain does not print a misleading token hint
-// after falling back to the watch page. Only formats still calls it: info
-// replaced it with the Client line's "(via watch page)" suffix, which carries
-// the delivery fact but not the no-token detail, while formats has no Client
-// line to carry either.
-func emitWatchPageBreadcrumb(env *appEnv, info *waxtap.InfoResult) {
-	if strings.EqualFold(env.cfg.client, "web") && info.ViaWatchPage {
-		env.note(noteWatchPageMetadata, "WEB metadata via the watch-page fallback (no PO token)")
-	}
 }
 
 // noteDroppedPlaylist reports a list= parameter that the current command will not
@@ -791,13 +839,26 @@ func noteForcedIOSIncomplete(env *appEnv, err error) {
 func friendlyError(err error) string {
 	// Provider connection errors may be wrapped by ErrNeedsPOToken. Check them
 	// first so the endpoint failure remains visible.
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, errInterrupted) {
 		return "canceled"
+	}
+	if errors.Is(err, context.Canceled) {
+		if signalFired() {
+			return "canceled"
+		}
+		// No signal, by either the marker or the run's own signal context:
+		// this cancellation came from inside WaxTap, and calling it
+		// "canceled" would read as the user's doing.
+		return "canceled before it finished, but no signal was received"
 	}
 	// A proxy that answered names its status and remedy, so check it before the
 	// generic proxy branch flattens it to "connection failed".
 	if pse, ok := errors.AsType[*proxyStatusError](err); ok {
 		return pse.Error()
+	}
+	// A proxy that answered nothing names itself and the budget it ran out.
+	if pde, ok := errors.AsType[*proxyDeadlineError](err); ok {
+		return pde.Error() + " (check --proxy)"
 	}
 	if isProxyError(err) {
 		return "proxy connection failed (check --proxy)"
@@ -1020,6 +1081,9 @@ func (e *proxyStatusError) Error() string {
 // CONNECT with an error status is reachable and its own message already carries the
 // remedy, so it gets guidance about the status instead of about connectivity.
 func proxyHint(err error) string {
+	if _, ok := errors.AsType[*proxyDeadlineError](err); ok {
+		return "the proxy accepted nothing within the budget; check the address and that the proxy is running"
+	}
 	pse, ok := errors.AsType[*proxyStatusError](err)
 	if !ok {
 		return "check the proxy is reachable and that --proxy is a correct URL"
@@ -1037,6 +1101,9 @@ func proxyHint(err error) string {
 // configured proxy. It prefers typed unwrapping and falls back to a string match
 // for transports that do not expose a typed proxyconnect error.
 func isProxyError(err error) bool {
+	if _, ok := errors.AsType[*proxyDeadlineError](err); ok {
+		return true
+	}
 	if _, ok := errors.AsType[*proxyStatusError](err); ok {
 		return true
 	}

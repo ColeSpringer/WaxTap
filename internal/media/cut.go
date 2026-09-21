@@ -28,6 +28,9 @@ const (
 	ModeCopy
 	// ModeAccurate forces a re-encode.
 	ModeAccurate
+	// ModeCopyExact is ModeCopy with spliced interior joins; see
+	// CutSpec.SpliceTrims.
+	ModeCopyExact
 )
 
 func (m Mode) String() string {
@@ -36,6 +39,8 @@ func (m Mode) String() string {
 		return "copy"
 	case ModeAccurate:
 		return "accurate"
+	case ModeCopyExact:
+		return "copy-exact"
 	default:
 		return "smart"
 	}
@@ -59,7 +64,14 @@ type CutSpec struct {
 	// the caller actually passed. They are independent and may both be set.
 	RequireCopyCutMode bool // --cut-mode copy
 	RequireCopyFormat  bool // --format copy
-	Encode             Spec
+	// SpliceTrims asks WaxFlow for exact interior splices (TranscodeOptions
+	// .SpliceTrims): the pre-roll packets ahead of each interior head carry a
+	// full-duration discard and each interior tail is exact. Only a Matroska
+	// destination can state those trims, so the caller has already held the
+	// output to .mka/.mkv/.webm; a declined plan fails the cut like every other
+	// explicit copy request rather than re-encoding.
+	SpliceTrims bool
+	Encode      Spec
 	// SourceSamples is the frame count a read of the source delivers, when the
 	// caller measured it (Runner.MeasureLength) because the headers only claim a
 	// length. The composed timeline holds every span to it, in both directions:
@@ -78,12 +90,28 @@ func (s CutSpec) requireCopy() bool { return s.RequireCopyCutMode || s.RequireCo
 // the caller to drop a flag they actually wrote.
 func (s CutSpec) copyFlags() string {
 	switch {
+	case s.SpliceTrims:
+		return "--cut-mode copy-exact"
 	case s.RequireCopyCutMode && s.RequireCopyFormat:
 		return "--format copy / --cut-mode copy"
 	case s.RequireCopyCutMode:
 		return "--cut-mode copy"
 	default:
 		return "--format copy"
+	}
+}
+
+// decodeReason names what in this spec forces a decode, for the refusal above.
+func decodeReason(s CutSpec) string {
+	switch {
+	case s.Crossfade > 0:
+		return "a crossfade"
+	case s.Encode.Channels != 0:
+		return "a downmix"
+	case s.Encode.GainDB != 0:
+		return "a loudness gain"
+	default:
+		return "a re-encode"
 	}
 }
 
@@ -100,6 +128,19 @@ type CutResult struct {
 	// end of the write; see Result.InputWarnings. A cut reads only the spans
 	// it keeps, so damage inside a removed span stays unreported here.
 	InputWarnings []string
+	// Keeps are the spans the output really holds, on the source timeline. A
+	// packet copy snaps each interior join inward to the packet grid and
+	// reports the landed spans here; a re-encode keeps exactly what was asked
+	// and reports the request. Removed, and every remap of source-timeline
+	// metadata, follow Keeps rather than the request.
+	Keeps []cutrange.Range
+	// Snaps counts the interior joins the packet copy moved and SnapMax is
+	// the largest single move. A join is a cut point, so the one range a
+	// caller removed is one join however many of its two edges moved; both
+	// are zero for a re-encode and for a copy whose edges already sat on the
+	// grid.
+	Snaps   int
+	SnapMax time.Duration
 }
 
 // Render applies spec's cut to input and writes the result to output. Output is
@@ -138,13 +179,19 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	mode := Mode(ModeAccurate)
 	var levels Levels
 	var found []string
+	keeps := spec.Keeps
+	snaps, snapMax := 0, time.Duration(0)
 	if tryRemux {
-		done, rfound, rerr := r.cutRemux(ctx, src, hint, outExt, spec.Keeps, spec.Total, staged)
+		out, rerr := r.cutRemux(ctx, src, hint, outExt, spec, staged)
 		if rerr != nil {
 			return CutResult{}, classifyEngineError(rerr, input, output)
 		}
-		if done {
-			mode, found = ModeCopy, rfound
+		if out.done {
+			mode, found = ModeCopy, out.found
+			if spec.SpliceTrims {
+				mode = ModeCopyExact
+			}
+			keeps, snaps, snapMax = out.keeps, out.snaps, out.snapMax
 		} else {
 			// WaxFlow declined a lossless cut-remux of the source codec (e.g. FLAC),
 			// or of the cut's shape (HE-AAC packet-cuts only from the stream start).
@@ -163,6 +210,16 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 			}
 		}
 	} else {
+		// An explicit copy request must not reach a decode. Nothing routes one
+		// here today (the facade refuses a copy beside a transcode or a
+		// crossfade, and the pipeline refuses one beside a fold), so this
+		// guards the contract rather than a path: silently re-encoding and
+		// reporting ModeAccurate is exactly what CutSpec.SpliceTrims and
+		// RequireCopyCutMode exist to prevent.
+		if spec.requireCopy() || spec.SpliceTrims {
+			return CutResult{}, fmt.Errorf("%w: this cut needs a decode (%s), which %s forbids",
+				waxerr.ErrIncompatibleSpec, decodeReason(spec), spec.copyFlags())
+		}
 		if levels, found, err = r.cutReencode(ctx, input, src, hint, outExt, spec, staged); err != nil {
 			return CutResult{}, classifyEngineError(err, input, output)
 		}
@@ -173,34 +230,49 @@ func (r *Runner) Render(ctx context.Context, input, output string, spec CutSpec)
 	}
 	return CutResult{
 		Output:        output,
-		Removed:       spec.Total - cutrange.OutputDuration(spec.Keeps, spec.Crossfade),
+		Removed:       spec.Total - cutrange.OutputDuration(keeps, spec.Crossfade),
 		Mode:          mode,
 		Applied:       true,
 		Levels:        levels,
 		InputWarnings: found,
+		Keeps:         keeps,
+		Snaps:         snaps,
+		SnapMax:       snapMax,
 	}, nil
+}
+
+// remuxOutcome is what a packet copy delivered: done false means WaxFlow
+// declined and the caller re-encodes.
+type remuxOutcome struct {
+	done    bool
+	keeps   []cutrange.Range // landed, on the source timeline
+	snaps   int
+	snapMax time.Duration
+	found   []string // input damage the packet walk found
 }
 
 // cutRemux performs the lossless packet-level cut-remux. It reports done=false
 // (and no error) when WaxFlow declines the source codec, so the caller re-encodes
-// instead, and the damage the packet walk found when it ran.
-func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, keeps []cutrange.Range, total time.Duration, dst *tempfile.File) (done bool, found []string, err error) {
+// instead, the spans the copy really landed on, and the damage the packet walk
+// found when it ran.
+func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (remuxOutcome, error) {
+	keeps, total := spec.Keeps, spec.Total
 	if err := r.acquire(ctx); err != nil {
-		return false, nil, err
+		return remuxOutcome{}, err
 	}
 	defer r.release()
 	grid, err := r.engine.PacketGrid(src, hint)
 	if err != nil {
-		return false, nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
-		return false, nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
+		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	track := info.Default()
 	outFormat, ok := codecToFormat(track.Codec)
 	if !ok {
-		return false, nil, nil // unknown codec: let the re-encode path handle it
+		return r.declineCopy(spec) // unknown codec: let the re-encode path handle it
 	}
 	// Walk a lazily walked demuxer before planning, now that the codec is one
 	// this path can copy. validateCutSpans bounds every span by track.Samples
@@ -215,37 +287,116 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 	// better answer for a damaged source than refusing the copy outright.
 	walked, walkErr, ctxErr := walkDefault(ctx, demux, info, track)
 	if ctxErr != nil {
-		return false, nil, ctxErr
+		return remuxOutcome{}, ctxErr
 	}
 	if walkErr != nil {
 		r.log.DebugContext(ctx, "the packet walk failed; re-encoding the cut instead of copying it", "err", walkErr)
-		return false, nil, nil
+		return r.declineCopy(spec)
 	}
 	track = walked
 	spans := toSpans(keeps, total, track.Fmt.Rate)
-	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt)}
+	opts := waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, outExt), SpliceTrims: spec.SpliceTrims}
 
 	plan, err := r.engine.PlanCut(track, opts, spans, grid)
 	if err != nil {
-		return false, nil, err
+		return remuxOutcome{}, err
 	}
 	if plan == nil {
-		return false, nil, nil // declined (e.g. FLAC): fall back to a re-encode
+		return r.declineCopy(spec) // declined (e.g. FLAC): fall back to a re-encode
 	}
-	cutTrack, _, err := waxflow.CutTrack(track, spans, grid)
+	cutTrack, landedSpans, err := waxflow.CutTrack(track, opts, spans, grid)
 	if err != nil {
-		return false, nil, err
+		return remuxOutcome{}, err
 	}
-	cutDemux, err := waxflow.Cut(demux, track, spans, grid)
+	cutDemux, err := waxflow.Cut(demux, track, opts, spans, grid)
 	if err != nil {
-		return false, nil, err
+		return remuxOutcome{}, err
 	}
 	// NB: pass CutTrack's track, not plan.Track.
 	tres, err := r.engine.RemuxDemuxer(ctx, cutDemux, cutTrack, dst, opts)
 	if err != nil {
-		return false, nil, err
+		return remuxOutcome{}, err
 	}
-	return true, sourceWarnings(tres.InputWarnings), nil
+	landed, snaps, snapMax := landedKeeps(keeps, spans, landedSpans, track.Fmt.Rate)
+	return remuxOutcome{done: true, keeps: landed, snaps: snaps, snapMax: snapMax, found: sourceWarnings(tres.InputWarnings)}, nil
+}
+
+// declineCopy is the answer when WaxFlow will not packet-cut this source. A
+// plain copy falls through to the re-encode; copy-exact asked for a packet
+// cut by name, so it fails here rather than delivering a decode the request
+// ruled out.
+func (r *Runner) declineCopy(spec CutSpec) (remuxOutcome, error) {
+	if spec.SpliceTrims {
+		return remuxOutcome{}, fmt.Errorf("%w: copy-exact needs a packet-level cut this source cannot supply (%s support it); use --cut-mode accurate", waxerr.ErrIncompatibleSpec, strings.Join(waxflow.CutFormats(), "/"))
+	}
+	return remuxOutcome{}, nil
+}
+
+// landedKeeps maps the spans a packet cut delivered back onto the time
+// ranges the caller asked for: one for one, an open-ended tail keeping the
+// request's end.
+//
+// It also counts the joins the cut moved and the largest single move. A join
+// is a cut point, the boundary between one kept span and the next, which is
+// what the caller removed a range at and what every report calls it. Its two
+// edges are the tail of the span before and the head of the span after, and
+// either or both may move; the join counts once. Counting edges instead would
+// report two joins for the one range a caller asked to remove.
+//
+// Heads move in both copy modes (no container states a front trim); tails
+// move only in the plain copy.
+func landedKeeps(keeps []cutrange.Range, asked, landed []waxflow.Span, rate int) ([]cutrange.Range, int, time.Duration) {
+	if len(keeps) == 0 {
+		return nil, 0, 0 // no span, no join; Render refuses this before here
+	}
+	out := make([]cutrange.Range, len(keeps))
+	moved := make([]bool, len(keeps)) // per join, indexed by the span after it
+	maxSnap := time.Duration(0)
+	for i, k := range keeps {
+		out[i] = k
+		if i >= len(landed) {
+			continue
+		}
+		if landed[i].From != asked[i].From {
+			out[i].Start = durationOf(landed[i].From, rate)
+			moved[i] = true
+			maxSnap = max(maxSnap, durationOf(absDiff(landed[i].From, asked[i].From), rate))
+		}
+		if asked[i].To != waxflow.ToEnd && landed[i].To != asked[i].To {
+			out[i].End = durationOf(landed[i].To, rate)
+			if i+1 < len(moved) {
+				moved[i+1] = true // the same join as the next span's head
+			}
+			maxSnap = max(maxSnap, durationOf(absDiff(landed[i].To, asked[i].To), rate))
+		}
+	}
+	// One count per interior join: moved[i] for i > 0 is the join before span
+	// i, set by either of its two edges. moved[0] is the first span's head,
+	// which is exact by construction and never a join.
+	joins := 0
+	for _, m := range moved[1:] {
+		if m {
+			joins++
+		}
+	}
+	return out, joins, maxSnap
+}
+
+// durationOf converts a sample count at rate to a duration, the inverse of
+// samplesOf.
+func durationOf(n int64, rate int) time.Duration {
+	if rate <= 0 {
+		return 0
+	}
+	return time.Duration(math.Round(float64(n) / float64(rate) * float64(time.Second)))
+}
+
+// absDiff is |a-b| on sample counts.
+func absDiff(a, b int64) int64 {
+	if a < b {
+		return b - a
+	}
+	return a - b
 }
 
 // cutReencode renders the cut by decoding: it slices the kept spans, concatenates

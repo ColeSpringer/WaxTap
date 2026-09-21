@@ -91,3 +91,60 @@ func TestFacade_WithFullMetadata(t *testing.T) {
 		t.Errorf("watchCalls = %d, want still 1 (no extra fetch under NoFallback)", watchCalls)
 	}
 }
+
+// A source policy that named a codec nothing here carries is as worth saying
+// on a listing as on a download: info reports the row a download would pick,
+// so it reports the same reason the pick is not the one asked for.
+func TestFacade_InfoWarnsAnUnmatchedSourcePolicy(t *testing.T) {
+	const aacFmt = `{"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 128000,
+       "url": "https://r1.googlevideo.com/videoplayback?expire=9999999999",
+       "contentLength": "27", "audioQuality": "AUDIO_QUALITY_MEDIUM", "lastModified": "1700000000000003"}`
+	const opusFmt = `{"itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 130000,
+       "url": "https://r1.googlevideo.com/videoplayback?expire=9999999999",
+       "contentLength": "27", "audioQuality": "AUDIO_QUALITY_MEDIUM", "lastModified": "1700000000000001"}`
+
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/v1/player") {
+			return resp(http.StatusOK, []byte(sabrPlayerJSONForFmts("android", aacFmt+", "+opusFmt))), nil
+		}
+		return resp(http.StatusOK, nil), nil
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// InfoBasic: the warning has to reach a plain listing, which is the depth
+	// the CLI's `info` runs at.
+	info, err := c.InfoResult(context.Background(), "dummyVideo0", waxtap.InfoBasic,
+		waxtap.WithSourcePolicy(waxtap.PreferCodec("vorbis")))
+	if err != nil {
+		t.Fatalf("InfoResult: %v", err)
+	}
+	var detail string
+	for _, w := range info.Warnings {
+		if w.Code == waxtap.WarnSourcePolicyUnmatched {
+			detail = w.Detail
+		}
+	}
+	if detail == "" {
+		t.Fatalf("warnings = %+v, want source-policy-unmatched", info.Warnings)
+	}
+	for _, want := range []string{"vorbis", "aac", "opus", "the best audio is"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail = %q, want %q in it", detail, want)
+		}
+	}
+
+	// A policy that matches says nothing.
+	quiet, err := c.InfoResult(context.Background(), "dummyVideo0", waxtap.InfoBasic,
+		waxtap.WithSourcePolicy(waxtap.PreferCodec("opus")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range quiet.Warnings {
+		if w.Code == waxtap.WarnSourcePolicyUnmatched {
+			t.Errorf("a matched policy warned: %v", w)
+		}
+	}
+}

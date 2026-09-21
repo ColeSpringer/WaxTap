@@ -34,7 +34,7 @@ func TestWarnUnboundSourcePolicy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			em := newEmitter(nil, "dummyVideo0")
-			warnUnboundSourcePolicy(em, tc.policy, tc.formats, tc.chosen)
+			warnUnboundSourcePolicy(em, tc.policy, tc.formats, tc.chosen, "delivering")
 			detail := ""
 			for _, w := range em.warnings {
 				if w.Code == WarnSourcePolicyUnmatched {
@@ -67,7 +67,7 @@ func TestWarnUnboundSourcePolicy(t *testing.T) {
 // produce a readable sentence rather than a dangling "available codecs: ".
 func TestWarnUnboundSourcePolicyNoCandidates(t *testing.T) {
 	em := newEmitter(nil, "dummyVideo0")
-	warnUnboundSourcePolicy(em, PreferCodec("flac"), nil, audFmt(251, "opus", 160000))
+	warnUnboundSourcePolicy(em, PreferCodec("flac"), nil, audFmt(251, "opus", 160000), "delivering")
 	if len(em.warnings) != 1 {
 		t.Fatalf("warnings = %+v, want exactly one", em.warnings)
 	}

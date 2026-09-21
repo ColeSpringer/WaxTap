@@ -157,18 +157,35 @@ func newNormalizeCmd() *cobra.Command {
 			if format == "" && filepath.Ext(explicit) == "" {
 				return usagef("normalizing a file requires an output path or --format (e.g. flac); use --measure-loudness to analyze without writing output")
 			}
-			tf, err := transcodeFormatFor(format, explicit)
+			var tf waxtap.TranscodeFormat
+			inferred, kept := false, false
+			if format != "" {
+				tf, err = parseTranscodeFormat(format)
+			} else {
+				// No --format: the output extension names a container, which
+				// keeps the source codec when it can hold it and otherwise
+				// runs its own usual encoder. A kept Opus source takes the
+				// header-gain path, the one normalize that is not a re-encode;
+				// every other kept codec is re-encoded, which is what normalize
+				// means.
+				tf, kept, inferred, err = inferOutputFormat(cmd.Context(), env, source, filepath.Ext(explicit))
+			}
 			if err != nil {
 				return err
 			}
 			if tf == waxtap.FormatCopy {
 				return usagef("normalization re-encodes; copy is not a valid output format")
 			}
+			specLayout, specDownmix := downmixFields(layout, doDownmix)
 			spec := waxtap.ProcessSpec{
-				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth},
+				// FromContainer travels here as it does on transcode: the
+				// user ran normalize, which names an encode, but not which
+				// codec. A container that could not hold the source picked
+				// that, and a lossy answer it never asked for is reported.
+				Transcode: &waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth, FromContainer: inferred && !kept},
 				Loudness:  &waxtap.LoudnessSpec{Mode: waxtap.LoudnessApply, Target: target, PeakMode: pm},
-				Channels:  layout,
-				Downmix:   doDownmix,
+				Channels:  specLayout,
+				Downmix:   specDownmix,
 			}
 			mc, err := collisionFor(cmd, collisionStr)
 			if err != nil {
@@ -181,8 +198,9 @@ func newNormalizeCmd() *cobra.Command {
 			if skip {
 				return emitSkip(env, "exists", outPath)
 			}
-			warnBitrateIgnored(env, tf, bitrate)
-			warnBitDepthIgnored(env, tf, bitDepth)
+			if err := noteKnobFlags(env, tf, bitrate, bitDepth); err != nil {
+				return err
+			}
 			spec.Output = outputFor(outPath, mc)
 			sel, policy, err := urlSelection(itag, codec, sourcePolicy, layout)
 			if err != nil {
@@ -205,7 +223,7 @@ func newNormalizeCmd() *cobra.Command {
 	bindBitDepthFlag(f, &bitDepth)
 	f.StringVarP(&out, "out", "o", "", "output file path for one input")
 	f.BoolVar(&album, "album", false, "treat all inputs as one album (group loudness)")
-	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input or --album")
+	f.StringVarP(&dir, "dir", "d", "", "output directory for a directory input, or for the files --album writes")
 	f.IntVar(&itag, "itag", 0, "select an exact itag (URL input)")
 	f.StringVar(&codec, "codec", "", "select the best source matching a codec (hard filter, URL input)")
 	bindSourceSelectionFlags(f, &channels, &downmix, &noFallback)
@@ -349,8 +367,9 @@ func runAlbum(cmd *cobra.Command, env *appEnv, inputs []string, p albumParams) e
 		seen[outPath] = i
 		tracks[i] = waxtap.AlbumTrack{Input: in, Output: outPath}
 	}
-	warnBitrateIgnored(env, tf, p.bitrate)
-	warnBitDepthIgnored(env, tf, p.bitDepth)
+	if err := noteKnobFlags(env, tf, p.bitrate, p.bitDepth); err != nil {
+		return err
+	}
 	res, err := env.client.ProcessAlbum(cmd.Context(), tracks, p.target,
 		waxtap.TranscodeSpec{Format: tf, Bitrate: p.bitrate, BitDepth: p.bitDepth},
 		waxtap.WithAlbumPeakMode(peakMode))

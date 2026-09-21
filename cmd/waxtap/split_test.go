@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -241,5 +242,26 @@ func TestSplitCollisionHintDoesNotOfferSkip(t *testing.T) {
 	}
 	if strings.Contains(stderr, "or skip)") {
 		t.Errorf("stderr = %q, want no bare skip suggestion: split refuses that mode", stderr)
+	}
+}
+
+// --quiet is the path-only contract every other command keeps: one output path
+// per line on stdout and nothing else, so a script reads the set a split wrote
+// instead of parsing a table.
+func TestSplitCommandQuietPrintsPaths(t *testing.T) {
+	dir, rip, cue := splitFixture(t, cliSplitSheet)
+	out := filepath.Join(dir, "out")
+
+	stdout, stderr, code := runMain(t, "split", rip, "--cue", cue, "-f", "flac", "-d", out, "--quiet")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	var want []string
+	for _, name := range []string{"01 - One.flac", "02 - Two.flac", "03 - Three.flac"} {
+		want = append(want, displayPath(filepath.Join(out, name)))
+	}
+	got := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	if !slices.Equal(got, want) {
+		t.Errorf("stdout lines = %q, want exactly the output paths %q", got, want)
 	}
 }

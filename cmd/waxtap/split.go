@@ -113,8 +113,9 @@ func newSplitCmd() *cobra.Command {
 				seen[out] = i
 				outs[i] = out
 			}
-			warnBitrateIgnored(env, tf, bitrate)
-			warnBitDepthIgnored(env, tf, bitDepth)
+			if err := noteKnobFlags(env, tf, bitrate, bitDepth); err != nil {
+				return err
+			}
 
 			res, err := env.client.Split(cmd.Context(), plan, outs, waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth})
 			if err != nil {
@@ -249,6 +250,15 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 	}
 	for _, w := range res.Warnings {
 		env.info("warning: [%s] %s\n", w.Code, w.Detail)
+	}
+	if env.quiet() {
+		// --quiet is the path-only contract every other command keeps: one
+		// output path per line and nothing else on stdout, so a script can
+		// read the set a split wrote.
+		for _, p := range res.Outputs {
+			env.printf("%s\n", displayPath(p))
+		}
+		return nil
 	}
 	env.printf("Split:    %s by %s (%s)\n\n", displayPath(plan.Input), displayPath(sheetAt), countOf(plan.TrackCount(), "track"))
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)

@@ -192,7 +192,14 @@ compiled player.
 - The cache is size-capped, schema-versioned, atomically written, and
   best-effort. Filesystem failures fall back to the network.
 - Responses without a usable cipher transform are not cached.
-- Use `waxtap cache clean` when corruption is suspected.
+- Entry directories are marked with a `CACHEDIR.TAG` on the first write, in
+  the Cache Directory Tagging Specification's form, so backup tools skip them
+  and `cache clean` can tell WaxTap's cache from a directory that shares its
+  name.
+- Use `waxtap cache clean` when corruption is suspected. It removes only the
+  entry directories WaxTap wrote, then the cache directory when that empties
+  it; a `--cache-dir` that is not a directory is a usage error and one holding
+  nothing of WaxTap's is left alone.
 - Use `--no-cache` or `WAXTAP_NO_CACHE` to disable it.
 
 ## PO tokens and sidecars
@@ -253,9 +260,13 @@ budget.
 configured (`--session-url`, else `--player-context-url`, else
 `--potoken-url`; the `--json` entry's `via` names which), with `--api-key` in
 the header, sent once. The `ping` line reports the daemon's own words: the
-scope it checked (`tenant`, or `daemon` when a keyed daemon got no key) and
-its reason (`ok`, `no-session`, `busy`, `probe-failed`), plus a browser
-relaunch when the probe made one. A 200 is healthy or a benign window and
+scope it checked (`tenant`, or `daemon` when a keyed daemon got no key), its
+reason (`ok`, `no-session`, `busy`, `probe-failed`), whether the daemon is
+`keyed`, and a browser relaunch when the probe made one. The `--json` ping entry also carries
+`status`: healthy, answered, not-offered, or failed. The run's `--api-key`
+and the daemon's keying are compared: a key given to a keyless daemon is not
+checked, and a keyed daemon asked without one answers the endpoint probes at
+daemon scope. Either mismatch is a `doctor-caveat` note. A 200 is healthy or a benign window and
 keeps the run healthy. A 503 is a loss the daemon confirmed: it fails the run
 as exit 9 with the reason as the entry's code, as does a 200 that says
 `probe-failed`, which a daemon predating `?strict` sends; an endpoint probe
@@ -272,13 +283,15 @@ the verdict the ping exists to fetch. A set `sidecarTimeoutSeconds` bounds the
 ping like every other request. Library callers ask the same question with
 `waxtap.PingSidecar`, bounded the same way and by their context.
 
-A bot check the sidecar's browser hits ("Sign in to confirm you're not a bot")
-buys a fresh identity once every 10 minutes; past that WaxSeal refuses the video
-as `player-context-failed` (HTTP 502) with a 2 minute `Retry-After`. That wait is
-past the 60 s cap, so WaxTap reports it rather than sleeping through it: the
-context arm is parked for the stated wait (capped at 5 minutes) and the native
-chain serves the rest of the batch meanwhile. With nothing delivering, it is exit
-9 with the wait in the hint.
+`player-context-failed` (HTTP 502) comes in two shapes. A bot check the
+sidecar's browser hits ("Sign in to confirm you're not a bot") buys a fresh
+identity once every 10 minutes; past that WaxSeal refuses the video with a
+2 minute `Retry-After`. That wait is past the 60 s cap, so WaxTap reports it
+rather than sleeping through it: the context arm is parked for the stated wait
+(capped at 5 minutes) and the native chain serves the rest of the batch
+meanwhile. With nothing delivering, it is exit 9 with the wait in the hint. The
+other shape is the daemon's confirmation budget running out, which carries no
+`Retry-After`; WaxTap retries it once after 500 ms as it does any 5xx.
 
 Error precedence across a download's attempts: `waxerr.PreferErr` ranks
 availability verdicts above everything else, but an attempt that reached the
@@ -333,17 +346,23 @@ response would; a live or upcoming flag refuses the context with the same
 sentinels.
 
 `--player-context-url` requires `--potoken-url`, and the context mint and
-download must share an egress IP because the signed URL is IP-bound.
+download must share an egress IP because the signed URL is IP-bound. A delivery
+on this path reports its client as `WEB_CONTEXT`; the session and static
+adoption paths report `WEB`.
 
 When an attested stream caps and the once-retried fresh context caps too, the
 session itself is suspect: WaxTap POSTs
 `{"session_generation","video_id","reason":"stream-capped"}` to the `/report`
 sibling of the player-context endpoint, then continues down the fallback chain.
-The report retires the daemon session so the next download's context comes from
-a fresh one. The `/report` response contract is the one in the session-adoption
-section: 200 with a JSON object, and `retry_after_seconds` refuses the report.
-A context without `session_generation` is never reported; an endpoint without
-`/report` fails each report (404) and the session stays.
+WaxSeal drops the reported generation's tokens the moment the report arrives and
+defers the retirement itself, which the next request of any kind consumes, token
+requests included. So the `/get_pot` on WaxTap's retry cannot be served a token
+minted under the degraded session, and the first `/get_pot` after a `/report` can
+be slow: it pays for the retirement. The `/report` response contract is the one
+in the session-adoption section: 200 with a JSON object, and
+`retry_after_seconds` refuses the report. A context without `session_generation`
+is never reported; an endpoint without `/report` fails each report (404) and the
+session stays.
 
 ### Session adoption
 
@@ -382,7 +401,36 @@ must answer 200 with a JSON object; an empty body, a 204, or a response
 carrying `retry_after_seconds` counts as a refusal and the session is kept. A
 minter that omits `session_generation` is never reported; one without `/report`
 fails each report (404). Either way a capped session cannot be rotated and the
-download fails.
+download fails. On arrival WaxSeal drops the reported generation's tokens and
+defers the retirement for the next request of any kind to consume, so a
+re-resolve cannot be handed the degraded session's leftovers and the first call
+after a report pays the retirement.
+
+## Cut precision
+
+A packet-level copy cut never delivers audio from outside the request, and each
+interior edge lands within one packet inside it (WaxFlow ADR-0011, `CutVersion`
+`cut-3`). The first span's head and the last span's tail are exact: their slop
+rides in the synthesized gapless trims rather than being delivered. Every
+interior join snaps inward instead, because no per-splice trim exists to hide a
+pre-roll in and delivering one would mean handing back 20 ms of Opus, 21 ms of
+AAC-LC, or 512 ms of HE-AAC from the span the caller asked to remove, audible at
+each join and shifting everything after it. WaxFlow reports where the spans fell
+in `CutPlan.Landed`, which WaxTap carries as `media.CutResult.Keeps` through
+`pipeline.Result.Keeps` to the `cut-snapped` warning and `--json`'s `cutSnaps`.
+
+Everything derived from a cut follows the landed spans, not the request: the
+removed duration, the short-decode check, and the chapter and lyric remaps. A
+span that keeps no whole packet declines to the re-encode rung, which cuts it
+exactly.
+
+`--cut-mode copy-exact` sets WaxFlow's `TranscodeOptions.SpliceTrims`: the
+pre-roll packets ahead of each interior head are walked and carry a
+full-duration discard, so each interior tail is exact and the decoder has
+converged where the kept audio starts. Only Matroska states a trim per packet,
+so the output must be `.mka`, `.mkv`, or `.webm`, and Firefox rejects a file
+carrying more than one discard. Interior heads still snap, since no container
+states a front trim.
 
 ## SABR audio
 

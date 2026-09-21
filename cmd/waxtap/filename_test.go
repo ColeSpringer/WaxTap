@@ -138,16 +138,28 @@ func TestResolveOutputNameTrailingEmptySegmentKeepsExtension(t *testing.T) {
 	}
 }
 
+// A template must not reach outside the output directory, and a component it
+// meant as navigation must not become a directory named "untitled" either: it
+// is dropped, so "../{id}.{ext}" lands flat the way "/{id}.{ext}" does.
 func TestResolveOutputNameNeutralizesTraversal(t *testing.T) {
-	for _, tmpl := range []string{"/{id}.{ext}", "../{id}.{ext}", "{author}/../{id}.{ext}"} {
+	for _, tmpl := range []string{"/{id}.{ext}", "../{id}.{ext}", "{author}/../{id}.{ext}", "./{id}.{ext}"} {
 		got := resolveOutputName(tmpl, templateData{ID: "abc123", Ext: "mp3"})
 		if filepath.IsAbs(got) {
 			t.Errorf("%q -> %q is absolute", tmpl, got)
 		}
 		for seg := range strings.SplitSeq(got, string(filepath.Separator)) {
-			if seg == ".." {
-				t.Errorf("%q -> %q keeps a .. component", tmpl, got)
+			if seg == ".." || seg == "." {
+				t.Errorf("%q -> %q keeps a %q component", tmpl, got, seg)
 			}
+			if seg == "untitled" {
+				t.Errorf("%q -> %q turned a navigation component into a directory", tmpl, got)
+			}
+		}
+	}
+	// The flat cases land as the bare name, with no directory at all.
+	for _, tmpl := range []string{"../{id}.{ext}", "/{id}.{ext}", "./{id}.{ext}"} {
+		if got := resolveOutputName(tmpl, templateData{ID: "abc123", Ext: "webm"}); got != "abc123.webm" {
+			t.Errorf("%q -> %q, want abc123.webm", tmpl, got)
 		}
 	}
 }

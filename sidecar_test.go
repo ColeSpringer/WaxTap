@@ -742,6 +742,85 @@ func TestParseNetscapeCookies(t *testing.T) {
 	if empty.Domain != ".youtube.com" || empty.Path != "/" {
 		t.Errorf("six-field cookie = %+v, want domain/path still parsed", empty)
 	}
+
+	// An expiry that does not parse fails the file, naming the line: reading
+	// it as "no expiry" makes it a session cookie, so a credential the export
+	// had already retired would be sent for the rest of the run with nothing
+	// to say so. The leniency above (headers, comments, short lines) is for
+	// lines that are not cookies at all, which is a different thing.
+	// A blank column is a session cookie, the way 0 is, and a fractional
+	// timestamp still names a moment. Only a value with no reading fails.
+	for _, tc := range []struct {
+		name, field string
+		wantZero    bool
+	}{
+		{"blank", "", true},
+		{"whitespace", " ", true},
+		{"zero", "0", true},
+		{"seconds", "1799999999", false},
+		{"fractional", "1799999999.5", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "cookies.txt")
+			line := ".youtube.com\tTRUE\t/\tFALSE\t" + tc.field + "\tPREF\tv\n"
+			if werr := os.WriteFile(p, []byte(line), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			c, cerr := ParseNetscapeCookies(p)
+			if cerr != nil {
+				t.Fatalf("expiry %q failed the file: %v", tc.field, cerr)
+			}
+			if len(c) != 1 {
+				t.Fatalf("got %d cookies, want 1", len(c))
+			}
+			if c[0].Expires.IsZero() != tc.wantZero {
+				t.Errorf("expiry %q -> %v, want zero = %v", tc.field, c[0].Expires, tc.wantZero)
+			}
+		})
+	}
+
+	badExpiry := filepath.Join(t.TempDir(), "cookies.txt")
+	if werr := os.WriteFile(badExpiry, []byte("# header\n.youtube.com\tTRUE\t/\tFALSE\tnot-a-number\tPREF\tv\n"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, eerr := ParseNetscapeCookies(badExpiry); eerr == nil {
+		t.Error("an expiry that does not parse was accepted")
+	} else if !strings.Contains(eerr.Error(), "expiry") || !strings.Contains(eerr.Error(), "line 2") {
+		t.Errorf("err = %v, want it to name the expiry and line 2", eerr)
+	}
+
+	// The secure flag is the opposite case: it decides only whether a cookie
+	// may travel over plain HTTP, and every jar-backed request WaxTap makes is
+	// HTTPS, so an odd spelling reads as FALSE rather than failing an export
+	// that otherwise works.
+	odd := filepath.Join(t.TempDir(), "cookies.txt")
+	body := ".youtube.com\tTRUE\t/\tMAYBE\t0\tPREF\tv\n" +
+		".youtube.com\tTRUE\t/\ttrue\t0\tSID\tw\n"
+	if werr := os.WriteFile(odd, []byte(body), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	loose, lerr := ParseNetscapeCookies(odd)
+	if lerr != nil {
+		t.Fatalf("an odd secure flag failed the file: %v", lerr)
+	}
+	if len(loose) != 2 {
+		t.Fatalf("got %d cookies, want 2", len(loose))
+	}
+	if loose[0].Secure {
+		t.Error("an unreadable secure flag should read as FALSE")
+	}
+	if !loose[1].Secure {
+		t.Error(`a lowercase "true" is TRUE; the column is case-insensitive`)
+	}
+
+	// An empty file is still a valid one, as the documented leniency says.
+	blank := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(blank, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ParseNetscapeCookies(blank); err != nil || len(got) != 0 {
+		t.Errorf("empty file = %v, %v, want no cookies and no error", got, err)
+	}
 }
 
 func TestParseSessionExpiry(t *testing.T) {
@@ -1387,8 +1466,8 @@ func TestPingSidecar(t *testing.T) {
 		},
 		{
 			name: "daemon scope, keyless on a keyed daemon", status: 200,
-			body: `{"ok":true,"probe":"daemon","reason":"ok","browser_relaunched":false}`,
-			want: SidecarHealth{OK: true, Probe: "daemon", Reason: "ok"},
+			body: `{"ok":true,"probe":"daemon","reason":"ok","browser_relaunched":false,"keyed":true}`,
+			want: SidecarHealth{OK: true, Probe: "daemon", Reason: "ok", Keyed: true},
 		},
 		{
 			// A benign window stays healthy under strict, as the daemon's own

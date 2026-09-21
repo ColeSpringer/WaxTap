@@ -272,8 +272,9 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 	}
 	// Report these once per run, not once per playlist item.
 	if tf, has, terr := df.transcodeFormat(); terr == nil && has {
-		warnBitrateIgnored(env, tf, df.bitrate)
-		warnBitDepthIgnored(env, tf, df.bitDepth)
+		if err := noteKnobFlags(env, tf, df.bitrate, df.bitDepth); err != nil {
+			return err
+		}
 	}
 	if cmd.Flags().Changed("loudness-target") && !df.normalize {
 		return usagef("--loudness-target requires --normalize")
@@ -809,16 +810,36 @@ func warnContainerExtMismatch(env *appEnv, df *downloadFlags, res *waxtap.Result
 	}
 	outExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(res.OutputPath), "."))
 	srcExt := strings.ToLower(res.SourceFormat.Extension)
-	// A cover-art embed remuxes a WebM source to its Ogg container and names the
-	// output to match, so that WebM->Ogg change is expected, not a mismatch. Other
-	// keep-source deliveries are not remuxed, so their mismatch still warns.
-	if df.embedThumbnail && srcExt == "webm" {
+	// A cover-art embed remuxes a source whose container cannot hold a picture
+	// into its codec's own, and the result reports the container the file is
+	// really in. That is a remux the run made, not a mismatch to warn about,
+	// and the user is told what happened rather than left to infer it from an
+	// extension that no longer matches the source's.
+	if (df.embedThumbnail || df.embedMetadata) && res.OutputFormat.Extension != "" &&
+		!strings.EqualFold(res.OutputFormat.Extension, srcExt) {
+		env.note(noteCoverArtRemuxed, "the %s source was remuxed to %s so the cover art could be embedded; the packets are unchanged",
+			srcExt, containerLabel(res.OutputFormat.Extension))
 		return
 	}
 	if outExt == "" || sameContainer(outExt, srcExt) {
 		return
 	}
 	env.note(noteContainerExtMismatch, "output path uses .%s, but the source container is .%s; bytes were not re-encoded (rename to .%s or pass --format to convert)", outExt, srcExt, srcExt)
+}
+
+// containerLabel names a container for a note, by the family rather than the
+// extension: an .opus and an .ogg are both Ogg files.
+func containerLabel(ext string) string {
+	switch strings.ToLower(ext) {
+	case "opus", "ogg", "oga":
+		return "Ogg"
+	case "mka", "mkv", "webm":
+		return "Matroska"
+	case "m4a", "mp4", "m4b":
+		return "MP4"
+	default:
+		return "." + strings.ToLower(ext)
+	}
 }
 
 // sameContainer reports whether two file extensions name the same media
@@ -874,7 +895,13 @@ func noteUseBothWebSourcesIfActionable(env *appEnv, res *waxtap.Result, err erro
 func webOutcomeActionable(res *waxtap.Result, err error) bool {
 	if res != nil {
 		for _, w := range res.Warnings {
-			if w.Code == waxtap.WarnWebContextRetry || w.Code == waxtap.WarnWebContextFallback {
+			switch w.Code {
+			case waxtap.WarnWebContextRetry, waxtap.WarnWebContextFallback:
+				return true
+			case waxtap.WarnWatchPageNoToken:
+				// A delivery that worked, but through the watch page: the
+				// player request failed and the token was never tried. A
+				// second source is exactly what would have helped.
 				return true
 			}
 		}
@@ -926,9 +953,10 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 // buildProcessSpec builds the shared ProcessSpec (transcode/cut/loudness) from
 // the flags, without an Output.
 func (df *downloadFlags) buildProcessSpec() (waxtap.ProcessSpec, error) {
+	specLayout, specDownmix := downmixFields(df.layout, df.downmix)
 	spec := waxtap.ProcessSpec{
-		Channels:        df.layout,
-		Downmix:         df.downmix,
+		Channels:        specLayout,
+		Downmix:         specDownmix,
 		IncludeMetadata: df.writeInfoJSON,
 		EmbedThumbnail:  df.embedThumbnail,
 		EmbedMetadata:   df.embedMetadata,

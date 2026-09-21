@@ -3,9 +3,11 @@ package waxtap
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -516,11 +518,13 @@ func TestAlbumMeasuresMixedWidthsAsAGroup(t *testing.T) {
 	}
 }
 
-// A member the timeline cannot place is still refused, naming the track: two
-// 6-channel files whose rear pairs sit in different places (WaxFlow's
-// conventional 6-channel layout puts them at the back) carry the same count
-// with positions the envelope has no home for.
-func TestAlbumRefusesAnUnplaceableMemberNamingTheTrack(t *testing.T) {
+// A member whose channel positions differ from its neighbours' is measured as
+// it is. Two 6-channel files, one with its rear pair at the back and one at
+// the sides, used to be refused: the group was a concatenation, a timeline is
+// built at one width and one layout, and the second file's positions had no
+// home in the first's. Each member is now decoded at its own width, so the
+// set has no envelope to be refused by and each track's encode stands alone.
+func TestAlbumMeasuresAMemberWhosePositionsDiffer(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	// FL|FR|FC|LFE|BL|BR, which is audio.DefaultLayout(6).
@@ -535,29 +539,32 @@ func TestAlbumRefusesAnUnplaceableMemberNamingTheTrack(t *testing.T) {
 	}
 	c := newOfflineClient(t)
 
-	_, err := c.MeasureAlbum(ctx, []string{back, side})
-	if !errors.Is(err, ErrUnsupportedInput) {
-		t.Fatalf("MeasureAlbum = %v, want ErrUnsupportedInput (exit 2)", err)
+	res, err := c.MeasureAlbum(ctx, []string{back, side})
+	if err != nil {
+		t.Fatalf("MeasureAlbum: %v", err)
 	}
-	if !strings.Contains(err.Error(), "side.wav") {
-		t.Errorf("err = %v, want it to name side.wav rather than a member index", err)
+	if math.IsInf(res.Album.IntegratedLUFS, 0) || math.IsNaN(res.Album.IntegratedLUFS) {
+		t.Errorf("album figure = %v, want a finite measurement", res.Album.IntegratedLUFS)
+	}
+	for i, l := range res.PerTrack {
+		if math.IsInf(l.IntegratedLUFS, 0) || math.IsNaN(l.IntegratedLUFS) {
+			t.Errorf("track %d = %v, want a finite measurement", i, l.IntegratedLUFS)
+		}
 	}
 
-	// The refusal reaches ProcessAlbum too, and it arrives before any track is
-	// written: the group measurement runs ahead of the write loop, so a set the
-	// timeline cannot open leaves no half-normalized album behind. The target is
-	// WAV because FLAC refuses this layout at its own encoder, one layer earlier,
-	// which would pin a different refusal than the one under test.
+	// The write path agrees: both tracks are written. The target is WAV
+	// because FLAC refuses this layout at its own encoder.
 	out := filepath.Join(dir, "out")
-	_, perr := c.ProcessAlbum(ctx, []AlbumTrack{
+	if _, perr := c.ProcessAlbum(ctx, []AlbumTrack{
 		{Input: back, Output: filepath.Join(out, "a.wav")},
 		{Input: side, Output: filepath.Join(out, "b.wav")},
-	}, -14, TranscodeSpec{Format: FormatWAV})
-	if !errors.Is(perr, ErrUnsupportedInput) || !strings.Contains(perr.Error(), "side.wav") {
-		t.Fatalf("ProcessAlbum = %v, want ErrUnsupportedInput naming side.wav", perr)
+	}, -14, TranscodeSpec{Format: FormatWAV}); perr != nil {
+		t.Fatalf("ProcessAlbum: %v", perr)
 	}
-	if _, serr := os.Stat(filepath.Join(out, "a.wav")); serr == nil {
-		t.Error("the refusal came after a track was written; it must precede the work")
+	for _, n := range []string{"a.wav", "b.wav"} {
+		if _, serr := os.Stat(filepath.Join(out, n)); serr != nil {
+			t.Errorf("%s was not written: %v", n, serr)
+		}
 	}
 }
 
@@ -727,4 +734,111 @@ func albumHasWarning(ws []Warning, code WarningCode) bool {
 		}
 	}
 	return false
+}
+
+// A mono member is measured as mono. The old group pass built one timeline
+// at one width, and a mono member placed into a stereo envelope was
+// duplicated onto both fronts and read 3 dB hot, so an album to a lossy
+// target (where a wide member forces a stereo timeline) came out 0.7 LU
+// away from the same album to a lossless one. The group is now the union of
+// every member's own gated blocks, so the target codec cannot move the figure.
+func TestAlbumMonoMemberIsNotCountedAsDualMono(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	stereo := filepath.Join(dir, "stereo.wav")
+	mono := filepath.Join(dir, "mono.wav")
+	wide := filepath.Join(dir, "wide.wav")
+	for p, b := range map[string][]byte{stereo: mediatest.SineWAV(2, 2), mono: mediatest.SineWAV(2, 1), wide: mediatest.FrontsOnlyWAV(2, 6)} {
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	measure := func(format TranscodeFormat, ext string) (*AlbumProcessResult, error) {
+		var tracks []AlbumTrack
+		for i, in := range []string{stereo, mono, wide} {
+			tracks = append(tracks, AlbumTrack{Input: in, Output: filepath.Join(dir, ext, strconv.Itoa(i)+"."+ext)})
+		}
+		return c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: format}, WithAlbumPeakMode(PeakCap))
+	}
+	flac, err := measure(FormatFLAC, "flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opus, err := measure(FormatOpus, "opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solo, err := c.Measure(ctx, mono)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, res := range map[string]*AlbumProcessResult{"flac": flac, "opus": opus} {
+		if d := math.Abs(res.PerTrack[1].IntegratedLUFS - solo.IntegratedLUFS); d > 0.05 {
+			t.Errorf("%s: mono member measured %.2f in the album, %.2f alone", name, res.PerTrack[1].IntegratedLUFS, solo.IntegratedLUFS)
+		}
+	}
+	// The group figure itself: over a set with nothing to fold, it is the
+	// energy-weighted mean of the members' own gated blocks, which the two
+	// equal-length members make the plain mean of their energies. A mono
+	// member widened onto a stereo pair reads 3 dB hot and pulls the group
+	// most of the way up to the stereo member's figure, which is what the
+	// concatenated group pass did.
+	pair, err := c.ProcessAlbum(ctx, []AlbumTrack{
+		{Input: stereo, Output: filepath.Join(dir, "pair", "0.flac")},
+		{Input: mono, Output: filepath.Join(dir, "pair", "1.flac")},
+	}, -14, TranscodeSpec{Format: FormatFLAC}, WithAlbumPeakMode(PeakCap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	energy := func(lufs float64) float64 { return math.Pow(10, lufs/10) }
+	want := 10 * math.Log10((energy(pair.PerTrack[0].IntegratedLUFS)+energy(pair.PerTrack[1].IntegratedLUFS))/2)
+	if d := math.Abs(pair.Album.IntegratedLUFS - want); d > 0.1 {
+		t.Errorf("album of a stereo and a mono member measured %.3f, want %.3f (the mean of their energies, %.3f LU off); the mono member was not measured as mono",
+			pair.Album.IntegratedLUFS, want, d)
+	}
+}
+
+// An album member the filesystem will not open is an I/O failure, exit 10,
+// the same as the single-file path gives. It is not bad input: the file may
+// be perfectly good audio the run cannot read.
+func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.wav")
+	if err := os.WriteFile(good, mediatest.SineWAV(1, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "locked.wav")
+	if err := os.WriteFile(locked, mediatest.SineWAV(1, 2), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+
+	c := newOfflineClient(t)
+	_, err := c.MeasureAlbum(ctx, []string{good, locked})
+	if err == nil {
+		t.Fatal("MeasureAlbum on an unreadable member succeeded")
+	}
+	// The same class the single-file path reports, so one unreadable file
+	// does not change meaning by being in an album.
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Errorf("err = %v (%T), want a *fs.PathError as the single-file path gives", err, err)
+	}
+	if errors.Is(err, ErrUnsupportedInput) {
+		t.Errorf("err = %v, want an I/O failure rather than bad input", err)
+	}
+	if !strings.Contains(err.Error(), "locked.wav") {
+		t.Errorf("err = %v, want it to name the track", err)
+	}
+
+	// The single-file path, for comparison.
+	_, serr := c.Measure(ctx, locked)
+	if !errors.As(serr, &pathErr) {
+		t.Errorf("single-file err = %v (%T), want a *fs.PathError", serr, serr)
+	}
 }

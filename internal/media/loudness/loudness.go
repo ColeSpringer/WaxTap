@@ -16,18 +16,13 @@ package loudness
 
 import (
 	"context"
-	"fmt"
 	"math"
-	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxflow"
 
 	"github.com/colespringer/waxtap/v3/internal/cutrange"
 	"github.com/colespringer/waxtap/v3/internal/media"
-	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // TruePeakCeilingDB is the true-peak ceiling (dBTP) normalization holds under. It
@@ -142,241 +137,40 @@ func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutr
 	return l, nil
 }
 
-// MeasureAlbum measures a set of tracks as a group and individually. The album
-// value is the EBU R128 result for the concatenated tracks, including gating and
-// energy weighting; it is not a mean of per-track LUFS. perTrack follows input
-// order.
+// MeasureAlbum measures a set of tracks as a group and individually, from
+// one decode per track: each member at folds[i], the width its own encode
+// delivers (media.Runner.PlanEncode; 0 or a short slice keeps the source
+// layout), and the album as EBU R128's gates run over every member's blocks
+// at once. The album value is not a mean of per-track LUFS, and it is not a
+// concatenation either: a concatenation is built at one width, and a mono
+// member widened into it reads 3 dB hot. perTrack follows input order.
 //
-// folds[i], when 1 or 2, folds track i's measurement to that width, the width
-// the album's encode delivers for it (media.Runner.PlanOutputChannels); 0, or a
-// nil slice, keeps the source layout. The folds name one width, and every
-// member left unfolded is at most that wide: a lossy row folds every source
-// wider than what it can hold to the same count and leaves the rest alone.
-// widths[i] is track i's source channel count, which the caller has already
-// probed; 0, or a short slice, means it could not be read, which counts as a
-// width of its own and keeps such a set off the fold-once shape below.
-//
-// The group pass measures the album at the widths the encode delivers, and how
-// depends on the set:
-//
-//   - Nothing folds: the Concat at source widths. A narrower member is placed
-//     into the widest layout at unity with its missing positions silent, which
-//     is loudness-neutral under BS.1770. The one exception is a mono member,
-//     which is duplicated across the front pair and measures about 3 dB up in
-//     the group; that predates this and is not new here.
-//   - Every member folds, from one source width: the Concat folded once, by the
-//     measurement. That fold is every member's own, and it is the raw mix with
-//     no limiter (waxflow.AnalyzeOptions.Channels), the same fold the per-track
-//     pass takes, so the group and the tracks agree on hot material.
-//   - Anything else, the realistic case being a surround member folded to
-//     stereo for a lossy target beside a stereo one: the timeline is built at
-//     the fold's width (waxflow.ConcatOptions.Channels), so each wider member
-//     is folded by its own chain before it meets its siblings and a narrower
-//     one is placed as above, and the measurement folds nothing. The order is
-//     the point: a fold applied to the assembled timeline would not be the
-//     member's own, because the mixer normalizes each output row by the energy
-//     of every source coefficient, silent positions included, so a 5.1 member
-//     widened to 7.1 and then folded to stereo lands about 1 dB under its
-//     direct fold. The fold inside a member's chain is the delivery fold,
-//     limiter included, which is what the encode meters for that member.
-func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds, widths []int) (album Loudness, perTrack []Loudness, err error) {
-	build, fold, err := groupPass(inputs, folds, widths)
+// The members are decoded one after another inside the engine, so an album of
+// N tracks costs N serial decodes on one concurrency slot. The Concat pass
+// this replaces cost N parallel decodes for the per-track figures plus N more
+// for the group, so the wall clock is at worst what the old group pass alone
+// cost.
+func MeasureAlbum(ctx context.Context, r *media.Runner, inputs []string, folds []int) (album Loudness, perTrack []Loudness, err error) {
+	group, members, warnings, err := r.AnalyzeGroup(ctx, inputs, folds)
 	if err != nil {
 		return Loudness{}, nil, err
 	}
-	perTrack, measured, err := measureTracks(ctx, r, inputs, folds)
-	if err != nil {
-		return Loudness{}, nil, err
-	}
-
-	med, closer, oerr := r.OpenAlbumConcat(ctx, inputs, measured, build)
-	if oerr != nil {
-		return Loudness{}, nil, oerr
-	}
-	defer closer()
-	// The group read's own damage list is the members' again, each under a
-	// member index; the per-track measurements above already carry them.
-	//
-	// "" names no single file: a concatenated album has several.
-	ares, merr := r.AnalyzeMedia(ctx, med, "", fold)
-	if merr != nil {
-		return Loudness{}, nil, merr
-	}
-	return fromResult(ares), perTrack, nil
-}
-
-// trackAnalyzer is the part of media.Runner the per-track pass uses: the
-// concurrency the runner admits, and a whole-file analysis. measureTracks
-// takes it rather than the Runner itself so a test can drive the pass with an
-// analyzer that counts the calls in flight, which is the one property a
-// stopwatch cannot pin here: "go test ./..." runs package binaries -p at a
-// time, so on a shared runner a correctly concurrent pass finishes no sooner
-// than a serial one.
-type trackAnalyzer interface {
-	// Concurrency is how many analyses to run at once, at least one; see
-	// media.Runner.Concurrency.
-	Concurrency() int
-	AnalyzeFile(ctx context.Context, input string, channels int) (*waxflow.AnalyzeResult, []string, error)
-}
-
-// measureTracks runs the per-track pass and returns each track's measurement
-// with the frame count its read delivered. The counts are what the group
-// timeline needs for a member whose headers state its length only
-// approximately; see media.Runner.OpenAlbumConcat.
-//
-// The tracks are measured across the runner's own concurrency budget rather
-// than one after another. Each is a full decode of a separate file and they
-// share nothing, so an album of N tracks was N decodes deep on one core while
-// the runner stood ready to admit Concurrency of them; it is the dominant cost
-// of measuring an album. The runner bounds the engine work either way, so what
-// the fan-out adds is the descriptors and buffers of the calls in flight,
-// which is the same budget the caller already set.
-//
-// A failure stops the dispatch, not the reads already running. The album is
-// measured to derive one gain, so once a member cannot be read there is no
-// album figure and the tracks not yet started are wasted work; the ones in
-// flight are already paid for, and letting them finish is what keeps the
-// answer stable. Cancelling them instead would record a cancellation against
-// a track that was itself about to fail, and the reported failure would then
-// depend on which decode lost the race.
-//
-// The error reported is the lowest-numbered track's, which is the one a pass
-// down the list would have hit first. That is the global one: indexes go out
-// in order, so every track left undispatched sits above every track that ran.
-func measureTracks(ctx context.Context, r trackAnalyzer, inputs []string, folds []int) ([]Loudness, []int64, error) {
-	perTrack := make([]Loudness, len(inputs))
-	measured := make([]int64, len(inputs))
-	errs := make([]error, len(inputs))
-
-	var failed atomic.Bool
-	next := make(chan int)
-	go func() {
-		defer close(next)
-		for i := range inputs {
-			if failed.Load() {
-				return
-			}
-			select {
-			case next <- i:
-			case <-ctx.Done():
-				return
-			}
+	perTrack = make([]Loudness, len(members))
+	var total time.Duration
+	for i := range members {
+		perTrack[i] = fromResult(&members[i])
+		// The two slices are built from the same input list and should be the
+		// same length; the bound is here so a future engine answering with a
+		// different count reports short figures rather than panicking in a
+		// caller's process.
+		if i < len(warnings) {
+			perTrack[i].Warnings = warnings[i]
 		}
-	}()
-
-	var wg sync.WaitGroup
-	// The budget is floored rather than trusted: an analyzer reporting none
-	// would start no workers, and the pass would hand back an album of
-	// unmeasured tracks with no error against any of them. media.Runner
-	// reports a floor of one, so the floor here only ever holds a stub.
-	for range min(max(r.Concurrency(), 1), len(inputs)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// The loop runs to the end of the channel even after a failure:
-			// a worker that returned early could leave the dispatch with no
-			// reader and the last index never sent.
-			for i := range next {
-				res, found, aerr := r.AnalyzeFile(ctx, inputs[i], foldAt(folds, i))
-				if aerr != nil {
-					errs[i] = aerr
-					failed.Store(true)
-					continue
-				}
-				perTrack[i] = fromResult(res)
-				perTrack[i].Warnings = found
-				measured[i] = res.Samples
-			}
-		}()
+		total += perTrack[i].Duration
 	}
-	wg.Wait()
-
-	for i, aerr := range errs {
-		if aerr != nil {
-			// The album has many inputs, so the failure names its file, the
-			// way a timeline error is named after its member.
-			return nil, nil, fmt.Errorf("track %s: %w", filepath.Base(inputs[i]), aerr)
-		}
-	}
-	return perTrack, measured, nil
-}
-
-// groupPass decides how the group measurement runs: build is the width the
-// timeline is built at (0 keeps the envelope) and fold the width the
-// measurement folds to (0 keeps the timeline's). See MeasureAlbum for the
-// three shapes.
-//
-// It holds the caller to the one-width rule rather than trusting it. Two
-// different fold widths cannot come from one encode, and an unfolded member
-// wider than the fold delivers a second width that one timeline cannot carry:
-// built at the fold it would fold a member whose encode does not, and built
-// wider it would place the folded ones. Both are refused as a spec conflict
-// naming the track, since a timeline error names members by index and this
-// one never reaches the timeline.
-//
-// Neither shape is reachable today, and the reason is not in this package:
-// every encoder folds each source above its cap to the same count, so one
-// codec and one spec name one width (media.TestPlanOutputChannelsCapsEvery
-// CodecAtOneWidth pins that, and is where a bump that stopped it would fail).
-// The refusals stay because the alternative to them is not a wrong error but
-// a silent one: an album gain derived from a member measured at a width its
-// own encode never delivers describes no file that was written.
-func groupPass(inputs []string, folds, widths []int) (build, fold int, err error) {
-	foldOf := func(i int) int { return foldAt(folds, i) }
-	widthOf := func(i int) int {
-		if i < len(widths) {
-			return widths[i]
-		}
-		return 0
-	}
-	width, allFold, oneWidth := 0, len(inputs) > 0, true
-	for i := range inputs {
-		switch f := foldOf(i); {
-		case f <= 0:
-			allFold = false
-		case width == 0:
-			width = f
-		case f != width:
-			return 0, 0, fmt.Errorf("track %s: %w: folds to %s where the album folds to %s; one encode delivers one width",
-				filepath.Base(inputs[i]), waxerr.ErrIncompatibleSpec, channelCount(f), channelCount(width))
-		}
-		if w := widthOf(i); w <= 0 || w != widthOf(0) {
-			oneWidth = false
-		}
-	}
-	if width == 0 {
-		return 0, 0, nil
-	}
-	for i := range inputs {
-		if w := widthOf(i); foldOf(i) <= 0 && w > width {
-			return 0, 0, fmt.Errorf("track %s: %w: delivers %s beside a fold to %s; the album's members do not share a delivered width",
-				filepath.Base(inputs[i]), waxerr.ErrIncompatibleSpec, channelCount(w), channelCount(width))
-		}
-	}
-	if allFold && oneWidth {
-		return 0, width, nil
-	}
-	return width, 0, nil
-}
-
-// channelCount names a width the way a refusal has to read: a mono fold is
-// "1 channel", not "1 channels".
-func channelCount(n int) string {
-	if n == 1 {
-		return "1 channel"
-	}
-	return fmt.Sprintf("%d channels", n)
-}
-
-// foldAt is track i's fold width, the one reading both passes take: a slice too
-// short to reach i, and any entry that is not a width, mean the track keeps its
-// source layout. MeasureAlbum's contract is 1 or 2, and a caller outside it
-// must not have the group and the tracks disagree about what it asked for.
-func foldAt(folds []int, i int) int {
-	if i < len(folds) && folds[i] > 0 {
-		return folds[i]
-	}
-	return 0
+	album = fromResult(group)
+	album.Duration = total // the group carries no format, so its length is the members'
+	return album, perTrack, nil
 }
 
 // GainFor is the closed form of ffmpeg's linear-mode loudnorm: the gain that

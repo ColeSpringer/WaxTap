@@ -335,7 +335,7 @@ func TestStreamErr_RecordReclassifiesURLExpired(t *testing.T) {
 
 	var s streamErr
 	s.record(t.Context(), fmt.Errorf("mid-read: %w", ErrURLExpired))
-	s.terminal(em)
+	s.terminal(em, 0, 0)
 
 	if !errors.Is(got, ErrIncompleteStream) {
 		t.Fatalf("terminal err = %v, want ErrIncompleteStream", got)
@@ -358,7 +358,7 @@ func TestStreamErr_RecordKeepsCancellation(t *testing.T) {
 
 	var s streamErr
 	s.record(ctx, fmt.Errorf("mid-read: %w", ErrURLExpired))
-	s.terminal(em)
+	s.terminal(em, 0, 0)
 
 	if errors.Is(got, ErrIncompleteStream) {
 		t.Fatalf("terminal err = %v, want no ErrIncompleteStream re-wrap", got)

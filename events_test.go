@@ -2,6 +2,7 @@ package waxtap
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -128,5 +129,49 @@ func TestEmitterWarnNthConcurrent(t *testing.T) {
 	}
 	if len(seen) != n {
 		t.Errorf("got %d distinct ordinals, want %d", len(seen), n)
+	}
+}
+
+// The throttle detail must not claim a pause WaxTap does not take: the penalty
+// is a wait the limiter holds later requests to that host for, and the request
+// that hit the limit is already past it.
+func TestThrottleDetailDoesNotClaimAPause(t *testing.T) {
+	cases := []struct {
+		name  string
+		code  WarningCode
+		ev    httpx.ThrottleEvent
+		want  string
+		avoid string
+	}{
+		{
+			name: "retry started",
+			code: WarnRateLimitedRetried,
+			ev:   httpx.ThrottleEvent{Host: "youtube.com", StatusCode: 429},
+			want: "retrying request to youtube.com after HTTP 429",
+		},
+		{
+			name:  "a stated penalty",
+			code:  WarnThrottled,
+			ev:    httpx.ThrottleEvent{Host: "youtube.com", StatusCode: 429, Penalty: 30 * time.Second},
+			want:  "rate limited by youtube.com (HTTP 429); further requests to it wait 30s",
+			avoid: "pausing",
+		},
+		{
+			name: "no penalty",
+			code: WarnThrottled,
+			ev:   httpx.ThrottleEvent{Host: "youtube.com", StatusCode: 429},
+			want: "rate limited by youtube.com (HTTP 429)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := throttleDetail(tc.code, tc.ev)
+			if got != tc.want {
+				t.Errorf("detail = %q, want %q", got, tc.want)
+			}
+			if tc.avoid != "" && strings.Contains(got, tc.avoid) {
+				t.Errorf("detail = %q, want it not to say %q", got, tc.avoid)
+			}
+		})
 	}
 }

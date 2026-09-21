@@ -65,9 +65,9 @@ func TestProcessMusepackSource(t *testing.T) {
 	}
 
 	// The promotion a cut into a foreign container makes is the shape that
-	// warns for a lossless source (TestProcessWarnsImplicitLossyPromotion); a
-	// source that was lossy already, which is what lossySource says of
-	// musepack, must take the same Opus re-encode without the warning.
+	// warns (TestProcessWarnsImplicitLossyPromotion). A source that was lossy
+	// already warns too: it pays a second generation the request said no more
+	// about than it said about a first, and the detail names it as one.
 	cutOut := filepath.Join(dir, "cut.mka")
 	res, err = c.Process(ctx, ProcessRequest{
 		Input:       in,
@@ -79,10 +79,11 @@ func TestProcessMusepackSource(t *testing.T) {
 	if res.OutputFormat.Codec != "opus" || !res.Transcoded {
 		t.Errorf("cut into .mka = %+v transcoded %v, want the container's Opus promotion", res.OutputFormat, res.Transcoded)
 	}
-	for _, w := range res.Warnings {
-		if w.Code == WarnImplicitLossy {
-			t.Errorf("warnings = %v; a source that was lossy already must not warn implicit-lossy", res.Warnings)
-		}
+	w, ok := findWarning(res.Warnings, WarnImplicitLossy)
+	if !ok {
+		t.Errorf("warnings = %v, want implicit-lossy: the Opus re-encode is a generation the request never named", res.Warnings)
+	} else if !strings.Contains(w.Detail, "second lossy generation") {
+		t.Errorf("detail = %q, want it to name the second generation", w.Detail)
 	}
 
 	// Keeping the packets under the source's own name is the natural copy
