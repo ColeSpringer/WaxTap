@@ -51,7 +51,7 @@ func (c *Client) ResolveWithFailure(ctx context.Context, ext *Extraction, format
 		if ext.serverAbrURL == "" {
 			return MediaPlan{}, fmt.Errorf("%w: candidate has neither URL nor signatureCipher", waxerr.ErrExtractionFailed)
 		}
-		return MediaPlan{SABR: c.newSABRStream(ext, formatIndex, rf)}, nil
+		return MediaPlan{SABR: c.newSABRStream(ext, formatIndex)}, nil
 	}
 
 	token, err := c.resolveToken(ctx, ext, failure)

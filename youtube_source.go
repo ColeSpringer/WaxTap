@@ -44,7 +44,6 @@ func (c *Client) SponsorBlockSegments(ctx context.Context, videoURL string, cate
 // attempt that produced it.
 type acquired struct {
 	video    *youtube.Video
-	fmtSel   Format
 	transfer mediaTransfer
 	attempt  youtube.AttemptID
 	client   string // display name for logs and warnings
@@ -62,6 +61,10 @@ type acquired struct {
 // viaWatchPage reports that this acquisition came from the watch-page scrape
 // rather than the player endpoint.
 func (a *acquired) viaWatchPage() bool { return a.attempt == youtube.AttemptWatchPage }
+
+// sourceFormat reports the format the acquisition delivers; see
+// mediaTransfer.sourceFormat.
+func (a *acquired) sourceFormat() Format { return a.transfer.sourceFormat() }
 
 // refreshStats counts what one attempt's signed-URL refresh callback did, so a
 // failed download can say how close it came and a successful one can say how much
@@ -345,11 +348,11 @@ func (c *Client) warnSessionDowngrade(em *emitter, a *acquired) {
 // buildTransfer selects and resolves a format from ext. When pinnedItag is
 // non-zero, selection prefers that encoding.
 func (c *Client) buildTransfer(ctx context.Context, req Request, id string, target format.Target, ext *youtube.Extraction, em *emitter, pinnedItag int) (*acquired, error) {
-	video, selFmt, plan, err := c.selectAndResolve(ctx, req, target, ext, em, pinnedItag)
+	video, idx, plan, err := c.selectAndResolve(ctx, req, target, ext, em, pinnedItag)
 	if err != nil {
 		return nil, err
 	}
-	a := &acquired{video: video, fmtSel: selFmt, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom(), fallbackCause: ext.FallbackCause()}
+	a := &acquired{video: video, attempt: ext.Attempt(), client: ext.ClientName(), substitutedFrom: ext.SubstitutedFrom(), fallbackCause: ext.FallbackCause()}
 	// Both branches record the identity the attempt runs under, SABR included: it
 	// refreshes no signed URL, but a whole-chain retry still has to know which
 	// identity to discard, and a zero there rotates nothing while reporting success.
@@ -367,7 +370,7 @@ func (c *Client) buildTransfer(ctx context.Context, req Request, id string, targ
 		a.transfer = sabrTransfer{dl: c.dl, handle: plan.SABR}
 		return a, nil
 	}
-	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(req, id, target, ext, selFmt.Itag, plan.Direct.ExpiresAt, em, a.stats)}
+	a.transfer = urlTransfer{dl: c.dl, src: toSource(*plan.Direct), refresh: c.directRefresh(ext, idx, id, plan.Direct.ExpiresAt, em, a.stats), selected: video.Formats[idx]}
 	return a, nil
 }
 
@@ -422,16 +425,17 @@ func capSuspected(failure *potoken.HTTPFailure, expiresAt time.Time) bool {
 }
 
 // directRefresh builds a signed-URL refresh callback pinned to the original
-// extraction's attempt and itag. Pinning prevents a resumed range from mixing
-// bytes from different encodings.
+// extraction's attempt and to the encoding at idx in it. Pinning the encoding,
+// not the itag, prevents a resumed range from mixing bytes from two encodings.
 //
 // expiresAt is the expiry of the currently live URL; the closure keeps it and
 // the extraction's identity generation current across refreshes, so a 403 can
 // be classified as cap-vs-expiry and a rotation discards only the identity
 // that minted the failing URL. The download layer serializes refresh callbacks
 // (renew runs under the shared source lock), so plain assignment is safe.
-func (c *Client) directRefresh(req Request, id string, target format.Target, ext *youtube.Extraction, pinnedItag int, expiresAt time.Time, em *emitter, stats *refreshStats) download.RefreshFunc {
+func (c *Client) directRefresh(ext *youtube.Extraction, idx int, id string, expiresAt time.Time, em *emitter, stats *refreshStats) download.RefreshFunc {
 	attempt := ext.Attempt()
+	itag := ext.Video().Formats[idx].Itag
 	lastExpiry := expiresAt
 	identityGen := ext.IdentityGeneration()
 	return func(fctx context.Context, failure *potoken.HTTPFailure) (download.Source, error) {
@@ -460,12 +464,12 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 		if rerr != nil {
 			return download.Source{}, refreshFailure(fctx, "re-extract attempt "+string(attempt), rerr)
 		}
-		// A refresh resumes an existing byte range, so the original itag is
-		// mandatory. A client fallback starts from offset zero and may select a
-		// substitute format.
-		ridx, rerr := selectIndex(Itag(pinnedItag), req.SourcePolicy, target, rext.Video().Formats)
-		if rerr != nil {
-			return download.Source{}, fmt.Errorf("%w: pinned itag %d absent after re-extract: %v", ErrURLExpired, pinnedItag, rerr)
+		// A refresh resumes an existing byte range, so it must land on the very
+		// encoding the range came from. A client fallback starts from offset zero
+		// and may select a substitute format.
+		ridx, ok := rext.FindEncoding(ext, idx)
+		if !ok {
+			return download.Source{}, fmt.Errorf("%w: the selected encoding (itag %d) is gone after re-extract", ErrURLExpired, itag)
 		}
 		rrctx, cancel := withTimeout(fctx, c.opts.Timeouts.Resolve)
 		defer cancel()
@@ -474,7 +478,7 @@ func (c *Client) directRefresh(req Request, id string, target format.Target, ext
 			return download.Source{}, refreshFailure(fctx, "re-resolve after refresh", rerr)
 		}
 		if nplan.Direct == nil {
-			return download.Source{}, fmt.Errorf("%w: stream refresh resolved itag %d to SABR", ErrURLExpired, pinnedItag)
+			return download.Source{}, fmt.Errorf("%w: stream refresh resolved itag %d to SABR", ErrURLExpired, itag)
 		}
 		lastExpiry = nplan.Direct.ExpiresAt
 		identityGen = rext.IdentityGeneration()
@@ -556,13 +560,14 @@ func (c *Client) acquireWebContext(ctx context.Context, req Request, id string, 
 	return a, nil
 }
 
-// selectAndResolve selects a format and resolves its delivery plan. A non-zero
-// pinnedItag preserves the preferred encoding across client fallback.
-func (c *Client) selectAndResolve(ctx context.Context, req Request, target format.Target, ext *youtube.Extraction, em *emitter, pinnedItag int) (*youtube.Video, Format, youtube.MediaPlan, error) {
+// selectAndResolve selects a format, returning its index in the video's
+// formats, and resolves its delivery plan. A non-zero pinnedItag preserves the
+// preferred encoding across client fallback.
+func (c *Client) selectAndResolve(ctx context.Context, req Request, target format.Target, ext *youtube.Extraction, em *emitter, pinnedItag int) (*youtube.Video, int, youtube.MediaPlan, error) {
 	video := ext.Video()
 	idx, err := c.selectSourceIndex(req, target, video.Formats, pinnedItag)
 	if err != nil {
-		return nil, Format{}, youtube.MediaPlan{}, err
+		return nil, -1, youtube.MediaPlan{}, err
 	}
 
 	em.stage(StageResolving)
@@ -570,11 +575,11 @@ func (c *Client) selectAndResolve(ctx context.Context, req Request, target forma
 	defer rcancel()
 	plan, err := c.yt.Resolve(rctx, ext, idx)
 	if err != nil {
-		return nil, Format{}, youtube.MediaPlan{}, err
+		return nil, -1, youtube.MediaPlan{}, err
 	}
 	c.log.DebugContext(ctx, "stream resolved",
 		"itag", video.Formats[idx].Itag, "codec", video.Formats[idx].Codec, "contentLength", video.Formats[idx].ContentLength)
-	return video, video.Formats[idx], plan, nil
+	return video, idx, plan, nil
 }
 
 // selectSourceIndex chooses a source format, preferring pinnedItag when available.
@@ -727,7 +732,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 
 		// Prefer the first selected encoding on later attempts.
 		if pinnedItag == 0 {
-			pinnedItag = a.fmtSel.Itag
+			pinnedItag = a.sourceFormat().Itag
 		}
 		if firstClient == "" {
 			firstClient = a.client
@@ -745,7 +750,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// Once per job, on the acquisition that actually delivered: selection
 			// itself has no emitter and re-runs on every refresh, so warning there
 			// would duplicate.
-			warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
+			warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.sourceFormat(), "delivering")
 			// Use the more specific web-context fallback warning below.
 			if a.client != firstClient && !firstFromWebContext {
 				em.warn(WarnFallbackProfile, fmt.Sprintf("client %q did not complete the stream; used %q", firstClient, a.client))
@@ -760,7 +765,7 @@ func (c *Client) acquireAndDownload(ctx context.Context, req Request, id string,
 			// exists to explain.
 			refreshes, rotations := a.stats.counts()
 			c.log.DebugContext(ctx, "download complete",
-				"client", a.client, "itag", a.fmtSel.Itag, "bytes", res.BytesWritten,
+				"client", a.client, "itag", a.sourceFormat().Itag, "bytes", res.BytesWritten,
 				"refreshes", refreshes, "rotations", rotations, "chainPasses", pass)
 			return a, res, path, nil
 		}
@@ -1098,6 +1103,10 @@ type mediaTransfer interface {
 	toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error)
 	toWriter(ctx context.Context, w io.Writer, progress download.ProgressFunc) (download.Result, error)
 	stream(ctx context.Context, progress download.ProgressFunc) (io.ReadCloser, download.StreamInfo, error)
+	// sourceFormat reports the format the transfer delivers: the one selected,
+	// until a SABR reload moves the stream to that rendition re-encoded at a new
+	// lastModified, whose size, bitrate, and duration may differ.
+	sourceFormat() Format
 }
 
 // urlTransfer delivers a signed URL through the chunked downloader.
@@ -1105,7 +1114,11 @@ type urlTransfer struct {
 	dl      *download.Downloader
 	src     download.Source
 	refresh download.RefreshFunc
+	// selected is the format the URL delivers; a refresh keeps the encoding.
+	selected Format
 }
+
+func (t urlTransfer) sourceFormat() Format { return t.selected }
 
 func (t urlTransfer) toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error) {
 	return t.dl.ToFile(ctx, t.src, path, t.refresh, progress)
@@ -1125,6 +1138,8 @@ type sabrTransfer struct {
 	dl     *download.Downloader
 	handle *youtube.SABRStream
 }
+
+func (t sabrTransfer) sourceFormat() Format { return t.handle.Format() }
 
 func (t sabrTransfer) toFile(ctx context.Context, path string, progress download.ProgressFunc) (download.Result, error) {
 	rc, _, err := t.handle.Open(ctx, sabrProgress(progress))
@@ -1277,7 +1292,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, err
 		}
 		em.stage(StageFinalizing)
-		out := a.fmtSel
+		out := a.sourceFormat()
 		out.ContentLength = r.BytesWritten
 		return &Result{
 			SourceKind:   SourceYouTube,
@@ -1285,7 +1300,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			Title:        a.video.Title,
 			Client:       a.client,
 			ViaWatchPage: a.viaWatchPage(),
-			SourceFormat: a.fmtSel,
+			SourceFormat: a.sourceFormat(),
 			OutputFormat: out,
 			OutputPath:   published,
 			SourceBytes:  r.BytesWritten,
@@ -1307,8 +1322,8 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			return nil, derr
 		}
 		em.stage(StageFinalizing)
-		warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
-		out := a.fmtSel
+		warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.sourceFormat(), "delivering")
+		out := a.sourceFormat()
 		out.ContentLength = r.BytesWritten
 		return &Result{
 			SourceKind:   SourceYouTube,
@@ -1316,7 +1331,7 @@ func (c *Client) deliverSource(ctx context.Context, req Request, id string, em *
 			Title:        a.video.Title,
 			Client:       a.client,
 			ViaWatchPage: a.viaWatchPage(),
-			SourceFormat: a.fmtSel,
+			SourceFormat: a.sourceFormat(),
 			OutputFormat: out,
 			SourceBytes:  r.BytesWritten,
 			OutputBytes:  r.BytesWritten,
@@ -1411,12 +1426,12 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	}
 
 	// The selected format determines the staged source filename.
-	dest := func(a *acquired) string { return filepath.Join(jobDir, "source"+sourceExt(a.fmtSel)) }
+	dest := func(a *acquired) string { return filepath.Join(jobDir, "source"+sourceExt(a.sourceFormat())) }
 	a, dlRes, srcPath, err := c.acquireAndDownload(ctx, req, id, em, dest)
 	if err != nil {
 		return "", nil, err
 	}
-	srcExt := sourceExt(a.fmtSel)
+	srcExt := sourceExt(a.sourceFormat())
 
 	em.stage(StageStaging)
 	ranges, sbRanges, err := c.collectRanges(ctx, req.Cut, a.video.ID, em)
@@ -1445,8 +1460,8 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 			Title:        a.video.Title,
 			Client:       a.client,
 			ViaWatchPage: a.viaWatchPage(),
-			SourceFormat: a.fmtSel,
-			OutputFormat: remuxedFormat(a.fmtSel, to),
+			SourceFormat: a.sourceFormat(),
+			OutputFormat: remuxedFormat(a.sourceFormat(), to),
 			SourceBytes:  dlRes.BytesWritten,
 			Metadata:     videoMetadataFor(req, a.video),
 		}
@@ -1487,7 +1502,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	if req.Cut != nil {
 		explicit = cutRanges(req.Cut.Ranges)
 	}
-	res := newProcessResult(SourceYouTube, pres, a.fmtSel, loudnessTarget(req.Loudness))
+	res := newProcessResult(SourceYouTube, pres, a.sourceFormat(), loudnessTarget(req.Loudness))
 	res.OutputFormat = remuxedFormat(res.OutputFormat, remuxedTo)
 	// A copy into the container the output extension named leaves the
 	// delivery's MIME type describing a file that is no longer in that
@@ -1495,7 +1510,7 @@ func (c *Client) produce(ctx context.Context, req Request, id, jobDir, pipeOut s
 	// already taken the extension from the path; the type follows it. Not
 	// run when the cover-art pass above did the same job.
 	if remuxedTo == "" && !pres.Transcoded && pres.OutputPath != "" {
-		if ext := strings.TrimPrefix(filepath.Ext(pres.OutputPath), "."); ext != "" && !strings.EqualFold(ext, a.fmtSel.Extension) {
+		if ext := strings.TrimPrefix(filepath.Ext(pres.OutputPath), "."); ext != "" && !strings.EqualFold(ext, a.sourceFormat().Extension) {
 			res.OutputFormat = remuxedFormat(res.OutputFormat, ext)
 		}
 	}
@@ -1615,8 +1630,8 @@ func (c *Client) Stream(ctx context.Context, req Request) (rc io.ReadCloser, inf
 	if derr != nil {
 		return nil, StreamInfo{}, derr
 	}
-	warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.fmtSel, "delivering")
-	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.fmtSel, ContentLength: sinfo.ContentLength, Client: a.client}
+	warnUnboundSourcePolicy(em, req.SourcePolicy, a.video.Formats, a.sourceFormat(), "delivering")
+	info = StreamInfo{VideoID: id, Title: a.video.Title, Format: a.sourceFormat(), ContentLength: sinfo.ContentLength, Client: a.client}
 	return &doneReader{ReadCloser: body, ctx: ctx, em: em, total: sinfo.ContentLength}, info, nil
 }
 

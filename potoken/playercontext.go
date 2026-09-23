@@ -77,11 +77,13 @@ type PlayerContextThumbnail struct {
 // PlayerContextFormat is one audio rendition in a PlayerContext. Itag, LMT, and
 // XTags identify the encoding as a unit: requesting an (itag, lmt, xtags) triple
 // that matches no rendition makes the SABR server answer RELOAD_PLAYER_RESPONSE,
-// so a consumer must carry all three together.
+// so a consumer must carry all three together. XTags must be the player
+// response's value verbatim: WaxTap also reads the audio role (acont) from it to
+// rank the original track.
 type PlayerContextFormat struct {
 	Itag             int    // YouTube format identifier
 	LMT              string // lastModified, distinguishes encodings sharing an itag
-	XTags            string // SABR format tags
+	XTags            string // the player response's xtags, verbatim
 	MimeType         string // raw YouTube MIME type
 	Bitrate          int    // bits per second
 	AudioQuality     string // YouTube's audioQuality tier, e.g. AUDIO_QUALITY_MEDIUM

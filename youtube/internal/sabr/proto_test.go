@@ -77,7 +77,7 @@ func pb(num protowire.Number, raw []byte) []byte {
 func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	req := videoPlaybackAbrRequest{
 		ClientAbrState:          clientAbrState{PlayerTimeMs: 1234, EnabledTrackTypes: enabledTrackTypesAudioOnly},
-		PreferredAudioFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "acont=original"}},
+		PreferredAudioFormatIds: []FormatId{{Itag: 251, LastModified: 1700000000000001, XTags: "ChEKBWFjb250EghvcmlnaW5hbAoKCgRsYW5nEgJlbg"}},
 		BufferedRanges:          []BufferedRange{{FormatId: FormatId{Itag: 251}, DurationMs: 5000, StartSegmentIndex: 1, EndSegmentIndex: 3}},
 		UstreamerConfig:         []byte("ustreamer-bytes"),
 		StreamerContext: streamerContext{
@@ -120,7 +120,7 @@ func TestVideoPlaybackAbrRequestRoundTrip(t *testing.T) {
 	if got := one(t, fid, 2).v; got != 1700000000000001 {
 		t.Errorf("FormatId.last_modified(2) = %d", got)
 	}
-	if got := one(t, fid, 3).b; string(got) != "acont=original" {
+	if got := one(t, fid, 3).b; string(got) != "ChEKBWFjb250EghvcmlnaW5hbAoKCgRsYW5nEgJlbg" {
 		t.Errorf("FormatId.xtags(3) = %q", got)
 	}
 

@@ -37,6 +37,49 @@ func TestToFormat_DRCPresenceMapsAbsentToNo(t *testing.T) {
 	}
 }
 
+// TestToFormat_OriginalFromXTags pins the IsOriginal precedence: the xtags audio
+// role decides when present, audioIsDefault only without one.
+func TestToFormat_OriginalFromXTags(t *testing.T) {
+	yes, no := true, false
+	track := func(def *bool) *rawAudioTrack {
+		return &rawAudioTrack{ID: "fr.3", DisplayName: "French", AudioIsDefault: def}
+	}
+	cases := []struct {
+		name  string
+		xtags string
+		track *rawAudioTrack
+		want  format.Tri
+	}{
+		{"original, no track", xtagsOriginalEn, nil, format.Yes},
+		{"dubbed-auto, no track", xtagsDubbedAutoDe, nil, format.No},
+		{"dubbed beats default=true", xtagsOf("acont", "dubbed", "lang", "fr"), track(&yes), format.No},
+		{"original beats default=false", xtagsOriginalEn, track(&no), format.Yes},
+		{"descriptive", xtagsOf("acont", "descriptive", "lang", "en"), nil, format.No},
+		{"unknown role", xtagsOf("acont", "commentary"), nil, format.No},
+		{"DRC variant of the original", xtagsOriginalDRC, nil, format.Yes},
+		{"drc only, no track", xtagsDRCOnly, nil, format.Unknown},
+		{"drc only, default=true", xtagsDRCOnly, track(&yes), format.Yes},
+		{"empty, default=false", "", track(&no), format.No},
+		{"empty, no track", "", nil, format.Unknown},
+		{"text form, default=true", xtagsTextForm, track(&yes), format.Yes},
+		{"text form, no track", xtagsTextForm, nil, format.Unknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := rawFormat{Itag: 251, MimeType: "audio/webm", XTags: tc.xtags, AudioTrack: tc.track}.toFormat()
+			if f.IsOriginal != tc.want {
+				t.Errorf("IsOriginal = %v, want %v", f.IsOriginal, tc.want)
+			}
+			switch {
+			case tc.track == nil && f.AudioTrack != nil:
+				t.Errorf("AudioTrack = %+v, want nil (none in the raw format)", f.AudioTrack)
+			case tc.track != nil && (f.AudioTrack == nil || f.AudioTrack.IsOriginal != tc.want):
+				t.Errorf("AudioTrack = %+v, want IsOriginal %v", f.AudioTrack, tc.want)
+			}
+		})
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/" + name)
@@ -132,11 +175,18 @@ func TestParsePlayerResponse_SABRConfig(t *testing.T) {
 		}
 	}
 	opus := raw[0]
-	if opus.Itag != 251 || opus.LastModified != "1700000000000001" || opus.XTags != "acont=original:lang=en" {
+	if opus.Itag != 251 || opus.LastModified != "1700000000000001" || opus.XTags != xtagsOriginalEn {
 		t.Errorf("opus format identity = %+v", opus)
 	}
 	if atoi64(opus.ContentLength) != 3500000 {
 		t.Errorf("opus contentLength = %q, want 3500000", opus.ContentLength)
+	}
+
+	// Both renditions carry the original track's xtags, as every rendition of
+	// a tagged track does.
+	fs := mapFormats(raw)
+	if fs[0].IsOriginal != format.Yes || fs[1].IsOriginal != format.Yes {
+		t.Errorf("IsOriginal = %v, %v, want yes, yes", fs[0].IsOriginal, fs[1].IsOriginal)
 	}
 }
 

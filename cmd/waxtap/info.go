@@ -232,10 +232,10 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 	for i, f := range deduped {
 		formats[i] = formatToJSON(f)
 	}
-	// dedupFormats keeps the first row per {itag,track,drc}. When the probed best row
-	// is a later duplicate, overlay its authoritative numbers onto the kept row so
-	// the formats[] entry agrees with the human "Best audio" line. Finalize formats
-	// before building out so the slice is not mutated afterward.
+	// dedupFormats keeps the first row per {itag,track,drc,original}. When the
+	// probed best row is a later duplicate, overlay its authoritative numbers onto
+	// the kept row so the formats[] entry agrees with the human "Best audio" line.
+	// Finalize formats before building out so the slice is not mutated afterward.
 	if bestErr == nil && info.Probed {
 		bestKey := dedupKey(v.Formats[bestIdx])
 		for i := range deduped {

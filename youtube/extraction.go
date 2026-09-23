@@ -71,8 +71,8 @@ type Extraction struct {
 	playerURL string
 	// webContext marks an Extraction built from an attested WEB /player context
 	// (see Client.ExtractWebContext) rather than the normal InnerTube chain. A
-	// mid-stream SABR reload must re-fetch the same kind of context to keep the
-	// URL, session, and GVS-token binding coherent.
+	// SABR reload must re-fetch the same kind of context to keep the URL,
+	// session, and GVS-token binding coherent.
 	webContext bool
 	// identityGen is the identity generation this extraction was made under,
 	// guest or adopted alike (see Client.RotateIdentity).
@@ -156,12 +156,27 @@ func (e *Extraction) FallbackCause() error {
 	return e.fallbackCause
 }
 
-// rawFormatByIndex returns the raw resolver input for Video.Formats[i].
+// rawFormatByIndex returns the raw resolver input for Video.Formats[i]. A nil
+// Extraction holds none.
 func (e *Extraction) rawFormatByIndex(i int) (rawFormat, bool) {
-	if i < 0 || i >= len(e.rawAudio) {
+	if e == nil || i < 0 || i >= len(e.rawAudio) {
 		return rawFormat{}, false
 	}
 	return e.rawAudio[i], true
+}
+
+// FindEncoding returns the index in e of the encoding prev's Video().Formats[i]
+// names: the same (itag, lastModified, xtags) triple. It reports false when e
+// does not carry it, as after a re-encode. A refresh that resumes a byte range
+// must land on this encoding; an itag alone can name a re-encode, a dub, or a
+// DRC variant.
+func (e *Extraction) FindEncoding(prev *Extraction, i int) (int, bool) {
+	want, ok := prev.rawFormatByIndex(i)
+	if !ok {
+		return -1, false
+	}
+	idx := findEncoding(e.rawAudio, want)
+	return idx, idx >= 0
 }
 
 // ResolvedStream contains the metadata available after resolution. Direct
@@ -192,7 +207,11 @@ type MediaPlan struct {
 func (m MediaPlan) Diagnostic() ResolvedStream {
 	switch {
 	case m.SABR != nil:
-		return ResolvedStream{IsSABR: true, ContentLength: m.SABR.contentLength, ExpiresAt: m.SABR.expiresAt}
+		rs := ResolvedStream{IsSABR: true, ContentLength: m.SABR.Format().ContentLength}
+		if m.SABR.ext != nil {
+			rs.ExpiresAt = m.SABR.ext.expiresAt
+		}
+		return rs
 	case m.Direct != nil:
 		return *m.Direct
 	default:

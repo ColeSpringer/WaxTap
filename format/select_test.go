@@ -144,6 +144,22 @@ func TestBestAudio_OriginalOutranksNonDRC(t *testing.T) {
 	}
 }
 
+// TestBestAudio_OriginalRankYesUnknownNo pins the middle rung: a track labelled
+// neither original nor dub ranks below the original and above a known dub. The
+// WEB path can mix all three on one video.
+func TestBestAudio_OriginalRankYesUnknownNo(t *testing.T) {
+	track := func(orig Tri) Format {
+		return Format{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, IsOriginal: orig}
+	}
+	cands := []Format{track(No), track(Unknown), track(Yes)}
+	if idx, err := BestForTarget(cands, MinimizeLoss(), Target{}); err != nil || idx != 2 {
+		t.Fatalf("idx = %d, err = %v, want 2 (original)", idx, err)
+	}
+	if idx, err := BestForTarget(cands[:2], MinimizeLoss(), Target{}); err != nil || idx != 1 {
+		t.Fatalf("idx = %d, err = %v, want 1 (unknown above a known dub)", idx, err)
+	}
+}
+
 func TestBestAudio_SkipsVideoOnly(t *testing.T) {
 	cands := []Format{
 		{Itag: 137, MIMEType: "video/mp4", Codec: "avc1.640028", AverageBitrate: 5000000},

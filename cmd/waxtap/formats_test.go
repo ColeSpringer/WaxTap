@@ -89,6 +89,18 @@ func TestDedupFormats(t *testing.T) {
 	}
 }
 
+// TestDedupFormats_KeepsTheOriginalFlag keeps two rows that differ only in the
+// ORIG column: merging them would hide which one is the original track.
+func TestDedupFormats_KeepsTheOriginalFlag(t *testing.T) {
+	in := []waxtap.Format{
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, IsOriginal: waxtap.No},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, IsOriginal: waxtap.Yes},
+	}
+	if got := dedupFormats(in); len(got) != 2 {
+		t.Fatalf("dedupFormats kept %d rows, want 2 (they differ in IsOriginal): %+v", len(got), got)
+	}
+}
+
 func TestFormatToJSON_AudioQuality(t *testing.T) {
 	f := waxtap.Format{Itag: 251, Codec: "opus", Extension: "webm", AverageBitrate: 105000, AudioQuality: waxtap.QualityMedium}
 	if got := formatToJSON(f).AudioQuality; got != "medium" {

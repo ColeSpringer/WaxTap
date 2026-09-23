@@ -84,9 +84,10 @@ func audioFormats(all []waxtap.Format) []waxtap.Format {
 // formatDedupKey identifies a display row. Distinct audio tracks and DRC variants
 // keep separate rows even when they share an itag.
 type formatDedupKey struct {
-	itag  int
-	track string
-	drc   waxtap.Tri
+	itag     int
+	track    string
+	drc      waxtap.Tri
+	original waxtap.Tri
 }
 
 func dedupKey(f waxtap.Format) formatDedupKey {
@@ -94,11 +95,12 @@ func dedupKey(f waxtap.Format) formatDedupKey {
 	if f.AudioTrack != nil && f.AudioTrack.ID != "" {
 		track = f.AudioTrack.ID
 	}
-	return formatDedupKey{itag: f.Itag, track: track, drc: f.IsDRC}
+	return formatDedupKey{itag: f.Itag, track: track, drc: f.IsDRC, original: f.IsOriginal}
 }
 
 // dedupFormats removes repeated display rows while retaining distinct audio
-// tracks and DRC variants. The first occurrence wins to preserve source order.
+// tracks, DRC variants, and original-track verdicts. The first occurrence wins
+// to preserve source order.
 // Stream selection continues to use the full format list.
 func dedupFormats(formats []waxtap.Format) []waxtap.Format {
 	seen := make(map[formatDedupKey]bool, len(formats))

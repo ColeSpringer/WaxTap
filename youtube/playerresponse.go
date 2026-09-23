@@ -93,7 +93,8 @@ type rawFormat struct {
 	AverageBitrate  int    `json:"averageBitrate"`
 	ContentLength   string `json:"contentLength"`
 	// LastModified and XTags distinguish encodings that share an itag. SABR
-	// sends them back as part of FormatId.
+	// sends them back as part of FormatId, so XTags stays raw; toFormat also
+	// reads the audio role from it.
 	LastModified     string         `json:"lastModified"`
 	XTags            string         `json:"xtags"`
 	AudioSampleRate  string         `json:"audioSampleRate"`
@@ -106,9 +107,11 @@ type rawFormat struct {
 
 // rawAudioTrack identifies one audio track of a multi-audio video.
 type rawAudioTrack struct {
-	ID             string `json:"id"`
-	DisplayName    string `json:"displayName"`
-	AudioIsDefault *bool  `json:"audioIsDefault"`
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	// AudioIsDefault marks the default track, which can be a dub. It decides
+	// IsOriginal only when xtags carries no acont.
+	AudioIsDefault *bool `json:"audioIsDefault"`
 }
 
 // parsePlayerResponse unmarshals a raw /player JSON body.
@@ -392,17 +395,35 @@ func (rf rawFormat) toFormat() format.Format {
 		ContentLength:  atoi64(rf.ContentLength),
 		Duration:       parseMillis(rf.ApproxDurationMs),
 		IsDRC:          drcFromPtr(rf.IsDrc),
+		IsOriginal:     rf.originalTrack(),
 	}
 	if rf.AudioTrack != nil {
 		f.Language = rf.AudioTrack.ID
-		f.IsOriginal = triFromPtr(rf.AudioTrack.AudioIsDefault)
 		f.AudioTrack = &format.AudioTrack{
 			ID:          rf.AudioTrack.ID,
 			DisplayName: rf.AudioTrack.DisplayName,
-			IsOriginal:  triFromPtr(rf.AudioTrack.AudioIsDefault),
+			IsOriginal:  f.IsOriginal,
 		}
 	}
 	return f
+}
+
+// originalTrack reports whether rf is the video's original-language audio. The
+// xtags audio role decides when present: original is Yes and any other role is
+// No, including one this code does not know, since Unknown would let it tie
+// with an untagged track. Without a decodable acont, audioTrack.audioIsDefault
+// decides; absent both, Unknown.
+func (rf rawFormat) originalTrack() format.Tri {
+	if acont, ok := xtagsAudioContent(rf.XTags); ok {
+		if acont == xtagAudioContentOriginal {
+			return format.Yes
+		}
+		return format.No
+	}
+	if rf.AudioTrack != nil {
+		return triFromPtr(rf.AudioTrack.AudioIsDefault)
+	}
+	return format.Unknown
 }
 
 // parseMIME splits a mimeType like `audio/webm; codecs="opus"` into a normalized

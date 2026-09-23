@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxtap/v3/format"
 	"github.com/colespringer/waxtap/v3/potoken"
 	"github.com/colespringer/waxtap/v3/waxerr"
 )
@@ -361,6 +362,45 @@ func TestWebContextFormatsCarryDrcAndTrack(t *testing.T) {
 	}
 	if rf2 := ext.rawAudio[1]; rf2.IsDrc != nil || rf2.AudioTrack != nil {
 		t.Error("rawAudio[1] must stay unset (no DRC/track on the provider format)")
+	}
+}
+
+// TestWebContextFormatsOriginalFromXTags covers the WEB path, whose context
+// carries no audioIsDefault: the xtags audio role alone makes IsOriginal known.
+func TestWebContextFormatsOriginalFromXTags(t *testing.T) {
+	pc := sampleContext()
+	pc.AudioFormats[0].XTags = xtagsOriginalEn
+	pc.AudioFormats[0].AudioTrackID = "en.4"
+	pc.AudioFormats[1].XTags = xtagsDubbedAutoDe
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := ext.video.Formats
+	if fs[0].IsOriginal != format.Yes || fs[0].AudioTrack == nil || fs[0].AudioTrack.IsOriginal != format.Yes {
+		t.Errorf("Formats[0]: IsOriginal = %v, AudioTrack = %+v, want yes on both", fs[0].IsOriginal, fs[0].AudioTrack)
+	}
+	if fs[1].IsOriginal != format.No || fs[1].AudioTrack != nil {
+		t.Errorf("Formats[1]: IsOriginal = %v, AudioTrack = %+v, want no and no track invented", fs[1].IsOriginal, fs[1].AudioTrack)
+	}
+	if got := ext.rawAudio[0].XTags; got != xtagsOriginalEn {
+		t.Errorf("rawAudio[0].XTags = %q, want the context's value verbatim", got)
+	}
+}
+
+// TestWebContextFormatsNormalizeMIME covers a provider that spells the MIME type
+// with other case or padding: the audio filter accepts it, so the stored type
+// must be the one the selector and the extension mapping read.
+func TestWebContextFormatsNormalizeMIME(t *testing.T) {
+	pc := sampleContext()
+	pc.AudioFormats[0].MimeType = ` Audio/WebM; codecs="opus"`
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := ext.video.Formats[0]
+	if f.MIMEType != `audio/webm; codecs="opus"` || f.Extension != "webm" || f.Codec != "opus" || !f.IsAudio() {
+		t.Errorf("Formats[0] = MIME %q, extension %q, codec %q, audio %v; want audio/webm opus", f.MIMEType, f.Extension, f.Codec, f.IsAudio())
 	}
 }
 

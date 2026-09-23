@@ -509,7 +509,7 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 		// The probe reads the stream over the signed URL, so it can outlive one
 		// as a download does and refreshes the same way.
 		em := newEmitter(nil, "")
-		refresh := c.directRefresh(Request{SourcePolicy: ro.policy}, id, format.Target{}, ext, video.Formats[idx].Itag, rs.ExpiresAt, em, &refreshStats{})
+		refresh := c.directRefresh(ext, idx, id, rs.ExpiresAt, em, &refreshStats{})
 		probe, perr := c.probeRemote(ctx, runner, rs, video.Formats[idx], refresh)
 		res.Warnings = append(res.Warnings, em.collected()...)
 		if perr != nil {

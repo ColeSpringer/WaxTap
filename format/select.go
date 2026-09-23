@@ -270,8 +270,8 @@ func lessKey(a, b [6]int) bool {
 }
 
 // originalRank sorts known-original tracks first and known dubs last. Unknown
-// stays between them because older player responses may not label the default
-// track.
+// stays between them for a response that labels the track in neither xtags nor
+// audioIsDefault.
 func originalRank(t Tri) int {
 	switch t {
 	case Yes:

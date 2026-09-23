@@ -24,12 +24,12 @@ func (c *Client) WebContextConfigured() bool { return c.webContext != nil }
 // URL's n parameter and mints a GVS PO token bound to the context's visitorData.
 //
 // videoID identifies the video to the provider and is stored on the returned
-// Extraction so a mid-stream RELOAD can re-fetch a fresh context (see
+// Extraction so a SABR reload can re-fetch a fresh context (see
 // SABRStream.reextract).
 //
-// Config.WebContextTimeout bounds every provider call, including mid-stream
-// refreshes. Provider failures return ProviderError so callers can fall back;
-// cancellation of the caller's own context is propagated unwrapped.
+// Config.WebContextTimeout bounds every provider call, including the re-fetch
+// after a reload. Provider failures return ProviderError so callers can fall
+// back; cancellation of the caller's own context is propagated unwrapped.
 func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extraction, error) {
 	if c.webContext == nil {
 		return nil, fmt.Errorf("%w: no player-context provider configured", waxerr.ErrExtractionFailed)
@@ -167,21 +167,24 @@ func (c *Client) webContextProfile(userAgent, version string) ClientProfile {
 // derived from MimeType by toFormat, so selection stays valid even when the
 // sample-rate/channels/quality fields are absent. IsDrc and AudioTrackID feed
 // the SABR client_abr_state (drc_enabled / audio_track_id) for DRC and
-// multi-audio renditions.
+// multi-audio renditions. toFormat reads the audio role from XTags, the only
+// IsOriginal signal a context carries, since it has no audioIsDefault.
 func webContextFormats(formats []potoken.PlayerContextFormat) []rawFormat {
 	out := make([]rawFormat, 0, len(formats))
 	for _, f := range formats {
 		// Ignore player-context entries WaxTap cannot request: missing itag,
 		// non-audio MIME, or empty MIME. This mirrors the player-response audio
-		// filter and normalizes whitespace/case because external contexts are less
-		// predictable than YouTube's JSON. If every entry is dropped, the existing
-		// empty-format guard returns ErrExtractionFailed for fallback.
-		if f.Itag <= 0 || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(f.MimeType)), "audio/") {
+		// filter on a normalized MIME type, which is also the one stored, because
+		// external contexts are less predictable than YouTube's JSON. If every
+		// entry is dropped, the existing empty-format guard returns
+		// ErrExtractionFailed for fallback.
+		mime := normalizeMIME(f.MimeType)
+		if f.Itag <= 0 || !strings.HasPrefix(mime, "audio/") {
 			continue
 		}
 		rf := rawFormat{
 			Itag:             f.Itag,
-			MimeType:         f.MimeType,
+			MimeType:         mime,
 			Bitrate:          f.Bitrate,
 			ContentLength:    itoaNonZero(f.ContentLength),
 			LastModified:     f.LMT,
@@ -201,6 +204,17 @@ func webContextFormats(formats []potoken.PlayerContextFormat) []rawFormat {
 		out = append(out, rf)
 	}
 	return out
+}
+
+// normalizeMIME trims a MIME type and lowercases its type and subtype, the part
+// that is case-insensitive; parameters such as codecs keep their spelling.
+func normalizeMIME(mime string) string {
+	typ, params, ok := strings.Cut(strings.TrimSpace(mime), ";")
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	if !ok {
+		return typ
+	}
+	return typ + ";" + params
 }
 
 // itoaNonZero formats v as a decimal string, or "" when v is zero, matching the

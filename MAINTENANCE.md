@@ -327,8 +327,11 @@ verdict and no wait changes it. A redirect is not followed and is reported as a
 configuration error. `player_url` is needed when the streaming URL's `n`
 parameter must be descrambled. Format entries require enough identity to select
 and request the audio, especially `itag`, `lmt`, `xtags`, and `mime_type`;
-richer quality, duration, DRC, and track fields are optional. An optional
-`session_generation` names the daemon session behind the context.
+richer quality, duration, DRC, and track fields are optional. `xtags` must be
+the player response's value verbatim (unpadded base64url protobuf): WaxTap
+reads the audio role (`acont`) from it to rank the original track, and any
+rewrite also breaks SABR format selection. An optional `session_generation`
+names the daemon session behind the context.
 
 Optional identity keys: `user_agent` and `client_version`, the exact
 `navigator.userAgent` and InnerTube client version the context was minted under.

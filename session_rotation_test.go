@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -339,6 +340,98 @@ func TestDownload_NoRotationOnExpiry403(t *testing.T) {
 	}
 	if w.homepageHits != 2 {
 		t.Errorf("homepage hits = %d, want 2: one bootstrap per chain pass, none from an expiry 403", w.homepageHits)
+	}
+}
+
+// TestDownload_RefreshKeepsTheEncoding re-encodes the selected rendition between
+// the extraction and a mid-download refresh. Resuming the byte range on the new
+// encoding would splice two encodings into one file, so the refresh refuses it
+// and the chain restarts the download from zero on a fresh extraction.
+func TestDownload_RefreshKeepsTheEncoding(t *testing.T) {
+	const size = 4096
+	const oldLMT, newLMT = "1700000000000001", "1700000000000009"
+	player := func(lmt string) string {
+		return fmt.Sprintf(`{
+			"responseContext": {},
+			"playabilityStatus": {"status": "OK"},
+			"streamingData": {
+				"expiresInSeconds": "21540",
+				"adaptiveFormats": [{
+					"itag": 251,
+					"mimeType": "audio/webm; codecs=\"opus\"",
+					"bitrate": 160000,
+					"averageBitrate": 130000,
+					"contentLength": "%d",
+					"audioSampleRate": "48000",
+					"audioChannels": 2,
+					"approxDurationMs": "212000",
+					"lastModified": "%s",
+					"url": "https://rr1---sn-test.googlevideo.com/videoplayback?itag=251&lmt=%s"
+				}]
+			},
+			"videoDetails": {"videoId": "dummyVideo0", "title": "Re-encode Test", "lengthSeconds": "212", "author": "T"}
+		}`, size, lmt, lmt)
+	}
+	media := map[string]string{oldLMT: strings.Repeat("A", size), newLMT: strings.Repeat("B", size)}
+
+	var mu sync.Mutex
+	var homepageHits, playerHits, oldFetches int
+	rt := rotationRT(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.URL.Path == "/" && strings.Contains(r.URL.Host, "youtube.com"):
+			homepageHits++
+			return guestHomepage(fmt.Sprintf("REENC_VD_%d", homepageHits)), nil
+		case strings.HasSuffix(r.URL.Path, "/player"):
+			playerHits++
+			lmt := oldLMT
+			if playerHits > 1 {
+				lmt = newLMT // re-encoded before the refresh re-extracts
+			}
+			return rotResp(http.StatusOK, player(lmt)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			lmt := r.URL.Query().Get("lmt")
+			start, end := rotRange(r.URL.Query().Get("range"), size)
+			body := media[lmt][start : end+1]
+			if lmt == oldLMT {
+				oldFetches++
+				if oldFetches > 1 {
+					return rotResp(http.StatusGone, ""), nil // the URL died after its first read
+				}
+				body = body[:1000] // the connection drops, so the reader resumes at 1000
+			}
+			resp := rotResp(http.StatusOK, body)
+			resp.ContentLength = int64(len(body))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			return resp, nil
+		}
+		return rotResp(http.StatusNotFound, ""), nil
+	})
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{
+		HTTPClient:       &http.Client{Jar: jar, Transport: rt},
+		Client:           "android_vr",
+		DisableDiskCache: true,
+		Retry:            RetryPolicy{MaxRetries: 1, BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "out.webm")
+	if _, err := c.Download(context.Background(), Request{URL: "dummyVideo0", ProcessSpec: ProcessSpec{Output: ToFile(out)}}); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != media[newLMT] {
+		t.Errorf("file = %d bytes, %d of them from the old encoding; want the new encoding whole", len(got), strings.Count(string(got), "A"))
 	}
 }
 

@@ -101,6 +101,90 @@ func TestFacade_SABRDownloadToWriter(t *testing.T) {
 	}
 }
 
+// TestFacade_SABRReloadReportsTheDeliveredEncoding reloads onto a response in
+// which the selected rendition was re-encoded at a new lastModified, with a new
+// size and bitrate. The stream delivers the re-encode, so the result's source
+// format must describe it rather than the format first selected.
+func TestFacade_SABRReloadReportsTheDeliveredEncoding(t *testing.T) {
+	reencoded := strings.NewReplacer(
+		`"bitrate": 130000`, `"bitrate": 131000`,
+		`"contentLength": "27"`, `"contentLength": "29"`,
+		`"lastModified": "1700000000000001"`, `"lastModified": "1700000000000009"`,
+	).Replace(sabrPlayerJSON)
+	if strings.Count(reencoded, "131000")+strings.Count(reencoded, `"29"`)+strings.Count(reencoded, "1700000000000009") != 3 {
+		t.Fatal("the re-encode edits did not all apply to the fixture")
+	}
+	body := fSabrHappyBody([]byte("INIT-SEG-"), []byte("MEDIA-SEGMENT-1-DATA"))
+
+	for _, sink := range []string{"writer", "file", "stream"} {
+		t.Run(sink, func(t *testing.T) {
+			var mu sync.Mutex
+			var players, posts int
+			rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/v1/player"):
+					// Force WEB (X-Youtube-Client-Name 1) to win; other clients fail.
+					if r.Header.Get("X-Youtube-Client-Name") != "1" {
+						return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+					}
+					players++
+					if players == 1 {
+						return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil
+					}
+					return resp(http.StatusOK, []byte(reencoded)), nil
+				case strings.Contains(r.URL.Path, "/videoplayback"):
+					posts++
+					if posts == 1 {
+						return resp(http.StatusOK, fUmpFrame(46, nil)), nil // RELOAD_PLAYER_RESPONSE
+					}
+					return resp(http.StatusOK, body), nil
+				default:
+					return resp(http.StatusNotFound, nil), nil
+				}
+			})
+			c, err := waxtap.New(waxtap.Options{
+				HTTPClient:      &http.Client{Transport: rt},
+				POTokenProvider: fProvider{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var got waxtap.Format
+			if sink == "stream" {
+				rc, info, err := c.Stream(context.Background(), waxtap.Request{URL: "dummyVideo0"})
+				if err != nil {
+					t.Fatalf("stream: %v", err)
+				}
+				if _, err := io.Copy(io.Discard, rc); err != nil {
+					t.Fatalf("read: %v", err)
+				}
+				rc.Close()
+				got = info.Format
+			} else {
+				var buf bytes.Buffer
+				out := waxtap.ToWriter(&buf)
+				if sink == "file" {
+					out = waxtap.ToFile(filepath.Join(t.TempDir(), "out.webm"))
+				}
+				res, err := c.Download(context.Background(), waxtap.Request{
+					URL:         "dummyVideo0",
+					ProcessSpec: waxtap.ProcessSpec{Output: out},
+				})
+				if err != nil {
+					t.Fatalf("download: %v", err)
+				}
+				got = res.SourceFormat
+			}
+			if got.ContentLength != 29 || got.Bitrate != 131000 {
+				t.Errorf("source format = size %d, bitrate %d; want the re-encode's 29 and 131000", got.ContentLength, got.Bitrate)
+			}
+		})
+	}
+}
+
 func TestFacade_IncompleteStreamFallsBackAcrossClients(t *testing.T) {
 	initBytes := []byte("INIT-SEG-")
 	mediaBytes := []byte("MEDIA-SEGMENT-1-DATA")

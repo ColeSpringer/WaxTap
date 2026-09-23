@@ -87,7 +87,7 @@ type Format struct {
 
 	// Multi-language / dubbed audio metadata.
 	Language   string      // audioTrack language tag, "" if single-track
-	AudioTrack *AudioTrack // raw audioTrack metadata, nil if none
+	AudioTrack *AudioTrack // audioTrack metadata, nil if none
 
 	// Tri-state quality hints (YouTube is inconsistent about exposing these).
 	IsDRC      Tri // dynamic-range-compressed rendition
@@ -98,12 +98,12 @@ type Format struct {
 	Duration      time.Duration // media duration, or 0 when unknown
 }
 
-// AudioTrack holds the raw audioTrack metadata YouTube attaches to dubbed or
+// AudioTrack holds the audioTrack metadata YouTube attaches to dubbed or
 // multi-language renditions.
 type AudioTrack struct {
 	ID          string // YouTube audio-track identifier
 	DisplayName string // localized track label
-	IsOriginal  Tri    // whether this is the video's original-language track
+	IsOriginal  Tri    // whether this is the video's original-language track, as Format.IsOriginal
 }
 
 // EffectiveBitrate returns AverageBitrate when known, otherwise Bitrate.

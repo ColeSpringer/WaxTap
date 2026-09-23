@@ -96,7 +96,7 @@ type Config struct {
 	// leaves WaxTap on its default extraction chain.
 	PlayerContextProvider potoken.PlayerContextProvider
 	// WebContextTimeout bounds each attested handoff: a PlayerContextProvider
-	// call (both the initial extraction and a mid-stream reload's re-fetch) and a
+	// call (both the initial extraction and a SABR reload's re-fetch) and a
 	// SessionProvider resolution through PrepareAdoptedSession, so a hung sidecar
 	// cannot hang a download or eat the extraction budget. Zero adds no bound.
 	WebContextTimeout time.Duration

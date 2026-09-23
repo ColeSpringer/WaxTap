@@ -15,6 +15,33 @@
         "audioChannels": 2,
         "audioQuality": "AUDIO_QUALITY_MEDIUM",
         "approxDurationMs": "212000",
+        "lastModified": "1700000000000003",
+        "xtags": "ChEKBWFjb250EghvcmlnaW5hbAoICgNkcmMSATEKCgoEbGFuZxICZW4",
+        "isDrc": true
+      },
+      {
+        "itag": 251,
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 160000,
+        "averageBitrate": 130000,
+        "contentLength": "3500000",
+        "audioSampleRate": "48000",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
+        "lastModified": "1700000000000004",
+        "xtags": "ChEKBWFjb250EghvcmlnaW5hbAoKCgRsYW5nEgJlbgoHCgJ2YhIBMQ"
+      },
+      {
+        "itag": 251,
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 160000,
+        "averageBitrate": 130000,
+        "contentLength": "3500000",
+        "audioSampleRate": "48000",
+        "audioChannels": 2,
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "approxDurationMs": "212000",
         "lastModified": "1700000000000001",
         "xtags": "ChEKBWFjb250EghvcmlnaW5hbAoKCgRsYW5nEgJlbg"
       },
