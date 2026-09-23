@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -238,16 +240,25 @@ func TestPlanSplitRefusals(t *testing.T) {
 			says:  "nothing to cut",
 		},
 		{
-			name:  "data track",
-			sheet: strings.Replace(splitSheet, "TRACK 02 AUDIO", "TRACK 02 MODE1/2352", 1),
+			name: "no audio track",
+			sheet: strings.NewReplacer("TRACK 01 AUDIO", "TRACK 01 MODE1/2352", "TRACK 02 AUDIO", "TRACK 02 MODE1/2352",
+				"TRACK 03 AUDIO", "TRACK 03 MODE1/2352").Replace(splitSheet),
+			want: ErrIncompatibleSpec,
+			says: "no audio track",
+		},
+		{
+			// A cooked sector is 512 samples where a raw one is a frame's 588,
+			// so every boundary past it would land early.
+			name:  "cooked data track ahead of the audio",
+			sheet: strings.Replace(splitSheet, "TRACK 01 AUDIO", "TRACK 01 MODE1/2048", 1),
 			want:  ErrIncompatibleSpec,
-			says:  "data track",
+			says:  "2352-byte sectors",
 		},
 		{
 			name:  "start past the end",
 			sheet: strings.Replace(splitSheet, "INDEX 01 00:04:00", "INDEX 01 00:30:00", 1),
 			want:  ErrIncompatibleSpec,
-			says:  "does not describe this rip",
+			says:  "does not describe this",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,7 +301,7 @@ func TestPlanSplitRefusesATruncatedRip(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = c.PlanSplit(ctx, cut, []byte(splitSheet))
-	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not describe this rip") {
+	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not describe this") {
 		t.Errorf("err = %v, want the up-front refusal", err)
 	}
 }
@@ -314,6 +325,9 @@ func TestSplitOutputRefusals(t *testing.T) {
 		{"copy", ok, TranscodeSpec{Format: FormatCopy}},
 		{"output is the rip", []string{ok[0], rip, ok[2]}, TranscodeSpec{Format: FormatFLAC}},
 		{"two pieces one path", []string{ok[0], ok[1], ok[1]}, TranscodeSpec{Format: FormatFLAC}},
+		// One file on Windows and macOS, where the later piece would replace
+		// the earlier; refused everywhere so a set is the same set everywhere.
+		{"two pieces apart in case", []string{ok[0], filepath.Join(dir, "1.FLAC"), ok[2]}, TranscodeSpec{Format: FormatFLAC}},
 		{"wrong count", ok[:2], TranscodeSpec{Format: FormatFLAC}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -508,5 +522,394 @@ func TestSplitDoesNotWarnClippingOnALossyRip(t *testing.T) {
 		if w.Code == WarnOutputClipping {
 			t.Errorf("a lossy rip raised output-clipping: %q", w.Detail)
 		}
+	}
+}
+
+// pieceTag reads one tag off a written piece, "" when it carries none.
+func pieceTag(t *testing.T, ctx context.Context, path string, k tag.Key) string {
+	t.Helper()
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := doc.Get(k)
+	if !ok || len(v) == 0 {
+		return ""
+	}
+	return v[0]
+}
+
+// A mixed-mode disc's data track is a piece nothing writes: the split skips it
+// and the audio keeps the disc's own numbering, 2 and up of a total that counts
+// the data track. Written, it would be noise named after a song.
+func TestPlanSplitSkipsADataTrack(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	sheet := `PERFORMER "Test Performer"
+TITLE "Test Album"
+FILE "rip.wav" WAVE
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 00 00:01:70
+    INDEX 01 00:02:00
+  TRACK 03 AUDIO
+    TITLE "Three"
+    INDEX 01 00:04:00
+`
+	plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v", err)
+	}
+	if len(plan.Pieces) != 2 || plan.Pieces[0].Track != 2 || plan.Pieces[1].Track != 3 {
+		t.Fatalf("pieces = %+v, want tracks 2 and 3", plan.Pieces)
+	}
+	// The audio begins at its own INDEX 01: the mode change puts data-mode
+	// sectors inside the pregap after the data track.
+	if p := plan.Pieces[0]; p.StartSample != 88200 || p.EndSample != 176400 {
+		t.Errorf("track 2 = [%d, %d), want [88200, 176400)", p.StartSample, p.EndSample)
+	}
+	want := []SplitSkip{{Track: 1, Type: "MODE1/2352", StartSample: 0, EndSample: 88200, End: 2 * time.Second}}
+	if !slices.Equal(plan.Skipped, want) {
+		t.Errorf("skipped = %+v, want %+v", plan.Skipped, want)
+	}
+	if plan.TrackTotal != 3 || plan.TrackCount() != 2 {
+		t.Errorf("TrackTotal = %d, TrackCount = %d; want 3 on the disc, 2 written", plan.TrackTotal, plan.TrackCount())
+	}
+
+	outs := []string{filepath.Join(dir, "2.flac"), filepath.Join(dir, "3.flac")}
+	res, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC})
+	if err != nil {
+		t.Fatalf("Split: %v", err)
+	}
+	if len(res.Outputs) != 2 {
+		t.Fatalf("outputs = %v, want the two audio pieces", res.Outputs)
+	}
+	r := media.NewRunner(media.RunnerConfig{})
+	for i, out := range res.Outputs {
+		pr, perr := r.Probe(ctx, out)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if a, ok := pr.AudioStream(); !ok || a.Samples != 88200 {
+			t.Errorf("piece %d holds %d samples, want 88200", i+1, a.Samples)
+		}
+		number := []string{"2", "3"}[i]
+		if got := pieceTag(t, ctx, out, tag.TrackNumber); got != number {
+			t.Errorf("piece %d track number = %q, want %q: the disc's own", i+1, got, number)
+		}
+		if got := pieceTag(t, ctx, out, tag.TrackTotal); got != "3" {
+			t.Errorf("piece %d track total = %q, want 3", i+1, got)
+		}
+	}
+}
+
+// A data track the rip holds none of is still the disc's: it is listed as
+// skipped, so a caller can say why the numbering starts at 2, and counted in
+// TrackTotal when it precedes the audio. EAC lists a mixed-mode disc's data
+// track at frame 0 beside the audio session it ripped, XLD gives it a FILE of
+// its own, and an Enhanced CD's sits in a second session past the rip, which no
+// player counts.
+func TestPlanSplitListsTheDataTracksTheRipHoldsNoneOf(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	const audio = `  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:00:00
+  TRACK 03 AUDIO
+    TITLE "Three"
+    INDEX 01 00:03:00
+`
+	const dataFile = "FILE \"rip.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n"
+	for _, tc := range []struct {
+		name    string
+		sheet   string
+		tracks  []int // the pieces', in order
+		skipped []SplitSkip
+		total   int
+	}{
+		{
+			name:    "beside the audio at frame 0",
+			sheet:   "FILE \"rip.wav\" WAVE\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n" + audio,
+			tracks:  []int{2, 3},
+			skipped: []SplitSkip{{Track: 1, Type: "MODE1/2352"}},
+			total:   3,
+		},
+		{
+			name:    "in a FILE of its own",
+			sheet:   dataFile + "FILE \"rip.wav\" WAVE\n" + audio,
+			tracks:  []int{2, 3},
+			skipped: []SplitSkip{{Track: 1, Type: "MODE1/2352"}},
+			total:   3,
+		},
+		{
+			// The audio ahead of track 2's INDEX 01 is the data track's pregap,
+			// in the data track's mode, and is skipped as the data track is.
+			name: "in a FILE of its own, with its pregap in the rip",
+			sheet: dataFile + "FILE \"rip.wav\" WAVE\n" +
+				strings.Replace(audio, "    INDEX 01 00:00:00", "    INDEX 00 00:00:00\n    INDEX 01 00:02:00", 1),
+			tracks:  []int{2, 3},
+			skipped: []SplitSkip{{Track: 1, Type: "MODE1/2352"}, {StartSample: 0, EndSample: 88200, End: 2 * time.Second}},
+			total:   3,
+		},
+		{
+			name: "after the audio",
+			sheet: "FILE \"rip.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n" +
+				"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:02:00\n" +
+				"  TRACK 03 MODE1/2352\n    INDEX 00 00:08:00\n    INDEX 01 00:10:00\n",
+			tracks:  []int{1, 2},
+			skipped: []SplitSkip{{Track: 3, Type: "MODE1/2352"}},
+			total:   2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := c.PlanSplit(ctx, rip, []byte(tc.sheet))
+			if err != nil {
+				t.Fatalf("PlanSplit: %v", err)
+			}
+			var tracks []int
+			for _, p := range plan.Pieces {
+				tracks = append(tracks, p.Track)
+			}
+			if !slices.Equal(tracks, tc.tracks) {
+				t.Errorf("the pieces are tracks %v, want %v", tracks, tc.tracks)
+			}
+			if !slices.Equal(plan.Skipped, tc.skipped) {
+				t.Errorf("skipped = %+v, want %+v", plan.Skipped, tc.skipped)
+			}
+			if plan.TrackTotal != tc.total {
+				t.Errorf("TrackTotal = %d, want %d", plan.TrackTotal, tc.total)
+			}
+			if last := plan.Pieces[len(plan.Pieces)-1]; last.EndSample != media.ToEnd {
+				t.Errorf("the last audio piece ends at %d, want the rip's end", last.EndSample)
+			}
+		})
+	}
+}
+
+// A sheet that numbers the hidden track TRACK 00 gets the piece the lead-in
+// does, track 0 with no number of its own, but keeps the title the sheet gave
+// it; the disc's tracks are numbered of a total that leaves it out.
+func TestSplitKeepsATrackZerosTitle(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	sheet := `PERFORMER "Test Performer"
+TITLE "Test Album"
+FILE "rip.wav" WAVE
+  TRACK 00 AUDIO
+    TITLE "Secret"
+    INDEX 01 00:00:00
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:02:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:04:00
+`
+	plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v", err)
+	}
+	if len(plan.Pieces) != 3 || plan.Pieces[0].Track != 0 || plan.Pieces[0].Title != "Secret" {
+		t.Fatalf("pieces = %+v, want track 0 \"Secret\" first", plan.Pieces)
+	}
+	if plan.TrackTotal != 2 {
+		t.Errorf("TrackTotal = %d, want 2: track 0 is not a track of the disc's", plan.TrackTotal)
+	}
+	outs := []string{filepath.Join(dir, "0.flac"), filepath.Join(dir, "1.flac"), filepath.Join(dir, "2.flac")}
+	if _, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
+		t.Fatalf("Split: %v", err)
+	}
+	if got := pieceTag(t, ctx, outs[0], tag.Title); got != "Secret" {
+		t.Errorf("track 0 title = %q, want the sheet's", got)
+	}
+	for _, k := range []tag.Key{tag.TrackNumber, tag.TrackTotal} {
+		if got := pieceTag(t, ctx, outs[0], k); got != "" {
+			t.Errorf("track 0 carries %s = %q; it has no number", k, got)
+		}
+	}
+	if n, total := pieceTag(t, ctx, outs[1], tag.TrackNumber), pieceTag(t, ctx, outs[1], tag.TrackTotal); n != "1" || total != "2" {
+		t.Errorf("track 1 is %s of %s, want 1 of 2", n, total)
+	}
+}
+
+// A data track between two audio tracks ends the audio before it at its INDEX
+// 00, the frame CUETools ends it at too, and the audio after it begins at its
+// own INDEX 01.
+func TestPlanSplitSkipsADataTrackBetweenAudioTracks(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	sheet := strings.Replace(splitSheet, "TRACK 02 AUDIO", "TRACK 02 MODE1/2352", 1)
+
+	plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v", err)
+	}
+	if len(plan.Pieces) != 2 || plan.Pieces[0].Track != 1 || plan.Pieces[1].Track != 3 {
+		t.Fatalf("pieces = %+v, want tracks 1 and 3", plan.Pieces)
+	}
+	const index00 = 145 * 588 // 00:01:70 at 44.1 kHz
+	if p := plan.Pieces[0]; p.EndSample != index00 {
+		t.Errorf("track 1 ends at %d, want %d, the data track's INDEX 00", p.EndSample, index00)
+	}
+	want := []SplitSkip{{Track: 2, Type: "MODE1/2352", Start: media.SampleTime(index00, 44100), StartSample: index00, EndSample: 176400, End: 4 * time.Second}}
+	if !slices.Equal(plan.Skipped, want) {
+		t.Errorf("skipped = %+v, want %+v", plan.Skipped, want)
+	}
+	if plan.TrackTotal != 3 {
+		t.Errorf("TrackTotal = %d, want 3", plan.TrackTotal)
+	}
+}
+
+// A trailing data track the rip does hold (a whole-disc image of an Enhanced
+// CD) ends the last audio piece at its INDEX 00 and is skipped to the end; the
+// disc's count stops at the audio.
+func TestPlanSplitHoldsATrailingDataTrack(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	sheet := `FILE "rip.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:02:00
+  TRACK 03 MODE1/2352
+    INDEX 00 00:05:00
+    INDEX 01 00:05:50
+`
+	plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v", err)
+	}
+	if len(plan.Pieces) != 2 || plan.Pieces[1].EndSample != 5*44100 {
+		t.Fatalf("pieces = %+v, want two, the last ending at the data track's INDEX 00", plan.Pieces)
+	}
+	want := []SplitSkip{{Track: 3, Type: "MODE1/2352", Start: 5 * time.Second, StartSample: 5 * 44100, EndSample: ToEnd, End: plan.Duration}}
+	if !slices.Equal(plan.Skipped, want) {
+		t.Errorf("skipped = %+v, want %+v", plan.Skipped, want)
+	}
+	if plan.TrackTotal != 2 {
+		t.Errorf("TrackTotal = %d, want 2: a data track after the audio is not counted", plan.TrackTotal)
+	}
+}
+
+// TRACKTOTAL is the disc's highest track number, not a count of the sheet's
+// lines: a sheet that leaves the data track out and numbers its audio from 02,
+// or skips a number, still says how many tracks the disc has.
+func TestPlanSplitTrackTotalIsTheDiscsHighestNumber(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	for _, tc := range []struct {
+		name    string
+		numbers []string
+		total   int
+	}{
+		{"data track left out", []string{"02", "03", "04"}, 4},
+		{"a number skipped", []string{"01", "02", "04"}, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sheet := strings.NewReplacer("TRACK 01", "TRACK "+tc.numbers[0], "TRACK 02", "TRACK "+tc.numbers[1], "TRACK 03", "TRACK "+tc.numbers[2]).Replace(splitSheet)
+			plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+			if err != nil {
+				t.Fatalf("PlanSplit: %v", err)
+			}
+			if plan.TrackTotal != tc.total {
+				t.Errorf("TrackTotal = %d, want %d", plan.TrackTotal, tc.total)
+			}
+			out := filepath.Join(dir, tc.name+".flac")
+			outs := []string{out, filepath.Join(dir, tc.name+"-b.flac"), filepath.Join(dir, tc.name+"-c.flac")}
+			if _, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
+				t.Fatalf("Split: %v", err)
+			}
+			if got := pieceTag(t, ctx, out, tag.TrackTotal); got != strconv.Itoa(tc.total) {
+				t.Errorf("track total = %q, want %d", got, tc.total)
+			}
+		})
+	}
+}
+
+// A sheet that numbers the hidden track TRACK 00 and gives it a pregap of its
+// own has no track before it for that audio to belong to: it is folded into
+// track 0 rather than kept as a second numberless piece with the same name.
+func TestPlanSplitFoldsTheLeadInIntoATrackZero(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	sheet := `FILE "rip.wav" WAVE
+  TRACK 00 AUDIO
+    TITLE "Secret"
+    INDEX 00 00:00:00
+    INDEX 01 00:01:00
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:02:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:04:00
+`
+	plan, err := c.PlanSplit(ctx, rip, []byte(sheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v", err)
+	}
+	if len(plan.Pieces) != 3 {
+		t.Fatalf("%d pieces, want 3: track 0 whole, then tracks 1 and 2", len(plan.Pieces))
+	}
+	if p := plan.Pieces[0]; p.Track != 0 || p.Title != "Secret" || p.StartSample != 0 || p.EndSample != 88200 || p.Start != 0 {
+		t.Errorf("track 0 = %+v, want \"Secret\" over [0, 88200)", p)
+	}
+}
+
+// A rip that holds no audio is refused before a piece is attempted, rather
+// than failing on the first one with the output directory already made.
+func TestPlanSplitRefusesAnEmptyRip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.wav")
+	if err := os.WriteFile(empty, mediatest.SineWAV(0, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := newOfflineClient(t).PlanSplit(ctx, empty, []byte(splitSheet))
+	if !errors.Is(err, ErrUnsupportedInput) || !strings.Contains(err.Error(), "no audio") {
+		t.Errorf("err = %v, want ErrUnsupportedInput saying the rip holds no audio", err)
+	}
+}
+
+// A plan that states no total clears the rip's own TRACKTOTAL rather than
+// leaving it under the sheet's numbers: a single-file rip tagged 1/1 would
+// otherwise hand every piece "of 1".
+func TestSplitClearsATrackTotalThePlanDoesNotState(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := splitRip(t, dir, "rip.wav")
+	if err := mediatest.TagFile(ctx, rip, "TRACKNUMBER", "1", "TRACKTOTAL", "1"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := c.PlanSplit(ctx, rip, []byte(splitSheet))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.TrackTotal = 0
+	outs := []string{filepath.Join(dir, "1.flac"), filepath.Join(dir, "2.flac"), filepath.Join(dir, "3.flac")}
+	if _, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
+		t.Fatalf("Split: %v", err)
+	}
+	if n, total := pieceTag(t, ctx, outs[1], tag.TrackNumber), pieceTag(t, ctx, outs[1], tag.TrackTotal); n != "2" || total != "" {
+		t.Errorf("piece 2 is %q of %q, want 2 of nothing", n, total)
 	}
 }

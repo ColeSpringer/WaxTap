@@ -143,10 +143,17 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   disc title as album, `REM DATE`/`GENRE`, `CATALOG`, `ISRC`), with the rip's
   own tags and cover art carried underneath. Audio before the first track's
   `INDEX 01` becomes `00 - Hidden Track` rather than being folded into track 1
-  or dropped. `--cue` defaults to a sheet beside the rip with the rip's stem. A
-  split always decodes, so `--format` names the encoder; it is inferred from the
-  rip's extension only when that is a lossless one. A sheet indexing several
-  files is refused: its tracks are already separate.
+  or dropped, unless it follows a data track in a FILE of its own, when it is
+  that track's pregap and is skipped. A data track (`TRACK 01 MODE1/2352` on a
+  mixed-mode disc) is never written as audio: it is skipped with a
+  `cue-data-track` note, listed under `skipped` in `--json` beside the disc's
+  `trackTotal`, and the audio keeps the disc's own numbering, so the pieces
+  start at `02` of a total that counts it. `--cue` defaults to a sheet beside
+  the rip with the rip's stem. A split always decodes, so `--format` names the
+  encoder; it is inferred from the rip's extension only when that is a lossless
+  one. A sheet indexing its audio against several files is refused, since its
+  tracks are already separate; a FILE holding no audio, as EAC and XLD write
+  the data track, is not one of them.
 - `--channels mono|stereo|surround|any` picks a native layout, defaulting to
   stereo. It selects among a video's source streams, so it needs a URL input: on
   a local file or a directory it exits 2, unless `--downmix` is set too, where it
@@ -398,6 +405,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `concurrency-clamped` | `--concurrency` exceeded the maximum and was clamped |
 | `container-ext-mismatch` | the output extension does not match the source container, which was copied unchanged |
 | `cover-art-remuxed` | a source whose container cannot hold a picture was remuxed into its codec's own so the cover art could be embedded; packets unchanged |
+| `cue-data-track` | the CUE sheet lists a data track, which was skipped rather than written as audio; the pieces keep the disc's numbering |
 | `cue-file-mismatch` | the CUE sheet names another file than the rip being split |
 | `doctor-caveat` | a `doctor` check passed with a caveat; the detail says what it did not prove |
 | `enumeration-error` | a playlist page failed to enumerate; the run continued |
@@ -457,8 +465,9 @@ so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist 
 channel URL with `Skip`/`Stop` predicates for an archive cursor, and
 `WithFullMetadata()` adds publish date and chapters to `Info`, or through
 `EnrichOptions` to each enriched entry. `Client.PlanSplit` reads a CUE sheet
-against a local rip and reports where the pieces fall, and `Client.Split` writes
-them, tagged from the sheet; the `split` subcommand is that pair.
+against a local rip and reports where the pieces fall, with the data tracks it
+skips in `SplitPlan.Skipped`, and `Client.Split` writes them, tagged from the
+sheet; the `split` subcommand is that pair.
 
 Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
 throttle starts refusing entries, because the refusal is worded exactly like a

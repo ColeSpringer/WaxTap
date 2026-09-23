@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -31,8 +32,13 @@ func newSplitCmd() *cobra.Command {
 			"the sheet (title, performer, track numbers, disc title as album, REM\n" +
 			"DATE/GENRE, CATALOG, ISRC), with the rip's own tags and cover art carried\n" +
 			"underneath. Audio before the first track's INDEX 01 becomes 00 - Hidden\n" +
-			"Track rather than being folded into track 1 or dropped. A sheet indexing\n" +
-			"several files is refused: its tracks are already separate.\n\n" +
+			"Track rather than being folded into track 1 or dropped, unless it follows a\n" +
+			"data track in a FILE of its own, when it is that track's pregap and is\n" +
+			"skipped. A data track (TRACK 01 MODE1/2352 on a mixed-mode disc) is never\n" +
+			"written as audio: it is skipped with a note and the audio keeps the disc's\n" +
+			"own numbering. A sheet indexing its audio against several files is refused,\n" +
+			"since its tracks are already separate; a FILE holding no audio, as EAC and\n" +
+			"XLD write the data track, is not one of them.\n\n" +
 			"--cue names the sheet, defaulting to one beside the rip with the rip's own\n" +
 			"stem. A split always decodes, so --format names the encoder; it is\n" +
 			"inferred from the rip's extension only when that is a lossless one.",
@@ -93,24 +99,20 @@ func newSplitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// The sheet may name another file and still describe this rip (one
-			// written beside a .wav, used on a .flac of it), so the mismatch is
-			// reported rather than refused.
-			if base := sheetFileBase(plan.SheetFile); base != "" && base != filepath.Base(rip) {
-				env.note(noteCueFileMismatch, "the sheet names %q; splitting %q by it", base, filepath.Base(rip))
-			}
-
 			outs := make([]string, len(plan.Pieces))
-			seen := map[string]int{}
 			for i, p := range plan.Pieces {
 				out, _, cerr := resolveCollision(filepath.Join(outDir, pieceName(p)+"."+transcodeExt(tf)), mc)
 				if cerr != nil {
 					return cerr
 				}
-				if prev, dup := seen[out]; dup {
-					return usagef("tracks %d and %d both map to %q; their titles differ only in characters a filename cannot hold", plan.Pieces[prev].Track, p.Track, displayPath(out))
+				// Two names apart only in case are one file on NTFS and APFS,
+				// where the later piece would replace the earlier: refused on
+				// every system, so a set is the same set everywhere.
+				for j, prev := range outs[:i] {
+					if strings.EqualFold(prev, out) {
+						return usagef("tracks %d and %d both map to %q; their names differ only in case or in characters a filename cannot hold", plan.Pieces[j].Track, p.Track, displayPath(out))
+					}
 				}
-				seen[out] = i
 				outs[i] = out
 			}
 			if err := noteKnobFlags(env, tf, bitrate, bitDepth); err != nil {
@@ -120,6 +122,16 @@ func newSplitCmd() *cobra.Command {
 			res, err := env.client.Split(cmd.Context(), plan, outs, waxtap.TranscodeSpec{Format: tf, Bitrate: bitrate, BitDepth: bitDepth})
 			if err != nil {
 				return err
+			}
+			// Said once the set exists: a refused split skipped nothing. The
+			// sheet may name another file and still describe this rip (one
+			// written beside a .wav, used on a .flac of it), so the mismatch
+			// is a remark, not a refusal.
+			if base := sheetFileBase(plan.SheetFile); base != "" && base != filepath.Base(rip) {
+				env.note(noteCueFileMismatch, "the sheet names %q; splitting %q by it", base, filepath.Base(rip))
+			}
+			for _, s := range plan.Skipped {
+				env.note(noteCueDataTrack, "%s", skipNote(s))
 			}
 			return emitSplit(env, plan, res, sheetAt)
 		},
@@ -171,16 +183,43 @@ func sheetFileBase(name string) string {
 
 // pieceName is the output stem of a piece: the track number, zero-padded to two
 // digits, and the sheet's title, sanitized the way every other name is. A
-// lead-in piece has no track and no title.
+// lead-in piece has no track and no title, unless the sheet wrote it as TRACK
+// 00 and titled it.
 func pieceName(p waxtap.SplitPiece) string {
 	title := p.Title
 	switch {
+	case title != "":
 	case p.Track == 0:
 		title = "Hidden Track"
-	case title == "":
+	default:
 		title = fmt.Sprintf("Track %02d", p.Track)
 	}
 	return truncateBytes(fmt.Sprintf("%02d - %s", p.Track, sanitizeStem(title)), maxStemBytes)
+}
+
+// skipNote says what a split left unwritten and why. The datatype is a token
+// off the sheet, so it is quoted and bounded: the line reaches a terminal.
+func skipNote(s waxtap.SplitSkip) string {
+	span := humanDuration(s.Start) + " to " + humanDuration(s.End) + " of the rip"
+	switch {
+	case s.Type == "":
+		return "skipped the pregap after the disc's data track, " + span + ", which is in the data track's mode, not audio"
+	case s.StartSample == s.EndSample:
+		return fmt.Sprintf("skipped TRACK %02d %q, a data track the rip holds none of; the audio keeps the disc's numbering", s.Track, clipToken(s.Type, 32))
+	}
+	return fmt.Sprintf("skipped TRACK %02d %q, a data track, not audio: %s", s.Track, clipToken(s.Type, 32), span)
+}
+
+// clipToken bounds a token from the sheet for a message: cut to n bytes on a
+// rune boundary, with an ellipsis for what was cut.
+func clipToken(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }
 
 type splitAlbumJSON struct {
@@ -204,6 +243,16 @@ type splitPieceJSON struct {
 	TagCarry  *tagCarryJSON `json:"tagCarry,omitempty"`
 }
 
+// splitSkipJSON is one entry of a split document's skipped list: a track the
+// sheet lists that no piece was written for, with its span of the rip in
+// seconds when the rip holds any of it.
+type splitSkipJSON struct {
+	Track int      `json:"track"`
+	Type  string   `json:"type,omitempty"`
+	Start *float64 `json:"start,omitempty"`
+	End   *float64 `json:"end,omitempty"`
+}
+
 // emitSplit renders the one document a split produces.
 func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, sheetAt string) error {
 	pieces := make([]splitPieceJSON, len(plan.Pieces))
@@ -225,12 +274,22 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 		for i, w := range res.Warnings {
 			warns[i] = warningJSON{Code: w.Code.String(), Detail: w.Detail}
 		}
+		skips := make([]splitSkipJSON, len(plan.Skipped))
+		for i, s := range plan.Skipped {
+			skips[i] = splitSkipJSON{Track: s.Track, Type: s.Type}
+			if s.StartSample != s.EndSample {
+				start, end := s.Start.Seconds(), s.End.Seconds()
+				skips[i].Start, skips[i].End = &start, &end
+			}
+		}
 		return env.emitJSON(struct {
 			SchemaVersion int              `json:"schemaVersion"`
 			Input         string           `json:"input"`
 			Cue           string           `json:"cue"`
 			Album         splitAlbumJSON   `json:"album"`
+			TrackTotal    int              `json:"trackTotal"`
 			Pieces        []splitPieceJSON `json:"pieces"`
+			Skipped       []splitSkipJSON  `json:"skipped,omitempty"`
 			Warnings      []warningJSON    `json:"warnings,omitempty"`
 			Notes         []noteJSON       `json:"notes,omitempty"`
 		}{
@@ -245,7 +304,7 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 				DiscNumber: plan.Album.DiscNumber,
 				DiscTotal:  plan.Album.DiscTotal,
 			},
-			pieces, warns, env.notesJSON(),
+			plan.TrackTotal, pieces, skips, warns, env.notesJSON(),
 		})
 	}
 	for _, w := range res.Warnings {
@@ -260,7 +319,13 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 		}
 		return nil
 	}
-	env.printf("Split:    %s by %s (%s)\n\n", displayPath(plan.Input), displayPath(sheetAt), countOf(plan.TrackCount(), "track"))
+	// The disc's count, and how many of its tracks were written when that is
+	// fewer: a data track skipped, or a sheet that numbers past what it lists.
+	tracks := countOf(plan.TrackTotal, "track")
+	if written := plan.TrackCount(); written < plan.TrackTotal {
+		tracks = fmt.Sprintf("%d of %s", written, tracks)
+	}
+	env.printf("Split:    %s by %s (%s)\n\n", displayPath(plan.Input), displayPath(sheetAt), tracks)
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tSTART\tTITLE\tMETADATA\tOUTPUT")
 	for i, p := range plan.Pieces {

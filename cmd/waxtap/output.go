@@ -199,8 +199,11 @@ const (
 	noteChannelsUnavailable  noteCode = "channels-unavailable"
 	noteConcurrencyClamped   noteCode = "concurrency-clamped"
 	noteContainerExtMismatch noteCode = "container-ext-mismatch"
-	noteCueFileMismatch      noteCode = "cue-file-mismatch"
-	noteDoctorCaveat         noteCode = "doctor-caveat"
+	// noteCueDataTrack reports a data track the sheet lists, which a split
+	// skips rather than writes as audio; the audio keeps the disc's numbering.
+	noteCueDataTrack    noteCode = "cue-data-track"
+	noteCueFileMismatch noteCode = "cue-file-mismatch"
+	noteDoctorCaveat    noteCode = "doctor-caveat"
 	// noteCoverArtRemuxed reports that a source whose container cannot hold a
 	// picture was remuxed into its codec's own so the cover art could go in.
 	noteCoverArtRemuxed   noteCode = "cover-art-remuxed"
@@ -231,6 +234,7 @@ var allNoteCodes = []noteCode{
 	noteChannelsUnavailable,
 	noteConcurrencyClamped,
 	noteContainerExtMismatch,
+	noteCueDataTrack,
 	noteCueFileMismatch,
 	noteDoctorCaveat,
 	noteCoverArtRemuxed,
