@@ -862,7 +862,7 @@ func TestBuildSABRConfig(t *testing.T) {
 		t.Errorf("ContentLength = %d, want 3500000", cfg.ContentLength)
 	}
 	if cfg.DRC || cfg.AudioTrackID != "" {
-		t.Errorf("DRC = %v, AudioTrackID = %q, want false and empty for the default full-range track", cfg.DRC, cfg.AudioTrackID)
+		t.Errorf("DRC = %v, AudioTrackID = %q, want false and empty for a full-range rendition of a single-track video", cfg.DRC, cfg.AudioTrackID)
 	}
 
 	// A DRC rendition of a named track declares both in client_abr_state.

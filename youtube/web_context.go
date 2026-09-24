@@ -167,8 +167,11 @@ func (c *Client) webContextProfile(userAgent, version string) ClientProfile {
 // derived from MimeType by toFormat, so selection stays valid even when the
 // sample-rate/channels/quality fields are absent. IsDrc and AudioTrackID feed
 // the SABR client_abr_state (drc_enabled / audio_track_id) for DRC and
-// multi-audio renditions. toFormat reads the audio role from XTags, the only
-// IsOriginal signal a context carries, since it has no audioIsDefault.
+// multi-audio renditions. toFormat reads the audio role from XTags first and
+// falls back to AudioIsDefault, carried beside the track id the way a player
+// response carries it inside audioTrack: stated true or false as given, nil
+// when the provider said nothing, and dropped without a track id, since the
+// flag names no track on its own.
 func webContextFormats(formats []potoken.PlayerContextFormat) []rawFormat {
 	out := make([]rawFormat, 0, len(formats))
 	for _, f := range formats {
@@ -195,11 +198,10 @@ func webContextFormats(formats []potoken.PlayerContextFormat) []rawFormat {
 			ApproxDurationMs: itoaNonZero(f.ApproxDurationMs),
 		}
 		if f.IsDrc {
-			isDrc := true
-			rf.IsDrc = &isDrc
+			rf.IsDrc = new(true)
 		}
 		if f.AudioTrackID != "" {
-			rf.AudioTrack = &rawAudioTrack{ID: f.AudioTrackID}
+			rf.AudioTrack = &rawAudioTrack{ID: f.AudioTrackID, AudioIsDefault: f.AudioIsDefault}
 		}
 		out = append(out, rf)
 	}

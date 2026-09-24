@@ -330,8 +330,13 @@ and request the audio, especially `itag`, `lmt`, `xtags`, and `mime_type`;
 richer quality, duration, DRC, and track fields are optional. `xtags` must be
 the player response's value verbatim (unpadded base64url protobuf): WaxTap
 reads the audio role (`acont`) from it to rank the original track, and any
-rewrite also breaks SABR format selection. An optional `session_generation`
-names the daemon session behind the context.
+rewrite also breaks SABR format selection. `audio_is_default`, the player's
+`audioTrack.audioIsDefault`, is that ranking's fallback when `xtags` carries no
+role, read only beside an `audio_track_id`; the player marks every track of a
+multi-track video, so a false there is a stated false and ranks that track
+below the default, while an absent key states nothing and leaves the verdict
+unknown. An optional `session_generation` names the daemon session behind the
+context.
 
 Optional identity keys: `user_agent` and `client_version`, the exact
 `navigator.userAgent` and InnerTube client version the context was minted under.

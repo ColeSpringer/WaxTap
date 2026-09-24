@@ -365,8 +365,8 @@ func TestWebContextFormatsCarryDrcAndTrack(t *testing.T) {
 	}
 }
 
-// TestWebContextFormatsOriginalFromXTags covers the WEB path, whose context
-// carries no audioIsDefault: the xtags audio role alone makes IsOriginal known.
+// TestWebContextFormatsOriginalFromXTags covers the WEB path with no default
+// flag: the xtags audio role alone makes IsOriginal known.
 func TestWebContextFormatsOriginalFromXTags(t *testing.T) {
 	pc := sampleContext()
 	pc.AudioFormats[0].XTags = xtagsOriginalEn
@@ -386,6 +386,108 @@ func TestWebContextFormatsOriginalFromXTags(t *testing.T) {
 	if got := ext.rawAudio[0].XTags; got != xtagsOriginalEn {
 		t.Errorf("rawAudio[0].XTags = %q, want the context's value verbatim", got)
 	}
+}
+
+// TestWebContextFormatsOriginalFromDefaultTrack covers the WEB path's fallback:
+// when xtags carries no audio role, the context's audio_is_default decides, as
+// audioTrack.audioIsDefault does on a player response. The player marks every
+// track of a multi-track video, true on the default and false on the rest, so
+// a stated false ranks No on both paths, while a provider that states nothing
+// leaves the verdict Unknown. The flag means nothing without a track id, since
+// on a player response it lives inside audioTrack.
+func TestWebContextFormatsOriginalFromDefaultTrack(t *testing.T) {
+	pc := sampleContext()
+	pc.AudioFormats[0].AudioTrackID = "en.4"
+	pc.AudioFormats[0].AudioIsDefault = new(true)
+	pc.AudioFormats[1].AudioTrackID = "de.3"
+	pc.AudioFormats[1].AudioIsDefault = new(false)
+	ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt := ext.rawAudio[0].AudioTrack; rt == nil || rt.AudioIsDefault == nil || !*rt.AudioIsDefault {
+		t.Errorf("rawAudio[0].AudioTrack = %+v, want AudioIsDefault true from the context", rt)
+	}
+	if rt := ext.rawAudio[1].AudioTrack; rt == nil || rt.ID != "de.3" || rt.AudioIsDefault == nil || *rt.AudioIsDefault {
+		t.Errorf("rawAudio[1].AudioTrack = %+v, want ID de.3 with the stated false", rt)
+	}
+	fs := ext.video.Formats
+	if fs[0].IsOriginal != format.Yes || fs[0].AudioTrack == nil || fs[0].AudioTrack.IsOriginal != format.Yes {
+		t.Errorf("Formats[0]: IsOriginal = %v, AudioTrack = %+v, want yes on both", fs[0].IsOriginal, fs[0].AudioTrack)
+	}
+	if fs[1].IsOriginal != format.No || fs[1].AudioTrack == nil || fs[1].AudioTrack.ID != "de.3" {
+		t.Errorf("Formats[1]: IsOriginal = %v, AudioTrack = %+v, want no on the de.3 track", fs[1].IsOriginal, fs[1].AudioTrack)
+	}
+
+	t.Run("an unstated flag stays unknown", func(t *testing.T) {
+		pc := sampleContext()
+		pc.AudioFormats[0].AudioTrackID = "en.4"
+		ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rt := ext.rawAudio[0].AudioTrack; rt == nil || rt.ID != "en.4" || rt.AudioIsDefault != nil {
+			t.Errorf("rawAudio[0].AudioTrack = %+v, want ID en.4 and no flag: the provider said nothing", rt)
+		}
+		if got := ext.video.Formats[0].IsOriginal; got != format.Unknown {
+			t.Errorf("IsOriginal = %v, want unknown, as a player response without the flag gives", got)
+		}
+	})
+
+	// The flag has to move the selection, not just the label. sampleContext
+	// carries no quality tiers, so bitrate decides among tracks tied on
+	// IsOriginal, and the lower-bitrate itag 140 wins only when the flag marks
+	// it as the default.
+	t.Run("the flag decides the selection", func(t *testing.T) {
+		pc := sampleContext()
+		pc.AudioFormats[0].AudioTrackID = "de.3"
+		pc.AudioFormats[1].AudioTrackID = "en.4"
+		pc.AudioFormats[1].AudioIsDefault = new(true)
+		ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idx, err := format.BestForTarget(ext.video.Formats, format.MinimizeLoss(), format.Target{}); err != nil || idx != 1 {
+			t.Errorf("BestForTarget = %d, %v, want 1: the default track beats the higher bitrate", idx, err)
+		}
+		pc.AudioFormats[1].AudioIsDefault = nil
+		ext, err = webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idx, err := format.BestForTarget(ext.video.Formats, format.MinimizeLoss(), format.Target{}); err != nil || idx != 0 {
+			t.Errorf("BestForTarget = %d, %v, want 0: without the flag the higher bitrate wins", idx, err)
+		}
+	})
+
+	t.Run("the audio role still decides", func(t *testing.T) {
+		pc := sampleContext()
+		pc.AudioFormats[0].XTags = xtagsDubbedAutoDe
+		pc.AudioFormats[0].AudioTrackID = "de.3"
+		pc.AudioFormats[0].AudioIsDefault = new(true)
+		ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ext.video.Formats[0].IsOriginal; got != format.No {
+			t.Errorf("IsOriginal = %v, want no: a dub marked default is still a dub", got)
+		}
+	})
+
+	t.Run("no track id, no track", func(t *testing.T) {
+		pc := sampleContext()
+		pc.AudioFormats[0].AudioIsDefault = new(true)
+		ext, err := webContextClient(pc, nil).ExtractWebContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rt := ext.rawAudio[0].AudioTrack; rt != nil {
+			t.Errorf("rawAudio[0].AudioTrack = %+v, want nil: a default flag without a track id names no track", rt)
+		}
+		if got := ext.video.Formats[0].IsOriginal; got != format.Unknown {
+			t.Errorf("IsOriginal = %v, want unknown", got)
+		}
+	})
 }
 
 // TestWebContextFormatsNormalizeMIME covers a provider that spells the MIME type

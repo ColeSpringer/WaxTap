@@ -398,7 +398,7 @@ func (rf rawFormat) toFormat() format.Format {
 		IsOriginal:     rf.originalTrack(),
 	}
 	if rf.AudioTrack != nil {
-		f.Language = rf.AudioTrack.ID
+		f.Language = trackLanguage(rf.AudioTrack.ID)
 		f.AudioTrack = &format.AudioTrack{
 			ID:          rf.AudioTrack.ID,
 			DisplayName: rf.AudioTrack.DisplayName,
@@ -406,6 +406,17 @@ func (rf rawFormat) toFormat() format.Format {
 		}
 	}
 	return f
+}
+
+// trackLanguage returns the language tag of an audioTrack id, the part before
+// its kind suffix: "en-US.4" gives "en-US" and "de.3" gives "de". An id with no
+// suffix, or nothing before it, is returned whole, so the result is empty only
+// for an empty id.
+func trackLanguage(id string) string {
+	if lang, _, ok := strings.Cut(id, "."); ok && lang != "" {
+		return lang
+	}
+	return id
 }
 
 // originalTrack reports whether rf is the video's original-language audio. The

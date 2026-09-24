@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxtap/v3"
@@ -60,7 +63,7 @@ func TestDedupFormats(t *testing.T) {
 		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000},
 		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000},
 		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000},
-		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "es"},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "es", AudioTrack: &waxtap.AudioTrack{ID: "es.3"}},
 		{Itag: 140, MIMEType: "audio/mp4", Codec: "mp4a.40.2", AverageBitrate: 128000, IsDRC: waxtap.Yes},
 	}
 	got := dedupFormats(in)
@@ -86,6 +89,68 @@ func TestDedupFormats(t *testing.T) {
 	}
 	if !haveDRC {
 		t.Error("dropped the DRC 140 variant")
+	}
+}
+
+// TestFormatToJSON_TrackID pins the two track keys: language is the tag alone
+// and audioTrackId the whole id, present only when the format names a track.
+func TestFormatToJSON_TrackID(t *testing.T) {
+	tracked := waxtap.Format{Itag: 251, Codec: "opus", Language: "en-US", AudioTrack: &waxtap.AudioTrack{ID: "en-US.4"}}
+	b, err := json.Marshal(formatToJSON(tracked))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"language":"en-US"`, `"audioTrackId":"en-US.4"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s, want %s", b, want)
+		}
+	}
+	b, err = json.Marshal(formatToJSON(waxtap.Format{Itag: 251, Codec: "opus"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "audioTrackId") || strings.Contains(string(b), "language") {
+		t.Errorf("json = %s, want neither track key on a single-track format", b)
+	}
+}
+
+// TestDedupFormats_KeepsTracksOfOneLanguage keeps two rows that share a
+// language but name different tracks: the key is the whole id, not the tag,
+// and the table prints that id so the two rows can be told apart.
+func TestDedupFormats_KeepsTracksOfOneLanguage(t *testing.T) {
+	in := []waxtap.Format{
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "en", IsOriginal: waxtap.No, AudioTrack: &waxtap.AudioTrack{ID: "en.3", IsOriginal: waxtap.No}},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "en", IsOriginal: waxtap.No, AudioTrack: &waxtap.AudioTrack{ID: "en.2", IsOriginal: waxtap.No}},
+	}
+	got := dedupFormats(in)
+	if len(got) != 2 {
+		t.Fatalf("dedupFormats kept %d rows, want 2 (different track ids): %+v", len(got), got)
+	}
+	var out bytes.Buffer
+	if err := renderFormatsTable(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}, got); err != nil {
+		t.Fatal(err)
+	}
+	table := out.String()
+	header, _, _ := strings.Cut(table, "\n")
+	if !strings.Contains(header, "TRACK") || strings.Contains(header, "LANG") {
+		t.Errorf("header = %q, want a TRACK column in place of LANG", header)
+	}
+	for _, id := range []string{"en.3", "en.2"} {
+		if !strings.Contains(table, id) {
+			t.Errorf("table lacks track %s:\n%s", id, table)
+		}
+	}
+}
+
+// TestDedupFormats_KeysOnTheTrackID merges two rows whose only difference is a
+// Language set without a track: the track id is the identity, not the tag.
+func TestDedupFormats_KeysOnTheTrackID(t *testing.T) {
+	in := []waxtap.Format{
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000},
+		{Itag: 251, MIMEType: "audio/webm", Codec: "opus", AverageBitrate: 160000, Language: "es"},
+	}
+	if got := dedupFormats(in); len(got) != 1 {
+		t.Fatalf("dedupFormats kept %d rows, want 1: without a track id there is one track", len(got))
 	}
 }
 

@@ -635,6 +635,37 @@ func TestPlayerContextProviderDecode(t *testing.T) {
 			t.Error("absent live flags must be false")
 		}
 	})
+
+	t.Run("track fields reach the contract type", func(t *testing.T) {
+		// A stated true, a stated false, and an older provider that says nothing
+		// beside its track id: the contract type keeps the three apart.
+		tracked := `{"playability_status":"OK","server_abr_streaming_url":"u","video_playback_ustreamer_config":"c","visitor_data":"v","audio_formats":[` +
+			`{"itag":251,"lmt":"1","xtags":"CggKA2RyYxIBMQ","mime_type":"audio/webm","is_drc":true,"audio_track_id":"en.4","audio_is_default":true},` +
+			`{"itag":251,"lmt":"2","xtags":"","mime_type":"audio/webm","audio_track_id":"de.3","audio_is_default":false},` +
+			`{"itag":251,"lmt":"3","xtags":"","mime_type":"audio/webm","audio_track_id":"fr.3"}]}`
+		srv := newPlayerContextServer(t, http.StatusOK, tracked)
+		defer srv.Close()
+		p, err := NewSidecarPlayerContextProvider(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc, err := p.ProvidePlayerContext(context.Background(), "dummyVideo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pc.AudioFormats) != 3 {
+			t.Fatalf("audio formats = %d, want 3", len(pc.AudioFormats))
+		}
+		if f := pc.AudioFormats[0]; !f.IsDrc || f.AudioTrackID != "en.4" || f.AudioIsDefault == nil || !*f.AudioIsDefault {
+			t.Errorf("format 0 = %+v, want is_drc, audio_track_id en.4 and a stated true", f)
+		}
+		if f := pc.AudioFormats[1]; f.IsDrc || f.AudioTrackID != "de.3" || f.AudioIsDefault == nil || *f.AudioIsDefault {
+			t.Errorf("format 1 = %+v, want audio_track_id de.3 and a stated false", f)
+		}
+		if f := pc.AudioFormats[2]; f.AudioTrackID != "fr.3" || f.AudioIsDefault != nil {
+			t.Errorf("format 2 = %+v, want audio_track_id fr.3 and no flag when the body carried none", f)
+		}
+	})
 }
 
 func TestPlayerContextProviderErrors(t *testing.T) {

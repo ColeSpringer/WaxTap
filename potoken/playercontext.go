@@ -95,10 +95,17 @@ type PlayerContextFormat struct {
 	// declares it in client_abr_state.drc_enabled when streaming one, so a
 	// provider omitting it leaves DRC renditions misdescribed on the wire.
 	IsDrc bool
-	// AudioTrackID identifies the audio track on multi-audio videos (the
-	// audioTrack.id of the /player format, e.g. "en.4"). Empty means the
-	// default or only track.
+	// AudioTrackID identifies the audio track (the audioTrack.id of the
+	// /player format, e.g. "en.4"). Empty means the video has a single track:
+	// every entry of a multi-track video carries one, the original's included.
 	AudioTrackID string
+	// AudioIsDefault is the player's audioTrack.audioIsDefault, which marks the
+	// default track, a dub included. WaxTap falls back to it to rank the
+	// original track when XTags carries no audio role, and reads it only beside
+	// an AudioTrackID, where the player marks every track: true on the default,
+	// false on the rest. Nil means the provider stated nothing, which leaves the
+	// verdict unknown rather than false.
+	AudioIsDefault *bool
 }
 
 // PlayerContextProvider supplies an attested player context for a video on

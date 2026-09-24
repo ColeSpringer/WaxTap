@@ -86,7 +86,7 @@ type Format struct {
 	AudioQuality AudioQualityTier
 
 	// Multi-language / dubbed audio metadata.
-	Language   string      // audioTrack language tag, "" if single-track
+	Language   string      // the audioTrack language tag, such as "en-US"; "" when the format names no track
 	AudioTrack *AudioTrack // audioTrack metadata, nil if none
 
 	// Tri-state quality hints (YouTube is inconsistent about exposing these).
@@ -101,7 +101,7 @@ type Format struct {
 // AudioTrack holds the audioTrack metadata YouTube attaches to dubbed or
 // multi-language renditions.
 type AudioTrack struct {
-	ID          string // YouTube audio-track identifier
+	ID          string // YouTube audio-track identifier, such as "en-US.4": the language tag and a kind suffix
 	DisplayName string // localized track label
 	IsOriginal  Tri    // whether this is the video's original-language track, as Format.IsOriginal
 }

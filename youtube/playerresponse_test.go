@@ -37,6 +37,31 @@ func TestToFormat_DRCPresenceMapsAbsentToNo(t *testing.T) {
 	}
 }
 
+// TestToFormat_LanguageIsTheTrackTag pins what Language holds: the language tag
+// of the audioTrack id, which is the part before its kind suffix, while
+// AudioTrack.ID keeps the whole id. An id with nothing before the dot is kept
+// whole, so Language is empty only when the format names no track.
+func TestToFormat_LanguageIsTheTrackTag(t *testing.T) {
+	cases := []struct{ id, want string }{
+		{"en-US.4", "en-US"},
+		{"de.3", "de"},
+		{"zh-Hans.3", "zh-Hans"},
+		{"en", "en"},
+		{".4", ".4"},
+		{"4", "4"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		f := rawFormat{Itag: 251, MimeType: "audio/webm", AudioTrack: &rawAudioTrack{ID: tc.id}}.toFormat()
+		if f.Language != tc.want || f.AudioTrack == nil || f.AudioTrack.ID != tc.id {
+			t.Errorf("id %q: Language = %q, AudioTrack = %+v, want %q and the whole id kept", tc.id, f.Language, f.AudioTrack, tc.want)
+		}
+	}
+	if f := (rawFormat{Itag: 251, MimeType: "audio/webm"}).toFormat(); f.Language != "" || f.AudioTrack != nil {
+		t.Errorf("no track: Language = %q, AudioTrack = %+v, want empty and nil", f.Language, f.AudioTrack)
+	}
+}
+
 // TestToFormat_OriginalFromXTags pins the IsOriginal precedence: the xtags audio
 // role decides when present, audioIsDefault only without one.
 func TestToFormat_OriginalFromXTags(t *testing.T) {

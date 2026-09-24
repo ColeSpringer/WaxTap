@@ -1075,9 +1075,12 @@ type playerContextFormatJSON struct {
 	ContentLength    int64  `json:"content_length"`
 	ApproxDurationMs int64  `json:"approx_duration_ms"`
 	// IsDrc and AudioTrackID feed the SABR client_abr_state for DRC and multi-audio
-	// renditions; absent means a plain default-track format.
-	IsDrc        bool   `json:"is_drc"`
-	AudioTrackID string `json:"audio_track_id"`
+	// renditions; absent, they describe a full-range rendition of a single-track
+	// video. AudioIsDefault ranks the original track when xtags carries no audio
+	// role; absent, it states nothing, which is not the same as false.
+	IsDrc          bool   `json:"is_drc"`
+	AudioTrackID   string `json:"audio_track_id"`
+	AudioIsDefault *bool  `json:"audio_is_default"`
 }
 
 // ProvidePlayerContext requests an attested WEB context from the configured
@@ -1121,6 +1124,7 @@ func (p *playerContextProvider) ProvidePlayerContext(ctx context.Context, videoI
 			ApproxDurationMs: f.ApproxDurationMs,
 			IsDrc:            f.IsDrc,
 			AudioTrackID:     f.AudioTrackID,
+			AudioIsDefault:   f.AudioIsDefault,
 		})
 	}
 	// Allocate the ladder only when the body carried rungs, so an absent or empty

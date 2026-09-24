@@ -91,11 +91,17 @@ type formatDedupKey struct {
 }
 
 func dedupKey(f waxtap.Format) formatDedupKey {
-	track := f.Language
-	if f.AudioTrack != nil && f.AudioTrack.ID != "" {
-		track = f.AudioTrack.ID
+	return formatDedupKey{itag: f.Itag, track: trackID(f), drc: f.IsDRC, original: f.IsOriginal}
+}
+
+// trackID is the audio track a format names, "" on a single-track video. It is
+// the row identity for the table and the audioTrackId key in --json; Language
+// is only the tag part of it.
+func trackID(f waxtap.Format) string {
+	if f.AudioTrack == nil {
+		return ""
 	}
-	return formatDedupKey{itag: f.Itag, track: track, drc: f.IsDRC, original: f.IsOriginal}
+	return f.AudioTrack.ID
 }
 
 // dedupFormats removes repeated display rows while retaining distinct audio
@@ -119,7 +125,7 @@ func dedupFormats(formats []waxtap.Format) []waxtap.Format {
 // renderFormatsTable writes an aligned table of formats to stdout.
 func renderFormatsTable(env *appEnv, formats []waxtap.Format) error {
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ITAG\tCODEC\tEXT\tKBPS\tTIER\tHZ\tCH\tLANG\tORIG\tDRC\tSIZE")
+	fmt.Fprintln(tw, "ITAG\tCODEC\tEXT\tKBPS\tTIER\tHZ\tCH\tTRACK\tORIG\tDRC\tSIZE")
 	for _, f := range formats {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			f.Itag,
@@ -129,7 +135,7 @@ func renderFormatsTable(env *appEnv, formats []waxtap.Format) error {
 			f.AudioQuality.String(),
 			intOrDash(f.SampleRate),
 			intOrDash(f.Channels),
-			dash(f.Language),
+			dash(trackID(f)),
 			triOrDash(f.IsOriginal),
 			triOrDash(f.IsDRC),
 			sizeOrDash(f.ContentLength),
@@ -159,9 +165,11 @@ func hasDRCVariant(formats []waxtap.Format) bool {
 
 // formatJSON is the --json view for YouTube formats, using explicit CLI field
 // names. Numeric fields stay present even when zero because YouTube uses zero for
-// unknown values in some streams. Only Itag uses omitempty; YouTube formats
-// always carry one. Local-file results use localFormatJSON to avoid network-only
-// fields that would always be zero.
+// unknown values in some streams; durationSeconds is the exception, since zero
+// there means unknown on every stream. itag is omitted only when no YouTube
+// format is behind the source, and language and audioTrackId only on a
+// single-track video. Local-file results use localFormatJSON to avoid
+// network-only fields that would always be zero.
 type formatJSON struct {
 	Itag            int     `json:"itag,omitempty"`
 	Codec           string  `json:"codec"`
@@ -173,6 +181,7 @@ type formatJSON struct {
 	Channels        int     `json:"channels"`
 	AudioQuality    string  `json:"audioQuality"`
 	Language        string  `json:"language,omitempty"`
+	AudioTrackID    string  `json:"audioTrackId,omitempty"`
 	IsOriginal      string  `json:"isOriginal"`
 	IsDRC           string  `json:"isDrc"`
 	ContentLength   int64   `json:"contentLength"`
@@ -191,6 +200,7 @@ func formatToJSON(f waxtap.Format) formatJSON {
 		Channels:        f.Channels,
 		AudioQuality:    f.AudioQuality.String(),
 		Language:        f.Language,
+		AudioTrackID:    trackID(f),
 		IsOriginal:      f.IsOriginal.String(),
 		IsDRC:           f.IsDRC.String(),
 		ContentLength:   f.ContentLength,
