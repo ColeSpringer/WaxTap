@@ -27,12 +27,9 @@ jobs:
         with:
           fetch-depth: 0 # GoReleaser reads the tag history to version the build
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          # Build with the newest patch release of the go.mod line, the same
-          # one vulncheck scans against.
-          check-latest: true
+      # Builds with the newest patch release of the go.mod line, the same one
+      # vulncheck scans against.
+      - uses: ./.github/actions/setup-go
 
       - uses: goreleaser/goreleaser-action@v7
         with:

@@ -48,6 +48,20 @@ func TestFileKind(t *testing.T) {
 	}
 }
 
+// A go directive names a patch once a dependency declares one, but releases
+// build with the newest patch of the line, so the table shows the line: the
+// major.minor .github/actions/setup-go installs from.
+func TestGoLine(t *testing.T) {
+	cases := map[string]string{
+		"1.26.0": "1.26", "1.26.10": "1.26", "1.26": "1.26", "1.27rc1": "1.27", "1": "1",
+	}
+	for directive, want := range cases {
+		if got := goLine(directive); got != want {
+			t.Errorf("goLine(%q) = %q, want %q", directive, got, want)
+		}
+	}
+}
+
 // collect takes the license and notice files at a module root and beside each
 // linked package, in path order, classifies the licenses, and leaves patents,
 // documentation, source files, and directories no linked package lives in (the

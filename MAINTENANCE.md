@@ -105,7 +105,10 @@ CI runs gofmt, vet, and a `go mod tidy` check, the race tests on Linux, macOS,
 and Windows (shuffled), and a GoReleaser snapshot of every release target.
 `vulncheck` runs govulncheck against each release target on every change and
 weekly. GitHub switches a schedule off after 60 days without a commit and emails
-the owner; re-enable it from the Actions tab.
+the owner; re-enable it from the Actions tab. Every workflow installs the newest
+patch of go.mod's release line through `.github/actions/setup-go`; setup-go
+reading go.mod itself would take a patched go line (`go 1.N.0`) as an exact
+version, and without `check-latest` it uses the runner's cached patch.
 
 Live extraction health is not checked from CI. A GitHub-hosted address is
 bot-walled in the player response, before the cipher path runs, so a scheduled

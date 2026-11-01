@@ -1,0 +1,25 @@
+name: Set up Go
+description: Install the newest patch release of the Go line go.mod names.
+
+# setup-go reads a patch in go.mod's go directive (go 1.N.0, which tidy writes
+# once a dependency declares one) as an exact version, so this passes only the
+# major.minor line, the same one internal/notices prints, and asks for its
+# newest patch rather than the one the runner has cached.
+
+runs:
+  using: composite
+  steps:
+    - id: line
+      shell: bash
+      run: |
+        line=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1/p' go.mod)
+        if [ -z "$line" ]; then
+          echo "::error file=go.mod::no go directive"
+          exit 1
+        fi
+        echo "line=$line" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version: ${{ steps.line.outputs.line }}
+        check-latest: true

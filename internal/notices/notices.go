@@ -1,16 +1,6 @@
 // Package notices renders THIRD-PARTY-NOTICES.md, the attribution file the
 // release archives ship beside LICENSE.
 //
-// Every release binary compiles in the Go modules it depends on and the Go
-// runtime, and their licenses (MIT, BSD, Apache-2.0) require that the copyright
-// and permission notices travel with a binary distribution. The file is
-// generated rather than hand-kept so a dependency bump cannot silently leave a
-// module out: Generate lists the modules go list links into the binary on each
-// release target, reads the license and notice files at each module's root and
-// beside each linked package out of the module cache, and reproduces them
-// verbatim. A test compares the checked-in file against a fresh render, so the
-// file is exactly what go.mod says it should be.
-//
 //go:generate go run ./gen
 package notices
 
@@ -355,18 +345,18 @@ func classify(text string) string {
 	return ""
 }
 
-// runtimeLicense returns the go directive of the main module and the
-// toolchain's LICENSE, which covers the runtime and standard library compiled
-// into every binary. The directive names the release line without its patch
-// level: GOTOOLCHAIN holds every build to at least that line, and the LICENSE
-// text does not change within one, so the file does not churn per patch
-// release.
+// runtimeLicense returns the release line of the main module's go directive
+// and the toolchain's LICENSE, which covers the runtime and standard library
+// compiled into every binary. The line drops any patch level: GOTOOLCHAIN holds
+// every build to at least that line, releases build with its newest patch, and
+// the LICENSE text does not change within one, so the file does not churn per
+// patch release.
 func runtimeLicense(ctx context.Context, tool string) (version, text string, err error) {
 	out, err := run(ctx, tool, nil, "list", "-m", "-f", "{{.GoVersion}}")
 	if err != nil {
 		return "", "", err
 	}
-	version = strings.TrimSpace(string(out))
+	version = goLine(strings.TrimSpace(string(out)))
 	root, err := run(ctx, tool, nil, "env", "GOROOT")
 	if err != nil {
 		return "", "", err
@@ -376,6 +366,19 @@ func runtimeLicense(ctx context.Context, tool string) (version, text string, err
 		return "", "", fmt.Errorf("notices: reading the Go toolchain LICENSE: %w", err)
 	}
 	return version, strings.ReplaceAll(string(raw), "\r\n", "\n"), nil
+}
+
+// releaseLine matches the major.minor that .github/actions/setup-go installs
+// from.
+var releaseLine = regexp.MustCompile(`^[0-9]+\.[0-9]+`)
+
+// goLine trims a go directive to its release line: 1.26.0 and 1.27rc1 read
+// 1.26 and 1.27.
+func goLine(directive string) string {
+	if line := releaseLine.FindString(directive); line != "" {
+		return line
+	}
+	return directive
 }
 
 // render writes the Markdown: a preamble, a summary table, then every file

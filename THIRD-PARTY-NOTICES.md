@@ -18,15 +18,15 @@ stale. Every license and notice text is reproduced verbatim.
 | Go runtime and standard library | go 1.26 | BSD-3-Clause |
 | github.com/colespringer/waxflow | v0.0.0-20260923050513-446ca3124d89 | MIT (see also THIRD-PARTY-NOTICES.md) |
 | github.com/colespringer/waxlabel | v1.8.0 | MIT |
-| github.com/dlclark/regexp2/v2 | v2.5.2 | MIT |
-| github.com/dop251/goja | v0.0.0-20260723142020-b4aef50fa347 | MIT / see text / BSD-3-Clause |
+| github.com/dlclark/regexp2/v2 | v2.12.0 | MIT |
+| github.com/dop251/goja | v0.0.0-20261031103838-cf2ff0ec0b31 | MIT / see text / BSD-3-Clause |
 | github.com/go-sourcemap/sourcemap | v2.1.4+incompatible | BSD-2-Clause |
-| github.com/google/pprof | v0.0.0-20230207041349-798e818bf904 | Apache-2.0 |
+| github.com/google/pprof | v0.0.0-20261026192309-dbd0ed30aa88 | Apache-2.0 |
 | github.com/inconshreveable/mousetrap | v1.1.0 | Apache-2.0 |
 | github.com/spf13/cobra | v1.10.2 | Apache-2.0 |
 | github.com/spf13/pflag | v1.0.10 | BSD-3-Clause |
-| golang.org/x/text | v0.40.0 | BSD-3-Clause |
-| google.golang.org/protobuf | v1.36.11 | BSD-3-Clause |
+| golang.org/x/text | v0.43.0 | BSD-3-Clause |
+| google.golang.org/protobuf | v1.36.12 | BSD-3-Clause |
 
 ## Go runtime and standard library
 
@@ -622,7 +622,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## github.com/dlclark/regexp2/v2 v2.5.2
+## github.com/dlclark/regexp2/v2 v2.12.0
 
 License: MIT (LICENSE)
 
@@ -650,7 +650,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## github.com/dop251/goja v0.0.0-20260723142020-b4aef50fa347
+## github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31
 
 License: MIT (LICENSE)
 
@@ -761,7 +761,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/google/pprof v0.0.0-20230207041349-798e818bf904
+## github.com/google/pprof v0.0.0-20261026192309-dbd0ed30aa88
 
 License: Apache-2.0 (LICENSE)
 
@@ -1394,7 +1394,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## golang.org/x/text v0.40.0
+## golang.org/x/text v0.43.0
 
 License: BSD-3-Clause (LICENSE)
 
@@ -1428,7 +1428,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## google.golang.org/protobuf v1.36.11
+## google.golang.org/protobuf v1.36.12
 
 License: BSD-3-Clause (LICENSE)
 

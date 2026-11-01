@@ -22,9 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
 
       - name: gofmt
         run: |
@@ -55,9 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
 
       - name: go test (race, shuffled)
         # Shuffled so a test that leans on the order of another runs into it here
@@ -77,9 +73,7 @@ jobs:
         with:
           fetch-depth: 0 # GoReleaser versions the snapshot from the latest tag
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
 
       - uses: goreleaser/goreleaser-action@v7
         with:
