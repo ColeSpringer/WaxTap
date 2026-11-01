@@ -270,34 +270,39 @@ func (r *RangeReader) blockAt(idx int64) ([]byte, error) {
 	return blk, nil
 }
 
-// fetchBlock reads [start, end] into memory, retrying a short body the way a
-// chunk write does and reporting a persistently short one as an incomplete
-// stream.
+// fetchBlock reads [start, end] into memory the way a chunk is written: a body
+// that ends early or stalls is resumed after the bytes it delivered, one ladder
+// covers the block's requests and bodies, and a block that keeps adding nothing
+// is an incomplete stream.
 func (r *RangeReader) fetchBlock(start, end int64) ([]byte, error) {
 	want := end - start + 1
-	for attempt := 0; ; attempt++ {
-		resp, err := r.d.fetchRetrying(r.ctx, r.shared, start, end)
+	buf := make([]byte, want)
+	var got int64
+	var l ladder
+	for {
+		resp, err := r.d.fetchRetrying(r.ctx, r.shared, start+got, end, &l)
 		if err != nil {
 			return nil, err
 		}
-		buf := make([]byte, want)
-		n, rerr := io.ReadFull(io.LimitReader(resp.Body, want), buf)
+		n, rerr := io.ReadFull(io.LimitReader(resp.Body, want-got), buf[got:])
 		drainClose(resp)
 		r.st.stats.Requests++
 		r.st.stats.BytesFetched += int64(n)
 		r.shared.noteDelivered(int64(n))
-		if rerr == nil {
+		got += int64(n)
+		if got == want {
 			return buf, nil
 		}
 		if cerr := r.ctx.Err(); cerr != nil {
 			return nil, cerr
 		}
-		if attempt >= r.d.maxChunkRetries {
-			return nil, fmt.Errorf("%w: short block at offset %d: got %d bytes, want %d: %w",
-				waxerr.ErrIncompleteStream, start, n, want, rerr)
-		}
-		if berr := r.d.backoff(r.ctx, attempt); berr != nil {
+		more, berr := r.d.resume(r.ctx, &l, int64(n))
+		if berr != nil {
 			return nil, berr
+		}
+		if !more {
+			return nil, fmt.Errorf("%w: short block at offset %d: got %d of %d bytes: %w",
+				waxerr.ErrIncompleteStream, start, got, want, rerr)
 		}
 	}
 }

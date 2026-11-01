@@ -271,6 +271,7 @@ func (c *Client) buildSABRConfig(ctx context.Context, ext *Extraction, formatInd
 		UserAgent:       ext.profile.UserAgent,
 		POToken:         potBytes,
 		ContentLength:   atoi64(rf.ContentLength),
+		StallTimeout:    c.stallTO,
 		DescrambleN:     descramble,
 		DumpDir:         os.Getenv(sabrDumpEnvVar),
 		DRC:             sabrDRC(rf),

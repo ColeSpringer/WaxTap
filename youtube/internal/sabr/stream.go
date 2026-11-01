@@ -29,8 +29,7 @@ import (
 
 // Defaults applied by Open when a Config field is left zero.
 const (
-	defaultRoundTimeout = 30 * time.Second
-	defaultMaxBackoff   = 30 * time.Second
+	defaultMaxBackoff = 30 * time.Second
 
 	// maxEmptyRounds bounds consecutive rounds without new media before the
 	// stream is treated as stalled.
@@ -116,8 +115,13 @@ type Config struct {
 	// ContentLength sets StreamInfo.ContentLength and the progress total from the
 	// player response. Zero means unknown.
 	ContentLength int64
-	// RoundTimeout bounds one request/response round. Zero uses the default.
-	RoundTimeout time.Duration
+	// StallTimeout bounds the wait for the next byte of a round: a POST whose
+	// response has not begun, or a response body that has stopped arriving,
+	// within the window fails the round. It is an idle bound rather than a
+	// deadline on the round, so a slow link finishes a large round while a hung
+	// one fails fast. Zero selects the default (httpx.DefaultStallTimeout,
+	// 30 s); a negative value disables the guard.
+	StallTimeout time.Duration
 	// MaxBackoff clamps server-directed backoff. Zero uses the default.
 	MaxBackoff time.Duration
 	// DescrambleN resolves the throttling n parameter of a SABR_REDIRECT URL. Nil
@@ -822,12 +826,11 @@ func (s *stream) post() ([]byte, error) {
 	body := s.buildRequest().marshal()
 	s.dumpBody("request", body)
 
-	ctx := s.ctx
-	if to := s.roundTimeout(); to > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, to)
-		defer cancel()
-	}
+	// The round runs under the stall guard: the POST must begin to answer, and
+	// the body must keep arriving, within the window. A failure is reported as
+	// the stall rather than the bare cancellation the transport returns.
+	ctx, watch := httpx.WithStallWatch(s.ctx, s.stallTimeout())
+	defer watch.Stop()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.requestURL(), bytes.NewReader(body))
 	if err != nil {
@@ -845,8 +848,9 @@ func (s *stream) post() ([]byte, error) {
 
 	resp, err := s.cfg.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, watch.Err(err)
 	}
+	resp.Body = watch.Body(resp.Body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: s.serverURL}
@@ -977,11 +981,10 @@ func (s *stream) descramble(rawURL string) (string, error) {
 	return out, nil
 }
 
-func (s *stream) roundTimeout() time.Duration {
-	if s.cfg.RoundTimeout > 0 {
-		return s.cfg.RoundTimeout
-	}
-	return defaultRoundTimeout
+// stallTimeout resolves Config.StallTimeout: zero is the default, negative
+// disables the guard.
+func (s *stream) stallTimeout() time.Duration {
+	return httpx.StallTimeout(s.cfg.StallTimeout)
 }
 
 func (s *stream) maxBackoff() time.Duration {

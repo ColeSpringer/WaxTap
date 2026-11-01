@@ -53,8 +53,9 @@ func (d *Downloader) Stream(ctx context.Context, src Source, refresh RefreshFunc
 
 // resumableReader presents one sequential byte stream over a Source that may
 // need to be refreshed. On 403/410 it refreshes the Source and opens an
-// open-ended range from the current offset. On a transient mid-stream failure it
-// reopens from the same offset until the stall guard trips.
+// open-ended range from the current offset. On a mid-stream failure it reopens
+// from the same offset, resuming for as long as attempts keep delivering and
+// giving up once the ladder is spent on attempts that add nothing.
 type resumableReader struct {
 	ctx    context.Context
 	d      *Downloader
@@ -66,21 +67,22 @@ type resumableReader struct {
 	total       int64  // content length, 0 if unknown
 	contentType string // learned from the first response
 
-	eof          bool
-	err          error // sticky terminal error
-	resumeOffset int64 // offset at the previous resume, to detect no-progress stalls
-	stalls       int
+	eof bool
+	err error // sticky terminal error
+	// l is the one budget the requests and the bodies share; bodyBytes is what
+	// the current body has delivered, which decides whether its end was progress.
+	l         ladder
+	bodyBytes int64
 }
 
 func (d *Downloader) newResumableReader(ctx context.Context, shared *sharedSource, rep *progressReporter) *resumableReader {
 	src, _ := shared.current()
 	return &resumableReader{
-		ctx:          ctx,
-		d:            d,
-		shared:       shared,
-		rep:          rep,
-		total:        src.ContentLength,
-		resumeOffset: -1,
+		ctx:    ctx,
+		d:      d,
+		shared: shared,
+		rep:    rep,
+		total:  src.ContentLength,
 	}
 }
 
@@ -116,6 +118,7 @@ func (r *resumableReader) Read(p []byte) (int, error) {
 		n, err := r.body.Read(p)
 		if n > 0 {
 			r.offset += int64(n)
+			r.bodyBytes += int64(n)
 			r.rep.add(int64(n))
 			r.shared.noteDelivered(int64(n))
 		}
@@ -126,20 +129,23 @@ func (r *resumableReader) Read(p []byte) (int, error) {
 		_ = r.body.Close()
 		r.body = nil
 
-		// EOF completes the stream when the known total has been reached. If the
-		// total is unknown, EOF is the only completion signal available.
-		if errors.Is(err, io.EOF) && (r.total <= 0 || r.offset >= r.total) {
+		// A known total reached is the end, whatever rode along with the final
+		// bytes; without one, EOF is the only completion signal there is.
+		if (r.total > 0 && r.offset >= r.total) || (r.total <= 0 && errors.Is(err, io.EOF)) {
 			r.eof = true
 			r.rep.flush()
 			return n, io.EOF
 		}
 
 		// Otherwise the transfer is incomplete. Resume from the current offset
-		// unless ctx is done or the stall guard stops the loop.
+		// unless ctx is done or the ladder is spent.
 		if r.ctx.Err() != nil {
 			r.err = r.ctx.Err()
-		} else if resumeErr := r.guardStall(err); resumeErr != nil {
-			r.err = resumeErr
+		} else if more, rerr := r.d.resume(r.ctx, &r.l, r.bodyBytes); rerr != nil {
+			r.err = rerr
+		} else if !more {
+			// Repeated resumes without progress prove that the stream is incomplete.
+			r.err = fmt.Errorf("%w: stream stalled at offset %d: %w", waxerr.ErrIncompleteStream, r.offset, err)
 		}
 		if r.err != nil {
 			if n > 0 {
@@ -154,39 +160,25 @@ func (r *resumableReader) Read(p []byte) (int, error) {
 	}
 }
 
-// guardStall bounds resumes that make no forward progress. It returns a
-// terminal error once the retry budget is exhausted at the same offset.
-func (r *resumableReader) guardStall(cause error) error {
-	if r.offset != r.resumeOffset {
-		r.resumeOffset = r.offset
-		r.stalls = 0
-		return nil
-	}
-	r.stalls++
-	if r.stalls > r.d.maxChunkRetries {
-		// Repeated resumes without progress prove that the stream is incomplete.
-		return fmt.Errorf("%w: stream stalled at offset %d: %w", waxerr.ErrIncompleteStream, r.offset, cause)
-	}
-	return nil
-}
-
 // openNext issues an open-ended ranged GET from the current offset, retrying
 // transient failures and refreshing an expired Source. On success it sets
 // r.body.
 func (r *resumableReader) openNext() error {
-	resp, err := r.d.fetchRetrying(r.ctx, r.shared, r.offset, -1)
+	resp, err := r.d.fetchRetrying(r.ctx, r.shared, r.offset, -1, &r.l)
 	if err != nil {
 		return err
 	}
 	r.learn(resp)
 	r.body = resp.Body
+	r.bodyBytes = 0
 	return nil
 }
 
 // fetchRetrying is the request ladder every fetch of a Source climbs: a 403 or
 // 410 renews the Source through handleRefresh without spending an attempt, a
-// declined refresh drops into the transient ladder, and everything else backs
-// off up to maxChunkRetries. On success the caller owns resp.Body.
+// declined refresh drops into the transient ladder, and everything else spends
+// l, the budget the caller's whole transfer unit shares. On success the caller
+// owns resp.Body.
 //
 // end < 0 asks for start to the end of the resource; a bounded request asks for
 // [start, end]. An origin that answered a bounded request by ignoring the range
@@ -194,8 +186,7 @@ func (r *resumableReader) openNext() error {
 // the caller already knows it needs another route. An open-ended resume keeps
 // its retries, since there a 200 says the origin served from zero rather than
 // that it refuses ranges, and the next attempt may land on a node that does.
-func (d *Downloader) fetchRetrying(ctx context.Context, shared *sharedSource, start, end int64) (*http.Response, error) {
-	attempt := 0
+func (d *Downloader) fetchRetrying(ctx context.Context, shared *sharedSource, start, end int64, l *ladder) (*http.Response, error) {
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -219,13 +210,16 @@ func (d *Downloader) fetchRetrying(ctx context.Context, shared *sharedSource, st
 			}
 			err = rerr
 		}
-		if (end >= 0 && errors.Is(err, errRangeIgnored)) || attempt >= d.maxChunkRetries || !retryable(ctx, err) {
+		if (end >= 0 && errors.Is(err, errRangeIgnored)) || !retryable(ctx, err) {
 			return nil, err
 		}
-		if berr := d.backoff(ctx, attempt); berr != nil {
+		more, berr := d.retry(ctx, l)
+		if berr != nil {
 			return nil, berr
 		}
-		attempt++
+		if !more {
+			return nil, exhausted(shared, err)
+		}
 	}
 }
 

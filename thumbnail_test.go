@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxtap/v3/internal/coverart"
 	"github.com/colespringer/waxtap/v3/internal/mediatest"
@@ -194,6 +195,49 @@ func candidateURLs(cs []coverCandidate) []string {
 		out[i] = c.url
 	}
 	return out
+}
+
+// A thumbnail host that answers and then sends nothing is abandoned after the
+// stall window, and the walk stops there: the remaining candidates sit on the
+// same host, so each would hang for another whole window. The failure names
+// the rung that stalled.
+func TestCoverPictureStopsOnAHungHost(t *testing.T) {
+	big := coverJPEG(1280, 720)
+	inner := &coverRoundTrip{bodies: map[string]coverResponse{
+		"https://i.ytimg.com/vi/" + testVideoID + "/maxresdefault.jpg": {body: big},
+		"https://i.ytimg.com/vi/" + testVideoID + "/hq720.jpg":         {body: big},
+	}}
+	rt := rotationRT(func(r *http.Request) (*http.Response, error) {
+		resp, err := inner.RoundTrip(r)
+		if err == nil {
+			resp.Body = hungMediaBody{r.Context()} // answers, then sends nothing
+		}
+		return resp, err
+	})
+	c, err := New(Options{
+		HTTPClient: &http.Client{Transport: rt},
+		Retry:      RetryPolicy{MaxRetries: -1},
+		Timeouts:   Timeouts{Stall: 100 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &youtube.Video{ID: testVideoID, Thumbnails: ladder(testVideoID, [2]int{640, 480})}
+
+	// Without the guard the hung body blocks until this deadline, which is the
+	// failure the test exists to catch.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err = c.coverPicture(ctx, v, CoverArtFrame)
+	if err == nil {
+		t.Fatal("coverPicture succeeded, want the stall reported")
+	}
+	if !strings.Contains(err.Error(), "maxresdefault.jpg") || !strings.Contains(err.Error(), "sent nothing") {
+		t.Errorf("err = %q, want the stalled rung named with the stall", err)
+	}
+	if len(inner.seen) != 1 {
+		t.Errorf("requests = %v, want the walk to stop at the first stall", inner.seen)
+	}
 }
 
 func TestCoverPictureWalksPastAMiss(t *testing.T) {

@@ -12,6 +12,11 @@
 // Signed stream URLs can expire during transfer. On HTTP 403 or 410, the
 // downloader asks the refresh function for a new Source and retries the affected
 // range. Without a refresh function, expiry fails with waxerr.ErrURLExpired.
+//
+// Every request runs under a stall guard ([Config.StallTimeout]): a response
+// that has not begun, or a body that has stopped delivering, within the window
+// is abandoned and the transfer resumed after the bytes already received, so a
+// slow link finishes while a hung connection fails fast.
 package download
 
 import (
@@ -102,13 +107,22 @@ type Config struct {
 	ChunkSize int64
 	// Parallelism caps simultaneous chunks within one ToFile download (default 4).
 	Parallelism int
-	// ChunkTimeout bounds one ToFile chunk request, including headers and body. 0
-	// means no extra deadline beyond the request context. Streaming methods do
-	// not apply this timeout.
-	ChunkTimeout time.Duration
+	// StallTimeout bounds the wait for the next byte of any response the
+	// Downloader reads: a request whose response has not begun, or a body that
+	// has delivered nothing, within the window is abandoned and the transfer
+	// resumed after the bytes already received. It is an idle bound, not a
+	// deadline, so a slow link finishes while a hung connection fails fast. It
+	// covers every method: ranged chunks, sequential streams, and ranged blocks.
+	// Zero selects the default (httpx.DefaultStallTimeout, 30 s); a negative
+	// value disables the guard, leaving the request context as the only bound.
+	StallTimeout time.Duration
 
-	// MaxChunkRetries is the per-chunk retry budget for transient failures after
-	// the first request (default 3). Expiry refreshes are counted separately.
+	// MaxChunkRetries is the budget of consecutive failed attempts each transfer
+	// unit (a chunk, a sequential stream, a probe block) gets after its first
+	// request (default 3). A request that fails and a body that adds nothing both
+	// spend it, so neither ladder can run its full length in turn; bytes landing
+	// refund it, since a transfer that is moving is not failing, and the next
+	// attempt resumes after them. Expiry refreshes are counted separately.
 	MaxChunkRetries int
 	// MaxRefreshes caps the URL refreshes per download (default 3). See
 	// sharedSource.renew for why the bound is a flat count.
@@ -126,7 +140,7 @@ type Downloader struct {
 	log             *slog.Logger
 	chunkSize       int64
 	parallelism     int
-	chunkTimeout    time.Duration
+	stallTimeout    time.Duration // 0 = disabled
 	maxChunkRetries int
 	maxRefreshes    int
 	baseBackoff     time.Duration
@@ -174,7 +188,7 @@ func New(cfg Config) *Downloader {
 		log:             cfg.Logger,
 		chunkSize:       cfg.ChunkSize,
 		parallelism:     cfg.Parallelism,
-		chunkTimeout:    cfg.ChunkTimeout,
+		stallTimeout:    httpx.StallTimeout(cfg.StallTimeout),
 		maxChunkRetries: cfg.MaxChunkRetries,
 		maxRefreshes:    cfg.MaxRefreshes,
 		baseBackoff:     cfg.BaseBackoff,
@@ -202,9 +216,17 @@ func (e *needRefreshError) Error() string {
 // speed. On success the caller owns resp.Body. A 403/410 is returned as
 // *needRefreshError; other unexpected statuses become a *waxerr.HTTPStatusError
 // via the strategy's validation.
+//
+// The request and the body it returns run under the stall guard: a response that
+// does not begin within the window fails here with a *httpx.StallError, and a
+// body that stops delivering reports one from Read, so every caller's retry
+// ladder sees a stall as the transient failure it is. Closing the body releases
+// the guard.
 func (d *Downloader) fetch(ctx context.Context, src Source, start, end int64) (*http.Response, error) {
+	ctx, watch := httpx.WithStallWatch(ctx, d.stallTimeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
+		watch.Stop()
 		return nil, err
 	}
 	for k, vs := range src.Headers {
@@ -221,8 +243,10 @@ func (d *Downloader) fetch(ctx context.Context, src Source, start, end int64) (*
 
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return nil, err
+		watch.Stop()
+		return nil, watch.Err(err)
 	}
+	resp.Body = watch.Body(resp.Body)
 	// httpx leaves 403/410 responses to the download layer so expiry can be
 	// handled with a Source refresh.
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusGone {
@@ -433,8 +457,9 @@ func gone(f *potoken.HTTPFailure) bool {
 }
 
 // retryable reports whether the download layer should retry err. It checks the
-// parent context, not errors.Is(err, context.DeadlineExceeded), so a per-chunk
-// timeout can use the retry budget while the caller's context remains live.
+// parent context, not errors.Is(err, context.DeadlineExceeded), so a stall,
+// which classifies as a deadline, can use the retry budget while the caller's
+// context remains live.
 func retryable(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -444,6 +469,54 @@ func retryable(ctx context.Context, err error) bool {
 	}
 	_, ok := errors.AsType[*needRefreshError](err)
 	return !ok
+}
+
+// ladder is the budget one transfer unit (a chunk span, a sequential stream, a
+// ranged block) has for consecutive attempts that fail. A request that fails
+// and a body that adds nothing both spend it, so the request ladder and the
+// resume loop cannot each run their full length in turn, and bytes landing
+// refund it in full, since a transfer that is moving is not failing.
+type ladder struct {
+	failed int // consecutive attempts that added nothing
+}
+
+// retry records a failed attempt. When the budget allows another it waits that
+// attempt's backoff and reports true; when the budget is spent it reports
+// false. A context error ending the backoff is returned.
+func (d *Downloader) retry(ctx context.Context, l *ladder) (bool, error) {
+	l.failed++
+	if l.failed > d.maxChunkRetries {
+		return false, nil
+	}
+	if err := d.backoff(ctx, l.failed-1); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// resume decides whether a transfer whose body ended early may open another
+// request, and waits before it does. An attempt that delivered bytes refunds
+// the budget but still waits one base step, so an origin that cuts every
+// response short is not asked again at once; one that added nothing spends a
+// step of the budget.
+func (d *Downloader) resume(ctx context.Context, l *ladder, delivered int64) (bool, error) {
+	if delivered > 0 {
+		l.failed = 0
+		return true, d.backoff(ctx, 0)
+	}
+	return d.retry(ctx, l)
+}
+
+// exhausted reports a request ladder that ran out of attempts. Once the source
+// has delivered anything, that is an incomplete delivery whatever the last
+// failure was: the stream ended before completion, and another client may
+// finish it. A source that never delivered fails as its last attempt did, since
+// nothing says a stream was there to finish.
+func exhausted(shared *sharedSource, cause error) error {
+	if n := shared.delivered.Load(); n > 0 {
+		return fmt.Errorf("%w: the source stopped answering after %d bytes: %w", waxerr.ErrIncompleteStream, n, cause)
+	}
+	return cause
 }
 
 // backoff sleeps an exponential, attempt-scaled duration, honoring ctx.

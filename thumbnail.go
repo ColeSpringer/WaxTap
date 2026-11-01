@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxlabel"
 
 	"github.com/colespringer/waxtap/v3/internal/coverart"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/internal/iox"
 	"github.com/colespringer/waxtap/v3/youtube"
 )
@@ -88,8 +89,8 @@ func (c *Client) coverPicture(ctx context.Context, v *youtube.Video, mode CoverA
 		if err != nil {
 			lastErr = err
 			// The next candidate is the same host, so it would answer the same way
-			// after another backoff.
-			if errors.Is(err, ErrRateLimited) {
+			// after another backoff, or hang for another whole window.
+			if _, stalled := errors.AsType[*httpx.StallError](err); stalled || errors.Is(err, ErrRateLimited) {
 				break
 			}
 			continue
@@ -284,20 +285,30 @@ func coverDims(data []byte) string {
 }
 
 // fetchThumbnail downloads a thumbnail image over the shared HTTP client, capped.
+// It runs under the same stall guard as the media transfer: the walk's context
+// is the job's, with no deadline of its own, so a host that answers and then
+// sends nothing would otherwise hold the job until the caller gives up.
 func (c *Client) fetchThumbnail(ctx context.Context, url string) ([]byte, error) {
+	ctx, watch := httpx.WithStallWatch(ctx, httpx.StallTimeout(c.opts.Timeouts.Stall))
+	defer watch.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
+	// Every failure names the URL: the walk reports one cause for several
+	// candidates, so a bare status or stall would not say which rung it was.
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", url, watch.Err(err))
 	}
+	resp.Body = watch.Body(resp.Body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		// Name the URL: the walk reports one cause for several candidates, so a
-		// bare status would not say which rung answered it.
 		return nil, fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
 	}
-	return iox.ReadAllCapped(resp.Body, maxThumbnailBytes, "thumbnail")
+	data, err := iox.ReadAllCapped(resp.Body, maxThumbnailBytes, "thumbnail")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", url, err)
+	}
+	return data, nil
 }

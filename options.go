@@ -157,7 +157,8 @@ type Concurrency struct {
 
 // Timeouts are per-operation deadlines applied through context. There is no
 // single global download cap; each operation gets its own budget. A zero field
-// means WaxTap adds no extra deadline for that operation.
+// means WaxTap adds no extra deadline for that operation, except Stall, which
+// is a liveness bound rather than a budget and has a default.
 type Timeouts struct {
 	Extraction time.Duration // player-response fetch + parse
 	// Resolve bounds stream-URL resolution (including the cipher JS). A plain
@@ -171,11 +172,18 @@ type Timeouts struct {
 	// only by the caller's context.
 	WebContext   time.Duration
 	SponsorBlock time.Duration // SponsorBlock fetch (see also SponsorBlock.Timeout)
-	// ChunkRetry bounds each ranged chunk request of a file download. A
-	// sequential delivery (a writer sink, Stream, SABR) makes no ranged
-	// requests, so it is bounded by the stall guard and the caller's context
-	// instead.
-	ChunkRetry time.Duration
+	// Stall bounds the wait for the next byte of a transfer: a request whose
+	// response has not begun, or a body that has stopped arriving, within the
+	// window is abandoned. It is an idle bound, not a deadline on the transfer,
+	// so a slow link finishes while a hung connection fails fast. A request that
+	// was never answered is retried; a chunk, sequential stream, or probe block
+	// whose body stalled is resumed after the bytes already received; a SABR
+	// round whose body stalled ends the stream, which the fallback chain may
+	// then finish through another client; a cover-art fetch that stalled gives
+	// up on the picture. Zero selects the default (30 s); a negative value
+	// disables the guard, leaving the caller's context as the only bound on a
+	// connection that stops delivering.
+	Stall time.Duration
 }
 
 // RetryPolicy tunes HTTP retry/backoff.

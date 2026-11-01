@@ -266,50 +266,6 @@ func TestToFile_AlreadyCanceledContext(t *testing.T) {
 	assertNoTempFiles(t, dir)
 }
 
-// TestToFile_ChunkTimeoutRetries covers a per-chunk timeout while the parent
-// context is still live. That timeout should use the retry budget.
-func TestToFile_ChunkTimeoutRetries(t *testing.T) {
-	payload := makePayload(8000)
-	var stalled atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if stalled.CompareAndSwap(false, true) {
-			// First request stalls past the per-chunk timeout; the client aborts
-			// this attempt and the chunk must retry, not give up.
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-		}
-		serveRange(w, r, payload)
-	}))
-	defer srv.Close()
-
-	d := New(Config{
-		HTTPClient:      httpx.New(httpx.Config{MaxRetries: -1, BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond}),
-		ChunkSize:       1000,
-		Parallelism:     4,
-		ChunkTimeout:    80 * time.Millisecond,
-		MaxChunkRetries: 3,
-		BaseBackoff:     time.Millisecond,
-		MaxBackoff:      2 * time.Millisecond,
-	})
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.bin")
-
-	src := Source{URL: srv.URL, ContentLength: int64(len(payload))}
-	if _, err := d.ToFile(context.Background(), src, path, nil, nil); err != nil {
-		t.Fatalf("ToFile: %v", err)
-	}
-	if !stalled.Load() {
-		t.Fatal("expected the first request to stall (test did not exercise the timeout)")
-	}
-	got, _ := os.ReadFile(path)
-	if !bytes.Equal(got, payload) {
-		t.Fatal("output mismatch after chunk-timeout retry")
-	}
-}
-
 // refreshThenTransient returns 403 on the first request, then transient 503s,
 // then serves normally.
 type refreshThenTransient struct {

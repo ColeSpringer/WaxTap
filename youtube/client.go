@@ -34,6 +34,7 @@ type Client struct {
 	potoken     potoken.Provider              // PO-token provider, when configured
 	webContext  potoken.PlayerContextProvider // attested WEB player-context provider, when configured
 	webCtxTO    time.Duration                 // per-call bound on the player-context provider; 0 = none
+	stallTO     time.Duration                 // wait for the next byte of a SABR round; 0 = sabr default, <0 = none
 	visitors    *cache.Store[string]          // bootstrapped guest visitorData, singleflighted
 	hl, gl      string                        // InnerTube host language / content region
 
@@ -114,6 +115,11 @@ type Config struct {
 	// ResolveTimeout bounds each cipher JS execution during resolution. Zero
 	// uses the resolver default.
 	ResolveTimeout time.Duration
+	// StallTimeout bounds the wait for the next byte of a SABR round: a POST
+	// whose response has not begun, or a body that has stopped arriving, within
+	// the window fails the round. Zero selects the SABR default (30 s); a
+	// negative value disables the guard.
+	StallTimeout time.Duration
 	// CacheDir is the base directory for on-disk caches. When set, and when
 	// DisableDiskCache is false, the default resolver stores base.js source under
 	// CacheDir/players. Empty leaves the resolver memory-only. Ignored when a
@@ -143,6 +149,7 @@ func New(cfg Config) *Client {
 		potoken:         cfg.POTokenProvider,
 		webContext:      cfg.PlayerContextProvider,
 		webCtxTO:        cfg.WebContextTimeout,
+		stallTO:         cfg.StallTimeout,
 		hl:              cfg.HL,
 		gl:              cfg.GL,
 		staticSession:   cfg.Session,

@@ -29,7 +29,7 @@ func baseConfig(d HTTPDoer) Config {
 		UserAgent:       "Mozilla/5.0 test",
 		POToken:         []byte("gvs-pot"),
 		ContentLength:   10,
-		RoundTimeout:    5 * time.Second,
+		StallTimeout:    5 * time.Second,
 	}
 }
 

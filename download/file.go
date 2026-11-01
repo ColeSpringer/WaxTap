@@ -33,7 +33,8 @@ func planChunks(total, chunkSize int64) []chunkSpan {
 
 // ToFile downloads src to path. When the content length is known and larger
 // than the configured chunk size, it writes byte ranges in parallel through
-// io.WriterAt; otherwise it uses a single resumable stream.
+// io.WriterAt; otherwise it uses a single resumable stream. A chunk whose body
+// ends early or stalls is resumed after the bytes it already wrote.
 //
 // Data is staged in a temp file next to path and renamed into place only after
 // the download completes. Failed or canceled downloads remove the temp file and
@@ -110,7 +111,7 @@ func (d *Downloader) streamToFile(ctx context.Context, shared *sharedSource, f *
 // downloadChunks fetches spans in parallel, writing each at its file offset. The
 // first worker error cancels the rest; cancellation is returned even if workers
 // stop between spans without a fetch returning an error.
-func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f *tempfile.File, spans []chunkSpan, rep *progressReporter) error {
+func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f io.WriterAt, spans []chunkSpan, rep *progressReporter) error {
 	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -170,93 +171,61 @@ func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f
 	return firstErr
 }
 
-// fetchChunkToFile fetches one span and writes it at its offset, retrying
-// transient failures and refreshing an expired Source. The OffsetWriter starts
-// at span.start, so workers write disjoint file regions.
-func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource, f *tempfile.File, span chunkSpan, rep *progressReporter) error {
+// fetchChunkToFile fetches one span and writes it at its offset, resuming after
+// the bytes already written when a body ends early or stalls. One ladder covers
+// the span's requests and its bodies alike; the OffsetWriter starts at the
+// resume offset, so workers write disjoint file regions and a retry never
+// rewrites what the span already has. A sink that refuses a write is terminal
+// at once, because no retry changes the disk.
+func (d *Downloader) fetchChunkToFile(ctx context.Context, shared *sharedSource, f io.WriterAt, span chunkSpan, rep *progressReporter) error {
 	expected := span.end - span.start + 1
-
-	// attempt counts transient retries only; a refresh (handled below) does not
-	// advance it, so an expired-URL re-resolve never eats the per-chunk budget.
-	attempt := 0
+	var got int64 // bytes of the span on disk, which the next request resumes after
+	var l ladder
 	for {
-		src, gen := shared.current()
-
-		cctx := ctx
-		var cancel context.CancelFunc
-		if d.chunkTimeout > 0 {
-			cctx, cancel = context.WithTimeout(ctx, d.chunkTimeout)
-		}
-
-		resp, err := d.fetch(cctx, src, span.start, span.end)
+		start := span.start + got
+		resp, err := d.fetchRetrying(ctx, shared, start, span.end, &l)
 		if err != nil {
-			if cancel != nil {
-				cancel()
-			}
-			if nr, ok := errors.AsType[*needRefreshError](err); ok {
-				rerr := handleRefresh(ctx, shared, gen, nr.failure)
-				if rerr == nil {
-					continue // retry with the refreshed URL; no attempt spent
-				}
-				// A declined refresh drops this 403 into the ordinary ladder below,
-				// which it never used to reach. Every other refresh outcome is
-				// terminal, and so is a 410 whatever the budget says.
-				if !refreshDeclined(rerr) || gone(nr.failure) {
-					return rerr
-				}
-				err = rerr
-			}
-			if attempt >= d.maxChunkRetries || !retryable(ctx, err) {
-				return err
-			}
-			if berr := d.backoff(ctx, attempt); berr != nil {
-				return berr
-			}
-			attempt++
-			continue
+			return err
 		}
 
-		w := &countingWriter{w: io.NewOffsetWriter(f, span.start), rep: rep}
-		n, copyErr := io.Copy(w, io.LimitReader(resp.Body, expected))
+		w := &countingWriter{w: io.NewOffsetWriter(f, start), rep: rep}
+		n, copyErr := io.Copy(w, io.LimitReader(resp.Body, expected-got))
 		// Bytes that arrived count as progress even when this span retries: the
 		// server served them, which is the fact the no-progress bail reads.
 		shared.noteDelivered(n)
 		drainClose(resp)
-		if cancel != nil {
-			cancel()
-		}
+		got += n
 
-		if copyErr == nil && n == expected {
+		// A span with all its bytes is complete, whatever rode along with the
+		// last of them.
+		if got == expected {
 			return nil
 		}
-
-		// Remove partial bytes from progress before retrying this span.
-		rep.add(-n)
 		// Preserve cancellation and deadlines so callers do not retry the download
 		// with another client. copyErr is the truncated read the cancellation
 		// produced and its chain need not reach context.Canceled, so both are joined:
 		// the context error makes the class, copyErr keeps whatever it carries.
 		if ctx.Err() != nil {
 			if copyErr != nil {
-				return fmt.Errorf("download: chunk at offset %d: %w", span.start, errors.Join(ctx.Err(), copyErr))
+				return fmt.Errorf("download: chunk at offset %d: %w", start, errors.Join(ctx.Err(), copyErr))
 			}
-			return fmt.Errorf("download: chunk at offset %d: %w", span.start, ctx.Err())
+			return fmt.Errorf("download: chunk at offset %d: %w", start, ctx.Err())
 		}
-		// A persistently short chunk proves that the source did not satisfy the
-		// requested range. Mark it incomplete so the caller can try another client.
-		if attempt >= d.maxChunkRetries {
-			if w.werr != nil {
-				// A local write failure must not be mistaken for a truncated source.
-				return fmt.Errorf("download: write chunk at offset %d: %w", span.start, w.werr)
-			}
+		if w.werr != nil {
+			// A local write failure must not be mistaken for a truncated source.
+			return fmt.Errorf("download: write chunk at offset %d: %w", start, w.werr)
+		}
+		more, rerr := d.resume(ctx, &l, n)
+		if rerr != nil {
+			return rerr
+		}
+		if !more {
+			// A span that repeatedly adds nothing proves that the source will not
+			// finish it. Mark it incomplete so the caller can try another client.
 			if copyErr != nil {
-				return fmt.Errorf("%w: chunk at offset %d: %w", waxerr.ErrIncompleteStream, span.start, copyErr)
+				return fmt.Errorf("%w: chunk at offset %d: %w", waxerr.ErrIncompleteStream, start, copyErr)
 			}
-			return fmt.Errorf("%w: short chunk at offset %d: got %d bytes, want %d", waxerr.ErrIncompleteStream, span.start, n, expected)
+			return fmt.Errorf("%w: short chunk at offset %d: got %d of %d bytes", waxerr.ErrIncompleteStream, span.start, got, expected)
 		}
-		if berr := d.backoff(ctx, attempt); berr != nil {
-			return berr
-		}
-		attempt++
 	}
 }

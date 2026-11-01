@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/internal/iox"
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
 	"github.com/colespringer/waxtap/v3/youtube"
@@ -921,6 +922,16 @@ func friendlyError(err error) string {
 	if hse, ok := errors.AsType[*waxtap.HTTPStatusError](err); ok {
 		return fmt.Sprintf("%s returned HTTP %d", httpStatusSource(hse.URL), hse.StatusCode)
 	}
+	// A stall names its host the way the library saw it; the user is told which
+	// service that was, the same way a status is attributed.
+	if se, ok := errors.AsType[*httpx.StallError](err); ok {
+		named := *se
+		named.Host = ""
+		if src := hostSource(se.Host); src != "the server" {
+			named.Host = src
+		}
+		return named.Error()
+	}
 	// Staging and publishing failures otherwise surface as a bare OS error naming
 	// a step the user never asked for ("rename out.mp3: Access is denied.").
 	if oe, ok := errors.AsType[*tempfile.OutputError](err); ok {
@@ -999,15 +1010,25 @@ func httpStatusSource(rawURL string) string {
 		return "the server"
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Hostname() == "" {
+	if err != nil {
 		return "the server"
 	}
-	host := strings.ToLower(u.Hostname())
+	return hostSource(u.Hostname())
+}
+
+// hostSource names the service behind a hostname. Unknown hosts get a neutral
+// label.
+func hostSource(host string) string {
+	host = strings.ToLower(host)
 	switch {
+	case host == "":
+		return "the server"
 	case strings.Contains(host, "sponsor"):
 		return "SponsorBlock"
 	case strings.Contains(host, "googlevideo"):
 		return "googlevideo"
+	case strings.Contains(host, "ytimg"):
+		return "the thumbnail CDN"
 	case strings.Contains(host, "youtube"):
 		return "YouTube"
 	default:
@@ -1106,6 +1127,11 @@ func proxyHint(err error) string {
 // for transports that do not expose a typed proxyconnect error.
 func isProxyError(err error) bool {
 	if _, ok := errors.AsType[*proxyDeadlineError](err); ok {
+		return true
+	}
+	// httpx knows the transport's spellings, and keeps the proxy cause of a
+	// stalled dial where the chain walks below cannot see it.
+	if httpx.IsProxyConnect(err) {
 		return true
 	}
 	if _, ok := errors.AsType[*proxyStatusError](err); ok {

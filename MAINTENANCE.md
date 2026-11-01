@@ -482,6 +482,12 @@ has reached the known attestation-pending preview cap. Do not treat it as a
 token or request-shape problem; use an attested player-context or adopted
 session.
 
+A round whose response stops arriving part way is a different thing: the stall
+timeout (`stallTimeoutSeconds`, 30 s) abandons it with "the server sent
+nothing for 30s" and exit 9 `timeout`. That is the connection, not the server
+withholding media; a withheld stream answers its rounds, just without media,
+and reports as incomplete (exit 7).
+
 For other stalls:
 
 ```sh

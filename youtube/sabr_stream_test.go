@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
 
@@ -193,6 +195,53 @@ func TestSABR_ResolveAndStreamBytes(t *testing.T) {
 	// read-only and does not mint).
 	if fp.gotReq.Scope != potoken.ScopeGVS {
 		t.Errorf("last provider scope = %v, want GVS", fp.gotReq.Scope)
+	}
+}
+
+// A SABR POST the server never answers is abandoned after the stall window and
+// retried by the HTTP client like any transport failure, so one hung connection
+// does not end the stream.
+func TestSABR_HeaderStallIsRetried(t *testing.T) {
+	initBytes := []byte("INIT-SEGMENT-")
+	mediaBytes := []byte("MEDIA-SEGMENT-1")
+
+	srv := &sabrServer{t: t, players: [][]byte{readFixture(t, "player_sabr.json")}, bodies: [][]byte{sabrHappyBody(initBytes, mediaBytes)}}
+	var posts, hung atomic.Int32
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/videoplayback") && posts.Add(1) == 1 {
+			hung.Add(1)
+			<-r.Context().Done() // never answers; the client gives up on this attempt
+			return nil, r.Context().Err()
+		}
+		return srv.RoundTrip(r)
+	})
+	fp := &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}}
+	c := newTestClientWith(rt, []ClientProfile{makeProfile(profileWeb)}, fp)
+	c.stallTO = 100 * time.Millisecond
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	plan, err := c.Resolve(context.Background(), ext, 0)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rc, _, err := plan.SABR.Open(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := append(append([]byte{}, initBytes...), mediaBytes...)
+	if !bytes.Equal(got, want) {
+		t.Errorf("streamed bytes = %q, want %q", got, want)
+	}
+	if hung.Load() != 1 || posts.Load() != 2 {
+		t.Errorf("POSTs = %d (hung %d), want 2 with the first hung", posts.Load(), hung.Load())
 	}
 }
 
@@ -820,7 +869,7 @@ func TestSABR_OpenUnprimedNeedsGVSProvider(t *testing.T) {
 }
 
 func TestBuildSABRConfig(t *testing.T) {
-	c := New(Config{Resolver: &fakeResolver{}, POTokenProvider: &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}}})
+	c := New(Config{Resolver: &fakeResolver{}, POTokenProvider: &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}}, StallTimeout: 7 * time.Second})
 
 	sess := newSession("US")
 	sess.visitorData = "VIS"
@@ -860,6 +909,9 @@ func TestBuildSABRConfig(t *testing.T) {
 	}
 	if cfg.ContentLength != 3500000 {
 		t.Errorf("ContentLength = %d, want 3500000", cfg.ContentLength)
+	}
+	if cfg.StallTimeout != 7*time.Second {
+		t.Errorf("StallTimeout = %v, want the client's 7s", cfg.StallTimeout)
 	}
 	if cfg.DRC || cfg.AudioTrackID != "" {
 		t.Errorf("DRC = %v, AudioTrackID = %q, want false and empty for a full-range rendition of a single-track video", cfg.DRC, cfg.AudioTrackID)

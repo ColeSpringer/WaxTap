@@ -15,6 +15,9 @@
 //     the absolute cap; this is the per-operation one.
 //   - Retried requests must be replayable: a request with a body but no
 //     GetBody is attempted exactly once.
+//   - A caller that wants a bound on the wait for the next byte, rather than on
+//     the whole exchange, puts a StallWatch on the request context. Do's own
+//     pauses hold its clock, so a Retry-After is never reported as a stall.
 package httpx
 
 import (
@@ -113,6 +116,10 @@ func preferNamedCause(err, earlier error) error {
 // setting, so every later attempt dials the same unreachable address. Do stops
 // on it, and so does the extraction chain.
 func IsProxyConnect(err error) bool {
+	// A stall keeps the transport's cause beside the chain, not in it.
+	if st, ok := errors.AsType[*stalledTransport](err); ok {
+		return IsProxyConnect(st.cause)
+	}
 	// errors.As walks the chain itself, so there is no loop to write here.
 	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "proxyconnect" {
 		return true
@@ -130,6 +137,9 @@ func IsProxyConnect(err error) bool {
 // Callers layered above this package use it for the same policy Do applies to
 // its own retries: an expired deadline must not erase a named cause.
 func NamesTransportCause(err error) bool {
+	if _, ok := errors.AsType[*stalledTransport](err); ok {
+		return true
+	}
 	_, ok := errors.AsType[*net.OpError](err)
 	return ok
 }
@@ -289,11 +299,17 @@ func New(cfg Config) *Client {
 // same unreachable address. On a capped-out Retry-After it returns
 // *waxerr.RateLimitError.
 //
+// A StallWatch on the request context bounds each attempt's wait for the
+// server to answer. An attempt that stalls is a transport failure like any
+// other: it is reported as a *StallError and retried, while the caller's
+// context stays live.
+//
 // On success the caller owns the returned response body. On retried or
 // rate-limited responses the intermediate bodies are drained and closed here.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 	host := req.URL.Hostname()
+	watch := stallWatchFrom(ctx)
 
 	attempts := c.cfg.MaxRetries + 1
 	if req.Body != nil && req.GetBody == nil {
@@ -321,8 +337,17 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 
-		resp, err := c.http.Do(req)
+		// Each attempt waits under its own stall clock, so a stall cancels this
+		// attempt alone and is retried below like any other transport failure.
+		areq := req
+		actx, attemptDone := watch.attempt(ctx, host)
+		if watch != nil {
+			areq = req.WithContext(actx)
+		}
+		resp, err := c.http.Do(areq)
 		if err != nil {
+			err = watch.Err(err)
+			attemptDone(nil)
 			// Same policy as PauseBlocked: a cancellation outranks the pending
 			// error, an expired deadline does not. A transport failure the deadline
 			// happened to interrupt is the one thing that can name a cause (a dead
@@ -369,6 +394,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			wait, ok := ParseRetryAfter(resp.Header)
 			status := resp.StatusCode
 			drain(resp)
+			attemptDone(nil)
 			rlErr := &waxerr.RateLimitError{Host: host, RetryAfter: wait, StatusCode: status}
 
 			// Retry-After can extend the base cooldown, but not beyond the maximum
@@ -410,6 +436,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		// Retryable server-side error.
 		if attempt < attempts-1 && retryableStatus(resp.StatusCode) {
 			drain(resp)
+			attemptDone(nil)
 			lastErr = &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.String()}
 			wait := c.backoffDuration(attempt)
 			// The typed status error carries the server's code into --json; a deadline
@@ -457,10 +484,16 @@ func (c *Client) backoffDuration(attempt int) time.Duration {
 
 // Sleep waits for d or until ctx is done, whichever comes first, returning the
 // context error on cancellation. A non-positive d returns immediately.
+//
+// A sleep is a deliberate wait, not the server failing to answer, so it holds
+// the clock of a StallWatch on ctx for its duration.
 func Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
+	w := stallWatchFrom(ctx)
+	w.pause()
+	defer w.resume()
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

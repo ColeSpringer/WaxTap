@@ -401,9 +401,10 @@ func TestOpenRangeRefusesAChunkedIgnoredRange(t *testing.T) {
 	}
 }
 
-// TestRangeReaderShortBlockIsIncomplete: a body that stops early is retried and
-// then reported as an incomplete stream, the class that sends a download to
-// another client rather than to the user as a bad file.
+// TestRangeReaderShortBlockIsIncomplete: a body that stops early is resumed,
+// and a block the origin then adds nothing to is reported as an incomplete
+// stream, the class that sends a download to another client rather than to the
+// user as a bad file.
 func TestRangeReaderShortBlockIsIncomplete(t *testing.T) {
 	payload := makePayload(4000)
 	var hits atomic.Int32
@@ -417,7 +418,10 @@ func TestRangeReaderShortBlockIsIncomplete(t *testing.T) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(payload[start : start+10]) // short
+		if start%1000 == 0 {
+			_, _ = w.Write(payload[start : start+10]) // the block's first request: short
+		}
+		// A resume gets nothing: the origin will not finish this block.
 	}))
 	defer srv.Close()
 

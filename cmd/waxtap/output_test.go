@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3"
+	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/internal/iox"
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
 )
@@ -219,6 +220,8 @@ func TestExitCodeFor(t *testing.T) {
 		// there too, and only the proxy case's position decides between them.
 		{&url.Error{Err: &proxyDeadlineError{host: "http://p:1", err: context.DeadlineExceeded}}, 9},
 		{&net.OpError{Op: "dial", Err: errFake("connection refused")}, 9},
+		// A stall is a timeout: the server stopped answering, not the user.
+		{&httpx.StallError{Idle: 30 * time.Second, Host: "rr1---sn-abc.googlevideo.com"}, 9},
 		{&fs.PathError{Op: "mkdir", Path: "/root/x", Err: errFake("permission denied")}, 10},
 		{errFake("other"), 1},
 	}
@@ -226,6 +229,41 @@ func TestExitCodeFor(t *testing.T) {
 		if got := exitCodeFor(tt.err); got != tt.want {
 			t.Errorf("exitCodeFor(%v) = %d, want %d", tt.err, got, tt.want)
 		}
+	}
+}
+
+// A stall is attributed to the service the way a status is, not to a CDN
+// hostname, and an unknown host stays anonymous.
+func TestFriendlyError_StallNamesTheService(t *testing.T) {
+	cases := []struct {
+		err  *httpx.StallError
+		want string
+	}{
+		{&httpx.StallError{Idle: 30 * time.Second, Headers: true, Received: 10, Host: "rr1---sn-abc.googlevideo.com"}, "googlevideo sent nothing for 30s after 10 bytes"},
+		{&httpx.StallError{Idle: 30 * time.Second, Host: "i.ytimg.com"}, "the thumbnail CDN did not answer within 30s"},
+		{&httpx.StallError{Idle: 30 * time.Second, Headers: true, Host: "cdn.example"}, "the server sent nothing for 30s"},
+		{&httpx.StallError{Idle: 30 * time.Second}, "the server did not answer within 30s"},
+	}
+	for _, tt := range cases {
+		if got := friendlyError(tt.err); got != tt.want {
+			t.Errorf("friendlyError(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+// A proxy that never answered a stalled attempt still reads as a proxy failure:
+// the stall keeps the transport's cause beside its chain, and the proxy hint
+// depends on seeing it.
+func TestFriendlyError_StalledProxyDialKeepsTheHint(t *testing.T) {
+	ctx, w := httpx.WithStallWatch(context.Background(), 20*time.Millisecond)
+	defer w.Stop()
+	<-ctx.Done()
+	err := w.Err(&url.Error{Op: "Get", URL: "https://media.example/x", Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errFake("operation was canceled")}})
+	if got := exitCodeFor(err); got != 9 {
+		t.Errorf("exitCodeFor = %d, want 9", got)
+	}
+	if got := friendlyError(err); !strings.Contains(got, "proxy") {
+		t.Errorf("friendlyError = %q, want the proxy named", got)
 	}
 }
 

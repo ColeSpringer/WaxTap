@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -479,7 +480,30 @@ var negativeNumericKeys = []struct{ jsonKey, envVar string }{
 	{"webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT"},
 	{"sidecarTimeoutSeconds", "WAXTAP_SIDECAR_TIMEOUT"},
 	{"sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT"},
-	{"chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT"},
+	{"stallTimeoutSeconds", "WAXTAP_STALL_TIMEOUT"},
+}
+
+// The whole-chunk deadline was replaced by the stall timeout, an idle bound with
+// a different scale: a value tuned for the old key would be wrong under the new
+// one, so the retired names are refused with the replacement named rather than
+// read as the new setting or ignored.
+func TestRetiredChunkTimeoutIsRefused(t *testing.T) {
+	err := readConfigJSON(t, `{"chunkTimeoutSeconds":120}`)
+	if err == nil || !isUsageError(err) {
+		t.Fatalf("readConfigFile(chunkTimeoutSeconds) = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "stallTimeoutSeconds") {
+		t.Errorf("err = %q, want the replacement key named", err)
+	}
+
+	t.Setenv("WAXTAP_CHUNK_TIMEOUT", "120")
+	_, err = envOverlay()
+	if err == nil || !isUsageError(err) {
+		t.Fatalf("envOverlay(WAXTAP_CHUNK_TIMEOUT) = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "WAXTAP_STALL_TIMEOUT") {
+		t.Errorf("err = %q, want the replacement variable named", err)
+	}
 }
 
 // A negative procs is the documented way to disable the concurrency limit, and
@@ -792,6 +816,69 @@ func TestLoadConfigRecordsSidecarTimeoutSet(t *testing.T) {
 	}
 	if !cfg.sidecarTimeoutSet || cfg.sidecarTimeout != 5*time.Second {
 		t.Errorf("env: set = %v, timeout = %v; want 5s, recorded as set", cfg.sidecarTimeoutSet, cfg.sidecarTimeout)
+	}
+}
+
+// The stall timeout defaults, reads from either layer, and reaches
+// Options.Timeouts.Stall; 0 keeps the default, since a transfer with no stall
+// bound hangs for as long as the connection does.
+func TestLoadConfigStallTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{}`)
+	t.Setenv("WAXTAP_CONFIG", path)
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "test"}
+		bindConfigFlags(cmd.Flags())
+		bindNetworkFlags(cmd.Flags())
+		bindPlayerExtractionFlags(cmd.Flags())
+		return cmd
+	}
+	load := func() *appConfig {
+		t.Helper()
+		cfg, err := loadConfig(newCmd())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	cfg := load()
+	if cfg.stallTimeout != defaultStallTimeout {
+		t.Errorf("unset: stallTimeout = %v, want the default %v", cfg.stallTimeout, defaultStallTimeout)
+	}
+	opts, err := cfg.options(slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Timeouts.Stall != defaultStallTimeout {
+		t.Errorf("Options.Timeouts.Stall = %v, want %v", opts.Timeouts.Stall, defaultStallTimeout)
+	}
+
+	write(`{"stallTimeoutSeconds": 7}`)
+	if cfg := load(); cfg.stallTimeout != 7*time.Second {
+		t.Errorf("file: stallTimeout = %v, want 7s", cfg.stallTimeout)
+	}
+	t.Setenv("WAXTAP_STALL_TIMEOUT", "5")
+	if cfg := load(); cfg.stallTimeout != 5*time.Second {
+		t.Errorf("env: stallTimeout = %v, want 5s", cfg.stallTimeout)
+	}
+	// Zero is the documented way to ask for the default, which the library
+	// applies when it sees zero.
+	t.Setenv("WAXTAP_STALL_TIMEOUT", "0")
+	cfg = load()
+	opts, err = cfg.options(slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Timeouts.Stall != 0 {
+		t.Errorf("zero: Options.Timeouts.Stall = %v, want 0 (the library's default selector)", opts.Timeouts.Stall)
 	}
 }
 

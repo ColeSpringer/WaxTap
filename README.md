@@ -537,7 +537,7 @@ config/environment only.
 | `webContextTimeoutSeconds` | `WAXTAP_WEB_CONTEXT_TIMEOUT` | - |
 | `sidecarTimeoutSeconds` | `WAXTAP_SIDECAR_TIMEOUT` | - |
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
-| `chunkTimeoutSeconds` | `WAXTAP_CHUNK_TIMEOUT` | - |
+| `stallTimeoutSeconds` | `WAXTAP_STALL_TIMEOUT` | - |
 
 `tempDir` names where downloaded sources and processed downloads are staged
 before delivery; a local file is processed beside its own output, so the
@@ -546,13 +546,21 @@ checked at startup; a missing one is created on first use, so a command that
 stages nothing creates nothing.
 
 Timeouts default to 45 s extraction, 30 s resolve, 60 s web context, 60 s per
-sidecar request, 10 s SponsorBlock, 120 s per chunk. The web-context timeout
+sidecar request, 10 s SponsorBlock, and a 30 s stall. The stall timeout bounds
+the wait for the next byte of a transfer, not the transfer: a response that has
+not begun within the window is abandoned and the request retried, and a body
+that stops arriving is abandoned and the chunk or stream resumed after the
+bytes already received, so a slow link finishes while a hung connection fails
+fast. A SABR round whose body stalls ends that stream, and the fallback chain
+moves on. There is no whole-chunk deadline to size for the slowest link. The
+web-context timeout
 bounds one attested handoff as a whole, a `/player-context` call or a `/session`
 resolution together with the wait the sidecar asks for and the one retry; the
-sidecar timeout bounds each request inside it. Setting
-`sidecarTimeoutSeconds` to 0 selects its default rather than "no deadline",
-unlike the other timeout keys: the handoff budget already bounds the call, and
-the retry needs a per-request bound to be reachable.
+sidecar timeout bounds each request inside it. Setting `sidecarTimeoutSeconds`
+or `stallTimeoutSeconds` to 0 selects its default rather than "no deadline",
+unlike the other timeout keys: the handoff budget already bounds the sidecar
+call and the retry needs a per-request bound to be reachable, and a transfer
+with no stall bound hangs for as long as the connection does.
 
 A proxy dial is bounded at 10 s and not retried, so a proxy that never answers
 fails inside any budget with the proxy named rather than consuming the whole

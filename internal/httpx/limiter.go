@@ -42,10 +42,16 @@ func NewHostLimiter(qps float64) *HostLimiter {
 // a timeout. The comparison is against the cooldown's own remaining time, not the
 // whole wait, so a delay that is mostly our own QPS spacing keeps returning
 // ctx.Err(): pacing our own requests is not the server throttling us.
+//
+// The wait is ours, not the server's, so it holds the clock of a StallWatch on
+// ctx: a cooldown longer than the idle window must not read as a stall.
 func (l *HostLimiter) Wait(ctx context.Context, host string) error {
 	if err := ctx.Err(); err != nil {
 		return err // do not reserve a slot for an already-canceled request
 	}
+	w := stallWatchFrom(ctx)
+	w.pause()
+	defer w.resume()
 	b := l.bucket(host)
 	slot, reserved := b.reserve(l.interval)
 	for {

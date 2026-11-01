@@ -49,7 +49,12 @@ const (
 	// needs a bound to be reached at all.
 	defaultSidecarTimeout      = 60 * time.Second
 	defaultSponsorBlockTimeout = 10 * time.Second
-	defaultChunkTimeout        = 120 * time.Second
+	// defaultStallTimeout bounds the wait for the next byte of a transfer, not
+	// the transfer, so it is sized for a connection that has gone quiet rather
+	// than for the slowest link a download may run over. It matches the
+	// library default; 0 selects it, since a transfer with no stall bound hangs
+	// for as long as the connection does.
+	defaultStallTimeout = 30 * time.Second
 )
 
 // appConfig holds resolved configuration after merging flags, environment, and
@@ -100,7 +105,7 @@ type appConfig struct {
 	sidecars            sidecarProviders
 	sidecarsBuilt       bool
 	sponsorBlockTimeout time.Duration
-	chunkTimeout        time.Duration
+	stallTimeout        time.Duration
 }
 
 // fileConfig mirrors the JSON config file. Pointer fields distinguish an absent
@@ -136,7 +141,12 @@ type fileConfig struct {
 	WebContextTimeoutSec   *float64 `json:"webContextTimeoutSeconds"`
 	SidecarTimeoutSec      *float64 `json:"sidecarTimeoutSeconds"`
 	SponsorBlockTimeoutSec *float64 `json:"sponsorBlockTimeoutSeconds"`
-	ChunkTimeoutSec        *float64 `json:"chunkTimeoutSeconds"`
+	StallTimeoutSec        *float64 `json:"stallTimeoutSeconds"`
+
+	// ChunkTimeoutSec is the retired whole-chunk deadline. It is still decoded
+	// so a config that sets it is refused with the replacement named, instead
+	// of failing as an unknown key or, from the environment, being ignored.
+	ChunkTimeoutSec *float64 `json:"chunkTimeoutSeconds"`
 }
 
 // loadConfig resolves configuration with precedence: an explicit flag wins, then
@@ -219,7 +229,7 @@ func loadConfig(cmd *cobra.Command) (*appConfig, error) {
 		sidecarTimeout:      coalesceDuration(defaultSidecarTimeout, fc.SidecarTimeoutSec, ec.SidecarTimeoutSec),
 		sidecarTimeoutSet:   fc.SidecarTimeoutSec != nil || ec.SidecarTimeoutSec != nil,
 		sponsorBlockTimeout: coalesceDuration(defaultSponsorBlockTimeout, fc.SponsorBlockTimeoutSec, ec.SponsorBlockTimeoutSec),
-		chunkTimeout:        coalesceDuration(defaultChunkTimeout, fc.ChunkTimeoutSec, ec.ChunkTimeoutSec),
+		stallTimeout:        coalesceDuration(defaultStallTimeout, fc.StallTimeoutSec, ec.StallTimeoutSec),
 	}
 	if err := validateLocale(a.hl, a.gl); err != nil {
 		return nil, err
@@ -344,7 +354,14 @@ func validateConfigNumbers(fc *fileConfig, label func(jsonKey, envVar string) st
 	checkFloat(fc.WebContextTimeoutSec, "webContextTimeoutSeconds", "WAXTAP_WEB_CONTEXT_TIMEOUT")
 	checkFloat(fc.SidecarTimeoutSec, "sidecarTimeoutSeconds", "WAXTAP_SIDECAR_TIMEOUT")
 	checkFloat(fc.SponsorBlockTimeoutSec, "sponsorBlockTimeoutSeconds", "WAXTAP_SPONSORBLOCK_TIMEOUT")
-	checkFloat(fc.ChunkTimeoutSec, "chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT")
+	checkFloat(fc.StallTimeoutSec, "stallTimeoutSeconds", "WAXTAP_STALL_TIMEOUT")
+	// The retired whole-chunk deadline is refused rather than read as the stall
+	// timeout: the two are on different scales, so a value tuned for one is
+	// wrong for the other.
+	if fc.ChunkTimeoutSec != nil {
+		errs = append(errs, fmt.Errorf("%q is no longer read; set %q, which bounds the wait for the next byte rather than a whole chunk",
+			label("chunkTimeoutSeconds", "WAXTAP_CHUNK_TIMEOUT"), label("stallTimeoutSeconds", "WAXTAP_STALL_TIMEOUT")))
+	}
 	return errors.Join(errs...)
 }
 
@@ -435,7 +452,8 @@ func envOverlay() (fileConfig, error) {
 	ec.WebContextTimeoutSec = getFloat("WAXTAP_WEB_CONTEXT_TIMEOUT")
 	ec.SidecarTimeoutSec = getFloat("WAXTAP_SIDECAR_TIMEOUT")
 	ec.SponsorBlockTimeoutSec = getFloat("WAXTAP_SPONSORBLOCK_TIMEOUT")
-	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT")
+	ec.StallTimeoutSec = getFloat("WAXTAP_STALL_TIMEOUT")
+	ec.ChunkTimeoutSec = getFloat("WAXTAP_CHUNK_TIMEOUT") // retired; validation names the replacement
 
 	if verr := validateConfigNumbers(&ec, envVarLabel); verr != nil {
 		errs = append(errs, verr)
@@ -539,7 +557,7 @@ func (a *appConfig) options(log *slog.Logger) (waxtap.Options, error) {
 			Resolve:      a.resolveTimeout,
 			WebContext:   a.webContextTimeout,
 			SponsorBlock: a.sponsorBlockTimeout,
-			ChunkRetry:   a.chunkTimeout,
+			Stall:        a.stallTimeout,
 		},
 		Retry: waxtap.RetryPolicy{
 			MaxRetries:   3,
