@@ -20,17 +20,19 @@ var ErrResponseTooLarge = errors.New("response body exceeds size cap")
 // JSON/binary/JavaScript decode error downstream. Callers set limit well above any
 // legitimate response, so the guard fires only on an anomaly.
 //
+// A read error is returned with the bytes read before it, as io.ReadAll returns
+// them, for a caller that can make use of a prefix; a caller that cannot checks
+// the error first. The cap is judged first and returns no bytes: a body that
+// overran it is not a prefix of anything, whatever else its last read reported.
+//
 // It buffers up to limit bytes in memory (io.ReadAll grows the slice until the
 // cap), so limit is meant for whole-body reads with a known ceiling. Keep it a
 // bounded constant; do not pass a multi-gigabyte or caller-controlled limit, which
 // could exhaust memory before the cap is reached.
 func ReadAllCapped(r io.Reader, limit int64, label string) ([]byte, error) {
 	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
-	}
 	if int64(len(buf)) > limit {
 		return nil, fmt.Errorf("%s would be truncated at the %d-byte cap: %w", label, limit, ErrResponseTooLarge)
 	}
-	return buf, nil
+	return buf, err
 }

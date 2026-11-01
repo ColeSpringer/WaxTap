@@ -521,12 +521,7 @@ func exhausted(shared *sharedSource, cause error) error {
 
 // backoff sleeps an exponential, attempt-scaled duration, honoring ctx.
 func (d *Downloader) backoff(ctx context.Context, attempt int) error {
-	shift := min(attempt, 16)
-	dur := d.baseBackoff << shift
-	if dur <= 0 || dur > d.maxBackoff {
-		dur = d.maxBackoff
-	}
-	t := time.NewTimer(dur)
+	t := time.NewTimer(httpx.Backoff(d.baseBackoff, d.maxBackoff, attempt))
 	defer t.Stop()
 	select {
 	case <-ctx.Done():

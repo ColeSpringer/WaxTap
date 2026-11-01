@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxtap/v3/internal/httpx"
+	"github.com/colespringer/waxtap/v3/waxerr"
 )
 
 // dripDoer answers every round with body, delivered one byte at a time with gap
@@ -77,10 +78,13 @@ func TestOpenSlowRoundFinishes(t *testing.T) {
 	}
 }
 
-// A round whose body stops arriving fails after the window with the stall
-// named, and classifies as a timeout.
+// A round whose body stops arriving is abandoned after the window and retried;
+// when every retry hangs too and nothing was ever delivered, the stream fails
+// with the stall named, and classifies as a timeout.
 func TestOpenHungRoundIsAStall(t *testing.T) {
+	var posts int
 	d := doerFunc(func(req *http.Request) (*http.Response, error) {
+		posts++
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: hungBody{req.Context()}, Header: make(http.Header)}, nil
 	})
 	cfg := baseConfig(d)
@@ -96,6 +100,12 @@ func TestOpenHungRoundIsAStall(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Error("a stall should classify as a timeout")
+	}
+	if errors.Is(err, waxerr.ErrIncompleteStream) {
+		t.Error("nothing was delivered, so the stall is reported as itself, not as an incomplete stream")
+	}
+	if posts != 1+defaultMaxRoundRetries {
+		t.Errorf("POSTs = %d, want %d: the hung round and the default retries", posts, 1+defaultMaxRoundRetries)
 	}
 }
 

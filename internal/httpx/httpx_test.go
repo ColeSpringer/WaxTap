@@ -688,3 +688,25 @@ func TestKeepCause(t *testing.T) {
 		t.Errorf("uninterrupted pause = %v, want nil", err)
 	}
 }
+
+func TestBackoff(t *testing.T) {
+	base, ceiling := 250*time.Millisecond, 5*time.Second
+	for _, tc := range []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{0, 250 * time.Millisecond},
+		{1, 500 * time.Millisecond},
+		{4, 4 * time.Second},
+		{5, 5 * time.Second},  // capped
+		{40, 5 * time.Second}, // the shift stops at 16 and the cap holds
+		{-1, 250 * time.Millisecond},
+	} {
+		if got := Backoff(base, ceiling, tc.attempt); got != tc.want {
+			t.Errorf("Backoff(%v, %v, %d) = %v, want %v", base, ceiling, tc.attempt, got, tc.want)
+		}
+	}
+	if got := Backoff(time.Hour, time.Minute, 16); got != time.Minute {
+		t.Errorf("an overflowing shift = %v, want the cap", got)
+	}
+}

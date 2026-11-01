@@ -178,15 +178,22 @@ type Timeouts struct {
 	// so a slow link finishes while a hung connection fails fast. A request that
 	// was never answered is retried; a chunk, sequential stream, or probe block
 	// whose body stalled is resumed after the bytes already received; a SABR
-	// round whose body stalled ends the stream, which the fallback chain may
-	// then finish through another client; a cover-art fetch that stalled gives
-	// up on the picture. Zero selects the default (30 s); a negative value
-	// disables the guard, leaving the caller's context as the only bound on a
-	// connection that stops delivering.
+	// round whose body stalled is resumed from the segments it had delivered
+	// whole; a cover-art fetch that stalled gives up on the picture. Resumes
+	// draw on the Retry budget (see RetryPolicy). Zero selects the default
+	// (30 s); a negative value disables the guard, leaving the caller's context
+	// as the only bound on a connection that stops delivering.
 	Stall time.Duration
 }
 
-// RetryPolicy tunes HTTP retry/backoff.
+// RetryPolicy tunes retry and backoff: the HTTP client's attempts at one
+// request, and the budget a chunk, sequential stream, probe block, or SABR
+// stream has for resuming after its body ended early. A resume that delivered
+// something refunds the budget, where for a SABR stream only a whole segment
+// counts, since a partial one is dropped and sent again; a resume that added
+// nothing spends it. A spent budget, like a request the HTTP client gave up
+// on, is an incomplete delivery once anything has been delivered, which the
+// fallback chain may finish through another client.
 type RetryPolicy struct {
 	MaxRetries  int           // additional attempts after the first
 	BaseBackoff time.Duration // base of the exponential backoff

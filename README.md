@@ -551,9 +551,9 @@ the wait for the next byte of a transfer, not the transfer: a response that has
 not begun within the window is abandoned and the request retried, and a body
 that stops arriving is abandoned and the chunk or stream resumed after the
 bytes already received, so a slow link finishes while a hung connection fails
-fast. A SABR round whose body stalls ends that stream, and the fallback chain
-moves on. There is no whole-chunk deadline to size for the slowest link. The
-web-context timeout
+fast. A SABR round whose body stalls is resumed too: the segments it delivered
+whole are kept and the next round continues from them. There is no whole-chunk
+deadline to size for the slowest link. The web-context timeout
 bounds one attested handoff as a whole, a `/player-context` call or a `/session`
 resolution together with the wait the sidecar asks for and the one retry; the
 sidecar timeout bounds each request inside it. Setting `sidecarTimeoutSeconds`

@@ -25,6 +25,7 @@ import (
 const (
 	tPartMediaHeader      = 20
 	tPartMedia            = 21
+	tPartMediaEnd         = 22
 	tPartFormatInit       = 42
 	tPartReloadPlayer     = 46
 	tPartStreamProtection = 58
@@ -99,14 +100,17 @@ func pbStreamProtection(status uint64) []byte {
 }
 
 // sabrHappyBody is a single-round SABR response: an init segment, one media
-// segment (sequence 1), and a FORMAT_INITIALIZATION_METADATA marking segment 1
-// as the last, so the stream completes after one round.
+// segment (sequence 1), each closed by MEDIA_END as the server closes them, and
+// a FORMAT_INITIALIZATION_METADATA marking segment 1 as the last, so the stream
+// completes after one round.
 func sabrHappyBody(initBytes, mediaBytes []byte) []byte {
 	return umpConcat(
 		umpFrame(tPartMediaHeader, pbMediaHeader(1, true, 0)),
 		mediaFrame(1, initBytes),
+		umpFrame(tPartMediaEnd, umpVarint(1)),
 		umpFrame(tPartMediaHeader, pbMediaHeader(2, false, 1)),
 		mediaFrame(2, mediaBytes),
+		umpFrame(tPartMediaEnd, umpVarint(2)),
 		umpFrame(tPartFormatInit, pbFormatInit(1)),
 	)
 }
@@ -244,6 +248,85 @@ func TestSABR_HeaderStallIsRetried(t *testing.T) {
 		t.Errorf("POSTs = %d (hung %d), want 2 with the first hung", posts.Load(), hung.Load())
 	}
 }
+
+// A SABR round whose body stops arriving part way is abandoned after the stall
+// window and resumed: the segments it delivered whole are kept, and the next
+// round continues from them, so one stalled connection does not end the stream.
+func TestSABR_BodyStallIsResumed(t *testing.T) {
+	initBytes := []byte("INIT-SEGMENT-")
+	mediaBytes := []byte("MEDIA-SEGMENT-1")
+	// The first round delivers the init segment whole, then stalls inside the
+	// media segment; the second round delivers everything.
+	initWhole := umpConcat(
+		umpFrame(tPartMediaHeader, pbMediaHeader(1, true, 0)),
+		mediaFrame(1, initBytes),
+		umpFrame(tPartMediaEnd, umpVarint(1)),
+	)
+	stalledRound := umpConcat(initWhole, umpFrame(tPartMediaHeader, pbMediaHeader(2, false, 1)), mediaFrame(2, mediaBytes[:5]))
+
+	srv := &sabrServer{t: t, players: [][]byte{readFixture(t, "player_sabr.json")}, bodies: [][]byte{nil, sabrHappyBody(initBytes, mediaBytes)}}
+	var posts atomic.Int32
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/videoplayback") && posts.Add(1) == 1 {
+			resp, err := srv.RoundTrip(r) // records the request; the scripted body is replaced
+			if err != nil {
+				return nil, err
+			}
+			resp.Body = &stalledBody{data: stalledRound, ctx: r.Context()}
+			resp.ContentLength = -1
+			return resp, nil
+		}
+		return srv.RoundTrip(r)
+	})
+	fp := &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}}
+	c := newTestClientWith(rt, []ClientProfile{makeProfile(profileWeb)}, fp)
+	c.stallTO = 100 * time.Millisecond
+	c.roundBackoff = time.Millisecond
+
+	ext, err := c.Extract(context.Background(), "dummyVideo0")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	plan, err := c.Resolve(context.Background(), ext, 0)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rc, _, err := plan.SABR.Open(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := append(append([]byte{}, initBytes...), mediaBytes...)
+	if !bytes.Equal(got, want) {
+		t.Errorf("streamed bytes = %q, want %q (init once, the cut segment from the resume)", got, want)
+	}
+	if posts.Load() != 2 {
+		t.Errorf("POSTs = %d, want 2: the stalled round and the one that resumed it", posts.Load())
+	}
+}
+
+// stalledBody delivers data and then stops, holding the connection until the
+// request is cancelled.
+type stalledBody struct {
+	data []byte
+	ctx  context.Context
+}
+
+func (b *stalledBody) Read(p []byte) (int, error) {
+	if len(b.data) > 0 {
+		n := copy(p, b.data)
+		b.data = b.data[n:]
+		return n, nil
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*stalledBody) Close() error { return nil }
 
 func TestSABR_PrimedTokenReusedOnce(t *testing.T) {
 	var gvsMints int
@@ -869,7 +952,10 @@ func TestSABR_OpenUnprimedNeedsGVSProvider(t *testing.T) {
 }
 
 func TestBuildSABRConfig(t *testing.T) {
-	c := New(Config{Resolver: &fakeResolver{}, POTokenProvider: &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}}, StallTimeout: 7 * time.Second})
+	c := New(Config{
+		Resolver: &fakeResolver{}, POTokenProvider: &fakeProvider{resp: potoken.Response{Token: "QUJDREVG"}},
+		StallTimeout: 7 * time.Second, RoundRetries: 4, RoundBackoff: 100 * time.Millisecond, RoundMaxBackoff: 9 * time.Second,
+	})
 
 	sess := newSession("US")
 	sess.visitorData = "VIS"
@@ -912,6 +998,9 @@ func TestBuildSABRConfig(t *testing.T) {
 	}
 	if cfg.StallTimeout != 7*time.Second {
 		t.Errorf("StallTimeout = %v, want the client's 7s", cfg.StallTimeout)
+	}
+	if cfg.MaxRoundRetries != 4 || cfg.RetryBackoff != 100*time.Millisecond || cfg.RetryMaxBackoff != 9*time.Second {
+		t.Errorf("round retry budget = (%d, %v, %v), want the client's (4, 100ms, 9s)", cfg.MaxRoundRetries, cfg.RetryBackoff, cfg.RetryMaxBackoff)
 	}
 	if cfg.DRC || cfg.AudioTrackID != "" {
 		t.Errorf("DRC = %v, AudioTrackID = %q, want false and empty for a full-range rendition of a single-track video", cfg.DRC, cfg.AudioTrackID)

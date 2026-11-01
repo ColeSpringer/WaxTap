@@ -35,8 +35,11 @@ type Client struct {
 	webContext  potoken.PlayerContextProvider // attested WEB player-context provider, when configured
 	webCtxTO    time.Duration                 // per-call bound on the player-context provider; 0 = none
 	stallTO     time.Duration                 // wait for the next byte of a SABR round; 0 = sabr default, <0 = none
-	visitors    *cache.Store[string]          // bootstrapped guest visitorData, singleflighted
-	hl, gl      string                        // InnerTube host language / content region
+	// The budget and backoff for SABR rounds cut short; 0 = sabr defaults.
+	roundRetries                  int
+	roundBackoff, roundMaxBackoff time.Duration
+	visitors                      *cache.Store[string] // bootstrapped guest visitorData, singleflighted
+	hl, gl                        string               // InnerTube host language / content region
 
 	// Identity rotation: resetSeq counts completed rotations and stamps every
 	// Extraction, so concurrent RotateIdentity calls collapse into one (see that
@@ -117,9 +120,22 @@ type Config struct {
 	ResolveTimeout time.Duration
 	// StallTimeout bounds the wait for the next byte of a SABR round: a POST
 	// whose response has not begun, or a body that has stopped arriving, within
-	// the window fails the round. Zero selects the SABR default (30 s); a
-	// negative value disables the guard.
+	// the window ends the round. A POST never answered is retried by the HTTP
+	// client; a body that stalled is cut and the stream resumes from the
+	// segments it had delivered whole, under RoundRetries. Zero selects the
+	// SABR default (30 s); a negative value disables the guard.
 	StallTimeout time.Duration
+	// RoundRetries is the budget of consecutive SABR rounds that may be cut
+	// short, by a stall or a dropped connection part way through the body,
+	// without adding media before the stream is given up; a cut round that adds
+	// media refunds it. Zero selects the SABR default (3); a negative value
+	// disables the retries.
+	RoundRetries int
+	// RoundBackoff is the base of the exponential wait before a cut round is
+	// retried, and RoundMaxBackoff caps that wait. Zero selects the SABR
+	// defaults (250 ms and 5 s).
+	RoundBackoff    time.Duration
+	RoundMaxBackoff time.Duration
 	// CacheDir is the base directory for on-disk caches. When set, and when
 	// DisableDiskCache is false, the default resolver stores base.js source under
 	// CacheDir/players. Empty leaves the resolver memory-only. Ignored when a
@@ -150,6 +166,9 @@ func New(cfg Config) *Client {
 		webContext:      cfg.PlayerContextProvider,
 		webCtxTO:        cfg.WebContextTimeout,
 		stallTO:         cfg.StallTimeout,
+		roundRetries:    cfg.RoundRetries,
+		roundBackoff:    cfg.RoundBackoff,
+		roundMaxBackoff: cfg.RoundMaxBackoff,
 		hl:              cfg.HL,
 		gl:              cfg.GL,
 		staticSession:   cfg.Session,

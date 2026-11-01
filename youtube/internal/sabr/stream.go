@@ -31,6 +31,15 @@ import (
 const (
 	defaultMaxBackoff = 30 * time.Second
 
+	// defaultMaxRoundRetries is the budget of consecutive rounds that may end
+	// part way without adding media before the stream is given up, and
+	// defaultRetryBackoff and defaultRetryMaxBackoff bound the wait before the
+	// next one is sent. They match the download layer's budget for a chunk or
+	// sequential stream.
+	defaultMaxRoundRetries = 3
+	defaultRetryBackoff    = 250 * time.Millisecond
+	defaultRetryMaxBackoff = 5 * time.Second
+
 	// maxEmptyRounds bounds consecutive rounds without new media before the
 	// stream is treated as stalled.
 	maxEmptyRounds = 2
@@ -117,11 +126,25 @@ type Config struct {
 	ContentLength int64
 	// StallTimeout bounds the wait for the next byte of a round: a POST whose
 	// response has not begun, or a response body that has stopped arriving,
-	// within the window fails the round. It is an idle bound rather than a
+	// within the window ends the round. It is an idle bound rather than a
 	// deadline on the round, so a slow link finishes a large round while a hung
-	// one fails fast. Zero selects the default (httpx.DefaultStallTimeout,
-	// 30 s); a negative value disables the guard.
+	// one fails fast. A POST never answered is retried by the HTTP client; a
+	// body that stalled is cut, and the stream resumes from the segments it
+	// had delivered whole (see MaxRoundRetries). Zero selects the default
+	// (httpx.DefaultStallTimeout, 30 s); a negative value disables the guard.
 	StallTimeout time.Duration
+	// MaxRoundRetries is the budget of consecutive rounds that may be cut
+	// short, by a stall or a dropped connection part way through the body,
+	// without adding media before the stream is given up. A cut round that
+	// adds media refunds it, and a round the server finishes answering resets
+	// it. Zero selects the default (3); a negative value disables the retries,
+	// so a cut round ends the stream.
+	MaxRoundRetries int
+	// RetryBackoff is the base of the exponential wait before a cut round is
+	// retried, and RetryMaxBackoff caps that wait. A cut round that added media
+	// waits the base alone. Zero selects the defaults (250 ms and 5 s).
+	RetryBackoff    time.Duration
+	RetryMaxBackoff time.Duration
 	// MaxBackoff clamps server-directed backoff. Zero uses the default.
 	MaxBackoff time.Duration
 	// DescrambleN resolves the throttling n parameter of a SABR_REDIRECT URL. Nil
@@ -184,7 +207,9 @@ type stream struct {
 	redirects      int
 	emptyRounds    int
 	contextRounds  int
-	rounds         int // total POSTs sent, for log correlation and dump names
+	cutRounds      int       // consecutive rounds cut short that added no media
+	rounds         int       // total POSTs sent, for log correlation and dump names
+	nextPostAt     time.Time // when the next POST may go out; see deferPost
 
 	// SABR context state. sabrContexts holds the value last received for each
 	// context type; activeContextTypes is the subset currently echoed back to the
@@ -287,20 +312,41 @@ func (s *stream) fill() {
 	}
 }
 
-// round performs one request/response cycle: POST, consume the UMP body, and
-// integrate any new segments. It returns errors for terminal protocol signals,
-// HTTP failures, and stalls.
+// round performs one request/response cycle: wait out any backoff the last
+// round asked for, POST, consume the UMP body, and integrate any new segments.
+// It returns errors for terminal protocol signals, HTTP failures, and stalls.
+//
+// A round whose body ended part way, cut by a stall or a dropped connection, is
+// not an error of the stream's: the parts that arrived whole are consumed as
+// they would have been, so a segment the server finished sending is kept and
+// acknowledged while one the cut fell inside is dropped for the server to send
+// again, and the next round follows after a wait (see resume). The reference
+// client re-sends its request on any such failure, and the server answers a
+// request from what it acknowledges as buffered, so the round that follows a
+// cut is the round that would have followed anyway.
 func (s *stream) round() error {
-	body, err := s.post()
-	if err != nil {
+	if err := s.waitTurn(); err != nil {
 		return err
 	}
-	res, err := s.consume(body)
+	body, cut, err := s.post()
+	if err != nil {
+		if cerr := s.ctx.Err(); cerr != nil {
+			return cerr // the caller gave up: nothing to salvage or retry
+		}
+		if !cut {
+			return s.failed(err) // the HTTP client already retried the request
+		}
+	}
+	cause := err
+	res, err := s.consume(body, cut)
 	if err != nil {
 		return err
 	}
 	if res.signal != nil {
 		return res.signal
+	}
+	if !cut {
+		s.cutRounds = 0 // the server finished answering: the connection is sound
 	}
 	if res.attestationPending {
 		s.attestationPending = true
@@ -330,19 +376,28 @@ func (s *stream) round() error {
 		return nil // re-POST to the new endpoint without advancing state
 	}
 
-	emitted, advanced := s.integrate(res)
+	emitted, advanced := s.integrate(res, cut)
 	if s.complete() {
 		s.done = true
 		return nil
 	}
-	// Backoff means the server is pacing the stream, not that it has stalled.
-	// Buffering a segment ahead of a gap also counts as media progress.
-	waiting := res.policy != nil && res.policy.BackoffTimeMs > 0
-	switch {
-	case emitted > 0 || advanced:
-		// Media progress clears both stall guards.
+	// Buffering a segment ahead of a gap also counts as media progress. Media
+	// clears both stall guards, in a cut round as in a finished one.
+	progressed := emitted > 0 || advanced
+	if progressed {
 		s.emptyRounds = 0
 		s.contextRounds = 0
+	}
+	if cut {
+		// The server did not finish answering, so the round says nothing about
+		// whether it is withholding media; the retry budget bounds it instead.
+		return s.resume(cause, progressed, res.policy)
+	}
+	// Backoff means the server is pacing the stream, not that it has stalled.
+	waiting := res.policy != nil && res.policy.BackoffTimeMs > 0
+	switch {
+	case progressed:
+		// Cleared above.
 	case changed:
 		// A changed context makes the next request differ (it now echoes the
 		// context), so the round isn't empty and we re-POST, but cap these so
@@ -362,24 +417,43 @@ func (s *stream) round() error {
 	}
 	s.log.DebugContext(s.ctx, "sabr: round complete",
 		"round", s.rounds,
-		"headers", len(res.headers), "media_parts", len(res.media),
+		"segments", len(res.segments),
 		"emitted_bytes", emitted, "advanced", advanced,
 		"next_seq", s.nextSeq, "end_segment", s.endSegment,
 		"buffered_segments", len(s.segments), "downloaded_ms", s.downloadedMs,
 		"empty_rounds", s.emptyRounds, "context_rounds", s.contextRounds)
 	if waiting {
-		return httpx.Sleep(s.ctx, clampBackoff(res.policy.BackoffTimeMs, s.maxBackoff()))
+		s.deferPost(clampBackoff(res.policy.BackoffTimeMs, s.maxBackoff()))
 	}
 	return nil
 }
 
+// waitTurn holds the round until the time the last one set with deferPost.
+func (s *stream) waitTurn() error {
+	if d := time.Until(s.nextPostAt); d > 0 {
+		return httpx.Sleep(s.ctx, d)
+	}
+	return nil
+}
+
+// deferPost holds the next POST for d from now. A wait the server asked for, or
+// a cut round earned, is taken at the start of the next round rather than at
+// the end of this one, so the bytes this round delivered reach the reader while
+// it runs instead of after it.
+func (s *stream) deferPost(d time.Duration) {
+	if d > 0 {
+		s.nextPostAt = time.Now().Add(d)
+	}
+}
+
 // roundResult is the decoded content of one SABR response body. UMP header ids
-// are scoped to a single response, so headers and media are matched per round: a
-// MEDIA part always shares its response with the MediaHeader it references.
+// are scoped to a single response, and within it a header id names one segment
+// at a time, from its MEDIA_HEADER until its MEDIA_END, after which the server
+// may use the id again; so segments are kept in arrival order and the id maps
+// only to the one still receiving bytes.
 type roundResult struct {
-	headers     map[uint32]*MediaHeader
-	media       map[uint32][]byte
-	mediaOrder  []uint32 // header ids in arrival order, for stable processing
+	segments    []*roundSegment          // every segment the body described, in arrival order
+	open        map[uint32]*roundSegment // the segment each header id is delivering
 	policy      *NextRequestPolicy
 	redirect    string
 	signal      error
@@ -395,17 +469,41 @@ type roundResult struct {
 	contextPolicy  *SabrContextSendingPolicy
 }
 
-// consume parses one UMP response body into a roundResult. A terminal signal
-// (attestation/reload/SABR error) short-circuits the rest of the body.
-func (s *stream) consume(body []byte) (roundResult, error) {
-	res := roundResult{
-		headers: make(map[uint32]*MediaHeader),
-		media:   make(map[uint32][]byte),
+// roundSegment is one segment as a response described it: its header, the
+// bytes its MEDIA parts carried, and whether its MEDIA_END arrived.
+type roundSegment struct {
+	header MediaHeader
+	data   []byte
+	ended  bool
+}
+
+// whole reports whether every byte of the segment arrived. A header that
+// declares the segment's length is the word on it: the bytes must reach that
+// length exactly, as the reference client requires. Without one, the server
+// closing the segment with MEDIA_END is what says it finished. A segment that
+// is neither is partial as far as this client can tell, whether the body was
+// cut inside it or ended at a part boundary with no error at all, as a proxy or
+// a close-delimited response can end it.
+func (seg *roundSegment) whole() bool {
+	if seg.header.ContentLength > 0 {
+		return int64(len(seg.data)) == seg.header.ContentLength
 	}
+	return seg.ended
+}
+
+// consume parses one UMP response body into a roundResult. A terminal signal
+// (attestation/reload/SABR error) short-circuits the rest of the body. cut
+// says the body ended before the server finished it: the part the cut fell
+// inside is dropped, and what came before it stands.
+func (s *stream) consume(body []byte, cut bool) (roundResult, error) {
+	res := roundResult{open: make(map[uint32]*roundSegment)}
 	r := newUMPReader(body)
 	for {
 		part, ok, err := r.next()
 		if err != nil {
+			if cut && errors.Is(err, errUMPTruncated) {
+				return res, nil // the cut fell inside this part
+			}
 			return res, wrapExtraction(err)
 		}
 		if !ok {
@@ -417,20 +515,37 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 			if err != nil {
 				return res, wrapExtraction(err)
 			}
-			hh := h
-			res.headers[h.HeaderID] = &hh
+			seg := &roundSegment{header: h}
+			res.segments = append(res.segments, seg)
+			res.open[h.HeaderID] = seg
 		case partMedia:
 			id, media, err := leadingVarint(part.Payload)
 			if err != nil {
 				return res, wrapExtraction(err)
 			}
-			hid := uint32(id)
-			if _, seen := res.media[hid]; !seen {
-				res.mediaOrder = append(res.mediaOrder, hid)
+			seg := res.open[uint32(id)]
+			if seg == nil {
+				s.log.WarnContext(s.ctx, "sabr: media bytes without a header", "header_id", id)
+				continue
 			}
-			res.media[hid] = append(res.media[hid], media...)
+			seg.data = append(seg.data, media...)
 		case partMediaEnd:
-			// Advisory: segments are finalized at the end of the round.
+			// The server has sent all of this header's media, and the id is
+			// free for another segment. One this client cannot read, or does
+			// not know, closes nothing; the segment is then judged by its
+			// declared length.
+			id, _, err := leadingVarint(part.Payload)
+			if err != nil {
+				s.log.DebugContext(s.ctx, "sabr: ignoring MEDIA_END with no header id", "err", err)
+				continue
+			}
+			seg := res.open[uint32(id)]
+			if seg == nil {
+				s.log.DebugContext(s.ctx, "sabr: MEDIA_END for an unknown header id", "header_id", id)
+				continue
+			}
+			seg.ended = true
+			delete(res.open, uint32(id))
 		case partFormatInitMetadata:
 			m, err := unmarshalFormatInitMetadata(part.Payload)
 			if err != nil {
@@ -511,8 +626,10 @@ func (s *stream) consume(body []byte) (roundResult, error) {
 }
 
 // integrate buffers one response's segments and moves contiguous bytes into
-// pending. advanced reports whether the response supplied any new segment.
-func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
+// pending. advanced reports whether the response supplied any new segment. cut
+// says the body ended before the server finished it, which makes a partial
+// segment expected rather than a fault.
+func (s *stream) integrate(res roundResult, cut bool) (emitted int, advanced bool) {
 	if res.endSegment > 0 {
 		s.endSegment = res.endSegment
 	}
@@ -522,25 +639,21 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 	// The per-segment trace boxes a large argument list, so it is gated here
 	// rather than left to slog's internal level check.
 	debug := s.log.Enabled(s.ctx, slog.LevelDebug)
-	for _, hid := range res.mediaOrder {
-		h := res.headers[hid]
-		data := res.media[hid]
-		if h == nil {
-			s.log.WarnContext(s.ctx, "sabr: media bytes without a header", "header_id", hid)
-			continue
-		}
+	for _, seg := range res.segments {
+		hh := seg.header // a copy: audioRound keeps the header, not the segment's bytes
+		h, data := &hh, seg.data
 		// Per-segment trace ahead of the skip branches below, so re-sent and
 		// below-start segments stay visible when diagnosing pacing stalls. A
 		// zero duration_ms with a non-zero effective_duration_ms means the
 		// server moved the duration into time_range.
 		if debug {
 			s.log.DebugContext(s.ctx, "sabr: segment received",
-				"round", s.rounds,
+				"round", s.rounds, "header_id", h.HeaderID,
 				"seq", h.SequenceNumber, "is_init", h.IsInitSeg,
 				"duration_ms", h.DurationMs, "effective_duration_ms", h.effectiveDurationMs(),
 				"start_ms", h.StartMs, "itag", h.Itag,
 				"format_itag", h.FormatId.Itag, "format_lmt", h.FormatId.LastModified, "format_xtags", h.FormatId.XTags,
-				"content_length", h.ContentLength, "bytes", len(data))
+				"content_length", h.ContentLength, "bytes", len(data), "ended", seg.ended)
 		}
 		// Route by format. Only the selected audio format reaches the output;
 		// any other format is dropped outright so it can never corrupt the audio.
@@ -550,12 +663,32 @@ func (s *stream) integrate(res roundResult) (emitted int, advanced bool) {
 			s.log.DebugContext(s.ctx, "sabr: dropping media for unexpected format", "itag", itag, "seq", h.SequenceNumber, "bytes", len(data))
 			continue
 		}
+		// Only a whole segment may reach the output or be acknowledged as
+		// buffered: a partial one would corrupt the file, and acknowledging it
+		// would stop the server from sending it again. Dropping it lets the
+		// next round ask for it. Inside a cut body a partial segment is
+		// expected; in one the server finished it is a fault worth a warning.
+		if !seg.whole() {
+			level := slog.LevelWarn
+			if cut {
+				level = slog.LevelDebug
+			}
+			s.log.Log(s.ctx, level, "sabr: dropping segment that did not arrive whole",
+				"seq", h.SequenceNumber, "is_init", h.IsInitSeg, "cut", cut, "ended", seg.ended,
+				"content_length", h.ContentLength, "bytes", len(data))
+			continue
+		}
 		if h.IsInitSeg {
 			if s.initWritten {
-				// Media was already emitted (it self-initialized, or no separate
-				// init preceded it). A late init segment cannot be prepended now;
-				// surface it instead of silently dropping it and corrupting output.
-				s.log.WarnContext(s.ctx, "sabr: init segment arrived after media was emitted; ignoring", "header_id", hid)
+				// The output has begun. The server sends the init segment again
+				// after a round it did not finish, and that is the one already
+				// written; a different one cannot be prepended now, so surface it
+				// instead of silently dropping it and corrupting output.
+				if bytes.Equal(data, s.initBytes) {
+					s.log.DebugContext(s.ctx, "sabr: init segment sent again; already written", "header_id", h.HeaderID)
+				} else {
+					s.log.WarnContext(s.ctx, "sabr: init segment arrived after media was emitted; ignoring", "header_id", h.HeaderID)
+				}
 				continue
 			}
 			if s.initBytes == nil {
@@ -820,11 +953,15 @@ func (s *stream) populateContexts(sc *streamerContext) {
 		"active", len(sc.SabrContexts), "unsent", len(sc.UnsentSabrContexts))
 }
 
-// post builds and sends one VideoPlaybackAbrRequest, returning the response body.
-func (s *stream) post() ([]byte, error) {
+// post builds and sends one VideoPlaybackAbrRequest, returning the response
+// body. cut reports a body that ended before the server finished it, by a stall
+// or a dropped connection: the bytes that did arrive are returned with the
+// error, for round to salvage. A request-phase failure, a non-200 status, and a
+// body over the cap are errors of the round itself and return no body.
+func (s *stream) post() (body []byte, cut bool, err error) {
 	s.rounds++
-	body := s.buildRequest().marshal()
-	s.dumpBody("request", body)
+	reqBody := s.buildRequest().marshal()
+	s.dumpBody("request", reqBody)
 
 	// The round runs under the stall guard: the POST must begin to answer, and
 	// the body must keep arriving, within the window. A failure is reported as
@@ -832,9 +969,9 @@ func (s *stream) post() ([]byte, error) {
 	ctx, watch := httpx.WithStallWatch(s.ctx, s.stallTimeout())
 	defer watch.Stop()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.requestURL(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.requestURL(), bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("Accept", "application/vnd.yt-ump")
@@ -848,19 +985,28 @@ func (s *stream) post() ([]byte, error) {
 
 	resp, err := s.cfg.HTTP.Do(req)
 	if err != nil {
-		return nil, watch.Err(err)
+		return nil, false, watch.Err(err)
 	}
 	resp.Body = watch.Body(resp.Body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: s.serverURL}
+		return nil, false, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: s.serverURL}
 	}
-	respBody, err := iox.ReadAllCapped(resp.Body, maxRoundBytes, "SABR response")
-	if err != nil {
-		return nil, err
+	body, err = iox.ReadAllCapped(resp.Body, maxRoundBytes, "SABR response")
+	if errors.Is(err, iox.ErrResponseTooLarge) {
+		return nil, false, err
 	}
-	s.dumpBody("round", respBody)
-	return respBody, nil
+	s.dumpBody("round", body)
+	if err == nil {
+		return body, false, nil
+	}
+	// The body failed part way. Bytes that reach a declared length are the
+	// whole answer, whatever rode along with the last of them, as an HTTP/2
+	// abort can add an error to a finished body; anything short of it is cut.
+	if resp.ContentLength > 0 && int64(len(body)) == resp.ContentLength {
+		return body, false, nil
+	}
+	return body, true, err
 }
 
 // requestURL returns the SABR endpoint with the 0-based request number
@@ -985,6 +1131,75 @@ func (s *stream) descramble(rawURL string) (string, error) {
 // disables the guard.
 func (s *stream) stallTimeout() time.Duration {
 	return httpx.StallTimeout(s.cfg.StallTimeout)
+}
+
+// resume decides whether a round cut short may be followed by another, and
+// sets the wait before it. It is the download layer's resume for a SABR stream:
+// a cut round that added media refunds the budget but still waits one base step,
+// so a connection that drops every round is not asked again at once; one that
+// added nothing spends a step of the budget and waits that attempt's backoff;
+// a spent budget ends the stream. A backoff the server asked for in the part of
+// the body that arrived is honored as well.
+func (s *stream) resume(cause error, progressed bool, policy *NextRequestPolicy) error {
+	attempt := 0
+	if progressed {
+		s.cutRounds = 0
+	} else {
+		s.cutRounds++
+		if s.cutRounds > s.maxRoundRetries() {
+			return s.failed(cause)
+		}
+		attempt = s.cutRounds - 1
+	}
+	wait := s.retryBackoff(attempt)
+	if policy != nil {
+		wait = max(wait, clampBackoff(policy.BackoffTimeMs, s.maxBackoff()))
+	}
+	s.log.InfoContext(s.ctx, "sabr: round cut short; resuming",
+		"round", s.rounds, "cause", cause, "progressed", progressed,
+		"cut_rounds", s.cutRounds, "wait", wait)
+	s.deferPost(wait)
+	return nil
+}
+
+// failed reports a round that will not be retried: a request the HTTP client
+// gave up on, a status the server answered with, or a cut the budget no longer
+// covers. Once the stream has delivered anything, that is an incomplete
+// delivery whatever the failure was: the stream ended before completion, and
+// another client may finish it. A stream that never delivered fails as the
+// round did, since nothing says a stream was there to finish.
+func (s *stream) failed(cause error) error {
+	if s.bytesWritten > 0 {
+		return fmt.Errorf("%w: the SABR stream ended after %d bytes: %w", waxerr.ErrIncompleteStream, s.bytesWritten, cause)
+	}
+	return cause
+}
+
+// maxRoundRetries resolves Config.MaxRoundRetries: zero is the default,
+// negative disables the retries.
+func (s *stream) maxRoundRetries() int {
+	switch {
+	case s.cfg.MaxRoundRetries < 0:
+		return 0
+	case s.cfg.MaxRoundRetries == 0:
+		return defaultMaxRoundRetries
+	default:
+		return s.cfg.MaxRoundRetries
+	}
+}
+
+// retryBackoff is the wait before the attempt-th retry of a cut round: the
+// configured base doubled per attempt, capped at the configured maximum. A
+// non-positive setting selects its default.
+func (s *stream) retryBackoff(attempt int) time.Duration {
+	base, ceiling := s.cfg.RetryBackoff, s.cfg.RetryMaxBackoff
+	if base <= 0 {
+		base = defaultRetryBackoff
+	}
+	if ceiling <= 0 {
+		ceiling = defaultRetryMaxBackoff
+	}
+	return httpx.Backoff(base, ceiling, attempt)
 }
 
 func (s *stream) maxBackoff() time.Duration {

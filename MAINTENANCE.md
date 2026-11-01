@@ -460,6 +460,11 @@ Important invariants:
   adopted session. A GVS token alone does not lift the preview cap.
 - Reassembly must write the initialization segment first and never return a
   headerless partial file as complete.
+- A segment is kept only when it arrived whole: its bytes match the header's
+  `content_length`, or, without one, its MEDIA_END arrived. Anything else is
+  dropped unacknowledged for the server to send again, in a round the server
+  finished as in one cut short, since a body can end at a part boundary with
+  no error at all.
 
 ### Protocol changes
 
@@ -483,10 +488,23 @@ token or request-shape problem; use an attested player-context or adopted
 session.
 
 A round whose response stops arriving part way is a different thing: the stall
-timeout (`stallTimeoutSeconds`, 30 s) abandons it with "the server sent
-nothing for 30s" and exit 9 `timeout`. That is the connection, not the server
-withholding media; a withheld stream answers its rounds, just without media,
-and reports as incomplete (exit 7).
+timeout (`stallTimeoutSeconds`, 30 s) cuts it, and the stream resumes. The
+segments the round delivered whole (closed by a MEDIA_END part, or matching
+their header's `content_length`) are kept and acknowledged; the segment the
+cut fell inside is dropped unacknowledged, and the next round asks the server
+to go on, which re-sends what was never acknowledged. This is what the
+reference client does on any mid-body failure, and a dropped connection takes
+the same path as a stall. Consecutive cut rounds that add no media spend the
+retry budget (`Retry.MaxRetries`, 3, with the download layer's backoff); a cut
+round that adds media refunds it. A spent budget is an incomplete delivery
+(exit 7) once bytes were delivered, so the fallback chain may finish the
+stream, and the cut itself (a stall is exit 9 `timeout`) before that. A
+withheld stream is neither: it answers its rounds, just without media, and
+reports as incomplete (exit 7). With `-v`, a cut round logs "sabr: round cut
+short; resuming" with its cause. Confirmed live on 2026-11-01 over the
+attested WEB path: a round cut inside a segment, by a dropped connection or a
+stall, was followed by the server re-sending that segment, and the stream
+completed byte-identical to an uncut download.
 
 For other stalls:
 

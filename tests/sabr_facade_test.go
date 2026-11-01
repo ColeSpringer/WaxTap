@@ -101,6 +101,86 @@ func TestFacade_SABRDownloadToWriter(t *testing.T) {
 	}
 }
 
+// TestFacade_SABRRoundCutShortResumes drops the connection part way through the
+// first SABR round, after the init segment and segment 1 arrived whole. The
+// download keeps them, asks the server to go on, and completes from the second
+// round rather than ending with the cut.
+func TestFacade_SABRRoundCutShortResumes(t *testing.T) {
+	initBytes := []byte("INIT-SEG-")
+	seg1 := []byte("MEDIA-SEGMENT-1-DATA")
+	seg2 := []byte("MEDIA-SEGMENT-2-DATA")
+	round1 := fSabrConcat(fSabrInitSeg(1, initBytes), fSabrMediaSeg(2, 1, seg1))
+	round2 := fSabrConcat(fSabrMediaSeg(3, 2, seg2), fSabrFormatInit(2))
+
+	var posts atomic.Int32
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/player"):
+			if r.Header.Get("X-Youtube-Client-Name") == "1" {
+				return resp(http.StatusOK, []byte(sabrPlayerJSON)), nil
+			}
+			return resp(http.StatusOK, []byte(errorPlayerJSON)), nil
+		case strings.Contains(r.URL.Path, "/videoplayback"):
+			if posts.Add(1) == 1 {
+				// The whole parts, then the connection drops before the format
+				// metadata that would have completed the round.
+				res := resp(http.StatusOK, nil)
+				res.Body = &cutReadCloser{data: round1, err: io.ErrUnexpectedEOF}
+				return res, nil
+			}
+			return resp(http.StatusOK, round2), nil
+		default:
+			return resp(http.StatusNotFound, nil), nil
+		}
+	})
+
+	c, err := waxtap.New(waxtap.Options{
+		HTTPClient:      &http.Client{Transport: rt},
+		POTokenProvider: fProvider{},
+		Retry:           waxtap.RetryPolicy{BaseBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), waxtap.Request{
+		URL:         "dummyVideo0",
+		ProcessSpec: waxtap.ProcessSpec{Output: waxtap.ToWriter(&buf)},
+	})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	want := fSabrConcat(initBytes, seg1, seg2)
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("downloaded bytes = %q, want %q", buf.Bytes(), want)
+	}
+	if res.OutputBytes != int64(len(want)) {
+		t.Errorf("OutputBytes = %d, want %d", res.OutputBytes, len(want))
+	}
+	if posts.Load() != 2 {
+		t.Errorf("SABR POSTs = %d, want 2: the cut round and the one that resumed it", posts.Load())
+	}
+}
+
+// cutReadCloser delivers data and then fails with err, as a body whose
+// connection dropped does.
+type cutReadCloser struct {
+	data []byte
+	err  error
+}
+
+func (b *cutReadCloser) Read(p []byte) (int, error) {
+	if len(b.data) == 0 {
+		return 0, b.err
+	}
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	return n, nil
+}
+
+func (*cutReadCloser) Close() error { return nil }
+
 // TestFacade_SABRReloadReportsTheDeliveredEncoding reloads onto a response in
 // which the selected rendition was re-encoded at a new lastModified, with a new
 // size and bitrate. The stream delivers the re-encode, so the result's source
@@ -1544,32 +1624,58 @@ func fSabrHappyBody(initBytes, mediaBytes []byte) []byte {
 // declaring endSeg as the final segment number. endSeg > 1 leaves later segments
 // undelivered, so the stream stalls and reports an incomplete delivery.
 func fSabrBody(initBytes, mediaBytes []byte, endSeg uint64) []byte {
-	mediaHdr := func(id uint64, isInit bool, seq uint64) []byte {
-		var b []byte
-		b = protowire.AppendTag(b, 1, protowire.VarintType)
-		b = protowire.AppendVarint(b, id)
-		if isInit {
-			b = protowire.AppendTag(b, 8, protowire.VarintType)
-			b = protowire.AppendVarint(b, 1)
-		}
-		if seq != 0 {
-			b = protowire.AppendTag(b, 9, protowire.VarintType)
-			b = protowire.AppendVarint(b, seq)
-		}
-		return b
-	}
-	media := func(id uint64, data []byte) []byte {
-		return fUmpFrame(21, append(fUmpVarint(id), data...))
-	}
-	fmtInit := protowire.AppendVarint(protowire.AppendTag(nil, 4, protowire.VarintType), endSeg)
+	return fSabrConcat(fSabrInitSeg(1, initBytes), fSabrMediaSeg(2, 1, mediaBytes), fSabrFormatInit(endSeg))
+}
 
+// fSabrConcat joins byte slices, UMP parts or output, into one.
+func fSabrConcat(parts ...[]byte) []byte {
 	var b []byte
-	b = append(b, fUmpFrame(20, mediaHdr(1, true, 0))...)
-	b = append(b, media(1, initBytes)...)
-	b = append(b, fUmpFrame(20, mediaHdr(2, false, 1))...)
-	b = append(b, media(2, mediaBytes)...)
-	b = append(b, fUmpFrame(42, fmtInit)...)
+	for _, p := range parts {
+		b = append(b, p...)
+	}
 	return b
+}
+
+// fSabrMediaHeader encodes a MediaHeader: header_id (1), is_init_seg (8),
+// sequence_number (9).
+func fSabrMediaHeader(id uint64, isInit bool, seq uint64) []byte {
+	var b []byte
+	b = protowire.AppendTag(b, 1, protowire.VarintType)
+	b = protowire.AppendVarint(b, id)
+	if isInit {
+		b = protowire.AppendTag(b, 8, protowire.VarintType)
+		b = protowire.AppendVarint(b, 1)
+	}
+	if seq != 0 {
+		b = protowire.AppendTag(b, 9, protowire.VarintType)
+		b = protowire.AppendVarint(b, seq)
+	}
+	return b
+}
+
+// fSabrInitSeg builds a whole init segment: header, bytes, and the MEDIA_END
+// (22) that closes it, as the server sends one.
+func fSabrInitSeg(id uint64, data []byte) []byte {
+	return fSabrConcat(
+		fUmpFrame(20, fSabrMediaHeader(id, true, 0)),
+		fUmpFrame(21, append(fUmpVarint(id), data...)),
+		fUmpFrame(22, fUmpVarint(id)),
+	)
+}
+
+// fSabrMediaSeg builds a whole media segment, closed by MEDIA_END.
+func fSabrMediaSeg(id, seq uint64, data []byte) []byte {
+	return fSabrConcat(
+		fUmpFrame(20, fSabrMediaHeader(id, false, seq)),
+		fUmpFrame(21, append(fUmpVarint(id), data...)),
+		fUmpFrame(22, fUmpVarint(id)),
+	)
+}
+
+// fSabrFormatInit builds the FORMAT_INITIALIZATION_METADATA (42) declaring
+// endSeg as the last segment.
+func fSabrFormatInit(endSeg uint64) []byte {
+	return fUmpFrame(42, protowire.AppendVarint(protowire.AppendTag(nil, 4, protowire.VarintType), endSeg))
 }
 
 // sabrAudioFmt251 is the baseline opus itag-251 SABR audio format.

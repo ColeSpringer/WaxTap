@@ -30,23 +30,37 @@ func baseConfig(d HTTPDoer) Config {
 		POToken:         []byte("gvs-pot"),
 		ContentLength:   10,
 		StallTimeout:    5 * time.Second,
+		RetryBackoff:    time.Millisecond, // a cut round resumes without a real wait
 	}
 }
 
-// initFrames builds the UMP parts for an init segment carrying data.
+// initFrames builds the UMP parts for an init segment carrying data, closed by
+// MEDIA_END as the server closes every segment.
 func initFrames(headerID uint32, data []byte) []byte {
 	return concat(
 		umpFrame(partMediaHeader, marshalMediaHeader(MediaHeader{HeaderID: headerID, Itag: 251, IsInitSeg: true})),
 		mediaFrame(headerID, data),
+		mediaEndFrame(headerID),
 	)
 }
 
-// segFrames builds the UMP parts for one media segment.
+// segFrames builds the UMP parts for one media segment, closed by MEDIA_END.
 func segFrames(headerID uint32, seq uint64, data []byte) []byte {
+	return concat(segFramesOpen(headerID, seq, data), mediaEndFrame(headerID))
+}
+
+// segFramesOpen builds a media segment's header and bytes without the MEDIA_END
+// that closes it: what a round cut short part way through a segment has.
+func segFramesOpen(headerID uint32, seq uint64, data []byte) []byte {
 	return concat(
 		umpFrame(partMediaHeader, marshalMediaHeader(MediaHeader{HeaderID: headerID, Itag: 251, SequenceNumber: seq, DurationMs: 5000})),
 		mediaFrame(headerID, data),
 	)
+}
+
+// mediaEndFrame builds the MEDIA_END part closing a header's media.
+func mediaEndFrame(headerID uint32) []byte {
+	return umpFrame(partMediaEnd, umpVarint(uint64(headerID)))
 }
 
 func formatInitFrame(endSegment int64) []byte {
@@ -166,6 +180,7 @@ func TestOpenTimeRangeOnlyDurationAdvancesPlayerTime(t *testing.T) {
 				TimeRange: TimeRange{StartTicks: int64(seq-1) * 441000, DurationTicks: 441000, Timescale: 44100}, // 10s
 			})),
 			mediaFrame(headerID, data),
+			mediaEndFrame(headerID),
 		)
 	}
 	resp1 := concat(initFrames(0, []byte("INIT")), seg(1, 1, []byte("AAA")), formatInitFrame(2))

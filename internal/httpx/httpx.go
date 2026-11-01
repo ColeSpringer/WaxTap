@@ -471,15 +471,22 @@ func retryableStatus(code int) bool {
 
 // backoffDuration computes a full-jitter exponential backoff for the attempt.
 func (c *Client) backoffDuration(attempt int) time.Duration {
-	shift := min(attempt, 16)
-	d := c.cfg.BaseBackoff << shift
-	if d <= 0 {
-		d = c.cfg.MaxBackoff // overflow safety
-	} else {
-		d = min(d, c.cfg.MaxBackoff)
-	}
+	d := Backoff(c.cfg.BaseBackoff, c.cfg.MaxBackoff, attempt)
 	// Full jitter in (0, d].
 	return time.Duration(rand.Int64N(int64(d)) + 1)
+}
+
+// Backoff is the exponential wait before the attempt-th retry, counted from
+// zero: base doubled per attempt and capped at ceiling, which also stands in
+// when the doubling overflows. It is the one arithmetic the retry ladders share
+// (this client's attempts, the download layer's chunk and stream resumes, and a
+// SABR stream's cut rounds); this client adds jitter on top.
+func Backoff(base, ceiling time.Duration, attempt int) time.Duration {
+	d := base << min(max(attempt, 0), 16)
+	if d <= 0 || d > ceiling {
+		return ceiling
+	}
+	return d
 }
 
 // Sleep waits for d or until ctx is done, whichever comes first, returning the
