@@ -19,9 +19,9 @@ stale. Every license and notice text is reproduced verbatim.
 | github.com/colespringer/waxflow | v0.0.0-20260923050513-446ca3124d89 | MIT (see also THIRD-PARTY-NOTICES.md) |
 | github.com/colespringer/waxlabel | v1.8.0 | MIT |
 | github.com/dlclark/regexp2/v2 | v2.12.0 | MIT |
-| github.com/dop251/goja | v0.0.0-20261031103838-cf2ff0ec0b31 | MIT / see text / BSD-3-Clause |
+| github.com/dop251/goja | v0.0.0-20261103214539-f5d1d0025744 | MIT / see text / BSD-3-Clause |
 | github.com/go-sourcemap/sourcemap | v2.1.4+incompatible | BSD-2-Clause |
-| github.com/google/pprof | v0.0.0-20261026192309-dbd0ed30aa88 | Apache-2.0 |
+| github.com/google/pprof | v0.0.0-20261103193413-97e8293de3c4 | Apache-2.0 |
 | github.com/inconshreveable/mousetrap | v1.1.0 | Apache-2.0 |
 | github.com/spf13/cobra | v1.10.2 | Apache-2.0 |
 | github.com/spf13/pflag | v1.0.10 | BSD-3-Clause |
@@ -650,7 +650,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31
+## github.com/dop251/goja v0.0.0-20261103214539-f5d1d0025744
 
 License: MIT (LICENSE)
 
@@ -761,7 +761,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/google/pprof v0.0.0-20261026192309-dbd0ed30aa88
+## github.com/google/pprof v0.0.0-20261103193413-97e8293de3c4
 
 License: Apache-2.0 (LICENSE)
 
