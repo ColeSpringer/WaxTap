@@ -3,6 +3,7 @@ package youtube
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -86,15 +87,7 @@ func cloneStringMap(m map[string]string) map[string]string {
 // ScopeNone is a zero-value sentinel, not a required scope, so it returns false
 // even if malformed input reached the profile.
 func (p ClientProfile) requiresPOToken(s potoken.Scope) bool {
-	if s == potoken.ScopeNone {
-		return false
-	}
-	for _, sc := range p.RequiresPOTokens {
-		if sc == s {
-			return true
-		}
-	}
-	return false
+	return s != potoken.ScopeNone && slices.Contains(p.RequiresPOTokens, s)
 }
 
 // canonicalizeScopes returns an owned, order-preserving copy with ScopeNone and

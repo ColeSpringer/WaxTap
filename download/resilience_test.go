@@ -82,10 +82,7 @@ func (o *shortOnce) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 		w.Header().Set("Content-Length", strconv.FormatInt(full, 10))
 		w.WriteHeader(http.StatusPartialContent)
-		short := full - 2
-		if short < 0 {
-			short = 0
-		}
+		short := max(full-2, 0)
 		_, _ = w.Write(o.payload[start : start+short]) // truncated: client sees a short chunk
 		return
 	}
@@ -166,10 +163,7 @@ func (o *shortAlways) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 	w.Header().Set("Content-Length", strconv.FormatInt(full, 10))
 	w.WriteHeader(http.StatusPartialContent)
-	short := full - 2
-	if short < 0 {
-		short = 0
-	}
+	short := max(full-2, 0)
 	_, _ = w.Write(o.payload[start : start+short])
 }
 
@@ -191,6 +185,44 @@ func TestToFile_PersistentShortChunkIsIncomplete(t *testing.T) {
 		t.Error("no output file should remain after an incomplete download")
 	}
 	assertNoTempFiles(t, dir)
+}
+
+// lowTotal answers every range with a Content-Range whose total is a quarter of
+// the real length, sends no Content-Length, and drops its first reply partway.
+type lowTotal struct {
+	payload []byte
+	dropped atomic.Bool
+}
+
+func (o *lowTotal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	n := int64(len(o.payload))
+	start, _ := parseTestRange(strings.TrimPrefix(r.Header.Get("Range"), "bytes="), n)
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, n-1, n/4))
+	w.WriteHeader(http.StatusPartialContent)
+	body := o.payload[start:]
+	if o.dropped.CompareAndSwap(false, true) {
+		_, _ = w.Write(body[:len(body)*6/10])
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
+	_, _ = w.Write(body)
+}
+
+// A Content-Range total inside its own range is invalid. Trusted, it turns a
+// dropped connection into a finished download: the reader counts the bytes it
+// has as past the end and stops, short of the real length.
+func TestStream_TotalInsideTheRangeDoesNotEndTheTransfer(t *testing.T) {
+	payload := makePayload(1000)
+	srv := httptest.NewServer(&lowTotal{payload: payload})
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if _, err := newTestDownloader(1000, 4).ToWriter(context.Background(), Source{URL: srv.URL}, &buf, nil, nil); err != nil {
+		t.Fatalf("ToWriter: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), payload) {
+		t.Fatalf("got %d bytes, want all %d: the stated total ended the transfer early", buf.Len(), len(payload))
+	}
 }
 
 // cancelDuringShort truncates every range like shortAlways and cancels the

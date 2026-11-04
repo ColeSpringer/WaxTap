@@ -37,7 +37,7 @@ func parseGenuine(t *testing.T) (baseURL string, body []byte) {
 		t.Fatal(err)
 	}
 	var genURL, bodyB64 string
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		s := strings.TrimSpace(line)
 		if strings.HasPrefix(s, "https://") && strings.Contains(s, "videoplayback") {
 			genURL = s
@@ -138,7 +138,7 @@ func TestReplayGenuineURL(t *testing.T) {
 	base, body := parseGenuine(t)
 	t.Logf("replaying genuine URL across rounds; body=%dB", len(body))
 	client := &http.Client{Timeout: 30 * time.Second}
-	for rn := 0; rn < 10; rn++ {
+	for rn := range 10 {
 		ru := base + "&rn=" + strconv.Itoa(rn)
 		req, _ := http.NewRequest(http.MethodPost, ru, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-protobuf")

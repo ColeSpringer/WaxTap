@@ -482,16 +482,14 @@ func TestPathReserverUniqueUnderContention(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make([]string, n)
 	errs := make([]error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range n {
+		wg.Go(func() {
 			p, skip, err := r.reserveOr(target, collisionAutoNumber)
 			if skip {
 				err = errSkipped
 			}
 			results[i], errs[i] = p, err
-		}(i)
+		})
 	}
 	wg.Wait()
 	seen := map[string]bool{}

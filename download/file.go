@@ -22,10 +22,7 @@ type chunkSpan struct {
 func planChunks(total, chunkSize int64) []chunkSpan {
 	var spans []chunkSpan
 	for start := int64(0); start < total; start += chunkSize {
-		end := start + chunkSize - 1
-		if end > total-1 {
-			end = total - 1
-		}
+		end := min(start+chunkSize-1, total-1)
 		spans = append(spans, chunkSpan{start: start, end: end})
 	}
 	return spans
@@ -131,9 +128,7 @@ func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f
 
 	workers := min(d.parallelism, len(spans))
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= len(spans) {
@@ -147,7 +142,7 @@ func (d *Downloader) downloadChunks(ctx context.Context, shared *sharedSource, f
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

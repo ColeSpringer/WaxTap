@@ -151,7 +151,7 @@ func TestPlayerResolve_Caches(t *testing.T) {
 	p := New(Config{HTTP: srv.doer()})
 
 	direct := "https://rr1.googlevideo.com/videoplayback?itag=251&n=12345"
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := p.Resolve(context.Background(), Context{VideoID: "vid123"}, Candidate{URL: direct}); err != nil {
 			t.Fatal(err)
 		}
@@ -258,11 +258,11 @@ func TestPlayerSignatureTimestamp_NoPattern(t *testing.T) {
 func TestPlayerSignatureTimestamp_DiscoversFromVideoID(t *testing.T) {
 	var watchVideoID string
 	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
-		switch {
-		case r.URL.Path == "/watch":
+		switch r.URL.Path {
+		case "/watch":
 			watchVideoID = r.URL.Query().Get("v")
 			return okResp(`<script src="` + testBaseJSPath + `"></script>`), nil
-		case r.URL.Path == testBaseJSPath:
+		case testBaseJSPath:
 			return okResp(`var cfg={signatureTimestamp:19834};` +
 				`var Xq={sp:function(a,b){a.splice(0,b)}};` +
 				`function dcr(a){a=a.split("");Xq.sp(a,1);return a.join("")}` +

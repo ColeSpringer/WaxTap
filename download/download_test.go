@@ -170,13 +170,11 @@ func TestSharedSource_RefreshOncePerGeneration(t *testing.T) {
 	// first should call refresh, the rest should see the advanced generation.
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, _, err := s.renew(context.Background(), 0, nil); err != nil {
 				t.Errorf("renew: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

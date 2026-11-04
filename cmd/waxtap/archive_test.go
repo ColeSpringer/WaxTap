@@ -65,17 +65,15 @@ func TestArchiveConcurrentAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range 50 {
+		wg.Go(func() {
 			_ = a.Add(string(rune('a'+i%26)) + "0000000000")
-		}(i)
+		})
 	}
 	wg.Wait()
 	// 26 distinct IDs should be recorded exactly once each.
 	b, _ := openArchive(path)
-	for i := 0; i < 26; i++ {
+	for i := range 26 {
 		if !b.Has(string(rune('a'+i)) + "0000000000") {
 			t.Errorf("missing id index %d", i)
 		}

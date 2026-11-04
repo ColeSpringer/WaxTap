@@ -511,16 +511,14 @@ func batchProbeAudio(ctx context.Context, inputs []string, family string, skip b
 		if ctx.Err() != nil {
 			break
 		}
-		wg.Add(1)
-		go func(in string) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			if p, err := probeAudio(ctx, in); err == nil {
 				mu.Lock()
 				probes[in] = p
 				mu.Unlock()
 			}
-		}(in)
+		})
 	}
 	wg.Wait()
 	return probes
@@ -703,9 +701,7 @@ func runBatchJobs(ctx context.Context, jobs []batchJob, concurrency int, process
 			outcomes[idx].status = statusNotRun
 			continue
 		}
-		wg.Add(1)
-		go func(idx int, job batchJob) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			if job.action == actCopy {
 				if published, err := copyThrough(job.input, job.output, job.mode); err != nil {
@@ -727,7 +723,7 @@ func runBatchJobs(ctx context.Context, jobs []batchJob, concurrency int, process
 				}
 			}
 			report(outcomes[idx])
-		}(idx, job)
+		})
 	}
 	wg.Wait()
 	return outcomes

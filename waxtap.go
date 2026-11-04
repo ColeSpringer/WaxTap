@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -882,15 +883,12 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 			if ctx.Err() != nil {
 				break
 			}
-			wg.Add(1)
 			sem <- struct{}{}
-			go func(i int) {
-				defer wg.Done()
-				// The semaphore release is registered after this defer, so it runs
-				// first. A slow progress callback cannot occupy a worker slot, and
-				// progressMu stays separate from the failure lock.
-				defer func() { <-sem }()
+			wg.Go(func() {
 				v, err := c.Info(ctx, pl.Entries[i].VideoID, InfoBasic, opts.EnrichOptions...)
+				// The slot covers the request alone, so a slow progress callback
+				// cannot occupy it. progressMu stays separate from the failure lock.
+				<-sem
 				if err != nil {
 					// Return cancellation through ctx.Err(), not as an item error.
 					if ctx.Err() == nil {
@@ -908,7 +906,7 @@ func (c *Client) enrichEntries(ctx context.Context, pl *Playlist, opts Enumerate
 				if report {
 					settled()
 				}
-			}(i)
+			})
 		}
 		wg.Wait()
 		return failed, causes
@@ -996,14 +994,7 @@ func enrichRotationLoop(
 	// accounted for once, whether or not a later pass revisits it.
 	failed, causes = pass(all, true)
 
-	anyShaped := func() bool {
-		for _, c := range causes {
-			if shaped(c) {
-				return true
-			}
-		}
-		return false
-	}
+	anyShaped := func() bool { return slices.ContainsFunc(causes, shaped) }
 
 	rotations := 0
 	for len(failed) > 0 && anyShaped() && ctx.Err() == nil && rotations < maxEnrichRotations {

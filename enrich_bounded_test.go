@@ -90,6 +90,7 @@ type enrichWorld struct {
 	verdicts       map[string]string // videoID -> player JSON that overrides the OK answer
 	serveWatchPage bool              // answer /watch with enrichWatchPage rather than a 404
 	browse         string            // the first browse page; "" serves enrichBrowseJSON
+	onPlayer       func(id string)   // called under mu as each player request arrives
 
 	homepageHits int
 	askedByVD    map[string]int
@@ -125,6 +126,9 @@ func (w *enrichWorld) roundTrip(t *testing.T) rotationRT {
 			}
 			id, vd := string(idm[1]), string(vdm[1])
 			w.playerAsked = append(w.playerAsked, id)
+			if w.onPlayer != nil {
+				w.onPlayer(id)
+			}
 			if w.askedByVD == nil {
 				w.askedByVD = map[string]int{}
 			}
@@ -147,13 +151,13 @@ func (w *enrichWorld) roundTrip(t *testing.T) rotationRT {
 	}
 }
 
-func enrichClient(t *testing.T, w *enrichWorld) *Client {
+func enrichClient(t *testing.T, w *enrichWorld, tweaks ...func(*Options)) *Client {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := New(Options{
+	opts := Options{
 		HTTPClient:       &http.Client{Jar: jar, Transport: w.roundTrip(t)},
 		Client:           "android_vr",
 		DisableDiskCache: true,
@@ -162,7 +166,11 @@ func enrichClient(t *testing.T, w *enrichWorld) *Client {
 			BaseBackoff: time.Millisecond,
 			MaxBackoff:  2 * time.Millisecond,
 		},
-	})
+	}
+	for _, tweak := range tweaks {
+		tweak(&opts)
+	}
+	c, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +271,37 @@ func TestEnumerateEnrich_MaxEnrichCapsFromTheFront(t *testing.T) {
 	}
 	if n := len(progress); n != 2 || progress[n-1] != [2]int{2, 2} {
 		t.Errorf("progress = %v, want two calls ending at (2, 2): total is the entries attempted, not listed", progress)
+	}
+}
+
+// A slow progress callback does not hold a worker slot. With one slot, the
+// second entry's request goes out while the first entry's callback is still
+// running, which it never could if the slot were held through the callback.
+func TestEnumerateEnrich_ProgressCallbackFreesItsSlot(t *testing.T) {
+	second := make(chan struct{})
+	w := &enrichWorld{onPlayer: func(id string) {
+		if id == "bbbbbbbbbbb" {
+			close(second)
+		}
+	}}
+	c := enrichClient(t, w, func(o *Options) { o.Concurrency.Downloads = 1 })
+
+	_, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{
+		Enrich:    true,
+		MaxEnrich: 2,
+		OnEnrichProgress: func(done, _ int) {
+			if done != 1 {
+				return
+			}
+			select {
+			case <-second:
+			case <-time.After(5 * time.Second):
+				t.Error("the second entry did not start while the first one's progress callback ran: the callback held the only worker slot")
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
 	}
 }
 

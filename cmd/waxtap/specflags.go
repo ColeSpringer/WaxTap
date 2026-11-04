@@ -303,7 +303,7 @@ func channelsAndDownmix(channels string, downmix bool) (waxtap.ChannelLayout, bo
 func parseRanges(specs []string) ([]waxtap.TimeRange, error) {
 	var ranges []waxtap.TimeRange
 	for _, spec := range specs {
-		for _, part := range strings.Split(spec, ",") {
+		for part := range strings.SplitSeq(spec, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue

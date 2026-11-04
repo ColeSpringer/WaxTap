@@ -300,11 +300,9 @@ func TestHostLimiterConcurrent(t *testing.T) {
 	for h := range 4 {
 		host := string(rune('a'+h)) + ".example"
 		for range 25 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				_ = l.Wait(context.Background(), host)
-			}()
+			})
 		}
 	}
 	wg.Wait()

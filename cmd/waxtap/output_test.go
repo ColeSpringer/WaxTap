@@ -274,7 +274,7 @@ func TestFriendlyError_StalledProxyDialKeepsTheHint(t *testing.T) {
 func TestClassifyError_SidecarConnectionWithoutOpError(t *testing.T) {
 	cause := &url.Error{Op: "Get", URL: "https://seal.example/ping?strict=true", Err: &tls.CertificateVerificationError{Err: errFake("x509: certificate signed by unknown authority")}}
 	se := &waxtap.SidecarError{Label: "sidecar health endpoint", Endpoint: "https://seal.example/ping?strict=true", Err: cause}
-	c := classifyArgs(se, nil)
+	c := classifyError(se)
 	if c.exitCode != 9 || c.code != "network" {
 		t.Errorf("exit = %d, code = %q, want 9 and network", c.exitCode, c.code)
 	}
@@ -292,7 +292,7 @@ func TestClassifyError_SidecarConnectionWithoutOpError(t *testing.T) {
 func TestClassifyError_ProviderErrorKeepsItsHint(t *testing.T) {
 	se := &waxtap.SidecarError{Label: "session endpoint", Endpoint: "http://127.0.0.1:4416/session", Err: &net.OpError{Op: "dial", Err: errFake("refused")}}
 	pe := &waxtap.ProviderError{Endpoint: "session", Cause: se}
-	c := classifyArgs(pe, nil)
+	c := classifyError(pe)
 	if c.exitCode != 9 || c.code != "network" {
 		t.Errorf("exit = %d, code = %q, want 9 and network", c.exitCode, c.code)
 	}
@@ -677,11 +677,11 @@ func TestFriendlyError_SponsorBlockNotMisattributed(t *testing.T) {
 // TestNormalizeExecuteError_FlagOrder verifies that a Cobra unknown-command for a
 // YouTube-looking token becomes a usage error (exit 2) with the flag-order hint.
 func TestNormalizeExecuteError_FlagOrder(t *testing.T) {
-	err := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`), []string{"dQw4w9WgXcQ"})
+	err := normalizeExecuteError(errFake(`unknown command "dummyVideo0" for "waxtap"`), []string{"dummyVideo0"})
 	if got := exitCodeFor(err); got != 2 {
 		t.Errorf("unknown-command exit = %d, want 2", got)
 	}
-	if hint := errorHint(err); !strings.Contains(hint, "waxtap download dQw4w9WgXcQ") {
+	if hint := errorHint(err); !strings.Contains(hint, "waxtap download dummyVideo0") {
 		t.Errorf("hint = %q, want a download suggestion", hint)
 	}
 	// A non-target unknown command becomes a plain usage error with no hint.
@@ -746,7 +746,7 @@ func TestNormalizeExecuteError_MisplacedFlagNamed(t *testing.T) {
 	}
 	// A target with no subcommand after it is a missing subcommand, not a
 	// misplaced flag: the download suggestion is still the useful answer.
-	target := normalizeExecuteError(errFake(`unknown command "dQw4w9WgXcQ" for "waxtap"`), []string{"--json", "dQw4w9WgXcQ"})
+	target := normalizeExecuteError(errFake(`unknown command "dummyVideo0" for "waxtap"`), []string{"--json", "dummyVideo0"})
 	if !strings.Contains(errorHint(target), "waxtap download") {
 		t.Errorf("hint = %q, want the download suggestion preserved", errorHint(target))
 	}
@@ -790,14 +790,14 @@ func TestFlagOrderHint(t *testing.T) {
 		msg  string
 		want string // substring the hint must contain; "" means no hint
 	}{
-		{"unknown command target", `unknown command "dQw4w9WgXcQ" for "waxtap"`, "waxtap download dQw4w9WgXcQ"},
+		{"unknown command target", `unknown command "dummyVideo0" for "waxtap"`, "waxtap download dummyVideo0"},
 		{"unknown command non-target", `unknown command "boguscmd" for "waxtap"`, ""},
 		{"dash shorthand 11-char id", "unknown shorthand flag: 'b' in -bcdefghijk", "-- -bcdefghijk"},
 		{"dash shorthand short token", "unknown shorthand flag: 'a' in -abc", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := flagOrderHint(&usageError{msg: tc.msg}, nil)
+			got := flagOrderHint(&usageError{msg: tc.msg})
 			if tc.want == "" {
 				if got != "" {
 					t.Errorf("flagOrderHint(%q) = %q, want no hint", tc.msg, got)
@@ -818,7 +818,7 @@ func TestFlagOrderHint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected pflag to reject -bcdefghijk as shorthand flags")
 		}
-		if got := flagOrderHint(&usageError{msg: err.Error()}, nil); !strings.Contains(got, "-- -bcdefghijk") {
+		if got := flagOrderHint(&usageError{msg: err.Error()}); !strings.Contains(got, "-- -bcdefghijk") {
 			t.Errorf("hint = %q, want the leading-dash guidance", got)
 		}
 	})
@@ -827,27 +827,10 @@ func TestFlagOrderHint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected info to reject the unknown --collision flag")
 		}
-		if got := flagOrderHint(&usageError{msg: err.Error()}, nil); got != "" {
+		if got := flagOrderHint(&usageError{msg: err.Error()}); got != "" {
 			t.Errorf("hint = %q, want none for an 11-char long flag", got)
 		}
 	})
-}
-
-func TestFlagOrderHint_NoMisplacedFlagHint(t *testing.T) {
-	// The misplaced-flag shape is rewritten by normalizeExecuteError before
-	// classification, so flagOrderHint must add nothing for it: the message
-	// already carries the guidance, and a hint would print it twice.
-	got := flagOrderHint(&usageError{msg: `unknown command "/p" for "waxtap"`},
-		[]string{"--no-cache", "--cache-dir", "/p", "info", "dQw4w9WgXcQ"})
-	if got != "" {
-		t.Errorf("flagOrderHint = %q, want none; the rewritten message carries the guidance", got)
-	}
-
-	// A genuine subcommand typo (no preceding flag) gets no hint either.
-	if got := flagOrderHint(&usageError{msg: `unknown command "boguscmd" for "waxtap"`},
-		[]string{"boguscmd"}); got != "" {
-		t.Errorf("flagOrderHint = %q, want no hint for a bare subcommand typo", got)
-	}
 }
 
 // TestRootSubcommandNamesMatchTree keeps the static order-hint set aligned with
@@ -1017,8 +1000,8 @@ func TestRenderErrorKept(t *testing.T) {
 	err := errors.New("something failed")
 	for _, jsonMode := range []bool{false, true} {
 		var plain, kept bytes.Buffer
-		renderError(&plain, jsonMode, err, nil)
-		renderErrorKept(&kept, jsonMode, err, nil, nil)
+		renderError(&plain, jsonMode, err)
+		renderErrorKept(&kept, jsonMode, err, nil)
 		if plain.String() != kept.String() {
 			t.Errorf("jsonMode=%v: nil kept diverged from renderError:\n%q\n%q", jsonMode, plain.String(), kept.String())
 		}
@@ -1026,7 +1009,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// Human form: the existing error line, then a note naming the file.
 	var human bytes.Buffer
-	renderErrorKept(&human, false, errors.Join(errInterrupted, context.Canceled), nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&human, false, errors.Join(errInterrupted, context.Canceled), &keptOutput{path: "/out/track.flac", bytes: 4096})
 	got := human.String()
 	if !strings.HasPrefix(got, "waxtap: canceled\n") {
 		t.Errorf("human output does not start with the usual error line:\n%q", got)
@@ -1041,7 +1024,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// JSON form: additive fields on the existing envelope.
 	var doc bytes.Buffer
-	renderErrorKept(&doc, true, errors.Join(errInterrupted, context.Canceled), nil, &keptOutput{path: "/out/track.flac", bytes: 4096})
+	renderErrorKept(&doc, true, errors.Join(errInterrupted, context.Canceled), &keptOutput{path: "/out/track.flac", bytes: 4096})
 	var envelope struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		OutputPath    string `json:"outputPath"`
@@ -1066,7 +1049,7 @@ func TestRenderErrorKept(t *testing.T) {
 
 	// The fields are omitempty, so an ordinary failure document does not gain keys.
 	var bare bytes.Buffer
-	renderError(&bare, true, err, nil)
+	renderError(&bare, true, err)
 	if strings.Contains(bare.String(), "outputPath") {
 		t.Errorf("ordinary error document gained an outputPath key:\n%s", bare.String())
 	}
@@ -1267,9 +1250,16 @@ func TestSidecarHint_StatedWait(t *testing.T) {
 func TestPerItemCancellationFollowsTheRunsSignal(t *testing.T) {
 	err := fmt.Errorf("item 2: %w", context.Canceled)
 
-	// No signal: a cancellation from inside WaxTap is a defect, and says so.
-	setRunSignal(nil)
-	t.Cleanup(func() { setRunSignal(nil) })
+	// No signal context at all, the state a test that drives a command
+	// directly runs in: a cancellation from inside WaxTap is a defect, and says
+	// so. The same state is put back for the tests that follow.
+	noSignal := func() {
+		runSignalMu.Lock()
+		defer runSignalMu.Unlock()
+		runSignal = nil
+	}
+	noSignal()
+	t.Cleanup(noSignal)
 	if c := classifyError(err); c.exitCode != 1 || c.code != "error" || !strings.Contains(c.message, "no signal") {
 		t.Errorf("without a signal: classify = %+v, want exit 1 naming the absent signal", c)
 	}
@@ -1287,9 +1277,7 @@ func TestPerItemCancellationFollowsTheRunsSignal(t *testing.T) {
 	}
 
 	// A live signal context is a run nobody interrupted.
-	live, stop := context.WithCancel(context.Background())
-	defer stop()
-	setRunSignal(live)
+	setRunSignal(t.Context())
 	if c := classifyError(err); c.exitCode != 1 {
 		t.Errorf("with a live signal context: classify = %+v, want exit 1", c)
 	}

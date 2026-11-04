@@ -172,14 +172,12 @@ func TestRangeReaderViewsShareOneFetchPerBlock(t *testing.T) {
 	b := rr.WithContext(context.Background())
 	var wg sync.WaitGroup
 	for _, v := range []*RangeReader{a, b, a, b} {
-		wg.Add(1)
-		go func(v *RangeReader) {
-			defer wg.Done()
+		wg.Go(func() {
 			buf := make([]byte, 100)
 			if _, err := v.ReadAt(buf, 3000); err != nil {
 				t.Errorf("concurrent ReadAt: %v", err)
 			}
-		}(v)
+		})
 	}
 	wg.Wait()
 	// Block 0 (eager) plus block 3, fetched once however many views asked.

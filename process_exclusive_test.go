@@ -243,9 +243,7 @@ func TestProcessToNewNumberedFileRace(t *testing.T) {
 	errs := make([]error, runners)
 	var wg sync.WaitGroup
 	for i := range runners {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			res, err := c.Process(context.Background(), ProcessRequest{
 				Input:       in,
 				ProcessSpec: ProcessSpec{Transcode: &TranscodeSpec{Format: FormatFLAC}, Output: ToNewNumberedFile(out)},
@@ -255,7 +253,7 @@ func TestProcessToNewNumberedFileRace(t *testing.T) {
 				return
 			}
 			paths[i] = res.OutputPath
-		}()
+		})
 	}
 	wg.Wait()
 

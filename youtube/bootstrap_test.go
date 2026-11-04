@@ -78,7 +78,7 @@ func TestExtract_BootstrapsRealVisitorData(t *testing.T) {
 		return fixtureResp(http.StatusNotFound, nil), nil
 	}))
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := c.Extract(context.Background(), "testVideo01"); err != nil {
 			t.Fatalf("extract %d: %v", i, err)
 		}

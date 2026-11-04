@@ -299,8 +299,7 @@ func TestExtractWebContextErrors(t *testing.T) {
 				},
 			),
 		})
-		parent, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		parent := t.Context()
 		_, err := c.ExtractWebContext(parent, "v")
 		// An internal provider timeout remains eligible for fallback.
 		if _, ok := errors.AsType[*waxerr.ProviderError](err); !ok {

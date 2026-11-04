@@ -825,8 +825,7 @@ func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
 	}
 	// The same class the single-file path reports, so one unreadable file
 	// does not change meaning by being in an album.
-	var pathErr *fs.PathError
-	if !errors.As(err, &pathErr) {
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
 		t.Errorf("err = %v (%T), want a *fs.PathError as the single-file path gives", err, err)
 	}
 	if errors.Is(err, ErrUnsupportedInput) {
@@ -838,7 +837,7 @@ func TestAlbumUnreadableMemberIsAnIOFailure(t *testing.T) {
 
 	// The single-file path, for comparison.
 	_, serr := c.Measure(ctx, locked)
-	if !errors.As(serr, &pathErr) {
+	if _, ok := errors.AsType[*fs.PathError](serr); !ok {
 		t.Errorf("single-file err = %v (%T), want a *fs.PathError", serr, serr)
 	}
 }

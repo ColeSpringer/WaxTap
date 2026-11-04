@@ -231,18 +231,15 @@ func New(cfg Config) *Client {
 	// it breaks GVS content_binding coherence and prevents learnVisitorData from
 	// recovering after the source is marked as adopted.
 	if c.staticSession != nil {
-		switch {
-		case c.staticSession.VisitorData == "":
+		if c.staticSession.VisitorData == "" {
 			c.adoptErr = errors.New("adopted session has an empty visitorData")
-		default:
-			if err := c.seedAdoptedCookies(c.staticSession.Cookies); err != nil {
-				c.adoptErr = err
-			} else {
-				c.adoptVD = c.staticSession.VisitorData
-				c.adoptUA = c.staticSession.UserAgent
-				c.adoptVersion = c.staticSession.ClientVersion
-				c.adoptResolved = true
-			}
+		} else if err := c.seedAdoptedCookies(c.staticSession.Cookies); err != nil {
+			c.adoptErr = err
+		} else {
+			c.adoptVD = c.staticSession.VisitorData
+			c.adoptUA = c.staticSession.UserAgent
+			c.adoptVersion = c.staticSession.ClientVersion
+			c.adoptResolved = true
 		}
 	}
 	return c

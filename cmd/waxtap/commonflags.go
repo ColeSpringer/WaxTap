@@ -143,7 +143,7 @@ func sponsorblockMisparse(cmd *cobra.Command, args []string, hasOutputPositional
 // match parseCategories.
 func isCategoryList(s string) bool {
 	n := 0
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue // parseCategories skips empty parts; mirror it

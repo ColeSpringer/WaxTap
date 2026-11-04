@@ -415,8 +415,8 @@ func TestCommitNewRefusesOccupiedPath(t *testing.T) {
 	if !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("CommitNew error = %v, want it to wrap fs.ErrExist", err)
 	}
-	var oe *OutputError
-	if !errors.As(err, &oe) {
+	oe, ok := errors.AsType[*OutputError](err)
+	if !ok {
 		t.Fatalf("CommitNew error = %T, want an *OutputError", err)
 	}
 	if oe.Op != "publish" {

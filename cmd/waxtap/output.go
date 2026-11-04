@@ -538,10 +538,9 @@ type keptOutput struct {
 }
 
 // renderError writes the final command error as JSON or as a human-readable line.
-// Both forms use the same classification. args is the command line the failure
-// came from, minus the program name; only the flag-ordering hint reads it.
-func renderError(w io.Writer, jsonMode bool, err error, args []string) {
-	renderErrorKept(w, jsonMode, err, args, nil)
+// Both forms use the same classification.
+func renderError(w io.Writer, jsonMode bool, err error) {
+	renderErrorKept(w, jsonMode, err, nil)
 }
 
 // renderErrorKept is renderError plus the file a failed run left behind. Every
@@ -553,11 +552,11 @@ func renderError(w io.Writer, jsonMode bool, err error, args []string) {
 // A cancellation reported this way is still exit 130 and still a failure. Naming
 // the file does not promote it to a success, and the caller says so in the note
 // when post-processing (the info sidecar, the archive entry) did not run.
-func renderErrorKept(w io.Writer, jsonMode bool, err error, args []string, kept *keptOutput) {
+func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
 	if err == nil {
 		return
 	}
-	c := classifyArgs(err, args)
+	c := classifyError(err)
 	if jsonMode {
 		je := jsonError{
 			SchemaVersion: schemaVersion,
@@ -607,19 +606,11 @@ type classifiedError struct {
 }
 
 // classifyError maps a terminal error to its exit code, machine code, message,
-// and optional hint, reading this process's command line for the flag-ordering
-// hint. Callers that hold the command line pass it to classifyArgs instead.
-func classifyError(err error) classifiedError {
-	return classifyArgs(err, os.Args[1:])
-}
-
-// classifyArgs is classifyError against a given command line. Only the
-// flag-ordering hint depends on args, so exit code, machine code, and message are
-// the same whatever is passed.
+// and optional hint.
 //
 // Domain sentinels take precedence over wrapped transport and filesystem errors.
 // Structural checks therefore run after all sentinel checks.
-func classifyArgs(err error, args []string) classifiedError {
+func classifyError(err error) classifiedError {
 	if err == nil {
 		return classifiedError{}
 	}
@@ -719,7 +710,7 @@ func classifyArgs(err error, args []string) classifiedError {
 	case isCollisionError(err):
 		c.exitCode, c.code = 2, "usage"
 	case isUsageError(err):
-		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err, args)
+		c.exitCode, c.code, c.hint = 2, "usage", flagOrderHint(err)
 
 	// A proxy that hung until the deadline leaves both markers in one chain, and
 	// only this order decides between them. The proxy is the actionable half:
@@ -1204,7 +1195,7 @@ func sidecarHint(sre *waxtap.SidecarResponseError) string {
 // responses indicate network or provider failures.
 //
 // A video-unavailable refusal never reaches here: it unwraps to its availability
-// verdict, which classifyArgs matches first.
+// verdict, which classifyError matches first.
 func sidecarResponseExit(sre *waxtap.SidecarResponseError) (int, string) {
 	status := sre.StatusCode
 	switch {
@@ -1307,9 +1298,8 @@ func normalizeExecuteError(err error, args []string) error {
 }
 
 // flagOrderHint adds CLI help for YouTube-looking arguments that Cobra or pflag
-// parsed before the command could receive them. args is the command line the
-// failure came from, minus the program name.
-func flagOrderHint(err error, args []string) string {
+// parsed before the command could receive them.
+func flagOrderHint(err error) string {
 	ue, ok := errors.AsType[*usageError](err)
 	if !ok {
 		return ""

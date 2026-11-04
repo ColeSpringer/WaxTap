@@ -126,7 +126,7 @@ func rejectEmptySponsorBlock(cmd *cobra.Command, value string) error {
 	if !cmd.Flags().Changed("sponsorblock") {
 		return nil
 	}
-	for _, part := range strings.Split(value, ",") {
+	for part := range strings.SplitSeq(value, ",") {
 		if strings.TrimSpace(part) != "" {
 			return nil
 		}
@@ -142,7 +142,7 @@ func parseCategories(csv string) ([]sponsorblock.Category, error) {
 		return sponsorblock.DefaultCategories, nil
 	}
 	var cats []sponsorblock.Category
-	for _, part := range strings.Split(csv, ",") {
+	for part := range strings.SplitSeq(csv, ",") {
 		c := sponsorblock.Category(strings.TrimSpace(part))
 		if c == "" {
 			continue

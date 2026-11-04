@@ -408,16 +408,14 @@ func TestScopedNotesConcurrent(t *testing.T) {
 	run := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{quiet: true}, notes: &noteCollector{}}
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			item := run.withScopedNotes()
 			item.note(noteUnalteredCopy, "item %d", i)
 			run.note(noteKeptOutput, "run note %d", i)
 			if got := item.notes.drain(); len(got) != 1 {
 				t.Errorf("item %d drained %d notes, want 1", i, len(got))
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	if got := run.notesJSON(); len(got) != 8 {

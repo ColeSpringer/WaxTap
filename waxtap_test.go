@@ -1366,25 +1366,16 @@ func TestProcessMeasureOnlyNoOutput(t *testing.T) {
 		t.Errorf("measure-only must not transcode or apply: %+v", res)
 	}
 	// The lifecycle matches the with-Output measure: StageFinalizing fires.
-	if !containsStage(stages, StageFinalizing) {
+	if !slices.Contains(stages, StageFinalizing) {
 		t.Errorf("stages = %v, want StageFinalizing", stages)
 	}
-	if containsStage(stages, StageSkipped) {
+	if slices.Contains(stages, StageSkipped) {
 		t.Errorf("stages = %v, measure-only must not be StageSkipped", stages)
 	}
 	// No stray output files were created alongside the input.
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("dir has %d entries, want only the input file", len(entries))
 	}
-}
-
-func containsStage(stages []Stage, want Stage) bool {
-	for _, s := range stages {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // TestMeasure exercises the Client.Measure convenience wrapper.

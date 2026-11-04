@@ -204,13 +204,11 @@ func TestConcurrentPutGet(t *testing.T) {
 	const workers = 16
 	var wg sync.WaitGroup
 	for i := range workers {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			key := "key" + string(rune('a'+i%4))
 			s.Put(key, bytes.Repeat([]byte("y"), 100))
 			s.Get(key)
-		}(i)
+		})
 	}
 	wg.Wait()
 }

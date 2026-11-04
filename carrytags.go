@@ -466,7 +466,7 @@ func remapLRCLines(text string, cut *appliedCut) (out string, dropped int, moved
 
 // lrcHasOffset reports an [offset:] tag, which applies to the whole sheet.
 func lrcHasOffset(text string) bool {
-	for _, ln := range strings.Split(text, "\n") {
+	for ln := range strings.SplitSeq(text, "\n") {
 		t := strings.TrimSpace(ln)
 		if strings.HasPrefix(t, "[") && strings.HasPrefix(strings.ToLower(strings.TrimPrefix(t, "[")), "offset:") {
 			return true

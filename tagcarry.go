@@ -234,13 +234,8 @@ func (tc *TagCarry) insert(it CarryItem) {
 // restored marks the excluded fields a remux put back as carried.
 func (tc *TagCarry) restored(keys []string) {
 	for i, it := range tc.Items {
-		if it.Kind == CarryField && it.Disposition == DispositionExcluded {
-			for _, k := range keys {
-				if it.Key == k {
-					tc.Items[i].Disposition, tc.Items[i].Reason = DispositionCarried, ""
-					break
-				}
-			}
+		if it.Kind == CarryField && it.Disposition == DispositionExcluded && slices.Contains(keys, it.Key) {
+			tc.Items[i].Disposition, tc.Items[i].Reason = DispositionCarried, ""
 		}
 	}
 }

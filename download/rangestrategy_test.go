@@ -124,6 +124,7 @@ func TestContentRangeTotal(t *testing.T) {
 		{"bytes 0-99/200", 200},
 		{"bytes 100-199/200", 200},
 		{"bytes 0-99/*", 0},
+		{"bytes 0-999/500", 0}, // a total inside the range it came with is no total
 		{"", 0},
 		{"garbage", 0},
 	}
@@ -174,6 +175,11 @@ func TestParseContentRange(t *testing.T) {
 		{"bytes 0-999/8000", 0, 999, 8000, true},
 		{"bytes 1000-1999/8000", 1000, 1999, 8000, true},
 		{"bytes 0-99/*", 0, 99, 0, true},
+		// The total must exceed the last position. One that does not is not
+		// trusted, but the span still is, so the offset checks keep their teeth.
+		{"bytes 0-999/1000", 0, 999, 1000, true},
+		{"bytes 0-999/999", 0, 999, 0, true},
+		{"bytes 0-999/500", 0, 999, 0, true},
 		{"bytes */8000", 0, 0, 0, false},
 		{"", 0, 0, 0, false},
 		{"garbage", 0, 0, 0, false},

@@ -72,15 +72,13 @@ func TestStore_SingleflightLoadsOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make([]int, n)
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			v, err := s.GetOrLoad(context.Background(), "k", load)
 			if err != nil {
 				t.Errorf("GetOrLoad: %v", err)
 			}
 			results[i] = v
-		}(i)
+		})
 	}
 
 	time.Sleep(25 * time.Millisecond) // let callers pile onto the in-flight load

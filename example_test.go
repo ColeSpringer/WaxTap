@@ -263,9 +263,9 @@ func ExampleClient_Info() {
 }
 
 // Example_errors shows the two ways to inspect a failure from Download or Info:
-// errors.Is for the sentinel category, and errors.As for YouTube's structured
-// detail. The re-exported error types satisfy error on their pointer type, so
-// errors.As takes a double-pointer target (var pe *PlayabilityError; &pe).
+// errors.Is for the sentinel category, and errors.AsType for YouTube's
+// structured detail. The re-exported error types satisfy error on their pointer
+// type, so ask for the pointer: errors.AsType[*PlayabilityError].
 func Example_errors() {
 	// In real use this comes from client.Download/Info; constructed here for a
 	// self-contained example.
@@ -279,8 +279,7 @@ func Example_errors() {
 		fmt.Println("category: video unavailable")
 	}
 
-	var pe *waxtap.PlayabilityError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*waxtap.PlayabilityError](err); ok {
 		fmt.Printf("status: %s\n", pe.Status)
 	}
 	// Output:

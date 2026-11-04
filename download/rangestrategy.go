@@ -142,7 +142,10 @@ func rangeLabel(start, end int64) string {
 
 // parseContentRange parses a "bytes start-end/total" header. ok is false when the
 // header is absent, malformed, or unsatisfiable (e.g. "bytes */1234"). total is 0
-// when the resource length is given as "*".
+// when the resource length is unknown: given as "*", or no larger than end. RFC
+// 9110 calls the latter invalid, and a reader that trusted it would take a
+// transfer cut short of the real length as complete. The span is still
+// returned, so the offset checks keep it.
 func parseContentRange(resp *http.Response) (start, end, total int64, ok bool) {
 	cr := strings.TrimSpace(resp.Header.Get("Content-Range"))
 	if cr == "" {
@@ -161,14 +164,17 @@ func parseContentRange(resp *http.Response) (start, end, total int64, ok bool) {
 		}
 		total = t
 	}
-	dash := strings.IndexByte(rangePart, '-')
-	if dash < 0 {
+	startPart, endPart, found := strings.Cut(rangePart, "-")
+	if !found {
 		return 0, 0, 0, false
 	}
-	s, err1 := strconv.ParseInt(strings.TrimSpace(rangePart[:dash]), 10, 64)
-	e, err2 := strconv.ParseInt(strings.TrimSpace(rangePart[dash+1:]), 10, 64)
+	s, err1 := strconv.ParseInt(strings.TrimSpace(startPart), 10, 64)
+	e, err2 := strconv.ParseInt(strings.TrimSpace(endPart), 10, 64)
 	if err1 != nil || err2 != nil || s < 0 || e < s {
 		return 0, 0, 0, false
+	}
+	if total <= e {
+		total = 0
 	}
 	return s, e, total, true
 }

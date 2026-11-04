@@ -241,7 +241,7 @@ func TestReleaseTargetsMatchGoreleaser(t *testing.T) {
 	lists := map[string][]string{}
 	var main string
 	key := ""
-	for _, line := range strings.Split(cfg, "\n") {
+	for line := range strings.SplitSeq(cfg, "\n") {
 		trim := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trim, "main:"):

@@ -190,9 +190,7 @@ coordinator:
 		}
 
 		started++
-		wg.Add(1)
-		go func(idx int, entry PlaylistEntry, req Request) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			r, derr := dl(ctx, req)
 			o := PlaylistItemOutcome{Entry: entry, Attempted: true}
@@ -201,9 +199,9 @@ coordinator:
 			} else {
 				o.Result = r
 			}
-			slots[idx] = &o
+			slots[i] = &o
 			emit(o)
-		}(i, entry, req)
+		})
 	}
 	wg.Wait()
 

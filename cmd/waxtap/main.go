@@ -60,6 +60,6 @@ func report(stdout, stderr io.Writer, args []string, jsonMode bool, err error) i
 	if jsonMode {
 		out = stdout
 	}
-	renderError(out, jsonMode, err, args)
+	renderError(out, jsonMode, err)
 	return exitCodeFor(err)
 }

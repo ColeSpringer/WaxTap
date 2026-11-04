@@ -511,9 +511,7 @@ func runSingleDownload(ctx context.Context, env *appEnv, df *downloadFlags, arg 
 			// stream, so the two can never both fire; reportKeptOutput's own guard is
 			// what enforces that.
 			err = finalError(ctx, err)
-			// No command line: the only hint that reads one is for an unknown
-			// command, and this seam is inside a command that already resolved and ran.
-			renderError(env.errOut, env.jsonMode(), err, nil)
+			renderError(env.errOut, env.jsonMode(), err)
 			err = alreadyRendered(err)
 		}()
 	}
@@ -670,8 +668,7 @@ func (env *appEnv) reportKeptOutput(ctx context.Context, df *downloadFlags, outP
 	if env.jsonMode() {
 		w = env.out
 	}
-	// nil command line, for the reason the stdout-stream seam gives.
-	renderErrorKept(w, env.jsonMode(), err, nil, kept)
+	renderErrorKept(w, env.jsonMode(), err, kept)
 	return alreadyRendered(err)
 }
 

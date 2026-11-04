@@ -461,7 +461,7 @@ func summarize(m Module) string {
 func paragraph(b *strings.Builder, text string) {
 	const width = 78
 	col := 0
-	for _, w := range strings.Fields(text) {
+	for w := range strings.FieldsSeq(text) {
 		switch {
 		case col == 0:
 		case col+1+len(w) > width:
