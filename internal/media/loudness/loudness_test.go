@@ -174,7 +174,7 @@ func TestMeasureCut(t *testing.T) {
 	in := filepath.Join(t.TempDir(), "s.wav")
 	os.WriteFile(in, mediatest.SineWAV(3, 2), 0o644)
 	// Measuring a 1s slice of a steady tone yields the same loudness as the whole.
-	l, err := MeasureCut(context.Background(), r, in, []cutrange.Range{{Start: 0, End: time.Second}}, 3*time.Second, 0, 0, 0)
+	l, err := MeasureCut(context.Background(), r, in, []cutrange.Range{{Start: 0, End: time.Second}}, 3*time.Second, 0, 0, media.Measured{})
 	if err != nil {
 		t.Fatalf("measure cut: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestMeasureCut(t *testing.T) {
 	}
 }
 
-// A caller that measured nothing (sourceSamples 0) over a file whose headers
+// A caller that measured nothing (a zero source) over a file whose headers
 // only claim a length used to get a refusal here: the bounded span declared
 // more than the truncated file holds. OpenComposed measures the source itself
 // now, so the span asks for what the file has and the measurement succeeds at
@@ -221,7 +221,7 @@ func TestMeasureCutWithNoLengthMeasuresTheSource(t *testing.T) {
 	keeps := []cutrange.Range{{Start: 0, End: 1900 * time.Millisecond}}
 	// A PathError here would be the old behaviour: a span past a truncated file
 	// read as an I/O failure rather than as the file's own shortfall.
-	l, err := MeasureCut(ctx, r, cut, keeps, pr.Format.Duration, 0, 0, 0)
+	l, err := MeasureCut(ctx, r, cut, keeps, pr.Format.Duration, 0, 0, media.Measured{})
 	if pe, ok := errors.AsType[*fs.PathError](err); ok {
 		t.Fatalf("got a PathError naming %s: a span past a truncated file is the file's shortfall, not a read failure", pe.Path)
 	}

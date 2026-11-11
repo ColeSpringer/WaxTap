@@ -678,13 +678,21 @@ func newTranscodeCmd() *cobra.Command {
 					// container, so the engine declines every PCM remux, and a
 					// spec with no stage delivers the file verbatim, which is
 					// what "already this format" means here.
-					if tf == waxtap.FormatWAV || tf == waxtap.FormatAIFF {
+					//
+					// A copy the engine would decline for the stream's own
+					// shape (a Vorbis front trim into Ogg) is not rewritten:
+					// the user named an encoder, not a copy, so the request
+					// goes on as named and the pipeline encodes it. A question
+					// that fails takes the copy, which reports the failure.
+					switch {
+					case tf == waxtap.FormatWAV || tf == waxtap.FormatAIFF:
 						spec.Transcode = nil
-					} else {
+						remuxNoop = true
+					case canCopy(cmd.Context(), env, source, outPath):
 						spec.Transcode.Format = waxtap.FormatCopy
 						spec.Transcode.Bitrate, spec.Transcode.BitDepth = 0, 0
+						remuxNoop = true
 					}
-					remuxNoop = true
 					probedCodec = p.Codec
 				}
 			}
@@ -745,6 +753,14 @@ func newTranscodeCmd() *cobra.Command {
 	bindNetworkFlags(f)
 	bindPlayerExtractionFlags(f)
 	return cmd
+}
+
+// canCopy asks whether source's packets can go into outPath's container
+// unchanged (waxtap.Client.CanCopy), answering yes when the question itself
+// fails so the copy runs and reports the failure as its own.
+func canCopy(ctx context.Context, env *appEnv, source, outPath string) bool {
+	ok, err := env.client.CanCopy(ctx, source, outPath)
+	return ok || err != nil
 }
 
 // containerExtOf is path's extension, lowercased and undotted, or "" when it

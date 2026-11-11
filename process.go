@@ -215,6 +215,19 @@ func (c *Client) ProbeAudio(ctx context.Context, path string) (AudioProbe, error
 	return AudioProbe{Codec: audio.CodecName, Channels: audio.Channels, Container: probe.Format.Container}, nil
 }
 
+// CanCopy reports whether the audio in a local file can be written to output
+// as a packet copy, the way FormatCopy delivers it. The codec has to be one a
+// container carries unchanged, and the stream's own shape has to survive the
+// trip: a Vorbis stream that starts before time zero copies into Matroska and
+// not into Ogg, which cannot state the trim. It reads headers only.
+//
+// A caller about to ask for a copy the user did not name, because the file is
+// already in the format they did name, asks this first and leaves the request
+// as named when the answer is no; Process then encodes it.
+func (c *Client) CanCopy(ctx context.Context, input, output string) (bool, error) {
+	return c.engine().CopyPlans(ctx, input, output)
+}
+
 // AlbumLoudnessResult reports a group loudness measurement plus per-track
 // measurements, in input order. The album value is a true group EBU R128
 // measurement, not a mean of the per-track LUFS.
@@ -875,24 +888,33 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 	return p
 }
 
-// albumShortDecode refuses a member that did not read to the length its
-// container states exactly. Every track in an album shares one gain, so a
-// figure computed over the 60% of a track that decodes would normalize the
-// whole record against a number that describes nothing; a single file warns
-// past the same damage and delivers what read, because there the user gets
-// the audio and the warning together.
+// albumShortDecode refuses a member whose measurement covers materially less
+// than the track: one that did not read to the length its container states
+// exactly, or one that read to it with silence where damage took the audio (a
+// FLAC keeps its length through a hole). Every track in an album shares one
+// gain, so a figure computed over the 60% of a track that decodes would
+// normalize the whole record against a number that describes nothing; a
+// single file warns past the same damage and delivers what read, because
+// there the user gets the audio and the warning together.
 //
 // A declaration a decode is never expected to match (ASF, a Matroska on its
 // Info Duration) is not one to hold a member to; those read to their end and
-// the length they deliver is the length.
+// the length they deliver is the length. A hole is held against any member,
+// since it is the read's own count of what it lost.
 func albumShortDecode(inputs []string, probes []albumProbe, perTrack []loudness.Loudness) error {
+	refuse := func(i int, note string) error {
+		return fmt.Errorf("track %s: %w: %s; every track in an album shares one gain, so a measurement of part of one cannot derive it",
+			filepath.Base(inputs[i]), waxerr.ErrUnsupportedInput, note)
+	}
 	for i := range perTrack {
+		if note := media.LostAudioNote(perTrack[i].Lost); note != "" {
+			return refuse(i, note)
+		}
 		if i >= len(probes) || probes[i].advisory || probes[i].duration <= 0 {
 			continue
 		}
 		if note := media.ShortMeasureNote(perTrack[i].Duration, probes[i].duration); note != "" {
-			return fmt.Errorf("track %s: %w: %s; every track in an album shares one gain, so a measurement of part of one cannot derive it",
-				filepath.Base(inputs[i]), waxerr.ErrUnsupportedInput, note)
+			return refuse(i, note)
 		}
 	}
 	return nil

@@ -54,6 +54,15 @@ type SplitPlan struct {
 	// in a session no player counts, is left out. Audio ahead of track 1, the
 	// lead-in or a TRACK 00, is not a track of the disc's.
 	TrackTotal int
+
+	// measured is the rip's length as PlanSplit measured it, when its headers
+	// only claimed one, and plannedFor the rip that answer is about: the count
+	// the pieces were checked against, which Split holds each piece to. Split
+	// reuses the pair for that rip and settles the question itself otherwise,
+	// since a plan built by hand, restored from its exported fields, or
+	// pointed at another file carries no answer to trust (see held).
+	measured   media.Measured
+	plannedFor string
 }
 
 // SplitAlbum is the disc-level metadata a sheet carries.
@@ -123,6 +132,33 @@ type SplitSkip struct {
 	StartSample, EndSample int64
 }
 
+// held is the length Split holds the pieces to: the one PlanSplit measured for
+// this rip, or, for a plan that did not come from PlanSplit with this Input, a
+// measurement taken now when the rip's headers only claim a length. The zero
+// answer is a rip whose headers state an exact count, which bounds the pieces
+// on its own.
+//
+// Without it a piece PlanSplit placed past the length a Matroska or an ASF
+// under-declares is refused by the rip's own headers, with the pieces before
+// it already written.
+func (p *SplitPlan) held(ctx context.Context, runner *media.Runner) (media.Measured, error) {
+	if p.plannedFor != "" && p.plannedFor == p.Input {
+		return p.measured, nil
+	}
+	probe, err := runner.Probe(ctx, p.Input)
+	if err != nil {
+		return media.Measured{}, err
+	}
+	if !probe.LengthClaimed {
+		return media.Measured{}, nil
+	}
+	length, err := runner.MeasureLength(ctx, p.Input)
+	if err != nil {
+		return media.Measured{}, err
+	}
+	return length.Measured(), nil
+}
+
 // pieceCut describes piece i as the one span of the rip it keeps, so a carry
 // remaps the rip's chapters and synced lyrics onto the piece's own timeline.
 func (p *SplitPlan) pieceCut(i int) *appliedCut {
@@ -188,12 +224,13 @@ func (c *Client) PlanSplit(ctx context.Context, input string, sheet []byte) (*Sp
 	// addressed past it is past the audio whatever the file holds behind it.
 	samples := audio.Samples
 	total := probe.Format.Duration
+	var measured media.Measured
 	if probe.LengthClaimed {
 		length, lerr := runner.MeasureLength(ctx, input)
 		if lerr != nil {
 			return nil, lerr
 		}
-		samples, total = length.Samples, length.Duration
+		samples, total, measured = length.Samples, length.Duration, length.Measured()
 	}
 	if samples == 0 {
 		// Known, not unknown: the probe says -1 for a count it lacks, and a
@@ -208,7 +245,7 @@ func (c *Client) PlanSplit(ctx context.Context, input string, sheet []byte) (*Sp
 		return nil, fmt.Errorf("%w: %v", waxerr.ErrIncompatibleSpec, err)
 	}
 
-	plan := &SplitPlan{Input: input, SheetFile: f.Name, Rate: audio.SampleRate, Duration: total, TrackTotal: trackTotal(sh)}
+	plan := &SplitPlan{Input: input, SheetFile: f.Name, Rate: audio.SampleRate, Duration: total, TrackTotal: trackTotal(sh), measured: measured, plannedFor: input}
 	plan.Album = SplitAlbum{Title: sh.Title, Performer: sh.Performer, Catalog: sh.Catalog}
 	plan.Album.Date, _ = sh.Rem("DATE")
 	plan.Album.Genre, _ = sh.Rem("GENRE")
@@ -348,6 +385,10 @@ func (c *Client) Split(ctx context.Context, plan *SplitPlan, outputs []string, s
 	}
 
 	runner := c.engine()
+	held, err := plan.held(ctx, runner)
+	if err != nil {
+		return nil, fmt.Errorf("waxtap.Split: %w", err)
+	}
 	res := &SplitResult{Outputs: make([]string, len(outputs)), TagCarry: make([]*TagCarry, len(outputs))}
 	em := newEmitter(nil, "")
 	var carry albumCarryWarns
@@ -365,7 +406,10 @@ func (c *Client) Split(ctx context.Context, plan *SplitPlan, outputs []string, s
 		if err := ensureParentDir(out); err != nil {
 			return nil, fmt.Errorf("waxtap.Split: piece %d (%s): %w", i+1, out, err)
 		}
-		sres, err := runner.RenderSpan(ctx, plan.Input, out, p.StartSample, p.EndSample, enc)
+		// Held to the length the pieces were checked against: a cut in the gap
+		// between what the headers declare and what the rip holds passed the
+		// plan, and the rip's own declaration would refuse it here.
+		sres, err := runner.RenderSpan(ctx, plan.Input, out, p.StartSample, p.EndSample, held, enc)
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.Split: piece %d (%s): %w", i+1, out, err)
 		}

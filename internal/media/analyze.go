@@ -3,12 +3,10 @@ package media
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
 	"github.com/colespringer/waxflow"
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 )
@@ -174,101 +172,105 @@ type Length struct {
 	Duration time.Duration
 	Warnings []string
 	Notes    []string
+	// Counted says the count came from decoding the whole file, the one route
+	// left for a source whose headers and positions only state times (WMA
+	// Pro, Voice and Lossless in ASF). A later decode of the same file that
+	// delivers less is then the engine disagreeing with itself, not the file
+	// holding less than it said; see Measured.
+	Counted bool
+}
+
+// Measured is a source's length as a measurement found it, in the form a cut
+// or a span is held to it: the count, and whether it came from decoding the
+// file (Length.Counted). The zero value means nobody measured. A measurement
+// of no samples is never carried in one: every caller refuses a file that
+// holds no audio before it has a span to hold to it.
+type Measured struct {
+	Samples int64
+	Counted bool
+}
+
+// Measured is the length as a cut carries it.
+func (l Length) Measured() Measured { return Measured{Samples: l.Samples, Counted: l.Counted} }
+
+// track is the measurement as WaxFlow takes it (waxflow.SliceMeasured): the
+// count and how it was taken, or a track with no length for the zero value,
+// which leaves the source's own declaration alone.
+func (m Measured) track() container.Track {
+	if m.Samples <= 0 {
+		return container.Track{Samples: -1}
+	}
+	return container.Track{Samples: m.Samples, SamplesCounted: m.Counted}
 }
 
 // MeasureLength is the length input really has: the measurement a timeline
-// asks for of a member whose headers only estimate its length, and the one
-// a cut needs of a payload the demuxer walks lazily. The walk is the cheap
-// measurement, frame headers only, and it now settles the count in both
-// directions for every container that has one, confirming or replacing what
-// the headers declared (ADTS, MP3 bare or in a WAV or AIFF-C, Matroska, a
-// fragmented MP4). Only ASF has no walk, so that alone decodes to EOF and
-// counts what the decode delivers. A fallback to the decode path opens and
-// demuxes the file a second time: countFrames needs its own format.Open, not
-// the demuxer walkLength already held. Either way the answer is what a read of
-// the file yields, with the damage the read found. A decode takes a
-// concurrency slot like every other one here and stops at a cancellation.
+// asks for of a member whose headers only estimate its length, and the one a
+// cut or a split needs of a payload the demuxer walks lazily. It is WaxFlow's
+// own measure (waxflow.MeasureLength), which takes the cheapest route the file
+// offers: a length the open already verified costs nothing, a deferred walk
+// reads frame headers (ADTS, MP3 bare or in a WAV or AIFF-C, Matroska, a
+// fragmented MP4, the frame counts of a WMA v1/v2 track), a source that seeks
+// exactly is seeked past its end, and only one whose positions are stated
+// times (WMA Pro, Voice and Lossless) is decoded to its end and counted, which
+// Counted marks. Either way the answer is what a read of the file yields, with
+// the damage the read found. It takes a concurrency slot like every other read
+// here, and every route stops at a cancellation.
 func (r *Runner) MeasureLength(ctx context.Context, input string) (Length, error) {
-	walked, ok, err := r.walkLength(ctx, input)
-	if err != nil || ok {
-		return walked, err
-	}
-	hint := hintFor(input)
-	n, rate, warnings, err := r.countFrames(ctx, input, hint)
+	src, closeSrc, err := openSource(input)
 	if err != nil {
 		return Length{}, err
 	}
-	return Length{Samples: n, Duration: trackDuration(n, rate), Warnings: warnings}, nil
-}
-
-// walkLength measures input by walking it, reporting ok=false when the
-// container has no walk to settle the count with and the caller has to decode.
-// It is MeasureLength's first half, split out so the walk can be tested apart
-// from the decode fallback.
-//
-// A non-Walker settles on its own declaration when that declaration was itself
-// a measurement at open (a FLAC verified against its tail, an Ogg granule), and
-// otherwise gives up: an ASF states a duration nothing checked. A Walker always
-// walks, even one already declaring an exact count, because the walk is what
-// confirms or shrinks that count now and is cheaper than the decode it saves.
-func (r *Runner) walkLength(ctx context.Context, input string) (Length, bool, error) {
-	src, closeSrc, err := openSource(input)
-	if err != nil {
-		return Length{}, false, err
-	}
 	defer closeSrc()
-	// A walk is a full header scan, real work like any decode, so it takes
-	// a concurrency slot too. The slot is released with this call, before
-	// the caller falls through to countFrames, which acquires its own: held
-	// past that point, a concurrency-1 Runner would deadlock against itself.
 	if err := r.acquire(ctx); err != nil {
-		return Length{}, false, err
+		return Length{}, err
 	}
 	defer r.release()
-	hint := hintFor(input)
-	demux, info, err := format.OpenDemuxer(src, hint, nil)
+	med, err := format.Open(src, hintFor(input), nil)
 	if err != nil {
-		return Length{}, false, classifyInputError(err, input)
+		return Length{}, classifyInputError(err, input)
 	}
-	before := info.Default()
-	if _, isWalker := demux.(container.Walker); !isWalker {
-		if !before.SamplesExact {
-			return Length{}, false, nil
+	defer med.Close()
+	t, err := waxflow.MeasureLength(ctx, med)
+	if err != nil {
+		// A cancellation is not bad input: the context's own error keeps it
+		// classified as canceled (exit 130).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Length{}, ctxErr
 		}
-		return lengthOf(before, info), true, nil
+		return Length{}, classifyInputError(err, input)
 	}
-	settled, walkErr, ctxErr := walkDefault(ctx, demux, info, before)
-	switch {
-	case ctxErr != nil:
-		return Length{}, false, ctxErr
-	case walkErr != nil:
-		return Length{}, false, classifyInputError(walkErr, input)
-	case settled.SamplesExact:
-		return lengthOf(settled, info), true, nil
-	}
-	return Length{}, false, nil
+	// The read's own findings: the walk's damage ("the metadata frame declares
+	// N frames but the run holds M", a dropped truncated frame) and its remarks
+	// on a file that is merely imprecise (a one-frame clean shortfall, an
+	// overrun).
+	info := med.Info()
+	return Length{
+		Samples:  t.Samples,
+		Duration: trackDuration(t.Samples, t.Fmt.Rate),
+		Warnings: sourceWarnings(info.Warnings),
+		Notes:    sourceWarnings(info.Notes),
+		Counted:  t.SamplesCounted,
+	}, nil
 }
 
-// walkDefault walks a lazily walked demuxer and returns want as the walk
-// settled it, with info's warnings and notes refolded. A demuxer already walked
-// is left alone and its current track returned.
+// walkDefault finishes a demuxer's deferred walk under ctx and returns want as
+// the walk settled it, with info's warnings and notes refolded. A demuxer that
+// defers none is left alone and its current track returned. Walk is called
+// whether or not Walked already reads true: a walk a read or a seek finished
+// has measured the payload, and only Walk, free by then, puts that on the
+// track.
 //
-// The three returns are separate because the two callers classify them
-// differently: a measurement reports a failed walk as bad input, while a copy
-// cut declines into its re-encode fallback. A cancellation is neither, and it
-// is checked on both sides of the walk because container.Walker.Walk takes no
-// ctx and cannot be interrupted mid-scan; that guard is the only thing bounding
-// it, which is why it lives here rather than at each call site.
+// The three returns are separate because a copy cut declines a failed walk
+// into its re-encode fallback, and a cancellation is not a failed walk: the
+// walk reads ctx before each step and stops with it, and that comes back as
+// ctxErr, the context's own error.
 func walkDefault(ctx context.Context, demux container.Demuxer, info *format.Info, want container.Track) (settled container.Track, walkErr, ctxErr error) {
-	if w, ok := demux.(container.Walker); ok && !w.Walked() {
-		if err := ctx.Err(); err != nil {
-			return want, nil, err
-		}
-		if err := w.Walk(); err != nil {
+	if w, ok := demux.(container.Walker); ok {
+		if err := w.Walk(ctx); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return want, nil, cerr
+			}
 			return want, err, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return want, nil, err
 		}
 	}
 	format.RefreshWarnings(info, demux)
@@ -278,61 +280,6 @@ func walkDefault(ctx context.Context, demux container.Demuxer, info *format.Info
 		}
 	}
 	return want, nil, nil
-}
-
-// lengthOf reports a settled track as a Length, carrying the read's own
-// warnings and notes: the walk's damage ("the metadata frame declares N frames
-// but the run holds M", a dropped truncated frame) and its remarks on a file
-// that is merely imprecise (a one-frame clean shortfall, an overrun).
-func lengthOf(t container.Track, info *format.Info) Length {
-	return Length{
-		Samples:  t.Samples,
-		Duration: trackDuration(t.Samples, t.Fmt.Rate),
-		Warnings: sourceWarnings(info.Warnings),
-		Notes:    sourceWarnings(info.Notes),
-	}
-}
-
-// countFrames reads path to its end and counts the frames the decode
-// delivers, the measurement a timeline asks for of a member whose headers
-// only estimate its length; it is MeasureLength's fallback for a payload no
-// walk can settle (a Xing MP3, an ASF). It is a full decode, so it takes a
-// concurrency slot like every other one here and stops at a cancellation.
-// Besides the count it returns the rate the file was read at and the
-// damage the read found (InputWarnings), which MeasureLength reports as its
-// own.
-func (r *Runner) countFrames(ctx context.Context, path, hint string) (int64, int, []string, error) {
-	if err := r.acquire(ctx); err != nil {
-		return 0, 0, nil, err
-	}
-	defer r.release()
-	src, closeSrc, err := openSource(path)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-	defer closeSrc()
-	m, err := format.Open(src, hint, nil)
-	if err != nil {
-		return 0, 0, nil, classifyInputError(err, path)
-	}
-	defer m.Close()
-	rate := m.Info().Default().Fmt.Rate
-	buf := audio.Get(m.Info().Default().Fmt, 4096)
-	defer audio.Put(buf)
-	var n int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0, 0, nil, err
-		}
-		err := m.ReadChunk(buf)
-		if err == io.EOF {
-			return n, rate, InputWarnings(m), nil
-		}
-		if err != nil {
-			return 0, 0, nil, classifyInputError(err, path)
-		}
-		n += int64(buf.N)
-	}
 }
 
 // openFileMedia opens path as a Media whose Close also closes the underlying

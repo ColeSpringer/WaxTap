@@ -228,13 +228,19 @@ func (r *Runner) remux(ctx context.Context, src container.Source, input, output 
 		return nil, Trim{}, classifyInputError(err, input)
 	}
 	track := info.Default()
-	outFormat, ok := codecToFormat(track.Codec)
+	opts, ok := copyOptions(track, output)
 	if !ok {
 		return nil, Trim{}, remuxDeclined(track.Codec)
 	}
-	opts := waxflow.TranscodeOptions{
-		Format:    outFormat,
-		Container: containerFor(outFormat, hintFor(output)),
+	// Ask before running: the engine declines a copy the stream's own shape
+	// rules out, and its run says only that the source "cannot be remuxed".
+	// The plan is headers and table lookups, and a decline here is explained.
+	plan, err := r.engine.PlanRemux(track, opts)
+	if err != nil {
+		return nil, Trim{}, classifyEngineError(err, input, output)
+	}
+	if plan == nil {
+		return nil, Trim{}, copyDeclined(track, opts.Container)
 	}
 	// The packets move unchanged, so a container with nowhere to state the
 	// source's trim delivers those samples as audio. WaxFlow's ADTS muxer
@@ -249,6 +255,80 @@ func (r *Runner) remux(ctx context.Context, src container.Source, input, output 
 		return nil, Trim{}, classifyEngineError(err, input, output)
 	}
 	return sourceWarnings(tres.InputWarnings), dropped, nil
+}
+
+// copyOptions is the remux a packet copy of track into output's container runs
+// as: WaxFlow's output format for the source codec and the container override
+// the extension asks for. ok is false for a codec no container carries
+// unchanged (remuxDeclined says why).
+func copyOptions(track container.Track, output string) (opts waxflow.TranscodeOptions, ok bool) {
+	outFormat, ok := codecToFormat(track.Codec)
+	if !ok {
+		return waxflow.TranscodeOptions{}, false
+	}
+	return waxflow.TranscodeOptions{Format: outFormat, Container: containerFor(outFormat, hintFor(output))}, true
+}
+
+// CopyPlans reports whether the engine would write input's audio into the
+// container output names as a packet copy: the codec has to be one a
+// container carries unchanged, and the stream's own shape has to survive the
+// trip (Engine.PlanRemux). It reads headers only.
+//
+// It is the question a caller asks before choosing a copy nobody named. A
+// request for a codec the source is already in is delivered as a copy, and
+// when the engine would decline that copy the encoder the request named is
+// what delivers it; an explicit copy is not asked here, since its refusal is
+// the answer the caller wants (Transcode).
+func (r *Runner) CopyPlans(ctx context.Context, input, output string) (bool, error) {
+	src, closeSrc, err := openSource(input)
+	if err != nil {
+		return false, err
+	}
+	defer closeSrc()
+	if err := r.acquire(ctx); err != nil {
+		return false, err
+	}
+	defer r.release()
+	_, info, err := format.OpenDemuxer(src, hintFor(input), nil)
+	if err != nil {
+		return false, classifyInputError(err, input)
+	}
+	track := info.Default()
+	opts, ok := copyOptions(track, output)
+	if !ok {
+		return false, nil
+	}
+	plan, err := r.engine.PlanRemux(track, opts)
+	if err != nil {
+		return false, classifyEngineError(err, input, output)
+	}
+	if plan == nil {
+		r.log.DebugContext(ctx, "the engine declines a packet copy of this stream into this container",
+			"codec", codecName(track.Codec), "container", opts.Container)
+	}
+	return plan != nil, nil
+}
+
+// copyDeclined explains a packet copy the engine's plan declined, for a caller
+// who asked for the copy by name. The reason classifies the engine's answer
+// rather than pre-empting it: the plan was asked first, and only a decline is
+// explained, in the terms of the one shape WaxTap can name.
+func copyDeclined(track container.Track, containerName string) error {
+	name := codecName(track.Codec)
+	if track.Codec == codec.Vorbis && track.Delay > 0 && containerName != "mka" && containerName != "webm" {
+		// Vorbis I A.2: the stream starts before time zero, and a decoder
+		// drops that much from the front. Ogg states it only as the granule
+		// its first page starts at, which WaxFlow's Ogg writer does not write,
+		// so a copy would play the samples the stream says to drop. Matroska
+		// states the trim, and takes the copy.
+		return fmt.Errorf("%w: cannot copy this vorbis stream into Ogg: it starts before time zero (a %d-sample front trim), which a copy into Ogg cannot state; name a .mka output to keep the packets, or pass --format vorbis to re-encode",
+			waxerr.ErrIncompatibleSpec, track.Delay)
+	}
+	into := "this container"
+	if containerName != "" {
+		into = containerName
+	}
+	return fmt.Errorf("%w: cannot copy this %s stream into %s unchanged; pass --format to re-encode", waxerr.ErrIncompatibleSpec, name, into)
 }
 
 // remuxDeclined reports that a codec cannot be packet-copied. PCM gets its own

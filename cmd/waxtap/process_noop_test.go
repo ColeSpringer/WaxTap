@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -101,6 +102,61 @@ func TestTranscodeSameFormatRemux(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "copied without re-encoding") {
 		t.Errorf("missing no-op note on stderr:\n%s", stderr)
+	}
+}
+
+// The same-format shortcut copies a file already in the named format, and
+// steps aside where the engine would decline that copy: a Vorbis stream that
+// starts before time zero cannot go into Ogg unchanged, and the user named an
+// encoder, so the run encodes rather than failing on a copy nobody asked for.
+// An explicit copy of the same file is refused, saying what would work.
+func TestTranscodeSameFormatEncodesWhereTheCopyDeclines(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain.ogg")
+	synthAudio(t, plain, "libvorbis")
+	whole, err := os.ReadFile(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed, _, err := mediatest.FrontTrimVorbis(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(dir, "in.ogg")
+	if err := os.WriteFile(in, trimmed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(dir, "out.ogg")
+	stdout, _, err := runTranscode(t, in, "--format", "vorbis", "-o", out, "--json")
+	if err != nil {
+		t.Fatalf("a named vorbis on a front-trimmed vorbis: %v, want an encode", err)
+	}
+	if transcodedFalse(t, stdout) {
+		t.Errorf("want transcoded:true, the copy being one the engine declines:\n%s", stdout)
+	}
+	if c := probeCodec(t, out); c != "vorbis" {
+		t.Errorf("output codec = %q, want vorbis", c)
+	}
+	_, stderr, err := runTranscode(t, in, "--format", "vorbis", "-o", filepath.Join(dir, "out2.ogg"))
+	if err != nil {
+		t.Fatalf("the same run in human mode: %v", err)
+	}
+	if strings.Contains(stderr, "without re-encoding") {
+		t.Errorf("stderr claims a copy that did not happen:\n%s", stderr)
+	}
+
+	_, _, err = runTranscode(t, in, "--format", "copy", "-o", filepath.Join(dir, "copy.ogg"))
+	if !errors.Is(err, waxtap.ErrIncompatibleSpec) || !strings.Contains(err.Error(), "front trim") {
+		t.Errorf("an explicit copy = %v, want ErrIncompatibleSpec naming the front trim", err)
+	}
+	// Matroska states the trim, so the shortcut still copies into it.
+	stdout, _, err = runTranscode(t, in, "--format", "vorbis", "-o", filepath.Join(dir, "out.mka"), "--json")
+	if err != nil {
+		t.Fatalf("a named vorbis into .mka: %v", err)
+	}
+	if !transcodedFalse(t, stdout) {
+		t.Errorf("want transcoded:false into .mka:\n%s", stdout)
 	}
 }
 

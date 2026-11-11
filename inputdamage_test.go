@@ -383,35 +383,45 @@ func TestProcessAlbumWarnsInputDamageFolded(t *testing.T) {
 	}
 }
 
-// corruptedFixture returns a FLAC whose middle bytes were overwritten in place:
-// the byte count and headers stay intact, so the probe passes it clean, and the
-// damage only surfaces when a decode actually reaches it.
-func corruptedFixture(t *testing.T, dir string) string {
+// corruptedFixture writes name in the given format and returns the intact path
+// and a copy with n bytes overwritten in place, starting 60% in: the byte
+// count and headers stay intact, so the probe passes it clean, and the damage
+// only surfaces when a decode actually reaches it.
+//
+// What the decode then delivers depends on the container. An Ogg Vorbis
+// stream loses the damaged page and whatever its packets held, so the decode
+// comes up short of the declared length. A FLAC resyncs on the next frame and
+// the frame numbers say how much is missing, so the engine fills the hole with
+// silence and the length holds.
+func corruptedFixture(t *testing.T, dir, name string, format TranscodeFormat, n int) (intact, corrupt string) {
 	t.Helper()
-	intact, _ := damagedFixture(t, dir, "in.flac", FormatFLAC)
+	intact, _ = damagedFixture(t, dir, name, format)
 	whole, err := os.ReadFile(intact)
 	if err != nil {
 		t.Fatal(err)
 	}
-	corrupt := filepath.Join(dir, "corrupt.flac")
+	corrupt = filepath.Join(dir, "corrupt-"+name)
 	off := len(whole) * 6 / 10
-	for i := range 512 {
+	if off+n > len(whole) {
+		t.Fatalf("the fixture holds %d bytes, too few to overwrite %d from %d", len(whole), n, off)
+	}
+	for i := range n {
 		whole[off+i] = 0xA5
 	}
 	if err := os.WriteFile(corrupt, whole, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return corrupt
+	return intact, corrupt
 }
 
 // Mid-file corruption is invisible to the probe (same byte count, clean
-// headers, full declared length), so the decode ending early is the only
-// evidence there is. A transcode that silently delivered 60% of the audio at
-// exit 0 was the bug; it now succeeds with the damage reported.
+// headers, full declared length), so the decode coming up short is the
+// evidence of how much went missing. A transcode that silently delivered part
+// of the audio at exit 0 was the bug; it succeeds with the damage reported.
 func TestProcessWarnsShortDecode(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	corrupt := corruptedFixture(t, dir)
+	intact, corrupt := corruptedFixture(t, dir, "in.ogg", FormatVorbis, 512)
 
 	res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
 		Input:       corrupt,
@@ -429,7 +439,7 @@ func TestProcessWarnsShortDecode(t *testing.T) {
 	}
 
 	clean, err := newOfflineClient(t).Process(ctx, ProcessRequest{
-		Input:       filepath.Join(dir, "in.flac"),
+		Input:       intact,
 		ProcessSpec: ProcessSpec{Output: ToFile(filepath.Join(dir, "clean.wav")), Transcode: &TranscodeSpec{Format: FormatWAV}},
 	})
 	if err != nil {
@@ -440,13 +450,112 @@ func TestProcessWarnsShortDecode(t *testing.T) {
 	}
 }
 
+// A FLAC numbers its frames, so the engine knows how much a damaged stretch
+// took and fills it with silence: the output keeps the declared length, the
+// audio after the hole sits where the stream puts it, and the warning carries
+// the engine's own count of what was lost rather than a decode that ended
+// early. An album takes a track whose hole is a frame or so, under the
+// threshold a short decode is held to, and folds the damage into its one
+// warning.
+func TestProcessFillsAFLACHoleWithSilence(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	intact, corrupt := corruptedFixture(t, dir, "in.flac", FormatFLAC, 512)
+
+	samples := func(path string) int64 {
+		t.Helper()
+		a, _ := mustProbeFile(t, c, path).AudioStream()
+		return a.Samples
+	}
+	out := filepath.Join(dir, "out.wav")
+	res, err := c.Process(ctx, ProcessRequest{
+		Input:       corrupt,
+		ProcessSpec: ProcessSpec{Output: ToFile(out), Transcode: &TranscodeSpec{Format: FormatWAV}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v, want the hole filled and the rest delivered", err)
+	}
+	detail := warningDetail(res, WarnInputDamage)
+	if !strings.Contains(detail, "samples lost") {
+		t.Errorf("detail = %q, want the engine's count of the samples the damage took", detail)
+	}
+	if strings.Contains(detail, "did not read") {
+		t.Errorf("detail = %q, want no short-decode note: the length holds", detail)
+	}
+	if got, want := samples(out), samples(intact); got != want {
+		t.Errorf("output holds %d samples, want the declared %d with the hole as silence", got, want)
+	}
+
+	album, err := c.ProcessAlbum(ctx, []AlbumTrack{
+		{Input: intact, Output: filepath.Join(dir, "one.flac")},
+		{Input: corrupt, Output: filepath.Join(dir, "two.flac")},
+	}, -14, TranscodeSpec{Format: FormatFLAC})
+	if err != nil {
+		t.Fatalf("ProcessAlbum: %v, want a track with a frame-sized hole taken", err)
+	}
+	folded := warningIn(album.Warnings, WarnInputDamage)
+	if !strings.Contains(folded, filepath.Base(corrupt)) || !strings.Contains(folded, "samples lost") {
+		t.Errorf("album damage = %q, want it to name %s and the loss", folded, filepath.Base(corrupt))
+	}
+}
+
+// A hole keeps a FLAC's length, so the length cannot say how much of a track
+// the album's gain was measured over. The read's own count of what it lost
+// does: a track that lost more than a short decode is allowed to come up short
+// by is refused, for the reason a short decode is, whether the album is being
+// written or only measured.
+func TestProcessAlbumRefusesATrackWithALargeHole(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	intact, corrupt := corruptedFixture(t, dir, "in.flac", FormatFLAC, 12000)
+
+	// The fixture is what the test says it is: a full-length read that lost
+	// more than the threshold to one hole.
+	single, err := c.Process(ctx, ProcessRequest{
+		Input:       corrupt,
+		ProcessSpec: ProcessSpec{Loudness: &LoudnessSpec{Mode: LoudnessMeasureOnly, Target: -14}},
+	})
+	if err != nil {
+		t.Fatalf("measuring the holed track alone: %v, want it measured with the damage warned", err)
+	}
+	lost := media.SampleTime(media.LostSamples([]string{warningDetail(single, WarnInputDamage)}), 44100)
+	if lost <= 500*time.Millisecond {
+		t.Fatalf("the fixture lost %v to its hole, too little to be refused; damage = %q", lost, warningDetail(single, WarnInputDamage))
+	}
+
+	tracks := []AlbumTrack{
+		{Input: intact, Output: filepath.Join(dir, "one.flac")},
+		{Input: corrupt, Output: filepath.Join(dir, "two.flac")},
+	}
+	check := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnsupportedInput) {
+			t.Fatalf("%s = %v, want ErrUnsupportedInput", what, err)
+		}
+		for _, want := range []string{filepath.Base(corrupt), "reads as silence", "shares one gain"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: err = %q, want it to carry %q", what, err, want)
+			}
+		}
+	}
+	_, err = c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: FormatFLAC})
+	check("ProcessAlbum", err)
+	if _, serr := os.Stat(tracks[0].Output); serr == nil {
+		t.Error("an album refused over one track still wrote another")
+	}
+	_, err = c.MeasureAlbum(ctx, []string{intact, corrupt})
+	check("MeasureAlbum", err)
+}
+
 // The measure-only path has no output to compare, but the meter reports how
-// much audio it read, which is the same evidence: a measurement over 60% of a
+// much audio it read, which is the same evidence: a measurement over part of a
 // track is not a measurement of the track.
 func TestMeasureOnlyWarnsShortDecode(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	corrupt := corruptedFixture(t, dir)
+	_, corrupt := corruptedFixture(t, dir, "in.ogg", FormatVorbis, 512)
 
 	res, err := newOfflineClient(t).Process(ctx, ProcessRequest{
 		Input:       corrupt,
@@ -464,18 +573,18 @@ func TestMeasureOnlyWarnsShortDecode(t *testing.T) {
 	}
 }
 
-// An album refuses a corrupt-middle track rather than warning past it: every
-// track shares one gain, and a gain computed over the 60% that decodes would
-// normalize the whole record against a number that describes nothing. The
-// refusal must name the file, not make the user count members, and it must
-// keep the covered-vs-declared cause.
+// An album refuses a track whose decode comes up short rather than warning
+// past it: every track shares one gain, and a gain computed over the part that
+// decodes would normalize the whole record against a number that describes
+// nothing. The refusal must name the file, not make the user count members,
+// and it must keep the covered-vs-declared cause.
 func TestProcessAlbumRefusesShortDecodeNamingTrack(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	corrupt := corruptedFixture(t, dir)
+	intact, corrupt := corruptedFixture(t, dir, "in.ogg", FormatVorbis, 512)
 
 	_, err := newOfflineClient(t).ProcessAlbum(ctx, []AlbumTrack{
-		{Input: filepath.Join(dir, "in.flac"), Output: filepath.Join(dir, "one.flac")},
+		{Input: intact, Output: filepath.Join(dir, "one.flac")},
 		{Input: corrupt, Output: filepath.Join(dir, "two.flac")},
 	}, -14, TranscodeSpec{Format: FormatFLAC})
 	if err == nil {
@@ -484,8 +593,8 @@ func TestProcessAlbumRefusesShortDecodeNamingTrack(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedInput) {
 		t.Errorf("err = %v, want ErrUnsupportedInput", err)
 	}
-	if !strings.Contains(err.Error(), "corrupt.flac") {
-		t.Errorf("err = %q, want it to name corrupt.flac", err)
+	if !strings.Contains(err.Error(), filepath.Base(corrupt)) {
+		t.Errorf("err = %q, want it to name %s", err, filepath.Base(corrupt))
 	}
 	if !strings.Contains(err.Error(), "covered") || !strings.Contains(err.Error(), "declared") {
 		t.Errorf("err = %q, want the covered-vs-declared cause kept", err)

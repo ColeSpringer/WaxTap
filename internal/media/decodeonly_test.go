@@ -1,7 +1,9 @@
 package media
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"math"
 	"os"
@@ -426,9 +428,9 @@ func TestAnalyzeFileReportsReadDamage(t *testing.T) {
 
 // A member whose headers only estimate its length is measured to its end,
 // with no declaration to hold it to: the group measurement decodes each
-// member itself. The WMA fixture is the advisory case (ASF has no walk, so
-// MeasureLength decodes it), and the group's count for it is what that decode
-// delivers.
+// member itself. The WMA fixture is the advisory case (WMA Lossless counts no
+// frames, so MeasureLength decodes it), and the group's count for it is what
+// that decode delivers.
 func TestAnalyzeGroupMeasuresAnAdvisoryMember(t *testing.T) {
 	r := NewRunner(RunnerConfig{MaxProcs: 1})
 	ctx := context.Background()
@@ -458,5 +460,91 @@ func TestAnalyzeGroupMeasuresAnAdvisoryMember(t *testing.T) {
 	cancel()
 	if _, _, err := r.AnalyzeGroup(canceled, []string{wma, wav}, nil); !errors.Is(err, context.Canceled) {
 		t.Errorf("AnalyzeGroup under a canceled context = %v, want context.Canceled", err)
+	}
+}
+
+// A WavPack stream behind a WAV header, the way files from before 4.0 were
+// written, is refused by name as an input this build does not read. Opened as
+// the PCM its header describes, the compressed bytes would decode as noise.
+func TestWavPackBehindAWAVHeaderIsRefused(t *testing.T) {
+	wav := mediatest.SineWAV(1, 2)
+	at := bytes.Index(wav, []byte("data"))
+	if at < 0 {
+		t.Fatal("no data chunk in the fixture")
+	}
+	head := wav[at+8:]
+	copy(head, "wvpk")
+	binary.LittleEndian.PutUint16(head[8:], 3) // the version field of a pre-4.0 stream
+	in := writeFixture(t, t.TempDir(), "old.wav", wav)
+
+	_, err := NewRunner(RunnerConfig{}).Probe(context.Background(), in)
+	if !errors.Is(err, waxerr.ErrUnsupportedInput) {
+		t.Fatalf("err = %v, want ErrUnsupportedInput", err)
+	}
+	if !strings.Contains(err.Error(), "WavPack") {
+		t.Errorf("err = %q, want the refusal to name WavPack", err)
+	}
+}
+
+// frontTrimmedVorbis writes an Ogg Vorbis stream that starts before time zero
+// (mediatest.FrontTrimVorbis) and returns its path and the trim in samples.
+func frontTrimmedVorbis(t *testing.T, r *Runner, dir string) (string, int64) {
+	t.Helper()
+	plain := filepath.Join(dir, "plain.ogg")
+	if _, err := r.Transcode(context.Background(), wavFixture(t, 2, 2), plain, Spec{Codec: CodecVorbis}); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	whole, err := os.ReadFile(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed, trim, err := mediatest.FrontTrimVorbis(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writeFixture(t, dir, "trimmed.ogg", trimmed), trim
+}
+
+// A Vorbis stream that starts before time zero states a front trim, which
+// Matroska carries and a copy into Ogg cannot. The engine declines that copy,
+// so the plan says no ahead of the run, an explicit copy is refused in terms
+// the caller can act on, and the copy into Matroska keeps the trim.
+func TestCopyOfAFrontTrimmedVorbis(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	in, trim := frontTrimmedVorbis(t, r, dir)
+
+	src, _ := mustProbe(t, r, in).AudioStream()
+	if src.Delay != trim || trim <= 0 {
+		t.Fatalf("the fixture states a %d-sample front trim, want the %d it was built with", src.Delay, trim)
+	}
+
+	ogg, mka := filepath.Join(dir, "copy.ogg"), filepath.Join(dir, "copy.mka")
+	if ok, err := r.CopyPlans(ctx, in, ogg); err != nil || ok {
+		t.Errorf("CopyPlans into Ogg = %v, %v; want the engine's decline", ok, err)
+	}
+	if ok, err := r.CopyPlans(ctx, in, mka); err != nil || !ok {
+		t.Errorf("CopyPlans into Matroska = %v, %v; want a copy", ok, err)
+	}
+
+	_, err := r.Transcode(ctx, in, ogg, Spec{Codec: CodecCopy})
+	if !errors.Is(err, waxerr.ErrIncompatibleSpec) {
+		t.Fatalf("a copy into Ogg = %v, want ErrIncompatibleSpec", err)
+	}
+	for _, want := range []string{"front trim", ".mka", "--format vorbis"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err, want)
+		}
+	}
+	if _, serr := os.Stat(ogg); serr == nil {
+		t.Error("a refused copy left an output behind")
+	}
+
+	if _, err := r.Transcode(ctx, in, mka, Spec{Codec: CodecCopy}); err != nil {
+		t.Fatalf("a copy into Matroska: %v", err)
+	}
+	if got, _ := mustProbe(t, r, mka).AudioStream(); got.Delay != trim || got.Samples != src.Samples {
+		t.Errorf("the Matroska copy states a %d-sample trim over %d samples, want %d over %d", got.Delay, got.Samples, trim, src.Samples)
 	}
 }

@@ -295,9 +295,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// re-encode supersedes it, so it only matters in the pure-copy case.
 	remux := spec.Remux && !transcoding
 
-	// sourceSamples is the count a read of the source delivers, measured only
-	// when the headers merely claim a length.
-	sourceSamples := int64(0)
+	// source is the length a read of the source delivers, measured only when
+	// the headers merely claim one.
+	var source media.Measured
 	if len(spec.Remove) > 0 && probe.LengthClaimed {
 		// The header's length is a claim (a payload the demuxer walks lazily,
 		// an advisory total, or none), and a cut resolved against it can
@@ -306,7 +306,8 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// inside. So the source is measured first and the ranges resolve
 		// against what a read delivers, the way a truncated FLAC's clamped
 		// probe already behaves. A walk settles every input that has one, a
-		// Xing MP3 included; only a WMA costs a decode. A download reaches
+		// Xing MP3 and a WMA v1/v2 included; only WMA Pro, Voice and Lossless
+		// cost a decode. A download reaches
 		// here for a WebM Opus row, whose Matroska open is lazy and states
 		// the Info Duration; an m4a states an exact count and does not.
 		send(StageAnalyzing)
@@ -314,7 +315,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		if lerr != nil {
 			return Result{}, lerr
 		}
-		total, sourceSamples = length.Duration, length.Samples
+		total, source = length.Duration, length.Measured()
 		sourceEmpty = length.Samples == 0
 		probe.Warnings = mergeSourceWarnings(probe.Warnings, length.Warnings)
 		// The walk's own remarks arrive here too: a count off by one clean frame
@@ -346,11 +347,13 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// opening the output. When the probe worked around damage, the duration
 		// here is the clamped one, and the user's ranges were likely written
 		// against the length the header still claims, so the rejection carries
-		// the probe's own note about why the file reads short.
+		// the probe's own notes about why the file reads short. The first few,
+		// not the first: a truncated FLAC reports the bytes it dropped ahead of
+		// the count it came up short of, and the second is the explanation.
 		if !effectiveCut && spec.RejectEmptyRemoval {
 			damage := ""
-			if len(probe.Warnings) > 0 {
-				damage = "; " + probe.Warnings[0]
+			if n := len(probe.Warnings); n > 0 {
+				damage = "; " + strings.Join(probe.Warnings[:min(n, 3)], "; ")
 			}
 			return Result{}, fmt.Errorf("%w: cut ranges %s do not intersect the media (duration %s%s)",
 				waxerr.ErrIncompatibleSpec, formatRanges(spec.Remove), total.Round(time.Second), damage)
@@ -452,6 +455,13 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			spec.Codec = c
 		case namedDecode:
 			// A copy cut would honour neither, and Render never learns the mode.
+			spec.Codec = c
+		case !effectiveCut && !copyPlans(ctx, r, input, output):
+			// The engine would decline this copy for the stream's own shape
+			// (a Vorbis stream that starts before time zero cannot go into
+			// Ogg unchanged). The caller named a codec, not a copy, so the
+			// encoder they named delivers it. A cut asks its own plan and
+			// falls back the same way (keptNamed).
 			spec.Codec = c
 		default:
 			if spec.Keep == KeepCodec {
@@ -642,7 +652,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// true peak both. The plan is WaxFlow's own, so the two cannot disagree.
 		send(StageAnalyzing)
 		if effectiveCut {
-			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, measureFold, sourceSamples)
+			measured, err = loudness.MeasureCut(ctx, r, input, keeps, total, spec.Crossfade, measureFold, source)
 		} else {
 			measured, err = loudness.Measure(ctx, r, input, measureFold)
 		}
@@ -718,7 +728,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				RequireCopyFormat:  remux,
 				SpliceTrims:        spec.CutMode == media.ModeCopyExact,
 				Encode:             fallback,
-				SourceSamples:      sourceSamples,
+				Source:             source,
 			})
 			if err != nil {
 				return err
@@ -889,6 +899,15 @@ func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string,
 		res.OutputProbe = &op
 	}
 	return res, nil
+}
+
+// copyPlans asks the engine whether it would packet-copy input into output's
+// container. A question that fails is answered yes: the copy then runs and
+// reports the failure as its own, where a no here would hide it behind an
+// encode.
+func copyPlans(ctx context.Context, r *media.Runner, input, output string) bool {
+	ok, err := r.CopyPlans(ctx, input, output)
+	return ok || err != nil
 }
 
 // mergeSourceWarnings appends the damage a write's read found to the probe's

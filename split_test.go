@@ -1,8 +1,11 @@
 package waxtap
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -911,5 +914,97 @@ func TestSplitClearsATrackTotalThePlanDoesNotState(t *testing.T) {
 	}
 	if n, total := pieceTag(t, ctx, outs[1], tag.TrackNumber), pieceTag(t, ctx, outs[1], tag.TrackTotal); n != "2" || total != "" {
 		t.Errorf("piece 2 is %q of %q, want 2 of nothing", n, total)
+	}
+}
+
+// A split holds each piece to the length its plan was checked against. A
+// Matroska rip states its length as a duration nothing checked, and one that
+// under-declares (here by half) still holds every track the sheet names. The
+// plan measures the rip and places all three, so each piece has to be cut
+// against that measurement too: the rip's own headers refuse a track past the
+// length they claim, with the pieces before it already written.
+func TestSplitHoldsPiecesToTheMeasuredLength(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := filepath.Join(dir, "rip.mka")
+	if _, err := c.Process(ctx, ProcessRequest{
+		Input:       splitRip(t, dir, "rip.wav"),
+		ProcessSpec: ProcessSpec{Output: ToFile(rip), Transcode: &TranscodeSpec{Format: FormatFLAC}},
+	}); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	// Halve the Info Duration: element 0x4489 holding an 8-byte float.
+	whole, err := os.ReadFile(rip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := bytes.Index(whole[:min(len(whole), 4096)], []byte{0x44, 0x89, 0x88})
+	if at < 0 {
+		t.Fatal("no Duration element in the fixture's head")
+	}
+	d := math.Float64frombits(binary.BigEndian.Uint64(whole[at+3:]))
+	binary.BigEndian.PutUint64(whole[at+3:], math.Float64bits(d/2))
+	if err := os.WriteFile(rip, whole, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	samples := func(path string) int64 {
+		t.Helper()
+		a, _ := mustProbeFile(t, c, path).AudioStream()
+		return a.Samples
+	}
+	if declared := samples(rip); declared >= 176400 {
+		t.Fatalf("the rip declares %d samples; the fixture no longer under-declares past track 3's start", declared)
+	}
+
+	plan, err := c.PlanSplit(ctx, rip, []byte(splitSheet))
+	if err != nil {
+		t.Fatalf("PlanSplit: %v, want the plan made against the measured length", err)
+	}
+	if plan.Duration != 6*time.Second {
+		t.Errorf("Duration = %v, want the measured 6s", plan.Duration)
+	}
+	// A plan rebuilt from its exported fields, as a caller that stored one
+	// would hand it back, carries no measurement. Split takes one itself
+	// rather than hold the pieces to the header.
+	rebuilt := &SplitPlan{
+		Input: plan.Input, SheetFile: plan.SheetFile, Rate: plan.Rate, Duration: plan.Duration,
+		Album: plan.Album, Pieces: plan.Pieces, Skipped: plan.Skipped, TrackTotal: plan.TrackTotal,
+	}
+	for name, p := range map[string]*SplitPlan{"planned": plan, "rebuilt": rebuilt} {
+		outs := []string{filepath.Join(dir, name+"-1.flac"), filepath.Join(dir, name+"-2.flac"), filepath.Join(dir, name+"-3.flac")}
+		if _, err := c.Split(ctx, p, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
+			t.Fatalf("Split of the %s plan: %v, want every piece the plan placed written", name, err)
+		}
+		for i, out := range outs {
+			if got := samples(out); got != 88200 {
+				t.Errorf("%s plan: piece %d holds %d samples, want 88200", name, i+1, got)
+			}
+		}
+	}
+}
+
+// A measurement is about one rip. A plan pointed at another file after it was
+// made is held to that file's own length, not to the one the plan measured.
+func TestSplitDoesNotCarryAMeasurementToAnotherRip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	plan, err := c.PlanSplit(ctx, splitRip(t, dir, "rip.wav"), []byte(splitSheet))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As if the first rip had measured longer than it is.
+	plan.measured = media.Measured{Samples: 10 * 44100}
+	other := splitRip(t, dir, "other.wav")
+	plan.Input = other
+	held, err := plan.held(ctx, c.engine())
+	if err != nil || held != (media.Measured{}) {
+		t.Errorf("held = %+v, %v; want the other rip's own exact length to bound the pieces", held, err)
+	}
+	outs := []string{filepath.Join(dir, "1.flac"), filepath.Join(dir, "2.flac"), filepath.Join(dir, "3.flac")}
+	if _, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
+		t.Fatalf("Split: %v", err)
 	}
 }

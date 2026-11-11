@@ -74,15 +74,16 @@ type CutSpec struct {
 	// explicit copy request rather than re-encoding.
 	SpliceTrims bool
 	Encode      Spec
-	// SourceSamples is the frame count a read of the source delivers, when the
-	// caller measured it (Runner.MeasureLength) because the headers only claim a
+	// Source is the length a read of the source delivers, when the caller
+	// measured it (Runner.MeasureLength) because the headers only claim a
 	// length. The composed timeline holds every span to it, in both directions:
 	// a span reaching the end asks for what the file has, and a file holding
 	// more than its headers declare gives up the declaration, not the audio.
-	// 0 means the caller did not measure, and Render measures the source itself
-	// rather than plan a bounded span against a number nothing confirmed; a file
-	// whose headers state an exact count is not measured either way.
-	SourceSamples int64
+	// The zero value means the caller did not measure, and Render measures the
+	// source itself rather than plan a bounded span against a number nothing
+	// confirmed; a file whose headers state an exact count is not measured
+	// either way.
+	Source Measured
 }
 
 // requireCopy reports whether either explicit copy request is in force.
@@ -359,8 +360,13 @@ func (r *Runner) cutRemux(ctx context.Context, src container.Source, hint, outEx
 		// answers for free.
 		return r.declineCopy(spec, DeclinedCodec)
 	}
-	grid, err := r.engine.PacketGrid(src, hint)
+	// The grid is a read of every packet, which stops with ctx; that is a
+	// cancellation, not a file the engine could not read.
+	grid, err := r.engine.PacketGrid(ctx, src, hint)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return remuxOutcome{}, ctxErr
+		}
 		return remuxOutcome{}, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	// Walk a lazily walked demuxer before planning, now that the codec is one
@@ -519,7 +525,7 @@ func absDiff(a, b int64) int64 {
 func (r *Runner) cutReencode(ctx context.Context, input string, src container.Source, hint, outExt string, spec CutSpec, dst *tempfile.File) (Levels, []string, error) {
 	// Composing may measure the source, which takes a slot; the encode below
 	// takes its own once the composition is built.
-	med, err := r.openComposed(ctx, input, src, hint, spec.Keeps, spec.Total, spec.Crossfade, spec.SourceSamples)
+	med, err := r.openComposed(ctx, input, src, hint, spec.Keeps, spec.Total, spec.Crossfade, spec.Source)
 	if err != nil {
 		return Levels{}, nil, err
 	}
@@ -544,60 +550,64 @@ func (r *Runner) cutReencode(ctx context.Context, input string, src container.So
 // several. The caller closes the returned Media.
 //
 // It probes the source's rate to convert the time-domain keeps to sample
-// spans. sourceSamples is 0 or the count a caller's Runner.MeasureLength
-// delivered; see CutSpec.SourceSamples. A source whose headers only claim a
-// length and that the caller did not measure is measured here, so no bounded
-// span is ever planned against a number nothing confirmed; input names the file
-// that measurement reads. The measurement takes a concurrency slot, so a caller
+// spans. source is the zero value or what a caller's Runner.MeasureLength
+// delivered; see CutSpec.Source. A source whose headers only claim a length and
+// that the caller did not measure is measured here, so no bounded span is ever
+// planned against a number nothing confirmed; input names the file that
+// measurement reads. The measurement takes a concurrency slot, so a caller
 // holding one must not reach here.
-func (r *Runner) openComposed(ctx context.Context, input string, src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration, sourceSamples int64) (format.Media, error) {
+//
+// ctx outlives the call: each span seeks to its start on its first read, which
+// can be a walk of the payload (an MP3's frame index, a WMA's frame counts),
+// and a read carries no context of its own, so the span keeps this one to stop
+// that walk with (waxflow.SliceMeasured).
+func (r *Runner) openComposed(ctx context.Context, input string, src container.Source, hint string, keeps []cutrange.Range, total time.Duration, crossfade time.Duration, source Measured) (format.Media, error) {
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 	}
 	track := info.Default()
-	// measured, not sourceSamples > 0: a file that holds no frames measures as
-	// zero, and reverting to the header's claim there would plan the one span
-	// shape WaxFlow reports as a blind request rather than a damaged file.
-	measured := sourceSamples > 0
-	if !measured && lengthClaimed(demux, track) {
+	if source.Samples <= 0 && lengthClaimed(demux, track) {
 		// Nobody measured, and the headers only claim: measure now. The caller
 		// asked for a cut of this file, not for a guess about its length.
 		length, lerr := r.MeasureLength(ctx, input)
 		if lerr != nil {
 			return nil, lerr
 		}
-		sourceSamples, measured = length.Samples, true
+		if length.Samples == 0 {
+			// Measured, and empty. Planning on would fall back to the header's
+			// claim, the one span shape WaxFlow reports as a blind request
+			// rather than as the file it is.
+			return nil, fmt.Errorf("%w: the input holds no audio frames, so there is nothing to cut", waxerr.ErrUnsupportedInput)
+		}
+		source = length.Measured()
 	}
+	// held is the measurement as every opened media is held to it, so the
+	// span's own up-front check accepts every span the plan holds and an
+	// overrun reports as the damaged file it is rather than as a span built
+	// blind. Unmeasured, it leaves the source's declaration alone.
+	//
 	// bound is what a bounded span is clamped under. The measurement is it,
 	// alone: MeasureLength returns the count the run enforces, already settled
 	// against the declaration (container.SettleLength clamps a capped track to
 	// what its packets hold and takes the raw run for one that only claimed a
 	// length), so re-clamping here could only subtract from an answer that is
 	// already the truth.
+	held := source.track()
 	bound := track.Samples
-	if measured {
-		bound = sourceSamples
-		track.Samples, track.SamplesAdvisory, track.SamplesExact = sourceSamples, false, true
+	if held.Samples >= 0 {
+		bound = held.Samples
+		track.Samples, track.SamplesAdvisory, track.SamplesExact, track.SamplesCounted = held.Samples, false, true, held.SamplesCounted
 	}
 	// An open-ended final span inherits the track's own claim about its
 	// length, and a Concat refuses one that is advisory (a WMA nobody
 	// measured) or absent altogether (raw ADTS, MP3 in an AIFF-C, both
 	// SamplesAdvisory false with no claim at all), so the open form is used
-	// only where the count is trusted or measured.
+	// only where the count is trusted or measured. An open span is held to an
+	// exact length all the same: a source that ends short of it without
+	// reporting damage fails the read rather than delivering a short cut.
 	openEnded := !track.SamplesAdvisory && track.Samples >= 0
 	rate := track.Fmt.Rate
-
-	// measured wraps each opened media in the count this cut was planned
-	// against, so the slice's own up-front check accepts every span the plan
-	// holds and an overrun reports as the damaged file it is rather than as a
-	// span built blind. It is a no-op when nothing was measured.
-	hold := func(m format.Media) format.Media {
-		if !measured {
-			return m
-		}
-		return waxflow.MeasuredMedia(m, sourceSamples)
-	}
 
 	if len(keeps) == 1 {
 		from, to := sampleBounds(keeps[0], total, rate, bound, openEnded)
@@ -605,12 +615,7 @@ func (r *Runner) openComposed(ctx context.Context, input string, src container.S
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", waxerr.ErrUnsupportedInput, err)
 		}
-		sl, err := waxflow.Slice(hold(med), from, to)
-		if err != nil {
-			med.Close()
-			return nil, err
-		}
-		return sl, nil
+		return waxflow.SliceMeasured(ctx, med, held, from, to) // closes med on error
 	}
 
 	members := make([]waxflow.ConcatSource, len(keeps))
@@ -625,7 +630,7 @@ func (r *Runner) openComposed(ctx context.Context, input string, src container.S
 			if err != nil {
 				return nil, err
 			}
-			return waxflow.Slice(hold(m), from, to)
+			return waxflow.SliceMeasured(ctx, m, held, from, to)
 		}}
 	}
 	xfade := int64(0)
@@ -636,15 +641,17 @@ func (r *Runner) openComposed(ctx context.Context, input string, src container.S
 }
 
 // OpenComposed opens the cut-composed Media for measurement (loudness), without
-// re-encoding. The caller closes it. sourceSamples is 0 or the count a
-// caller's Runner.MeasureLength delivered; see CutSpec.SourceSamples; a source
-// whose headers only claim a length is measured here when it is 0.
-func (r *Runner) OpenComposed(ctx context.Context, input string, keeps []cutrange.Range, total, crossfade time.Duration, sourceSamples int64) (format.Media, func() error, error) {
+// re-encoding. The caller closes it. source is the zero value or what a
+// caller's Runner.MeasureLength delivered; see CutSpec.Source; a source whose
+// headers only claim a length is measured here when it is zero. ctx bounds
+// the reads the returned Media makes to reach each span, so it must outlive
+// them.
+func (r *Runner) OpenComposed(ctx context.Context, input string, keeps []cutrange.Range, total, crossfade time.Duration, source Measured) (format.Media, func() error, error) {
 	src, closeSrc, err := openSource(input)
 	if err != nil {
 		return nil, nil, err
 	}
-	med, err := r.openComposed(ctx, input, src, hintFor(input), keeps, total, crossfade, sourceSamples)
+	med, err := r.openComposed(ctx, input, src, hintFor(input), keeps, total, crossfade, source)
 	if err != nil {
 		_ = closeSrc()
 		return nil, nil, err

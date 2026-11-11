@@ -59,6 +59,10 @@ type Loudness struct {
 	// hold the measurement against the probed length: a decode that ends early
 	// on a probe-clean file leaves this as the only evidence.
 	Duration time.Duration
+	// Lost is how much of Duration is silence the engine delivered where
+	// damage took samples (media.LostSamples over Warnings): the length holds
+	// through such a hole, so Duration alone would call the read complete.
+	Lost time.Duration
 	// Warnings is the input damage the measurement's read found, in the
 	// source's own terms (waxflow.AnalyzeResult.InputWarnings, folded by
 	// media.Result.InputWarnings' rule), complete as of the end of the
@@ -101,6 +105,7 @@ func fromResult(res *waxflow.AnalyzeResult) Loudness {
 	}
 	if res.Format.Rate > 0 {
 		l.Duration = time.Duration(float64(res.Samples) / float64(res.Format.Rate) * float64(time.Second))
+		l.Lost = media.SampleTime(media.LostSamples(res.InputWarnings), res.Format.Rate)
 	}
 	return l
 }
@@ -119,11 +124,11 @@ func Measure(ctx context.Context, r *media.Runner, input string, channels int) (
 // MeasureCut measures the loudness of the cut-composed audio, so the gain matches
 // the bytes a fused cut+encode will produce. keeps are the retained spans on the
 // source timeline; total is the source duration; channels folds the measurement
-// to a downmix target (0 keeps the source layout). sourceSamples is 0 or the
-// count a prior media.Runner.MeasureLength(input) delivered, when the source's
-// headers only claim a length; see media.CutSpec.SourceSamples.
-func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutrange.Range, total, crossfade time.Duration, channels int, sourceSamples int64) (Loudness, error) {
-	med, closer, err := r.OpenComposed(ctx, input, keeps, total, crossfade, sourceSamples)
+// to a downmix target (0 keeps the source layout). source is the zero value or
+// what a prior media.Runner.MeasureLength(input) delivered, when the source's
+// headers only claim a length; see media.CutSpec.Source.
+func MeasureCut(ctx context.Context, r *media.Runner, input string, keeps []cutrange.Range, total, crossfade time.Duration, channels int, source media.Measured) (Loudness, error) {
+	med, closer, err := r.OpenComposed(ctx, input, keeps, total, crossfade, source)
 	if err != nil {
 		return Loudness{}, err
 	}

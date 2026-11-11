@@ -109,8 +109,9 @@ EBU R128's gates run over every track's blocks at once rather than over a
 concatenation: a mono track is measured as mono, not as the dual-mono a stereo
 timeline would make of it, and a track whose channel positions differ from its
 neighbours' is measured as it is. A track that does not read to the length its
-container states exactly is refused, naming the file: every track shares one
-gain, and one derived from part of a track describes nothing. Loudness uses
+container states exactly, or that reads to it with more than half a second of
+silence where damage took the audio, is refused, naming the file: every track
+shares one gain, and one derived from part of a track describes nothing. Loudness uses
 EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
@@ -177,7 +178,10 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   is copied rather than re-encoded, a URL's once the download is staged, so
   `transcode <url> out.opus` and `download --format opus` keep an Opus delivery
   and say so; `--force` is the request to encode it anyway. An accurate cut, a
-  crossfade, and a fold always run the encoder.
+  crossfade, and a fold always run the encoder, and so does a copy the stream's
+  own shape rules out (a Vorbis stream that starts before time zero cannot go
+  into Ogg unchanged); `--format copy` of such a stream is refused, naming the
+  container that takes it.
 - `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
   Names are case-insensitive and trimmed, and a few spellings are aliases:
   `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff,
@@ -192,7 +196,10 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   frames, Microsoft ADPCM in WAV and MP4/MOV, and uncompressed PCM in
   MP4/MOV. WMA, Musepack, G.711, and ADPCM are decode-only, so
   `--format copy` on one is refused; an MP3 carried in a WAV or MP4 copies
-  out to a bare `.mp3`. Chapters (ASF markers, SV8 chapter packets) carry
+  out to a bare `.mp3`. WavPack is read from its own `.wv` file, 4.0 and
+  later: a stream behind a WAV header, as files from before 4.0 were written,
+  and a bare pre-4.0 stream are refused by name rather than read as noise.
+  Chapters (ASF markers, SV8 chapter packets) carry
   like any other input's. `--format copy` is refused on WAV and AIFF (PCM
   belongs to its container), and a same-container PCM request is delivered as a
   byte copy with `same-format-copied`; `--bit-depth`, `--downmix`, and
@@ -385,7 +392,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `implicit-downmix` | the encoder folded channels the request never asked to lose |
 | `output-clipping` | the delivered file's level is past full scale |
 | `implicit-lossy` | the output container could not carry the source codec, so a lossy encoder the request never named ran (a `cut`, or an extension-named output with no `--format`) |
-| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered |
+| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered, with silence the length of whatever a FLAC lost |
 | `loudness-unmeasurable` | an integrated loudness came back non-finite; the detail names the side and the cause |
 | `source-policy-unmatched` | `--source-policy prefer:<codec>` named a family this video does not offer |
 | `empty-input` | the input's audio track holds no frames |

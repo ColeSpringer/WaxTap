@@ -10,8 +10,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -891,7 +893,7 @@ func probeSampleFormat(t *testing.T, r *Runner, path string) audio.Format {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	defer closeSrc()
-	info, err := r.Engine().Probe(src, hintFor(path), nil)
+	info, err := r.Engine().Probe(context.Background(), src, hintFor(path), nil)
 	if err != nil {
 		t.Fatalf("probe %s: %v", path, err)
 	}
@@ -1330,7 +1332,7 @@ func TestProbeReportsClaimedLength(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
 	wma := filepath.Join(dir, "lossless.wma")
-	// an advisory total, no walker
+	// an advisory total, and a codec with no frame counts to walk
 	if err := os.WriteFile(wma, mediatest.LosslessWMA(), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1394,8 +1396,126 @@ func TestShortDecodeNotes(t *testing.T) {
 	}
 }
 
+// LostSamples reads the size of a hole out of the engine's own finding, which
+// is the only place the engine states it. This holds the reading to the
+// wording on a real hole: a FLAC with a stretch overwritten mid-file reads to
+// its declared length, and the count LostSamples takes from that read's
+// warnings is exactly the silence that stands in the output for the frames
+// that went.
+func TestLostSamplesReadsTheEnginesCount(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	intact := encodedFixture(t, dir, CodecFLAC)
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := len(whole) * 6 / 10
+	for i := range 512 {
+		whole[off+i] = 0xA5
+	}
+	holed := writeFixture(t, dir, "holed.flac", whole)
+
+	res, err := r.AnalyzeFile(ctx, holed, 0)
+	if err != nil {
+		t.Fatalf("AnalyzeFile: %v", err)
+	}
+	lost := LostSamples(res.InputWarnings)
+	if lost <= 0 {
+		t.Fatalf("LostSamples = %d over %q; the engine's wording for a hole has moved", lost, res.InputWarnings)
+	}
+	declared, _ := mustProbe(t, r, intact).AudioStream()
+	if res.Samples != declared.Samples {
+		t.Fatalf("the holed read delivered %d samples, want the declared %d with silence in the hole", res.Samples, declared.Samples)
+	}
+	// The hole is whole frames of digital silence: count the silent samples
+	// of the decode and they cover what the read says it lost.
+	if silent := silentFrames(t, holed); silent < lost {
+		t.Errorf("the decode holds %d silent samples, fewer than the %d the read says it lost", silent, lost)
+	}
+	if clean, err := r.AnalyzeFile(ctx, intact, 0); err != nil || LostSamples(clean.InputWarnings) != 0 {
+		t.Errorf("a clean read lost %d samples (err %v)", LostSamples(clean.InputWarnings), err)
+	}
+
+	// Both wordings the engine uses, summed across findings, and nothing from
+	// a finding that took no samples.
+	got := LostSamples([]string{
+		"1291 bytes are not a valid frame, dropped: 4096 samples lost (offset 27234)",
+		"the frames skip from sample 8192 to 12288: 4096 samples lost (offset 9000)",
+		"462 trailing bytes are not a valid frame, dropped (offset 27234)",
+	})
+	if got != 8192 {
+		t.Errorf("LostSamples = %d, want 8192", got)
+	}
+	if note := LostAudioNote(SampleTime(lost, declared.SampleRate)); note != "" {
+		t.Errorf("a frame-sized hole drew %q; it is under the threshold a short decode is held to", note)
+	}
+	if note := LostAudioNote(time.Second); !strings.Contains(note, "reads as silence") {
+		t.Errorf("LostAudioNote(1s) = %q, want it to say the loss reads as silence", note)
+	}
+}
+
+// silentFrames decodes path and counts the frames in which every channel is
+// digital silence.
+func silentFrames(t *testing.T, path string) int64 {
+	t.Helper()
+	m, err := openFileMedia(path, hintFor(path))
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer m.Close()
+	buf := audio.Get(m.Info().Default().Fmt, 4096)
+	defer audio.Put(buf)
+	var n int64
+	for {
+		err := m.ReadChunk(buf)
+		if err == io.EOF {
+			return n
+		}
+		if err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		for i := range buf.N {
+			silent := true
+			for ch := range buf.Fmt.Channels {
+				if buf.I[ch*buf.Stride+i] != 0 {
+					silent = false
+				}
+			}
+			if silent {
+				n++
+			}
+		}
+	}
+}
+
+// decodedFrames reads path to its end and counts the frames the decode
+// delivers: the independent count a measurement is checked against.
+func decodedFrames(t *testing.T, path string) int64 {
+	t.Helper()
+	m, err := openFileMedia(path, hintFor(path))
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer m.Close()
+	buf := audio.Get(m.Info().Default().Fmt, 4096)
+	defer audio.Put(buf)
+	var n int64
+	for {
+		err := m.ReadChunk(buf)
+		if err == io.EOF {
+			return n
+		}
+		if err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		n += int64(buf.N)
+	}
+}
+
 // The measured length is what a lazily walked payload really has. The walk
-// settles it for both codecs now: it replaces a Xing count it came up short of
+// settles it for both codecs: it replaces a Xing count it came up short of
 // and drops a final frame whose declared span runs past the data end, so the
 // walked count and an independent decode agree to the sample.
 //
@@ -1446,12 +1566,12 @@ func TestMeasureLengthOfTruncatedPayloads(t *testing.T) {
 		// span runs past the data end rather than counting it, so a walked count
 		// and a decoded one agree to the sample; any gap at all is a real
 		// mismeasurement.
-		decoded, _, _, derr := r.countFrames(context.Background(), cut, hintFor(cut))
-		if derr != nil {
-			t.Fatalf("%s: decode: %v", codec, derr)
-		}
-		if decoded != short.Samples {
+		if decoded := decodedFrames(t, cut); decoded != short.Samples {
 			t.Errorf("%s: MeasureLength %d, decode %d: the walk and the decode must agree", codec, short.Samples, decoded)
+		}
+		// Both payloads have a walk, so neither measurement is a decode.
+		if short.Counted || full.Counted {
+			t.Errorf("%s: Counted = %v (truncated), %v (intact); a frame walk measures these, not a decode", codec, short.Counted, full.Counted)
 		}
 		// A truncated file is damaged, and the measurement that found the
 		// shortfall is the one that has to say so.
@@ -1461,10 +1581,10 @@ func TestMeasureLengthOfTruncatedPayloads(t *testing.T) {
 	}
 }
 
-// TestMeasureLengthWalksAXingMP3 covers the case the walk used to refuse to
-// settle: an MP3 whose Xing frame declares the intact length over a payload
-// that stops early. The walk now replaces that count with what it found, so the
-// measurement costs a header scan rather than a decode, and it says why.
+// TestMeasureLengthWalksAXingMP3 covers an MP3 whose Xing frame declares the
+// intact length over a payload that stops early. The walk replaces that count
+// with what it found, so the measurement costs a header scan rather than a
+// decode, and it says why.
 func TestMeasureLengthWalksAXingMP3(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
@@ -1477,19 +1597,15 @@ func TestMeasureLengthWalksAXingMP3(t *testing.T) {
 	if err := os.WriteFile(cut, whole[:len(whole)*61/100], 0o644); err != nil {
 		t.Fatal(err)
 	}
-	walked, ok, err := r.walkLength(context.Background(), cut)
+	walked, err := r.MeasureLength(context.Background(), cut)
 	if err != nil {
-		t.Fatalf("walkLength: %v", err)
+		t.Fatalf("MeasureLength: %v", err)
 	}
-	if !ok {
-		t.Fatal("walkLength did not settle a Xing MP3's count; the measurement fell back to a decode")
+	if walked.Counted {
+		t.Fatal("the walk did not settle a Xing MP3's count; the measurement fell back to a decode")
 	}
-	decoded, _, _, err := r.countFrames(context.Background(), cut, hintFor(cut))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if walked.Samples != decoded {
-		t.Errorf("walked %d, decoded %d: the walk is the measurement now, so the two must agree", walked.Samples, decoded)
+	if decoded := decodedFrames(t, cut); walked.Samples != decoded {
+		t.Errorf("walked %d, decoded %d: the walk is the measurement, so the two must agree", walked.Samples, decoded)
 	}
 	joined := strings.Join(walked.Warnings, "; ")
 	if !strings.Contains(joined, "declares") {
@@ -1500,29 +1616,159 @@ func TestMeasureLengthWalksAXingMP3(t *testing.T) {
 	}
 }
 
-// TestMeasureLengthReleasesWalkSlotBeforeDecodeFallback covers a Runner
-// bounded to one concurrent operation: a WMA is the one container with no walk
-// to settle its count, so the measurement falls straight through to
-// countFrames, which acquires its own slot. If walkLength held its slot past
-// its return, this would deadlock instead of returning.
-func TestMeasureLengthReleasesWalkSlotBeforeDecodeFallback(t *testing.T) {
+// TestMeasureLengthCountsALosslessWMAByDecoding covers the one route that
+// decodes: WMA Lossless states its positions as times and counts no frames, so
+// its length is what a decode to the end delivers, and the measurement says so
+// (Counted), which is what lets a later shortfall be told from a damaged file.
+// The Runner is bounded to one concurrent operation: the measurement is one
+// read under one slot, and it must not wait on a second.
+func TestMeasureLengthCountsALosslessWMAByDecoding(t *testing.T) {
 	r := NewRunner(RunnerConfig{MaxProcs: 1})
 	wma := filepath.Join(t.TempDir(), "in.wma")
 	if err := os.WriteFile(wma, mediatest.LosslessWMA(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	type answer struct {
+		length Length
+		err    error
+	}
+	done := make(chan answer, 1)
 	go func() {
-		defer close(done)
-		if _, err := r.MeasureLength(context.Background(), wma); err != nil {
-			t.Errorf("MeasureLength: %v", err)
-		}
+		l, err := r.MeasureLength(context.Background(), wma)
+		done <- answer{l, err}
 	}()
 	select {
-	case <-done:
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("MeasureLength: %v", got.err)
+		}
+		if !got.length.Counted {
+			t.Error("Counted = false; a WMA Lossless length is a decode's count")
+		}
+		if decoded := decodedFrames(t, wma); got.length.Samples != decoded {
+			t.Errorf("MeasureLength %d, decode %d", got.length.Samples, decoded)
+		}
+		if m := got.length.Measured(); m.Samples != got.length.Samples || !m.Counted {
+			t.Errorf("Measured() = %+v, want the count and its route", m)
+		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("MeasureLength did not return: the walk's concurrency slot outlived its closure and deadlocked against countFrames")
+		t.Fatal("MeasureLength did not return at concurrency one")
 	}
+}
+
+// TestMeasureLengthWalksAWMAFrameCount covers the walk WMA v1/v2 has: the
+// superframes count their own frames, so the length an ASF header only rounds
+// to a millisecond is settled by reading packet headers, and it is the count a
+// decode delivers, more than the header declares on this fixture.
+func TestMeasureLengthWalksAWMAFrameCount(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	wma := filepath.Join(t.TempDir(), "in.wma")
+	if err := os.WriteFile(wma, mediatest.ChapteredWMA(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := r.Probe(ctx, wma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared, _ := pr.AudioStream()
+	if !pr.LengthClaimed || !declared.SamplesAdvisory {
+		t.Fatalf("probe = %+v claimed %v; want an advisory length reported as a claim", declared, pr.LengthClaimed)
+	}
+	got, err := r.MeasureLength(ctx, wma)
+	if err != nil {
+		t.Fatalf("MeasureLength: %v", err)
+	}
+	if got.Counted {
+		t.Error("Counted = true; a WMA v1/v2 track is measured by its frame counts, not a decode")
+	}
+	if decoded := decodedFrames(t, wma); got.Samples != decoded {
+		t.Errorf("MeasureLength %d, decode %d: the frame counts and the decode must agree", got.Samples, decoded)
+	}
+	if got.Samples <= declared.Samples {
+		t.Errorf("measured %d against a declared %d; the fixture's header no longer under-declares", got.Samples, declared.Samples)
+	}
+}
+
+// walkEndingContext is a context that ends the first time a walk reads it:
+// container.WalkCanceled is what every walk reads its context through, before
+// each of its steps, so a cancellation delivered there arrives part-way
+// through a walk whatever else reads the context before or after. The cancel
+// is a real one, so anything waiting on Done or derived from this context
+// sees it too.
+type walkEndingContext struct {
+	context.Context
+	cancel context.CancelFunc
+	ended  atomic.Bool
+}
+
+func endsInAWalk() *walkEndingContext {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &walkEndingContext{Context: ctx, cancel: cancel}
+}
+
+func (c *walkEndingContext) Err() error {
+	if !c.ended.Load() && calledFrom("container.WalkCanceled") {
+		c.ended.Store(true)
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// calledFrom reports whether a function whose name ends in name is on the
+// calling goroutine's stack.
+func calledFrom(name string) bool {
+	pcs := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, name) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// A walk stops with its context, and a stopped walk is a cancellation: the
+// engine reports it under its own code from inside the read, and classifying
+// that as bad input would turn a Ctrl-C into "unsupported or unreadable
+// input" at exit 2. Both walks a cut runs are covered: the frame walk a
+// measurement takes, and the read of every packet a copy cut plans from.
+func TestAWalkStoppedByItsContextIsACancellation(t *testing.T) {
+	dir := t.TempDir()
+	check := func(t *testing.T, ctx *walkEndingContext, err error) {
+		t.Helper()
+		if !ctx.ended.Load() {
+			t.Fatalf("no walk read the context, so nothing was stopped part-way; err = %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if errors.Is(err, waxerr.ErrUnsupportedInput) {
+			t.Errorf("err = %v, want no bad-input sentinel on a cancellation", err)
+		}
+	}
+	t.Run("measure", func(t *testing.T) {
+		ctx := endsInAWalk()
+		_, err := NewRunner(RunnerConfig{}).MeasureLength(ctx, encodedFixture(t, dir, CodecMP3))
+		check(t, ctx, err)
+	})
+	t.Run("copy cut", func(t *testing.T) {
+		ctx := endsInAWalk()
+		out := filepath.Join(dir, "cut.opus")
+		_, err := NewRunner(RunnerConfig{}).Render(ctx, encodedFixture(t, dir, CodecOpus), out, CutSpec{
+			Keeps:   []cutrange.Range{{Start: 0, End: 500 * time.Millisecond}, {Start: time.Second, End: 2 * time.Second}},
+			Total:   2 * time.Second,
+			CopyCut: true,
+			Encode:  Spec{Codec: CodecOpus},
+		})
+		check(t, ctx, err)
+		if _, serr := os.Stat(out); serr == nil {
+			t.Error("a canceled cut left an output behind")
+		}
+	})
 }
 
 // A dead context never gets a concurrency slot. A select picks at random among
@@ -1545,10 +1791,10 @@ func TestAcquireRefusesACanceledContext(t *testing.T) {
 	}
 }
 
-// TestOpenComposedHoldsSpansToSourceSamples covers the cut-composition half of
+// TestOpenComposedHoldsSpansToTheMeasure covers the cut-composition half of
 // MeasureLength: a truncated MP3 still declares its full Xing duration, so a
 // keep that reaches it asks OpenComposed for more than the file holds. Handing
-// over the measured count (sourceSamples) makes such a span run open-ended
+// over the measurement (source) makes such a span run open-ended
 // instead of to the untrustworthy declared total, so the read reaches the
 // file's real end cleanly rather than hitting the "source ended... its cut
 // points do not describe this file" refusal.
@@ -1561,7 +1807,7 @@ func TestAcquireRefusesACanceledContext(t *testing.T) {
 // the last subtest hands one over deliberately, and the overrun reports as the
 // damaged file it is (CodeMalformedInput, exit 2), never as a request built
 // blind.
-func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
+func TestOpenComposedHoldsSpansToTheMeasure(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -1584,9 +1830,9 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 		t.Fatalf("measure: %v", err)
 	}
 
-	readToEOF := func(t *testing.T, keeps []cutrange.Range, sourceSamples int64) error {
+	readToEOF := func(t *testing.T, keeps []cutrange.Range, source Measured) error {
 		t.Helper()
-		med, closer, err := r.OpenComposed(ctx, cut, keeps, total, 0, sourceSamples)
+		med, closer, err := r.OpenComposed(ctx, cut, keeps, total, 0, source)
 		if err != nil {
 			return err
 		}
@@ -1609,12 +1855,12 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 	}
 
 	t.Run("single keep to total", func(t *testing.T) {
-		if err := readToEOF(t, []cutrange.Range{{Start: 0, End: total}}, length.Samples); err != nil {
+		if err := readToEOF(t, []cutrange.Range{{Start: 0, End: total}}, length.Measured()); err != nil {
 			t.Fatalf("ReadChunk: %v", err)
 		}
 	})
 	t.Run("two keeps, second to total", func(t *testing.T) {
-		if err := readToEOF(t, multiKeeps, length.Samples); err != nil {
+		if err := readToEOF(t, multiKeeps, length.Measured()); err != nil {
 			t.Fatalf("ReadChunk: %v", err)
 		}
 	})
@@ -1623,7 +1869,7 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 		// because the final span declared the untrustworthy Xing length to
 		// Concat. openComposed now measures the file first, so the composition
 		// reads to the real end like the measured cases above.
-		if err := readToEOF(t, multiKeeps, 0); err != nil {
+		if err := readToEOF(t, multiKeeps, Measured{}); err != nil {
 			t.Fatalf("ReadChunk: %v", err)
 		}
 	})
@@ -1632,7 +1878,7 @@ func TestOpenComposedHoldsSpansToSourceSamples(t *testing.T) {
 		// reported as damage, which is exit 2 with no path error, rather than
 		// as a blind request (CodeInvalidRequest), which openComposed cannot
 		// produce: every bounded span it plans is over a measured track.
-		err := readToEOF(t, multiKeeps, length.Samples*2)
+		err := readToEOF(t, multiKeeps, Measured{Samples: length.Samples * 2})
 		if err == nil {
 			t.Fatal("want an error: the count declares audio the file does not hold")
 		}
@@ -1666,7 +1912,7 @@ func TestRenderMeasuresAClaimedLengthAtConcurrencyOne(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		// SourceSamples 0: nobody measured, and the keeps reach the declared
+		// Source zero: nobody measured, and the keeps reach the declared
 		// (untrustworthy) end, which is the shape that needs the measurement.
 		_, rerr := r.Render(context.Background(), cut, out, CutSpec{
 			Keeps: []cutrange.Range{
@@ -1708,10 +1954,10 @@ func TestOpenComposedNoDeclaredLengthFallsBackToBounded(t *testing.T) {
 		{Start: 0, End: 300 * time.Millisecond},
 		{Start: 600 * time.Millisecond, End: total},
 	}
-	// sourceSamples 0: nobody measured it, which is exactly the case openEnded
+	// source zero: nobody measured it, which is exactly the case openEnded
 	// must not treat as open-ended just because SamplesAdvisory happens to be
 	// false for a track that also has no length claim at all.
-	med, closer, err := r.OpenComposed(context.Background(), intact, keeps, total, 0, 0)
+	med, closer, err := r.OpenComposed(context.Background(), intact, keeps, total, 0, Measured{})
 	if err != nil {
 		t.Fatalf("open composed: %v", err)
 	}
@@ -1783,23 +2029,15 @@ func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
 	if !ok || a.Samples <= 0 || a.SamplesExact || a.SamplesAdvisory || !pr.LengthClaimed {
 		t.Fatalf("probe = %+v claimed %v; want a declared count that is neither exact nor advisory, reported as a claim", a, pr.LengthClaimed)
 	}
-	walked, ok, err := r.walkLength(ctx, frag)
-	if err != nil || !ok {
-		t.Fatalf("walkLength = %+v, %v, %v; want the walk to settle the count", walked, ok, err)
+	// A walker's answer has to come from the walk: a decode of the same file
+	// would agree on the count, so what pins the cheap path is that the
+	// measurement says it was not one.
+	walked, err := r.MeasureLength(ctx, frag)
+	if err != nil || walked.Counted {
+		t.Fatalf("MeasureLength = %+v, %v; want the walk to settle the count", walked, err)
 	}
 	if walked.Samples != a.Samples {
 		t.Errorf("the walk counted %d frames where the index declared %d", walked.Samples, a.Samples)
-	}
-	// MeasureLength is the caller's door, and a walker's answer has to come
-	// from the walk: a decode of the same file would agree on the count, so
-	// what pins the cheap path is that walkLength answered ok above and that
-	// MeasureLength returns what it found.
-	measured, err := r.MeasureLength(ctx, frag)
-	if err != nil {
-		t.Fatalf("MeasureLength: %v", err)
-	}
-	if measured.Samples != walked.Samples {
-		t.Errorf("MeasureLength = %d, walk = %d; the walker's answer is the one that stands", measured.Samples, walked.Samples)
 	}
 	// The declaration is the sidx's, so a fragmented movie whose index lies is
 	// settled by the walk rather than believed. Cutting the last fragment's
@@ -1811,9 +2049,9 @@ func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
 		t.Fatalf("probe the overstated index: %v", err)
 	}
 	a2, _ := pr2.AudioStream()
-	walked2, ok, err := r.walkLength(ctx, lying)
-	if err != nil || !ok {
-		t.Fatalf("walkLength on the overstated index = %v, %v", ok, err)
+	walked2, err := r.MeasureLength(ctx, lying)
+	if err != nil || walked2.Counted {
+		t.Fatalf("MeasureLength on the overstated index = %+v, %v", walked2, err)
 	}
 	if a2.Samples <= walked2.Samples {
 		t.Errorf("index declared %d and the walk found %d; the fixture does not overstate", a2.Samples, walked2.Samples)

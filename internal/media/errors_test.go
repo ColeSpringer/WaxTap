@@ -224,12 +224,12 @@ func TestClassifyInputErrorKeepsNonMediaCodes(t *testing.T) {
 // means a bug rather than a condition to classify); not-found and
 // source-changed come from WaxFlow's HTTP source client, which WaxTap never
 // hands a URL; the rest are the daemon's own (its auth, signed URLs, catalog,
-// and load shedding), which the in-process engine never raises.
+// library roots, and load shedding), which the in-process engine never raises.
 func TestEngineErrorMappingCoversExitContract(t *testing.T) {
 	unmapped := map[wferr.Code]bool{
 		wferr.CodeInternal: true, wferr.CodeNotFound: true, wferr.CodeOverloaded: true,
 		wferr.CodeUnauthorized: true, wferr.CodeSignatureInvalid: true, wferr.CodeSignatureExpired: true,
-		wferr.CodeSourceChanged: true, wferr.CodeCatalogUnavailable: true,
+		wferr.CodeSourceChanged: true, wferr.CodeCatalogUnavailable: true, wferr.CodeRootUnavailable: true,
 	}
 	for _, class := range wferr.ExitContract() {
 		for _, code := range class.Codes {

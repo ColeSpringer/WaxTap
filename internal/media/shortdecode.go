@@ -2,6 +2,8 @@ package media
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -50,4 +52,45 @@ func ShortMeasureNote(got, declared time.Duration) string {
 	}
 	return fmt.Sprintf("the measurement covered %s of a declared %s; the remainder of the file did not read",
 		got.Round(10*time.Millisecond), declared.Round(10*time.Millisecond))
+}
+
+// lostSamplesRe matches the count the engine puts on a finding that took
+// samples out of the stream: "1291 bytes are not a valid frame, dropped: 4096
+// samples lost", "the frames skip from sample 8192 to 12288: 4096 samples
+// lost". A FLAC numbers its frames, so the engine knows the size of a hole
+// and delivers that much silence in its place.
+//
+// keep in sync with waxflow container/flacn and container/ogg (warn "...
+// samples lost"). The engine states the count nowhere but in this text (see
+// docs/upstream-requests.md), and the coupling fails quiet: a reworded
+// warning reads as nothing lost, and the damage is still reported in the
+// engine's own words. TestLostSamplesReadsTheEnginesCount holds the two
+// together on a real hole.
+var lostSamplesRe = regexp.MustCompile(`\b(\d+) samples lost\b`)
+
+// LostSamples totals the samples a read's damage findings say were lost and
+// delivered as silence. warnings is the read's own list (Result.InputWarnings),
+// which names each hole once; the engine caps that list, so a file damaged in
+// more places than it lists is undercounted.
+func LostSamples(warnings []string) int64 {
+	var n int64
+	for _, w := range warnings {
+		if m := lostSamplesRe.FindStringSubmatch(w); m != nil {
+			if v, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+				n += v
+			}
+		}
+	}
+	return n
+}
+
+// LostAudioNote returns a damage note when a read delivered materially less
+// audio than its length says because damage took it and silence stands in its
+// place, or "" below the threshold a short decode is held to. The length holds
+// there, so nothing else would say how much of the read was the file's own.
+func LostAudioNote(lost time.Duration) string {
+	if lost <= shortDecodeMinShortfall {
+		return ""
+	}
+	return fmt.Sprintf("damage took %s of the audio, which reads as silence", lost.Round(10*time.Millisecond))
 }

@@ -52,8 +52,9 @@ type ProbeResult struct {
 	// its segment index sums until the fragments are walked), or it states an
 	// advisory total (ASF), or none at all. A cut resolved against such a
 	// length can declare a span the file does not hold, so the pipeline
-	// measures the file first (Runner.MeasureLength), a walk for every
-	// container that has one and a decode only for the one that does not.
+	// measures the file first (Runner.MeasureLength): a walk for every payload
+	// that has one, a WMA v1/v2 track's frame counts included, and a decode
+	// only for the WMA codecs that count no frames (Pro, Voice, Lossless).
 	LengthClaimed bool
 }
 

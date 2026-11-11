@@ -16,7 +16,7 @@ stale. Every license and notice text is reproduced verbatim.
 | Component | Version | License |
 |---|---|---|
 | Go runtime and standard library | go 1.26 | BSD-3-Clause |
-| github.com/colespringer/waxflow | v0.0.0-20260923050513-446ca3124d89 | MIT (see also THIRD-PARTY-NOTICES.md) |
+| github.com/colespringer/waxflow | v0.0.0-20261106151554-2f448c9435fd | MIT (see also THIRD-PARTY-NOTICES.md) |
 | github.com/colespringer/waxlabel | v1.8.0 | MIT |
 | github.com/dlclark/regexp2/v2 | v2.12.0 | MIT |
 | github.com/dop251/goja | v0.0.0-20261103214539-f5d1d0025744 | MIT / see text / BSD-3-Clause |
@@ -62,7 +62,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## github.com/colespringer/waxflow v0.0.0-20260923050513-446ca3124d89
+## github.com/colespringer/waxflow v0.0.0-20261106151554-2f448c9435fd
 
 License: MIT (LICENSE)
 
@@ -389,7 +389,7 @@ Entries follow this format:
 > decisions, and the container writer.
 
 > **codec/ape decoder**: a clean-room port of the *Monkey's Audio* reference
-> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.26. A lossless
+> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.45. A lossless
 > decoder has to reproduce the reference bit for bit, so the parts that define
 > the bitstream are ported faithfully: the range decoder and its two symbol
 > models (`UnBitArray.cpp` and `Old/UnBitArrayOld.cpp`, with the model tables
@@ -397,7 +397,7 @@ Entries follow this format:
 > product, sign-sign weight update, and step quantizers (`NNFilterGeneric.cpp`,
 > `NNFilterCommon.h`), the adaptive predictor and its first-order lift
 > (`NewPredictor.cpp`, `ScaledFirstOrderFilter.h`), the interim 24-bit variant
-> (`Interim.h`), the file header layouts (`APEHeader.cpp`, `MACLib.h`), the
+> (`Interim.cpp`), the file header layouts (`APEHeader.cpp`, `MACLib.h`), the
 > frame driver's special-code handling and CRC finalization
 > (`APEDecompressCore.cpp`), and the mid/side inverse and sample packing
 > (`Prepare.cpp`). The bit reader, the packet model, the container demuxer, and
