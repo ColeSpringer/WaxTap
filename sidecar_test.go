@@ -1513,6 +1513,28 @@ func TestPingSidecar(t *testing.T) {
 			want: SidecarHealth{Probe: "tenant", Reason: "busy", Error: "the page is held by a request"},
 		},
 		{
+			// A daemon that serves through a failed launch answers the idle
+			// window's word at 200. The count, its account of the last failure
+			// and what is left of the cool-down say it is not idle.
+			name: "no-session behind failed launches", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"youtube refused attestation","consecutive_launch_failures":3,"retry_after_seconds":42}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "youtube refused attestation", LaunchFailures: 3, RetryAfter: 42 * time.Second},
+		},
+		{
+			// The count outlives the cool-down: the wait is present only while
+			// one is open, and the tenant still has no session after it.
+			name: "failed launches with the cool-down over", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"youtube refused attestation","consecutive_launch_failures":1}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "youtube refused attestation", LaunchFailures: 1},
+		},
+		{
+			// A live session reports the field as 0, and a count or a wait
+			// below zero is no count and no wait.
+			name: "counts that say nothing", status: 200,
+			body: `{"ok":true,"probe":"tenant","reason":"ok","consecutive_launch_failures":-2,"retry_after_seconds":-30}`,
+			want: SidecarHealth{OK: true, Probe: "tenant", Reason: "ok"},
+		},
+		{
 			// The loss the daemon confirmed: 503 under strict, with its account.
 			name: "probe-failed", status: 503,
 			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"the shared browser missed two probes and was torn down and relaunched","browser_relaunched":true}`,
@@ -1526,6 +1548,24 @@ func TestPingSidecar(t *testing.T) {
 			body:    `{"ok":false,"probe":"daemon","reason":"probe-failed","error":"no browser answers"}`,
 			want:    SidecarHealth{Probe: "daemon", Reason: "probe-failed", Error: "no browser answers"},
 			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "no browser answers", RetryAfter: 30 * time.Second},
+		},
+		{
+			// A probe can fail on a tenant whose launches were already
+			// failing: the browser check that follows a no-session found it
+			// wedged. The account is then the probe's, the count stands, and
+			// the cool-down the body states is the refusal's wait, as an
+			// envelope's retry_after_seconds would be.
+			name: "probe-failed behind failed launches", status: 503,
+			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"page crashed","consecutive_launch_failures":2,"retry_after_seconds":120}`,
+			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", LaunchFailures: 2, RetryAfter: 120 * time.Second},
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "page crashed", RetryAfter: 120 * time.Second},
+		},
+		{
+			// A Retry-After header wins over the body's, as on any refusal.
+			name: "probe-failed with both waits", status: 503, retryAfter: "30",
+			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"page crashed","consecutive_launch_failures":2,"retry_after_seconds":120}`,
+			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", LaunchFailures: 2, RetryAfter: 120 * time.Second},
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "page crashed", RetryAfter: 30 * time.Second},
 		},
 		{
 			// Older daemons omit the reason word; the body is still a health

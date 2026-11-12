@@ -694,7 +694,9 @@ func TestMeasureAlbumReportsInputWarnings(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	c := newOfflineClient(t)
-	intact, truncated := damagedFixture(t, dir, "track.flac", FormatFLAC)
+	// Under the half second an album refuses a track over, so the damage is
+	// a warning on a measurement that still describes the tracks.
+	intact, truncated := clippedFixture(t, dir, "track.flac", FormatFLAC)
 
 	res, err := c.MeasureAlbum(ctx, []string{intact, truncated})
 	if err != nil {

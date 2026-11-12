@@ -122,7 +122,7 @@ func (r *Runner) RemuxWithOpusGain(ctx context.Context, input, output string, de
 	if err := staged.Commit(); err != nil {
 		return Result{}, 0, err
 	}
-	res := Result{Output: output, Codec: CodecCopy, InputWarnings: sourceWarnings(tres.InputWarnings)}
+	res := Result{Output: output, Codec: CodecCopy, InputWarnings: sourceWarnings(tres.InputWarnings), Loss: lossOf(tres)}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}

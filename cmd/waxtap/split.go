@@ -241,6 +241,9 @@ type splitPieceJSON struct {
 	Start     float64       `json:"start"` // seconds into the rip
 	Output    string        `json:"output"`
 	TagCarry  *tagCarryJSON `json:"tagCarry,omitempty"`
+	// InputLoss counts what the piece's span of the rip lost; see
+	// inputLossJSON.
+	InputLoss *inputLossJSON `json:"inputLoss,omitempty"`
 }
 
 // splitSkipJSON is one entry of a split document's skipped list: a track the
@@ -267,6 +270,9 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 		}
 		if i < len(res.TagCarry) {
 			pieces[i].TagCarry = tagCarryToJSON(res.TagCarry[i])
+		}
+		if i < len(res.InputLoss) {
+			pieces[i].InputLoss = inputLossToJSON(res.InputLoss[i])
 		}
 	}
 	if env.jsonMode() {
@@ -327,9 +333,11 @@ func emitSplit(env *appEnv, plan *waxtap.SplitPlan, res *waxtap.SplitResult, she
 	}
 	env.printf("Split:    %s by %s (%s)\n\n", displayPath(plan.Input), displayPath(sheetAt), tracks)
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tSTART\tTITLE\tMETADATA\tOUTPUT")
+	// MISSING joins the table only when a piece lost audio; see lossCell.
+	missing := anyInputLoss(res.InputLoss)
+	fmt.Fprintf(tw, "#\tSTART\tTITLE\t%sMETADATA\tOUTPUT\n", lossHeader(missing))
 	for i, p := range plan.Pieces {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", p.Track, humanDuration(p.Start), pieceTitle(p), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s%s\t%s\n", p.Track, humanDuration(p.Start), pieceTitle(p), lossColumn(missing, res.InputLoss, i), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
 	}
 	return tw.Flush()
 }

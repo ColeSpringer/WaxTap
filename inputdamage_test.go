@@ -33,8 +33,24 @@ func warningIn(ws []Warning, code WarningCode) string {
 }
 
 // damagedFixture writes a fixture in the given format and returns the intact
-// path and a truncated copy of it.
+// path and a truncated copy of it: the first 60% of the bytes, so 1.2 s of
+// its 3 s are gone.
 func damagedFixture(t *testing.T, dir, name string, format TranscodeFormat) (intact, truncated string) {
+	t.Helper()
+	return truncatedFixture(t, dir, name, format, 60)
+}
+
+// clippedFixture is damagedFixture with only the last 6% of the bytes gone:
+// a file cut short by a fraction of a second, which is damage an album takes
+// and warns about, under the half second it refuses a track over.
+func clippedFixture(t *testing.T, dir, name string, format TranscodeFormat) (intact, truncated string) {
+	t.Helper()
+	return truncatedFixture(t, dir, name, format, 94)
+}
+
+// truncatedFixture writes a 3 s fixture in the given format and returns the
+// intact path and a copy holding the first keep percent of its bytes.
+func truncatedFixture(t *testing.T, dir, name string, format TranscodeFormat, keep int) (intact, truncated string) {
 	t.Helper()
 	ctx := context.Background()
 	wav := filepath.Join(dir, name+"-src.wav")
@@ -53,7 +69,7 @@ func damagedFixture(t *testing.T, dir, name string, format TranscodeFormat) (int
 		t.Fatal(err)
 	}
 	truncated = filepath.Join(dir, "cut-"+name)
-	if err := os.WriteFile(truncated, whole[:len(whole)*6/10], 0o644); err != nil {
+	if err := os.WriteFile(truncated, whole[:len(whole)*keep/100], 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return intact, truncated
@@ -69,17 +85,21 @@ func TestProcessWarnsInputDamage(t *testing.T) {
 		format TranscodeFormat
 		ext    string
 		detail string // wording each container uses for the damage it tolerated
+		// counted says the header declares a length the file falls short of,
+		// so the engine counts what is missing and the warning leads with it.
+		counted bool
 	}{
-		{"wav", FormatWAV, ".wav", "clamped"},
-		{"flac", FormatFLAC, ".flac", "declares"},
+		{"wav", FormatWAV, ".wav", "clamped", true},
+		{"flac", FormatFLAC, ".flac", "STREAMINFO declares", true},
 		// The frame-indexed payloads walk lazily: their probe reads the headers
 		// clean, and the truncated frame is found by the read that reaches it,
 		// which the write reports and the warning carries. Both word it the same
 		// way now that ADTS drops a final frame whose declared span runs past
 		// the data end instead of indexing it, which is what MP3's walker always
-		// did.
-		{"mp3", FormatMP3, ".mp3", "truncated final frame"},
-		{"aac", FormatAAC, ".aac", "truncated final frame"},
+		// did. The MP3 has a Xing count to fall short of; ADTS declares no
+		// length, so there is nothing to count the loss against.
+		{"mp3", FormatMP3, ".mp3", "truncated final frame", true},
+		{"aac", FormatAAC, ".aac", "truncated final frame", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -112,6 +132,17 @@ func TestProcessWarnsInputDamage(t *testing.T) {
 			}
 			if !strings.HasPrefix(detail, "the input is damaged: ") {
 				t.Errorf("detail = %q, want the verdict to lead now that the list holds damage alone", detail)
+			}
+			// The engine's count of the missing audio comes first, in seconds,
+			// ahead of the findings that explain it. It is the whole account
+			// of the shortfall, so the short-decode note has nothing to add,
+			// even for the MP3 whose probe still declared the full length.
+			const counted = "the input is damaged: the audio ends "
+			if got := strings.HasPrefix(detail, counted) && strings.Contains(detail, "short of the length its source declares"); got != tc.counted {
+				t.Errorf("detail = %q, want the count of what the file is short by leading: %v", detail, tc.counted)
+			}
+			if strings.Contains(detail, "did not read") {
+				t.Errorf("detail = %q, want no short-decode note beside the engine's own count", detail)
 			}
 			if hasWarning(res, WarnInputNote) {
 				t.Errorf("a truncated input raised the not-damage note: %+v", res.Warnings)
@@ -329,9 +360,74 @@ func TestCutOnTruncatedSourcePostClamp(t *testing.T) {
 	}
 	// The rejection is where the surprising duration needs explaining: the user
 	// asked for a cut that exists in the file the header describes, so the
-	// error carries the probe's damage note alongside the clamped duration.
-	if !strings.Contains(err.Error(), "declares") {
-		t.Errorf("err = %v, want the probe's damage note explaining the short duration", err)
+	// error carries the probe's damage note alongside the clamped duration,
+	// behind the engine's count of how far the file ends short.
+	for _, want := range []string{"short of the length its source declares", "STREAMINFO declares"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to explain the short duration with %q", err, want)
+		}
+	}
+}
+
+// A run that reads nothing of the file still says how far it ends short: a
+// FLAC's open settles the length, so the probe has the count, and it leads
+// the damage notes the way a read's count does.
+func TestNoOpRunCountsWhatTheProbeSettled(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	intact, truncated := damagedFixture(t, dir, "in.flac", FormatFLAC)
+	runner := media.NewRunner(media.RunnerConfig{})
+
+	pres, err := pipeline.Run(ctx, runner, truncated, filepath.Join(dir, "out.flac"), pipeline.Spec{Codec: media.CodecCopy}, nil)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+	if pres.OutputPath != "" {
+		t.Fatalf("OutputPath = %q, want a no-op: this spec asks for nothing", pres.OutputPath)
+	}
+	if len(pres.SourceWarnings) == 0 || !strings.Contains(pres.SourceWarnings[0], "short of the length its source declares") {
+		t.Errorf("SourceWarnings = %q, want the probe's count leading", pres.SourceWarnings)
+	}
+	clean, err := pipeline.Run(ctx, runner, intact, filepath.Join(dir, "clean.flac"), pipeline.Spec{Codec: media.CodecCopy}, nil)
+	if err != nil {
+		t.Fatalf("pipeline.Run on the intact file: %v", err)
+	}
+	if len(clean.SourceWarnings) != 0 {
+		t.Errorf("a whole file reports %q", clean.SourceWarnings)
+	}
+}
+
+// A cut counts what its own spans lost. A file cut short lost its audio off
+// the end, so a cut that keeps the end says how far the output falls short of
+// what the source declared, and one that removes the tail holds everything it
+// asked for and counts nothing. The findings are the file's either way.
+func TestCutCountsTruncationOnlyThroughTheEnd(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, truncated := damagedFixture(t, dir, "in.flac", FormatFLAC) // about 1.76 s held of a declared 3
+	c := newOfflineClient(t)
+	const counted = "short of the length its source declares"
+
+	cut := func(name string, r TimeRange) string {
+		t.Helper()
+		res, err := c.Process(ctx, ProcessRequest{Input: truncated, ProcessSpec: ProcessSpec{
+			Output: ToFile(filepath.Join(dir, name)),
+			Cut:    &CutSpec{Ranges: []TimeRange{r}},
+		}})
+		if err != nil {
+			t.Fatalf("cut %s: %v", name, err)
+		}
+		detail := warningDetail(res, WarnInputDamage)
+		if !strings.Contains(detail, "STREAMINFO declares") {
+			t.Errorf("%s: detail = %q, want the file's own finding", name, detail)
+		}
+		return detail
+	}
+	if detail := cut("kept-end.flac", TimeRange{Start: 200 * time.Millisecond, End: 500 * time.Millisecond}); !strings.Contains(detail, counted) {
+		t.Errorf("a cut that keeps the end: detail = %q, want the count of what the end lost", detail)
+	}
+	if detail := cut("dropped-end.flac", TimeRange{Start: time.Second, End: 3 * time.Second}); strings.Contains(detail, counted) {
+		t.Errorf("a cut that removes the tail: detail = %q, want no count: its one span is all there", detail)
 	}
 }
 
@@ -342,7 +438,9 @@ func TestCutOnTruncatedSourcePostClamp(t *testing.T) {
 func TestProcessAlbumWarnsInputDamageFolded(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	intact, truncated := damagedFixture(t, dir, "track.flac", FormatFLAC)
+	// Cut short by a fraction of a second: an album refuses a track missing
+	// more (TestProcessAlbumRefusesATrackCutShort).
+	intact, truncated := clippedFixture(t, dir, "track.flac", FormatFLAC)
 
 	albumDamage := func(t *testing.T, tracks []AlbumTrack) []Warning {
 		t.Helper()
@@ -369,8 +467,12 @@ func TestProcessAlbumWarnsInputDamageFolded(t *testing.T) {
 	if !strings.Contains(one[0].Detail, filepath.Base(truncated)) {
 		t.Errorf("detail = %q, want it to name %q", one[0].Detail, filepath.Base(truncated))
 	}
+	// The track's own count leads its findings, as a single file's does.
+	if want := filepath.Base(truncated) + ": the input is damaged: the audio ends "; !strings.HasPrefix(one[0].Detail, want) {
+		t.Errorf("detail = %q, want it to lead with how far the track ends short", one[0].Detail)
+	}
 
-	_, truncated2 := damagedFixture(t, dir, "more.flac", FormatFLAC)
+	_, truncated2 := clippedFixture(t, dir, "more.flac", FormatFLAC)
 	two := albumDamage(t, []AlbumTrack{
 		{Input: truncated, Output: filepath.Join(dir, "three.flac")},
 		{Input: truncated2, Output: filepath.Join(dir, "four.flac")},
@@ -380,6 +482,50 @@ func TestProcessAlbumWarnsInputDamageFolded(t *testing.T) {
 	}
 	if !strings.Contains(two[0].Detail, "and 1 more track") {
 		t.Errorf("detail = %q, want the fold to count the second track", two[0].Detail)
+	}
+}
+
+// A file cut short has its length restated to what it holds, so the probe and
+// the measurement agree on a length and neither says the track is partial.
+// The engine counts what the header declared past the end, and an album holds
+// a track to that count as it does to a short decode and to a hole: a gain
+// measured over the 60% of a track the file still holds describes nothing,
+// whether the album is being written or only measured.
+func TestProcessAlbumRefusesATrackCutShort(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		format TranscodeFormat
+		ext    string
+	}{{"flac", FormatFLAC, ".flac"}, {"wav", FormatWAV, ".wav"}, {"mp3", FormatMP3, ".mp3"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c := newOfflineClient(t)
+			intact, truncated := damagedFixture(t, dir, "in"+tc.ext, tc.format)
+
+			tracks := []AlbumTrack{
+				{Input: intact, Output: filepath.Join(dir, "one.flac")},
+				{Input: truncated, Output: filepath.Join(dir, "two.flac")},
+			}
+			check := func(what string, err error) {
+				t.Helper()
+				if !errors.Is(err, ErrUnsupportedInput) {
+					t.Fatalf("%s = %v, want ErrUnsupportedInput", what, err)
+				}
+				for _, want := range []string{filepath.Base(truncated), "short of the length its source declares", "shares one gain"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s: err = %q, want it to carry %q", what, err, want)
+					}
+				}
+			}
+			_, err := c.ProcessAlbum(ctx, tracks, -14, TranscodeSpec{Format: FormatFLAC})
+			check("ProcessAlbum", err)
+			if _, serr := os.Stat(tracks[0].Output); serr == nil {
+				t.Error("an album refused over one track still wrote another")
+			}
+			_, err = c.MeasureAlbum(ctx, []string{intact, truncated})
+			check("MeasureAlbum", err)
+		})
 	}
 }
 
@@ -478,7 +624,10 @@ func TestProcessFillsAFLACHoleWithSilence(t *testing.T) {
 	}
 	detail := warningDetail(res, WarnInputDamage)
 	if !strings.Contains(detail, "samples lost") {
-		t.Errorf("detail = %q, want the engine's count of the samples the damage took", detail)
+		t.Errorf("detail = %q, want the engine's finding for the frames the damage took", detail)
+	}
+	if !strings.Contains(detail, "are silence where damage took the audio") {
+		t.Errorf("detail = %q, want the engine's count of the silence standing in for them", detail)
 	}
 	if strings.Contains(detail, "did not read") {
 		t.Errorf("detail = %q, want no short-decode note: the length holds", detail)
@@ -495,7 +644,7 @@ func TestProcessFillsAFLACHoleWithSilence(t *testing.T) {
 		t.Fatalf("ProcessAlbum: %v, want a track with a frame-sized hole taken", err)
 	}
 	folded := warningIn(album.Warnings, WarnInputDamage)
-	if !strings.Contains(folded, filepath.Base(corrupt)) || !strings.Contains(folded, "samples lost") {
+	if !strings.Contains(folded, filepath.Base(corrupt)) || !strings.Contains(folded, "are silence where damage took the audio") {
 		t.Errorf("album damage = %q, want it to name %s and the loss", folded, filepath.Base(corrupt))
 	}
 }
@@ -520,9 +669,11 @@ func TestProcessAlbumRefusesATrackWithALargeHole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("measuring the holed track alone: %v, want it measured with the damage warned", err)
 	}
-	lost := media.SampleTime(media.LostSamples([]string{warningDetail(single, WarnInputDamage)}), 44100)
-	if lost <= 500*time.Millisecond {
-		t.Fatalf("the fixture lost %v to its hole, too little to be refused; damage = %q", lost, warningDetail(single, WarnInputDamage))
+	// The single file's warning leads with the engine's own count, which is
+	// the number the album holds the track to.
+	detail := warningDetail(single, WarnInputDamage)
+	if !strings.HasPrefix(detail, "the input is damaged: ") || !strings.Contains(detail, "silence where damage took the audio") {
+		t.Fatalf("damage = %q, want it to count the silence the hole left", detail)
 	}
 
 	tracks := []AlbumTrack{
@@ -534,7 +685,7 @@ func TestProcessAlbumRefusesATrackWithALargeHole(t *testing.T) {
 		if !errors.Is(err, ErrUnsupportedInput) {
 			t.Fatalf("%s = %v, want ErrUnsupportedInput", what, err)
 		}
-		for _, want := range []string{filepath.Base(corrupt), "reads as silence", "shares one gain"} {
+		for _, want := range []string{filepath.Base(corrupt), "silence where damage took the audio", "shares one gain"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%s: err = %q, want it to carry %q", what, err, want)
 			}

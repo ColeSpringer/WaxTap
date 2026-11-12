@@ -109,10 +109,11 @@ EBU R128's gates run over every track's blocks at once rather than over a
 concatenation: a mono track is measured as mono, not as the dual-mono a stereo
 timeline would make of it, and a track whose channel positions differ from its
 neighbours' is measured as it is. A track that does not read to the length its
-container states exactly, or that reads to it with more than half a second of
-silence where damage took the audio, is refused, naming the file: every track
-shares one gain, and one derived from part of a track describes nothing. Loudness uses
-EBU R128 (integrated LUFS, true peak dBTP, range LU).
+container states exactly is refused, naming the file, and so is one missing
+more than half a second some other way: read to its length with silence where
+damage took the audio, or cut short of the length its header declares. Every
+track shares one gain, and one derived from part of a track describes nothing.
+Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
 
 ### Notes
 
@@ -302,6 +303,18 @@ EBU R128 (integrated LUFS, true peak dBTP, range LU).
   their APEv2 block holds text tags and cover art (a Cover Art item), while
   chapters and synced lyrics have no APEv2 form and are reported as carry
   losses.
+- A damaged local input is processed from the part that reads and reported as
+  `input-damage`. Two kinds of loss leave the length looking whole, and both
+  are counted: the silence standing in for frames a FLAC lost, and how far a
+  file cut short ends short of the length its header declares. The warning
+  leads with them, and `--json` carries them as `inputLoss` (`lostSamples`,
+  `truncatedSamples`, and the `sampleRate` both are at: the written file's, so
+  the output's when the encode resamples, and the input's own for a
+  measurement, which writes none): on a single file's document, on each track
+  under `--album`, on each piece of a `split`, and on each batch item. The key is
+  absent for an input that lost nothing by either count. An album or a split
+  folds its damaged rows into one warning naming the first, so their tables
+  add a `MISSING` column, in seconds, when any row lost audio.
 - SponsorBlock cuts on a download take the same packet-level path, so the same
   snap and `cut-snapped` warning apply.
 - The `sponsorblock` preview fetches the video's length and marks segments the
@@ -392,7 +405,7 @@ appear in `--json` as `warnings[]` and `notes[]`.
 | `implicit-downmix` | the encoder folded channels the request never asked to lose |
 | `output-clipping` | the delivered file's level is past full scale |
 | `implicit-lossy` | the output container could not carry the source codec, so a lossy encoder the request never named ran (a `cut`, or an extension-named output with no `--format`) |
-| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered, with silence the length of whatever a FLAC lost |
+| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered, with silence the length of whatever a FLAC lost. Where the engine can count what is missing, the detail leads with it (how much is that silence, and how far the audio ends short of the length the file declares) and `--json` carries the numbers as `inputLoss` |
 | `loudness-unmeasurable` | an integrated loudness came back non-finite; the detail names the side and the cause |
 | `source-policy-unmatched` | `--source-policy prefer:<codec>` named a family this video does not offer |
 | `empty-input` | the input's audio track holds no frames |
@@ -474,7 +487,10 @@ channel URL with `Skip`/`Stop` predicates for an archive cursor, and
 `EnrichOptions` to each enriched entry. `Client.PlanSplit` reads a CUE sheet
 against a local rip and reports where the pieces fall, with the data tracks it
 skips in `SplitPlan.Skipped`, and `Client.Split` writes them, tagged from the
-sheet; the `split` subcommand is that pair.
+sheet; the `split` subcommand is that pair. What a damaged local input lost
+that its length does not show is counted in `InputLoss`: on `Result` and
+`MeasureResult`, and per track or per piece on the album and split results,
+beside the `WarnInputDamage` warning that words it.
 
 Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
 throttle starts refusing entries, because the refusal is worded exactly like a
@@ -627,7 +643,9 @@ single-client `--profile-override`, since an adopted session cannot span the
 several clients the default chain tries. With
 sidecar URLs configured, the daemon behind them is asked for its health first
 (WaxSeal's `/ping`, one round trip, reported with its reason: `ok`,
-`no-session`, `busy`, or `probe-failed`, and whether the daemon is keyed), then
+`no-session`, `busy`, or `probe-failed`, whether the daemon is keyed, and, for
+a daemon with no session because it could not launch one, how many launches
+failed, with its account and its wait in a `doctor-caveat` note), then
 each endpoint is probed once (session, PO token, player-context), so a cold
 daemon's first-call cost and any refusal code are visible; the `--json` ping
 entry carries a one-word `status`: healthy, answered, not-offered, or failed; the token and context probe latencies include WaxSeal's separation

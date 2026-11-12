@@ -44,6 +44,15 @@ type ProbeResult struct {
 	// keeps them apart, so a caller reporting damage reports Warnings alone.
 	// Nil when the engine had nothing to say.
 	Notes []string
+	// Loss is how far the default track's header declares past the end of
+	// what the file holds, where opening the file settles that: the audio a
+	// file cut short lost off its end, which the length reported here no
+	// longer shows because it is the length that is there. Only the truncated
+	// count is ever set, since a probe reads nothing to deliver as silence. A
+	// payload walked lazily (an MP3 on its Xing count, a fragmented MP4)
+	// states it once a read or a measurement reaches the end
+	// (Result.Loss, Length.Loss).
+	Loss Loss
 	// LengthClaimed says the default track's length is a claim the headers
 	// make, not a count a read confirmed: the demuxer walks its payload
 	// lazily and has not reached the end (container.Walker: MP3, bare or in
@@ -205,6 +214,7 @@ func mapProbe(info *format.Info, size int64) ProbeResult {
 	def := info.Default()
 	pr.Streams = append(pr.Streams, stream(def))
 	pr.Format.Duration = trackDuration(def.Samples, def.Fmt.Rate)
+	pr.Loss = Loss{TruncatedSamples: info.Truncated, Rate: def.Fmt.Rate}
 	for _, t := range info.Tracks {
 		if t.ID == def.ID {
 			continue

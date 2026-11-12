@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -301,6 +302,80 @@ func assertNormalizeUsageError(t *testing.T, args []string) {
 	}
 }
 
+// The warning above an album or split table folds every damaged row into one
+// line that names the first, so the table says what each of the others lost:
+// a MISSING column, in seconds, present only when some row lost audio. A run
+// with nothing missing prints the table it always did.
+func TestTablesShowWhatEachRowLost(t *testing.T) {
+	inputs := []string{"a.flac", "b.flac", "c.flac"}
+	per := []waxtap.LoudnessInfo{{IntegratedLUFS: -11}, {IntegratedLUFS: -12}, {IntegratedLUFS: -13}}
+	outs := []string{"out/a.flac", "out/b.flac", "out/c.flac"}
+	losses := []*waxtap.InputLoss{
+		nil,
+		{TruncatedSamples: 8820, SampleRate: 44100},                     // 0.20 s
+		{LostSamples: 4410, TruncatedSamples: 13230, SampleRate: 44100}, // 0.10 s and 0.30 s
+	}
+	render := func(emit func(env *appEnv) error) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := emit(&appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	tables := map[string]func(losses []*waxtap.InputLoss) string{
+		"album process": func(l []*waxtap.InputLoss) string {
+			return render(func(env *appEnv) error {
+				return emitAlbumProcess(env, inputs, &waxtap.AlbumProcessResult{PerTrack: per, Outputs: outs, TagCarry: make([]*waxtap.TagCarry, 3), InputLoss: l})
+			})
+		},
+		"album measure": func(l []*waxtap.InputLoss) string {
+			return render(func(env *appEnv) error {
+				return emitAlbumMeasure(env, inputs, &waxtap.AlbumLoudnessResult{PerTrack: per, InputLoss: l})
+			})
+		},
+		"split": func(l []*waxtap.InputLoss) string {
+			plan := &waxtap.SplitPlan{Input: "rip.flac", TrackTotal: 3, Pieces: []waxtap.SplitPiece{{Track: 1}, {Track: 2}, {Track: 3}}}
+			return render(func(env *appEnv) error {
+				return emitSplit(env, plan, &waxtap.SplitResult{Outputs: outs, TagCarry: make([]*waxtap.TagCarry, 3), InputLoss: l}, "rip.cue")
+			})
+		},
+	}
+	for name, table := range tables {
+		t.Run(name, func(t *testing.T) {
+			s := table(losses)
+			for _, want := range []string{"MISSING", "0.20 s off the end", "0.10 s as silence, 0.30 s off the end"} {
+				if !strings.Contains(s, want) {
+					t.Errorf("table = %q, want %q", s, want)
+				}
+			}
+			// The whole row's cell is a dash, between its neighbours.
+			var first string
+			for line := range strings.SplitSeq(s, "\n") {
+				if strings.HasPrefix(line, "1 ") {
+					first = line
+				}
+			}
+			if !strings.Contains(first, " - ") {
+				t.Errorf("row 1 = %q, want a - cell for the row that lost nothing", first)
+			}
+			for _, clean := range [][]*waxtap.InputLoss{nil, {nil, nil, nil}} {
+				if s := table(clean); strings.Contains(s, "MISSING") {
+					t.Errorf("a run that lost nothing prints %q, want no MISSING column", s)
+				}
+			}
+		})
+	}
+
+	// Counts with no rate to time them at are stated as the samples they are.
+	if got := lossCell([]*waxtap.InputLoss{{LostSamples: 1, TruncatedSamples: 2048}}, 0); got != "1 sample as silence, 2048 samples off the end" {
+		t.Errorf("lossCell with no rate = %q", got)
+	}
+	if got := lossCell(nil, 4); got != "-" {
+		t.Errorf("lossCell past the list = %q, want -", got)
+	}
+}
+
 // TestAlbumTracksJSONTagCarry pins the per-track carry in the album document:
 // present with the report, absent for a track that carried nothing and for a
 // measurement, which carries nothing at all.
@@ -311,16 +386,45 @@ func TestAlbumTracksJSONTagCarry(t *testing.T) {
 		{Items: []waxtap.CarryItem{{Kind: waxtap.CarryChapters, Count: 3, Disposition: waxtap.DispositionCarried}}},
 		nil,
 	}
-	rows := albumTracksJSON(inputs, per, []string{"out/a.flac", "out/b.flac"}, carries)
+	rows := albumTracksJSON(inputs, per, []string{"out/a.flac", "out/b.flac"}, carries, nil)
 	if rows[0].TagCarry == nil || len(rows[0].TagCarry.Items) != 1 || rows[0].TagCarry.Items[0].Kind != "chapters" {
 		t.Errorf("track 0 tagCarry = %+v, want the chapter item", rows[0].TagCarry)
 	}
 	if rows[1].TagCarry != nil {
 		t.Errorf("track 1 tagCarry = %+v, want none for a track that carried nothing", rows[1].TagCarry)
 	}
-	for i, row := range albumTracksJSON(inputs, per, nil, nil) {
+	for i, row := range albumTracksJSON(inputs, per, nil, nil, nil) {
 		if row.TagCarry != nil || row.Output != "" {
 			t.Errorf("measurement row %d = %+v, want no output and no carry", i, row)
+		}
+	}
+}
+
+// TestAlbumTracksJSONInputLoss pins the per-track count in the album
+// document: the three numbers on the track that lost audio, and no key at all
+// on one that lost nothing, for a measurement and a write alike.
+func TestAlbumTracksJSONInputLoss(t *testing.T) {
+	inputs := []string{"a.flac", "b.flac"}
+	per := []waxtap.LoudnessInfo{{}, {}}
+	losses := []*waxtap.InputLoss{nil, {TruncatedSamples: 8192, SampleRate: 44100}}
+	for name, rows := range map[string][]albumTrackJSON{
+		"measure": albumTracksJSON(inputs, per, nil, nil, losses),
+		"process": albumTracksJSON(inputs, per, []string{"out/a.flac", "out/b.flac"}, []*waxtap.TagCarry{nil, nil}, losses),
+	} {
+		raw, err := json.Marshal(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got[0]["inputLoss"]; ok {
+			t.Errorf("%s: track 0 = %v, want no inputLoss key for a track that lost nothing", name, got[0])
+		}
+		loss, _ := got[1]["inputLoss"].(map[string]any)
+		if loss["lostSamples"] != float64(0) || loss["truncatedSamples"] != float64(8192) || loss["sampleRate"] != float64(44100) {
+			t.Errorf("%s: track 1 inputLoss = %v, want all three numbers present", name, got[1]["inputLoss"])
 		}
 	}
 }
@@ -400,5 +504,18 @@ func TestNormalizeAlbumMeasureRendersWarnings(t *testing.T) {
 	first, _ := warns[0].(map[string]any)
 	if first["code"] != "input-damage" {
 		t.Errorf("warnings[0] = %v, want input-damage", warns[0])
+	}
+	// The warning's count as numbers, on the track it is about and no other.
+	tracks, _ := doc["tracks"].([]any)
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %v, want two", doc["tracks"])
+	}
+	if whole, _ := tracks[0].(map[string]any); whole["inputLoss"] != nil {
+		t.Errorf("tracks[0] = %v, want no inputLoss on the whole track", whole)
+	}
+	short, _ := tracks[1].(map[string]any)
+	loss, _ := short["inputLoss"].(map[string]any)
+	if n, _ := loss["truncatedSamples"].(float64); n <= 0 || loss["lostSamples"] != float64(0) || loss["sampleRate"] != float64(44100) {
+		t.Errorf("tracks[1].inputLoss = %v, want what the track ends short by at 44100 Hz", short["inputLoss"])
 	}
 }

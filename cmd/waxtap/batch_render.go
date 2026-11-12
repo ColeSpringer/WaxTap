@@ -40,15 +40,17 @@ func countBatch(outcomes []batchOutcome, ignored int) batchCounts {
 
 // batchItemRecord is the NDJSON representation of one batch item.
 type batchItemRecord struct {
-	SchemaVersion  int           `json:"schemaVersion"`
-	Type           string        `json:"type"`
-	Index          int           `json:"index"`
-	Input          string        `json:"input"`
-	Output         string        `json:"output,omitempty"`
-	Status         string        `json:"status"`
-	IntegratedLUFS *jsonFloat    `json:"integratedLufs,omitempty"`
-	Error          *errorJSON    `json:"error,omitempty"`
-	Warnings       []warningJSON `json:"warnings,omitempty"`
+	SchemaVersion  int        `json:"schemaVersion"`
+	Type           string     `json:"type"`
+	Index          int        `json:"index"`
+	Input          string     `json:"input"`
+	Output         string     `json:"output,omitempty"`
+	Status         string     `json:"status"`
+	IntegratedLUFS *jsonFloat `json:"integratedLufs,omitempty"`
+	Error          *errorJSON `json:"error,omitempty"`
+	// InputLoss counts what the item's input lost; see inputLossJSON.
+	InputLoss *inputLossJSON `json:"inputLoss,omitempty"`
+	Warnings  []warningJSON  `json:"warnings,omitempty"`
 }
 
 // itemRecord builds an item record. Measure records contain loudness instead of
@@ -73,6 +75,7 @@ func itemRecord(o batchOutcome, measure bool) batchItemRecord {
 		rec.Output = displayPath(o.output)
 	}
 	if o.result != nil {
+		rec.InputLoss = inputLossToJSON(o.result.InputLoss)
 		for _, w := range o.result.Warnings {
 			rec.Warnings = append(rec.Warnings, warningJSON{Code: w.Code.String(), Detail: w.Detail})
 		}

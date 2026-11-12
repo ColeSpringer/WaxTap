@@ -702,6 +702,14 @@ type Result struct {
 	// TagCarry.
 	TagCarry *TagCarry
 
+	// InputLoss counts what a local input lost that the delivered audio's
+	// length does not show: the numbers the WarnInputDamage detail leads
+	// with, at the rate of the audio delivered. It is nil for an input that
+	// lost nothing by either count, and for a YouTube source, where a
+	// delivery that came up short is a failure to report, not the caller's
+	// input to count; see InputLoss.
+	InputLoss *InputLoss
+
 	// Metadata contains extended video metadata when ProcessSpec.IncludeMetadata
 	// is set. It is nil otherwise.
 	Metadata *VideoMetadata
@@ -915,11 +923,16 @@ const (
 	// WarnInputDamage reports problems in a local input the decoder worked
 	// around: a header declaring more audio than the file holds, bytes that did
 	// not parse, or a decode that ended short of the declared length. Detail
-	// leads with the verdict and carries the decoder's notes in its own words
-	// (or the short-decode observation); the engine's remarks on a file that
-	// plays fine are [WarnInputNote]'s, never this one's. The run still
-	// succeeds, because the readable audio is real audio and refusing it would
-	// help nobody.
+	// leads with the verdict, then the engine's count of what is missing where
+	// it has one (how much of the audio is silence standing in for frames a
+	// FLAC lost, and how far the audio ends short of the length the file
+	// declares), then the decoder's notes in its own words (or the
+	// short-decode observation); the engine's remarks on a file that plays
+	// fine are [WarnInputNote]'s, never this one's. The run still succeeds,
+	// because the readable audio is real audio and refusing it would help
+	// nobody. An album is the exception: it refuses a track missing more than
+	// half a second, since every track shares one gain. The counts the detail
+	// leads with are on the result as numbers; see [InputLoss].
 	//
 	// The list is complete once the output is written, not once the input is
 	// probed: a demuxer that walks its payload lazily (MP3, bare or inside a

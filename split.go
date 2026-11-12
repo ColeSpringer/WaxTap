@@ -179,7 +179,13 @@ type SplitResult struct {
 	// TagCarry itemizes each piece's metadata carry, in piece order; a nil
 	// entry is a piece whose carry did not run (the rip had nothing to carry).
 	TagCarry []*TagCarry
-	Warnings []Warning
+	// InputLoss counts what each piece's span of the rip lost that the
+	// piece's length does not show, in piece order, at the piece's own rate:
+	// a hole in the piece it falls in, and a rip cut short in the piece that
+	// runs to its end. A nil entry is a piece that lost nothing by either
+	// count. See InputLoss.
+	InputLoss []*InputLoss
+	Warnings  []Warning
 }
 
 // PlanSplit reads a CUE sheet against a local rip and returns where the pieces
@@ -224,13 +230,14 @@ func (c *Client) PlanSplit(ctx context.Context, input string, sheet []byte) (*Sp
 	// addressed past it is past the audio whatever the file holds behind it.
 	samples := audio.Samples
 	total := probe.Format.Duration
+	short := probe.Loss
 	var measured media.Measured
 	if probe.LengthClaimed {
 		length, lerr := runner.MeasureLength(ctx, input)
 		if lerr != nil {
 			return nil, lerr
 		}
-		samples, total, measured = length.Samples, length.Duration, length.Measured()
+		samples, total, measured, short = length.Samples, length.Duration, length.Measured(), length.Loss
 	}
 	if samples == 0 {
 		// Known, not unknown: the probe says -1 for a count it lacks, and a
@@ -242,6 +249,17 @@ func (c *Client) PlanSplit(ctx context.Context, input string, sheet []byte) (*Sp
 	// piece of its own, and a data track is a piece nothing writes.
 	pieces, err := f.Pieces(audio.SampleRate, samples)
 	if err != nil {
+		// A track that starts past the rip's end reads as a sheet for some
+		// other file. When the same sheet fits the length the rip's own header
+		// declares, the rip being cut short is why, and the count says so.
+		// Asked rather than read off the refusal's wording, and asked of the
+		// sheet: its other refusals (one track, a data track ahead of audio)
+		// fail at any length and are no business of the truncation.
+		if short.TruncatedSamples > 0 {
+			if _, derr := f.Pieces(audio.SampleRate, samples+short.TruncatedSamples); derr == nil {
+				return nil, fmt.Errorf("%w: %v; the rip is cut short: %s", waxerr.ErrIncompatibleSpec, err, short.Note())
+			}
+		}
 		return nil, fmt.Errorf("%w: %v", waxerr.ErrIncompatibleSpec, err)
 	}
 
@@ -389,7 +407,7 @@ func (c *Client) Split(ctx context.Context, plan *SplitPlan, outputs []string, s
 	if err != nil {
 		return nil, fmt.Errorf("waxtap.Split: %w", err)
 	}
-	res := &SplitResult{Outputs: make([]string, len(outputs)), TagCarry: make([]*TagCarry, len(outputs))}
+	res := &SplitResult{Outputs: make([]string, len(outputs)), TagCarry: make([]*TagCarry, len(outputs)), InputLoss: make([]*InputLoss, len(outputs))}
 	em := newEmitter(nil, "")
 	var carry albumCarryWarns
 	var levels albumLevels
@@ -399,7 +417,7 @@ func (c *Client) Split(ctx context.Context, plan *SplitPlan, outputs []string, s
 	// (a lossy rip's decode can overshoot, which the clipping policy suppresses)
 	// and the engine's remarks on the file.
 	in := probeAudio(ctx, runner, plan.Input)
-	noted.observe(plan.Input, inputNote(in.notes))
+	noted.observe(plan.Input, inputNote(in.notes), false)
 	enc := media.Spec{Codec: codec, Bitrate: spec.Bitrate, BitDepth: spec.BitDepth}
 	for i, out := range outputs {
 		p := plan.Pieces[i]
@@ -413,9 +431,13 @@ func (c *Client) Split(ctx context.Context, plan *SplitPlan, outputs []string, s
 		if err != nil {
 			return nil, fmt.Errorf("waxtap.Split: piece %d (%s): %w", i+1, out, err)
 		}
-		// The damage is the rip's, found again by each piece's read; naming the
-		// piece is what tells the listener which span the read gave up in.
-		damaged.observe(out, inputDamageNote(sres.InputWarnings))
+		// The findings are the rip's, found again by each piece's read. The
+		// count is the piece's own: a hole in the piece it falls in, and a rip
+		// cut short in the piece that runs to its end. A piece with a count
+		// leads the one warning (albumInputRemarks), which is what names the
+		// span the damage fell in.
+		res.InputLoss[i] = inputLossOf(sres.Loss)
+		damaged.observe(out, inputDamageNote(sres.Loss.Lead(sres.InputWarnings)), res.InputLoss[i] != nil)
 		levels.observe(out, in.codec, sres.Levels)
 		tem := newEmitter(nil, "")
 		tc, terr := c.splitTags(ctx, plan, i, out, tem)

@@ -172,6 +172,11 @@ type Length struct {
 	Duration time.Duration
 	Warnings []string
 	Notes    []string
+	// Loss is how far the header declares past the end of what the file
+	// holds, as the measurement left it: known here for a payload a probe
+	// leaves unwalked, where ProbeResult.Loss is still zero. The truncated
+	// count only; a measurement delivers nothing.
+	Loss Loss
 	// Counted says the count came from decoding the whole file, the one route
 	// left for a source whose headers and positions only state times (WMA
 	// Pro, Voice and Lossless in ASF). A later decode of the same file that
@@ -249,6 +254,7 @@ func (r *Runner) MeasureLength(ctx context.Context, input string) (Length, error
 		Duration: trackDuration(t.Samples, t.Fmt.Rate),
 		Warnings: sourceWarnings(info.Warnings),
 		Notes:    sourceWarnings(info.Notes),
+		Loss:     Loss{TruncatedSamples: info.Truncated, Rate: t.Fmt.Rate},
 		Counted:  t.SamplesCounted,
 	}, nil
 }

@@ -90,7 +90,9 @@ func (r *Runner) RenderSpan(ctx context.Context, input, output string, from, to 
 	if err := staged.Commit(); err != nil {
 		return Result{}, err
 	}
-	res := Result{Output: output, Codec: enc.Codec, Levels: levelsOf(tres), InputWarnings: sourceWarnings(tres.InputWarnings)}
+	// The loss is the span's own: a hole is counted by the piece it falls in,
+	// and a truncation only by a span that runs to the end of the source.
+	res := Result{Output: output, Codec: enc.Codec, Levels: levelsOf(tres), InputWarnings: sourceWarnings(tres.InputWarnings), Loss: lossOf(tres)}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}

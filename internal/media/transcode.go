@@ -56,6 +56,11 @@ type Result struct {
 	// list ProbeResult.Warnings carries, the probe's entries included, each
 	// once; nil for a clean source.
 	InputWarnings []string
+	// Loss is the engine's own count of what the source lost that the
+	// output's length does not show: silence written where damage took the
+	// audio, and what the source declared past its end. Zero for a source
+	// that lost nothing; see Loss.
+	Loss Loss
 	// TrimDropped is the source's gapless trim a copy could not carry: the
 	// output container states none, so those samples play as audio. Zero
 	// for an encode, which applies the trim while decoding, and for a copy
@@ -137,11 +142,12 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 
 	var levels Levels
 	var found []string
+	var loss Loss
 	var dropped Trim
 	if spec.Codec == CodecCopy {
 		// remux classifies its own failures; classifying again here would wrap an
 		// already-mapped error a second time.
-		found, dropped, err = r.remux(ctx, src, input, output, staged)
+		found, loss, dropped, err = r.remux(ctx, src, input, output, staged)
 		if err != nil {
 			return Result{}, err
 		}
@@ -153,13 +159,13 @@ func (r *Runner) Transcode(ctx context.Context, input, output string, spec Spec)
 		if err != nil {
 			return Result{}, classifyEngineError(err, input, output)
 		}
-		levels, found = levelsOf(tres), sourceWarnings(tres.InputWarnings)
+		levels, found, loss = levelsOf(tres), sourceWarnings(tres.InputWarnings), lossOf(tres)
 	}
 
 	if err := staged.Commit(); err != nil {
 		return Result{}, err
 	}
-	res := Result{Output: output, Codec: spec.Codec, Levels: levels, InputWarnings: found, TrimDropped: dropped}
+	res := Result{Output: output, Codec: spec.Codec, Levels: levels, InputWarnings: found, Loss: loss, TrimDropped: dropped}
 	if fi, serr := os.Stat(output); serr == nil {
 		res.Size = fi.Size()
 	}
@@ -219,28 +225,30 @@ func (r *Runner) RemuxContainer(ctx context.Context, input, output, container st
 // names, choosing WaxFlow's output format from the source codec (the codec must
 // survive the trip) so no re-encode happens. It takes the paths rather than their
 // container hints so its failures can name the file they are about. It
-// returns the damage the packet walk found (see Result.InputWarnings) and the
+// returns the damage the packet walk found (see Result.InputWarnings), the
+// copy's count of what the source lost (see Result.Loss: the silent frames it
+// wrote for a hole, and what the source declared past its end), and the
 // gapless trim the destination container could not state (see
 // Result.TrimDropped).
-func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) ([]string, Trim, error) {
+func (r *Runner) remux(ctx context.Context, src container.Source, input, output string, dst *tempfile.File) ([]string, Loss, Trim, error) {
 	demux, info, err := format.OpenDemuxer(src, hintFor(input), nil)
 	if err != nil {
-		return nil, Trim{}, classifyInputError(err, input)
+		return nil, Loss{}, Trim{}, classifyInputError(err, input)
 	}
 	track := info.Default()
 	opts, ok := copyOptions(track, output)
 	if !ok {
-		return nil, Trim{}, remuxDeclined(track.Codec)
+		return nil, Loss{}, Trim{}, remuxDeclined(track.Codec)
 	}
 	// Ask before running: the engine declines a copy the stream's own shape
 	// rules out, and its run says only that the source "cannot be remuxed".
 	// The plan is headers and table lookups, and a decline here is explained.
 	plan, err := r.engine.PlanRemux(track, opts)
 	if err != nil {
-		return nil, Trim{}, classifyEngineError(err, input, output)
+		return nil, Loss{}, Trim{}, classifyEngineError(err, input, output)
 	}
 	if plan == nil {
-		return nil, Trim{}, copyDeclined(track, opts.Container)
+		return nil, Loss{}, Trim{}, copyDeclined(track, opts.Container)
 	}
 	// The packets move unchanged, so a container with nowhere to state the
 	// source's trim delivers those samples as audio. WaxFlow's ADTS muxer
@@ -252,9 +260,9 @@ func (r *Runner) remux(ctx context.Context, src container.Source, input, output 
 	}
 	tres, err := r.engine.RemuxDemuxer(ctx, demux, track, dst, opts)
 	if err != nil {
-		return nil, Trim{}, classifyEngineError(err, input, output)
+		return nil, Loss{}, Trim{}, classifyEngineError(err, input, output)
 	}
-	return sourceWarnings(tres.InputWarnings), dropped, nil
+	return sourceWarnings(tres.InputWarnings), lossOf(tres), dropped, nil
 }
 
 // copyOptions is the remux a packet copy of track into output's container runs

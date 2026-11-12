@@ -414,6 +414,27 @@ func tagCarryToJSON(tc *waxtap.TagCarry) *tagCarryJSON {
 	return out
 }
 
+// inputLossJSON is the --json view of what a local input lost that no length
+// shows: the two counts the input-damage warning leads with, as numbers. The
+// key is absent for an input that lost nothing by either count, and all three
+// fields are present when it is there, so a reader that finds the object can
+// compute with it without testing each key.
+type inputLossJSON struct {
+	// LostSamples are silence standing in for audio damage took, and
+	// TruncatedSamples what the input's header declares past the end of the
+	// file; both at SampleRate.
+	LostSamples      int64 `json:"lostSamples"`
+	TruncatedSamples int64 `json:"truncatedSamples"`
+	SampleRate       int   `json:"sampleRate"`
+}
+
+func inputLossToJSON(l *waxtap.InputLoss) *inputLossJSON {
+	if l == nil {
+		return nil
+	}
+	return &inputLossJSON{LostSamples: l.LostSamples, TruncatedSamples: l.TruncatedSamples, SampleRate: l.SampleRate}
+}
+
 type resultJSON struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	SourceKind    string `json:"sourceKind"`
@@ -449,7 +470,9 @@ type resultJSON struct {
 	Loudness *loudnessJSON `json:"loudness,omitempty"`
 	// TagCarry itemizes a local process's metadata carry; see tagCarryJSON.
 	TagCarry *tagCarryJSON `json:"tagCarry,omitempty"`
-	Warnings []warningJSON `json:"warnings,omitempty"`
+	// InputLoss counts what a local input lost; see inputLossJSON.
+	InputLoss *inputLossJSON `json:"inputLoss,omitempty"`
+	Warnings  []warningJSON  `json:"warnings,omitempty"`
 	// Notes are the run's note: diagnostics, in the same {code, detail} shape as
 	// Warnings. They were stderr-only and --quiet-gated, so --json --quiet, the
 	// combination a script is most likely to use, saw none of them.
@@ -481,6 +504,7 @@ func resultToJSON(res *waxtap.Result) resultJSON {
 	}
 	out.SourceFormat, out.OutputFormat = formatDTOs(res)
 	out.TagCarry = tagCarryToJSON(res.TagCarry)
+	out.InputLoss = inputLossToJSON(res.InputLoss)
 	if res.Loudness != nil {
 		lj := &loudnessJSON{Target: jsonFloat(res.Loudness.Target)}
 		lj.Input = loudnessInfoToJSON(res.Loudness.Input)

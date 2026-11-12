@@ -786,3 +786,124 @@ func TestCutCopyModeNamesTheRealConflict(t *testing.T) {
 		t.Errorf("stderr = %q, want it not to blame --format", stderr)
 	}
 }
+
+// truncatedCopy writes the first 60% of src's bytes to a file named name
+// beside it: a file cut short of the length its header still declares.
+func truncatedCopy(t *testing.T, src, name string) string {
+	t.Helper()
+	whole, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := filepath.Join(filepath.Dir(src), name)
+	if err := os.WriteFile(cut, whole[:len(whole)*6/10], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cut
+}
+
+// What an input lost reaches --json as numbers under inputLoss, beside the
+// input-damage warning that words it, for a write and for a measurement. A
+// whole input's document has no such key.
+func TestJSONDocumentCarriesInputLoss(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.flac")
+	synthAudio(t, in, "flac")
+	short := truncatedCopy(t, in, "short.flac")
+
+	for name, args := range map[string][]string{
+		"transcode":    {"transcode", short, filepath.Join(dir, "t.wav"), "--format", "wav", "--json"},
+		"measure-only": {"normalize", short, "--measure-loudness", "--json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stdout, stderr, code := runMain(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			doc := oneJSONDoc(t, stdout)
+			loss, ok := doc["inputLoss"].(map[string]any)
+			if !ok {
+				t.Fatalf("inputLoss = %v, want the object; document: %v", doc["inputLoss"], doc)
+			}
+			if n, _ := loss["truncatedSamples"].(float64); n <= 0 {
+				t.Errorf("truncatedSamples = %v, want what the file ends short by", loss["truncatedSamples"])
+			}
+			// Every field is there once the object is, the zero one included.
+			if loss["lostSamples"] != float64(0) || loss["sampleRate"] != float64(44100) || len(loss) != 3 {
+				t.Errorf("inputLoss = %v, want lostSamples 0, sampleRate 44100, and nothing else", loss)
+			}
+			warns, _ := doc["warnings"].([]any)
+			if len(warns) == 0 {
+				t.Errorf("the count came with no warning to word it: %v", doc)
+			}
+		})
+	}
+
+	stdout, stderr, code := runMain(t, "transcode", in, filepath.Join(dir, "whole.wav"), "--format", "wav", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if doc := oneJSONDoc(t, stdout); doc["inputLoss"] != nil {
+		t.Errorf("inputLoss = %v on a whole input, want the key omitted", doc["inputLoss"])
+	}
+}
+
+// A split's document counts each piece's own loss: a rip cut short inside its
+// last track puts the number on that piece and on no other.
+func TestJSONSplitDocumentCarriesInputLossPerPiece(t *testing.T) {
+	dir := t.TempDir()
+	whole := filepath.Join(dir, "whole.flac")
+	synthAudio(t, whole, "flac") // 1 s
+	rip := truncatedCopy(t, whole, "rip.flac")
+	cue := filepath.Join(dir, "rip.cue")
+	if err := os.WriteFile(cue, []byte("FILE \"rip.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runMain(t, "split", rip, "--cue", cue, "-f", "flac", "-d", filepath.Join(dir, "out"), "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	pieces, _ := oneJSONDoc(t, stdout)["pieces"].([]any)
+	if len(pieces) != 2 {
+		t.Fatalf("pieces = %v, want two", pieces)
+	}
+	if first, _ := pieces[0].(map[string]any); first["inputLoss"] != nil {
+		t.Errorf("pieces[0] = %v, want no inputLoss: its span is whole", first)
+	}
+	last, _ := pieces[1].(map[string]any)
+	loss, _ := last["inputLoss"].(map[string]any)
+	if n, _ := loss["truncatedSamples"].(float64); n <= 0 || loss["lostSamples"] != float64(0) || loss["sampleRate"] != float64(44100) {
+		t.Errorf("pieces[1].inputLoss = %v, want what the rip's last track ends short by", last["inputLoss"])
+	}
+}
+
+// A batch item's record carries its own count, and one for an item that lost
+// nothing, or that never ran, has no such key.
+func TestBatchItemRecordCarriesInputLoss(t *testing.T) {
+	keys := func(o batchOutcome) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(itemRecord(o, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	lossy := keys(batchOutcome{input: "a.flac", output: "out/a.mp3", status: statusOK,
+		result: &waxtap.Result{InputLoss: &waxtap.InputLoss{LostSamples: 4096, SampleRate: 44100}}})
+	loss, _ := lossy["inputLoss"].(map[string]any)
+	if loss["lostSamples"] != float64(4096) || loss["truncatedSamples"] != float64(0) || loss["sampleRate"] != float64(44100) {
+		t.Errorf("inputLoss = %v, want the item's three numbers", lossy["inputLoss"])
+	}
+	for name, o := range map[string]batchOutcome{
+		"whole input": {input: "b.flac", output: "out/b.mp3", status: statusOK, result: &waxtap.Result{}},
+		"never ran":   {input: "c.flac", status: statusNotRun},
+	} {
+		if m := keys(o); m["inputLoss"] != nil {
+			t.Errorf("%s: record = %v, want no inputLoss key", name, m)
+		}
+	}
+}

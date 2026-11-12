@@ -155,16 +155,27 @@ type Result struct {
 	SourceChannels int
 	// SourceWarnings are the input's damage notes, carried so a caller can
 	// report that the delivered audio is the readable part of a damaged file
-	// rather than all of it: the probe's (media.ProbeResult.Warnings), then
-	// what the write's read found past the headers (media.Result
-	// .InputWarnings; a demuxer that walks its payload lazily finds damage
-	// where the read reaches it), each once, then the short-decode note when
-	// the output came up short of what the source declared.
+	// rather than all of it: the engine's count of what the source lost when
+	// it lost any (media.Loss.Note: silence standing in for a hole, a file
+	// that ends short of the length it declares), then the probe's
+	// (media.ProbeResult.Warnings), then what the write's read found past the
+	// headers (media.Result.InputWarnings; a demuxer that walks its payload
+	// lazily finds damage where the read reaches it), each once, then the
+	// short-decode note when the output came up short of what the source
+	// declared by more than the engine counted.
 	//
 	// Only the input contributes. The output probe below is of a file this
 	// pipeline just wrote, where damage would be an encoder defect rather than
 	// something to warn the user about their input.
 	SourceWarnings []string
+	// SourceLoss is the engine's count behind the line SourceWarnings leads
+	// with: what the input lost that no length shows, as the one read that
+	// produced this result counted it. The delivered file's write when one
+	// ran, at that file's rate; the measurement's for a measure-only run and
+	// for a header-gain copy, whose short-decode note is judged against the
+	// measurement; else what opening the file settled, for a run that read
+	// nothing. Zero for an input that lost nothing by either count.
+	SourceLoss media.Loss
 	// SourceNotes are the engine's remarks on an input that is not damaged
 	// (media.ProbeResult.Notes): what it did with a well-formed file. The
 	// probe's list is the whole of it: the engine raises every note when it
@@ -295,6 +306,12 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// re-encode supersedes it, so it only matters in the pure-copy case.
 	remux := spec.Remux && !transcoding
 
+	// short is how far the file ends short of the length its header declares,
+	// as far as anything before a read can count it: the probe's, or the
+	// measurement's below for a payload the probe leaves unwalked. It is the
+	// truncation total already has out of it, so a short-decode check credits a
+	// read only what it counted past this (media.Loss.TruncatedPast).
+	short := probe.Loss
 	// source is the length a read of the source delivers, measured only when
 	// the headers merely claim one.
 	var source media.Measured
@@ -315,7 +332,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		if lerr != nil {
 			return Result{}, lerr
 		}
-		total, source = length.Duration, length.Measured()
+		total, source, short = length.Duration, length.Measured(), length.Loss
 		sourceEmpty = length.Samples == 0
 		probe.Warnings = mergeSourceWarnings(probe.Warnings, length.Warnings)
 		// The walk's own remarks arrive here too: a count off by one clean frame
@@ -347,13 +364,14 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// opening the output. When the probe worked around damage, the duration
 		// here is the clamped one, and the user's ranges were likely written
 		// against the length the header still claims, so the rejection carries
-		// the probe's own notes about why the file reads short. The first few,
-		// not the first: a truncated FLAC reports the bytes it dropped ahead of
-		// the count it came up short of, and the second is the explanation.
+		// why the file reads short: the engine's count of how far it ends short
+		// of that length, then the probe's own notes. The first few, not the
+		// first: a truncated FLAC reports the bytes it dropped ahead of the
+		// count it came up short of.
 		if !effectiveCut && spec.RejectEmptyRemoval {
 			damage := ""
-			if n := len(probe.Warnings); n > 0 {
-				damage = "; " + strings.Join(probe.Warnings[:min(n, 3)], "; ")
+			if notes := short.Lead(probe.Warnings); len(notes) > 0 {
+				damage = "; " + strings.Join(notes[:min(len(notes), 3)], "; ")
 			}
 			return Result{}, fmt.Errorf("%w: cut ranges %s do not intersect the media (duration %s%s)",
 				waxerr.ErrIncompatibleSpec, formatRanges(spec.Remove), total.Round(time.Second), damage)
@@ -668,7 +686,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	}
 
 	if headerGain {
-		return writeHeaderGain(ctx, r, input, output, spec.Loudness.Target, total, measured, res, send)
+		return writeHeaderGain(ctx, r, input, output, spec.Loudness.Target, total, short, measured, res, send)
 	}
 
 	// Nothing to write: a measure-only or fully no-op spec. The caller delivers
@@ -678,10 +696,15 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 	// decode to its declared length (mid-file corruption probes clean).
 	if !effectiveCut && !transcoding && !apply && !remux {
 		if measure {
-			if note := media.ShortMeasureNote(measured.Duration, total); note != "" {
+			if note := media.ShortMeasureNote(measured.Duration, total, measured.Loss.TruncatedPast(short)); note != "" {
 				res.SourceWarnings = append(res.SourceWarnings, note)
 			}
+			res.SourceLoss = measured.Loss
+		} else {
+			// Nothing read the file, so the count is what opening it settled.
+			res.SourceLoss = short
 		}
+		res.SourceWarnings = res.SourceLoss.Lead(res.SourceWarnings)
 		return res, nil
 	}
 
@@ -740,6 +763,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 			res.CutSnaps, res.CutSnapMax = cres.Snaps, cres.SnapMax
 			res.CutDeclined = cres.Declined
 			res.Levels = cres.Levels
+			res.SourceLoss = cres.Loss
 			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, cres.InputWarnings)
 			// A copy cut that fell back to a re-encode (the packet copy declined;
 			// res.CutDeclined says why) reports the encode it actually produced.
@@ -762,6 +786,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		if err == nil {
 			res.Levels = tres.Levels
 			res.TrimDropped = tres.TrimDropped
+			res.SourceLoss = tres.Loss
 			res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, tres.InputWarnings)
 		}
 		return err
@@ -815,6 +840,10 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		res.GainDB = enc.GainDB
 	}
 
+	// The last completed write's count, so it describes the file left at
+	// output however many passes the gain search took.
+	res.SourceWarnings = res.SourceLoss.Lead(res.SourceWarnings)
+
 	// Probe the written output so callers can report authoritative output numbers.
 	// Best-effort: the write already succeeded, so a probe failure must not fail
 	// the job.
@@ -825,6 +854,12 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 		// file the probe passed clean - the one shape of input damage with no
 		// probe warning to carry. A pure remux is exempt: it moves packets
 		// without decoding, so the output declares whatever the input declared.
+		// What the engine counted as truncated is not in it, where want still
+		// includes that audio: a file cut short of a length its header only
+		// claimed (an MP3 on its Xing count) has that shortfall stated above,
+		// in the engine's own number. A length the probe or a measurement
+		// restated has it out already, and so has every cut resolved against
+		// one, so there the whole gap is the decode's.
 		if res.Transcoded || res.Cut {
 			want := total
 			if effectiveCut {
@@ -833,7 +868,7 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 				// measured against the request would read as input damage.
 				want = cutrange.OutputDuration(res.Keeps, spec.Crossfade)
 			}
-			if note := media.ShortDecodeNote(op.Format.Duration, want); note != "" {
+			if note := media.ShortDecodeNote(op.Format.Duration, want, res.SourceLoss.TruncatedPast(short)); note != "" {
 				res.SourceWarnings = append(res.SourceWarnings, note)
 			}
 		}
@@ -846,7 +881,9 @@ func Run(ctx context.Context, r *media.Runner, input, output string, spec Spec, 
 // across, and the measurement above already heard that gain, so the head is
 // moved by the change rather than set to a total. An input with no measurable
 // loudness derives no gain and is delivered as a plain copy.
-func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string, target float64, total time.Duration, measured loudness.Loudness, res Result, send func(Stage)) (Result, error) {
+//
+// short is the truncation total already has out of it (see Run).
+func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string, target float64, total time.Duration, short media.Loss, measured loudness.Loudness, res Result, send func(Stage)) (Result, error) {
 	res.LoudnessApplied = loudness.Gainable(measured.IntegratedLUFS)
 	q := 0
 	if res.LoudnessApplied {
@@ -856,8 +893,11 @@ func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string,
 	// The packets are copied, so the output probe cannot reveal a decode that
 	// ended early; the measurement above is the only read of the audio, and its
 	// own length is what says the file does not decode to what it declares.
-	// The encode path learns the same thing from its output probe.
-	if note := media.ShortMeasureNote(measured.Duration, total); note != "" {
+	// The encode path learns the same thing from its output probe. Its count
+	// of what the source lost is the one this path reports too, for the same
+	// reason: the note is judged against that count, and a second count from
+	// the copy's walk could only disagree with the note beside it.
+	if note := media.ShortMeasureNote(measured.Duration, total, measured.Loss.TruncatedPast(short)); note != "" {
 		res.SourceWarnings = append(res.SourceWarnings, note)
 	}
 	send(StageRemuxing)
@@ -872,6 +912,8 @@ func writeHeaderGain(ctx context.Context, r *media.Runner, input, output string,
 		return Result{}, err
 	}
 	res.SourceWarnings = mergeSourceWarnings(res.SourceWarnings, tres.InputWarnings)
+	res.SourceLoss = measured.Loss
+	res.SourceWarnings = res.SourceLoss.Lead(res.SourceWarnings)
 	res.OutputPath = output
 	res.OutputCodec = media.CodecOpus
 	// Only a head that actually moved: a source already on target quantizes to

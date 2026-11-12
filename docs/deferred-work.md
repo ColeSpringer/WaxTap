@@ -17,16 +17,3 @@ Gate tags:
   build when picked up.
 - `[upstream]` needs sibling-repo work first; the ask is in
   upstream-requests.md.
-
-## Open entries
-
-- `[upstream]` **The size of a hole is read out of a warning's text.** Since
-  WaxFlow `2f448c9` a FLAC that lost frames, native or in Ogg, reads to its
-  full length with silence where they were, so a length no longer says how
-  much of a track a measurement covered. An album refuses a track that lost
-  more than half a second this way, as it refuses a short decode, and the
-  only place the engine states the count is the finding's wording
-  (`media.LostSamples`, "... 4096 samples lost"). A reworded warning reads
-  as nothing lost, and a file damaged in more places than the engine lists
-  (64) is undercounted. Take the count from a field when one exists
-  (upstream-requests.md, WaxFlow) and drop the parse.

@@ -59,10 +59,14 @@ type Loudness struct {
 	// hold the measurement against the probed length: a decode that ends early
 	// on a probe-clean file leaves this as the only evidence.
 	Duration time.Duration
-	// Lost is how much of Duration is silence the engine delivered where
-	// damage took samples (media.LostSamples over Warnings): the length holds
-	// through such a hole, so Duration alone would call the read complete.
-	Lost time.Duration
+	// Loss is the engine's count of what the source lost that Duration does
+	// not show (waxflow.AnalyzeResult's LostSamples and TruncatedSamples): how
+	// much of Duration is silence delivered where damage took the audio, and
+	// how much more the file declared than it held. The length holds through
+	// a hole and is restated for a file cut short, so Duration alone would
+	// call either read complete. A group's figure carries its members' totals
+	// and no rate.
+	Loss media.Loss
 	// Warnings is the input damage the measurement's read found, in the
 	// source's own terms (waxflow.AnalyzeResult.InputWarnings, folded by
 	// media.Result.InputWarnings' rule), complete as of the end of the
@@ -102,10 +106,10 @@ func fromResult(res *waxflow.AnalyzeResult) Loudness {
 		LRA:            res.LoudnessRange,
 		SamplePeakDB:   res.SamplePeakDB,
 		Warnings:       res.InputWarnings,
+		Loss:           media.AnalysisLoss(res),
 	}
 	if res.Format.Rate > 0 {
 		l.Duration = time.Duration(float64(res.Samples) / float64(res.Format.Rate) * float64(time.Second))
-		l.Lost = media.SampleTime(media.LostSamples(res.InputWarnings), res.Format.Rate)
 	}
 	return l
 }

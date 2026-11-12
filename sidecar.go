@@ -233,6 +233,12 @@ func (r sidecarReporter) invalidate(ctx context.Context, inv potoken.SessionInva
 // loss the probe confirmed. A daemon that answered without a health body (a
 // bgutil server reports its uptime and version) leaves every field empty: the
 // ping proved it answers, and nothing more.
+//
+// "no-session" names two different daemons. One is idle: a report retired its
+// session and the next request establishes another. The other tried to
+// establish one and was refused, by YouTube or by its own browser, and since
+// WaxSeal serves through a failed launch instead of exiting it answers the
+// same word. LaunchFailures tells them apart.
 type SidecarHealth struct {
 	// OK reports a live session (a tenant probe) or a running browser (a daemon
 	// probe). It is false inside the benign windows, which are still healthy.
@@ -244,8 +250,21 @@ type SidecarHealth struct {
 	// "probe-failed". Empty when the body carried none.
 	Reason string
 	// Error is the daemon's own account of a probe that was not ok, capped
-	// like a refusal's reason. Empty when it gave none.
+	// like a refusal's reason. A healthy no-session whose LaunchFailures is
+	// above 0 gives the last failed launch's; a ping that failed gives the
+	// probe's own failure whatever the count, since the body has one field
+	// for both. Empty when it gave none.
 	Error string
+	// LaunchFailures counts the session launches in a row that failed, 0 once
+	// a session attests and from a daemon that predates the field. Above 0
+	// the tenant has no session because it could not get one, and every
+	// request that needs one is refused until a launch succeeds.
+	LaunchFailures int
+	// RetryAfter is what is left of the cool-down a failed launch opened,
+	// inside which the daemon refuses without launching again. Zero when none
+	// is open. A ping that failed carries the same wait on its error, unless
+	// a Retry-After header stated another.
+	RetryAfter time.Duration
 	// BrowserRelaunched reports that the probe found the shared browser gone
 	// and relaunched it before answering, which otherwise shows only in the
 	// daemon's log.
@@ -284,11 +303,15 @@ const sidecarPingTimeout = 110 * time.Second
 //
 // The verdict is the daemon's. A 200 is healthy, or a benign window that
 // strict keeps at 200 (no-session, busy), and returns the health with a nil
-// error. A 200 whose JSON carries no health body counts as answered, which is
+// error. That includes a no-session whose LaunchFailures is above 0: the probe
+// observed no loss, so the daemon keeps it at 200, and the health says the
+// tenant cannot get a session. A 200 whose JSON carries no health body counts as answered, which is
 // all a daemon that is not WaxSeal can say; one that is not JSON is the
 // unusable response it is from any sidecar. A 503 is the loss the probe
-// confirmed, returned as a [SidecarResponseError] whose Code is the reason and
-// whose Reason is the daemon's account, beside the decoded health; so is a 200
+// confirmed, returned as a [SidecarResponseError] whose Code is the reason,
+// whose Reason is the daemon's account, and whose RetryAfter is the wait it
+// stated (a Retry-After header, else the body's retry_after_seconds, as on
+// any refusal), beside the decoded health; so is a 200
 // whose reason is "probe-failed", which a daemon that predates ?strict sends
 // where a 503 goes today. Any other status is the refusal it is everywhere
 // else (401 for a wrong key, 404 from a daemon with no /ping), and a
@@ -347,6 +370,8 @@ type sidecarHealthBody struct {
 	Error             string `json:"error"`
 	BrowserRelaunched bool   `json:"browser_relaunched"`
 	Keyed             *bool  `json:"keyed"`
+	LaunchFailures    int    `json:"consecutive_launch_failures"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
 }
 
 // pingSidecar is one strict ping of endpoint. A health body arrives with a 200
@@ -395,12 +420,16 @@ func pingSidecar(ctx context.Context, client *http.Client, endpoint, apiKey stri
 		Error:             capRunes(strings.TrimSpace(body.Error), sidecarReasonRunes),
 		BrowserRelaunched: body.BrowserRelaunched,
 		Keyed:             body.Keyed != nil && *body.Keyed,
+		LaunchFailures:    max(body.LaunchFailures, 0),
+		RetryAfter:        time.Duration(max(body.RetryAfterSeconds, 0)) * time.Second,
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable || h.Reason == sidecarPingReasonProbeFailed {
 		// The loss the daemon confirmed, as the refusal it is: the reason where
-		// a code goes, the daemon's account where a reason goes, and a wait a
-		// proxy may have stated on it.
-		r := sidecarRefusal{Reason: h.Error, Code: h.Reason}
+		// a code goes, the daemon's account where a reason goes, and the wait
+		// stated on it, read as a refusal's is: a Retry-After header (a
+		// proxy's, on a ping) wins over the body's retry_after_seconds, which
+		// is the cool-down a failed launch left open.
+		r := sidecarRefusal{Reason: h.Error, Code: h.Reason, RetryAfter: h.RetryAfter}
 		if d, ok := httpx.ParseRetryAfter(resp.Header); ok {
 			r.RetryAfter = d
 		}

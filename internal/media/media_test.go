@@ -1364,45 +1364,51 @@ func TestProbeReportsClaimedLength(t *testing.T) {
 
 // TestShortDecodeNotes pins the thresholds: a real mid-file failure trips, the
 // frame-level drift ordinary encoders produce does not, and neither does a
-// proportionally tiny shortfall on very long audio.
+// proportionally tiny shortfall on very long audio. A shortfall the engine
+// counted as truncation is not a decode that ended early, and only what the
+// count leaves unexplained is held to the threshold.
 func TestShortDecodeNotes(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		got      time.Duration
-		declared time.Duration
-		want     bool
+		name      string
+		got       time.Duration
+		declared  time.Duration
+		truncated time.Duration
+		want      bool
 	}{
-		{"corrupt frame stops the decode", 1800 * time.Millisecond, 3 * time.Second, true},
-		{"encoder padding drift", 2950 * time.Millisecond, 3 * time.Second, false},
-		{"seconds lost on long audio", 10*time.Minute - 5*time.Second, 10 * time.Minute, true},
-		{"framing drift on long audio", 10*time.Hour - 200*time.Millisecond, 10 * time.Hour, false},
-		{"most of a short file gone", 400 * time.Millisecond, time.Second, true},
-		{"unknown declared", time.Second, 0, false},
-		{"unknown got", 0, time.Second, false},
-		{"delivered long", 3 * time.Second, 2 * time.Second, false},
+		{"corrupt frame stops the decode", 1800 * time.Millisecond, 3 * time.Second, 0, true},
+		{"encoder padding drift", 2950 * time.Millisecond, 3 * time.Second, 0, false},
+		{"seconds lost on long audio", 10*time.Minute - 5*time.Second, 10 * time.Minute, 0, true},
+		{"framing drift on long audio", 10*time.Hour - 200*time.Millisecond, 10 * time.Hour, 0, false},
+		{"most of a short file gone", 400 * time.Millisecond, time.Second, 0, true},
+		{"unknown declared", time.Second, 0, 0, false},
+		{"unknown got", 0, time.Second, 0, false},
+		{"delivered long", 3 * time.Second, 2 * time.Second, 0, false},
+		{"the engine counted the whole shortfall", 1800 * time.Millisecond, 3 * time.Second, 1200 * time.Millisecond, false},
+		{"the count leaves a second unexplained", 800 * time.Millisecond, 3 * time.Second, 1200 * time.Millisecond, true},
+		{"a negative count explains nothing", 1800 * time.Millisecond, 3 * time.Second, -time.Hour, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			note := ShortDecodeNote(tc.got, tc.declared)
+			note := ShortDecodeNote(tc.got, tc.declared, tc.truncated)
 			if got := note != ""; got != tc.want {
-				t.Fatalf("ShortDecodeNote(%v, %v) = %q, want note=%v", tc.got, tc.declared, note, tc.want)
+				t.Fatalf("ShortDecodeNote(%v, %v, %v) = %q, want note=%v", tc.got, tc.declared, tc.truncated, note, tc.want)
 			}
 			if tc.want && !strings.Contains(note, "did not read") {
 				t.Errorf("note = %q, want it to say the remainder did not read", note)
 			}
-			if m := ShortMeasureNote(tc.got, tc.declared); (m != "") != tc.want {
-				t.Errorf("ShortMeasureNote(%v, %v) = %q, want note=%v", tc.got, tc.declared, m, tc.want)
+			if m := ShortMeasureNote(tc.got, tc.declared, tc.truncated); (m != "") != tc.want {
+				t.Errorf("ShortMeasureNote(%v, %v, %v) = %q, want note=%v", tc.got, tc.declared, tc.truncated, m, tc.want)
 			}
 		})
 	}
 }
 
-// LostSamples reads the size of a hole out of the engine's own finding, which
-// is the only place the engine states it. This holds the reading to the
-// wording on a real hole: a FLAC with a stretch overwritten mid-file reads to
-// its declared length, and the count LostSamples takes from that read's
-// warnings is exactly the silence that stands in the output for the frames
-// that went.
-func TestLostSamplesReadsTheEnginesCount(t *testing.T) {
+// A hole keeps a FLAC's length, so the length cannot say how much of a read
+// is the file's own; the engine's count does. This holds that count to a real
+// hole: a FLAC with a stretch overwritten mid-file reads to its declared
+// length, the measurement's LostSamples is exactly the silence standing in the
+// decode for the frames that went, and a write of the same file counts the
+// same.
+func TestLossCountsAHole(t *testing.T) {
 	r := NewRunner(RunnerConfig{})
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1421,9 +1427,9 @@ func TestLostSamplesReadsTheEnginesCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeFile: %v", err)
 	}
-	lost := LostSamples(res.InputWarnings)
-	if lost <= 0 {
-		t.Fatalf("LostSamples = %d over %q; the engine's wording for a hole has moved", lost, res.InputWarnings)
+	loss := AnalysisLoss(res)
+	if loss.LostSamples <= 0 || loss.TruncatedSamples != 0 {
+		t.Fatalf("loss = %+v over %q, want a count of the hole and no truncation", loss, res.InputWarnings)
 	}
 	declared, _ := mustProbe(t, r, intact).AudioStream()
 	if res.Samples != declared.Samples {
@@ -1431,28 +1437,229 @@ func TestLostSamplesReadsTheEnginesCount(t *testing.T) {
 	}
 	// The hole is whole frames of digital silence: count the silent samples
 	// of the decode and they cover what the read says it lost.
-	if silent := silentFrames(t, holed); silent < lost {
-		t.Errorf("the decode holds %d silent samples, fewer than the %d the read says it lost", silent, lost)
+	if silent := silentFrames(t, holed); silent < loss.LostSamples {
+		t.Errorf("the decode holds %d silent samples, fewer than the %d the read says it lost", silent, loss.LostSamples)
 	}
-	if clean, err := r.AnalyzeFile(ctx, intact, 0); err != nil || LostSamples(clean.InputWarnings) != 0 {
-		t.Errorf("a clean read lost %d samples (err %v)", LostSamples(clean.InputWarnings), err)
+	if loss.Lost() != SampleTime(loss.LostSamples, declared.SampleRate) {
+		t.Errorf("Lost = %v, want the count timed at the source's %d Hz", loss.Lost(), declared.SampleRate)
+	}
+	if loss.Material() {
+		t.Errorf("a frame-sized hole (%v) is material; it is under the threshold a short decode is held to", loss.Lost())
+	}
+	if note := loss.Note(); !strings.Contains(note, "silence where damage took the audio") {
+		t.Errorf("Note = %q, want the engine's line on the silence", note)
 	}
 
-	// Both wordings the engine uses, summed across findings, and nothing from
-	// a finding that took no samples.
-	got := LostSamples([]string{
-		"1291 bytes are not a valid frame, dropped: 4096 samples lost (offset 27234)",
-		"the frames skip from sample 8192 to 12288: 4096 samples lost (offset 9000)",
-		"462 trailing bytes are not a valid frame, dropped (offset 27234)",
-	})
-	if got != 8192 {
-		t.Errorf("LostSamples = %d, want 8192", got)
+	// An encode and a packet copy count the hole they wrote silence for.
+	for _, tc := range []struct {
+		name string
+		spec Spec
+	}{{"out.wav", Spec{Codec: CodecWAV}}, {"copy.flac", Spec{Codec: CodecCopy}}} {
+		wres, err := r.Transcode(ctx, holed, filepath.Join(dir, tc.name), tc.spec)
+		if err != nil {
+			t.Fatalf("Transcode to %s: %v", tc.name, err)
+		}
+		if wres.Loss != loss {
+			t.Errorf("%s: Loss = %+v, want the measurement's %+v", tc.name, wres.Loss, loss)
+		}
 	}
-	if note := LostAudioNote(SampleTime(lost, declared.SampleRate)); note != "" {
-		t.Errorf("a frame-sized hole drew %q; it is under the threshold a short decode is held to", note)
+
+	clean, err := r.AnalyzeFile(ctx, intact, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if note := LostAudioNote(time.Second); !strings.Contains(note, "reads as silence") {
-		t.Errorf("LostAudioNote(1s) = %q, want it to say the loss reads as silence", note)
+	if got := AnalysisLoss(clean); got.LostSamples != 0 || got.TruncatedSamples != 0 || got.Note() != "" {
+		t.Errorf("a clean read lost %+v (%q)", got, got.Note())
+	}
+}
+
+// A file cut short has its length restated to what it holds, so a probe and a
+// read agree and neither says the track is partial. The engine's count is the
+// difference: what the header declares past the end, the same from a
+// measurement, an encode and a packet copy.
+func TestLossCountsATruncation(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	intact := encodedFixture(t, dir, CodecFLAC) // 2 s
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := writeFixture(t, dir, "cut.flac", whole[:len(whole)*6/10])
+
+	declared, _ := mustProbe(t, r, intact).AudioStream()
+	held, _ := mustProbe(t, r, cut).AudioStream()
+	if held.Samples <= 0 || held.Samples >= declared.Samples {
+		t.Fatalf("the cut file probes at %d samples, want fewer than the whole file's %d", held.Samples, declared.Samples)
+	}
+	res, err := r.AnalyzeFile(ctx, cut, 0)
+	if err != nil {
+		t.Fatalf("AnalyzeFile: %v", err)
+	}
+	loss := AnalysisLoss(res)
+	if want := declared.Samples - held.Samples; loss.TruncatedSamples != want || loss.LostSamples != 0 {
+		t.Fatalf("loss = %+v, want %d truncated (the declared %d less the %d held) and none lost", loss, want, declared.Samples, held.Samples)
+	}
+	// A FLAC's open settles the length, so the probe counts it without a read.
+	if got := mustProbe(t, r, cut).Loss; got != loss {
+		t.Errorf("the probe's Loss = %+v, want the read's %+v", got, loss)
+	}
+	if got := mustProbe(t, r, intact).Loss; got.Note() != "" {
+		t.Errorf("a whole file's probe counts %+v", got)
+	}
+	if res.Samples != held.Samples {
+		t.Errorf("the read delivered %d samples, want the %d the file holds", res.Samples, held.Samples)
+	}
+	if !loss.Material() {
+		t.Errorf("a file missing %v of its audio is not material", loss.Truncated())
+	}
+	if note := loss.Note(); !strings.Contains(note, "short of the length its source declares") {
+		t.Errorf("Note = %q, want the engine's line on the truncation", note)
+	}
+	for _, tc := range []struct {
+		name string
+		spec Spec
+	}{{"out.wav", Spec{Codec: CodecWAV}}, {"copy.flac", Spec{Codec: CodecCopy}}} {
+		wres, err := r.Transcode(ctx, cut, filepath.Join(dir, tc.name), tc.spec)
+		if err != nil {
+			t.Fatalf("Transcode to %s: %v", tc.name, err)
+		}
+		if wres.Loss != loss {
+			t.Errorf("%s: Loss = %+v, want the measurement's %+v", tc.name, wres.Loss, loss)
+		}
+	}
+}
+
+// An MP3's frames are walked lazily, so a probe of one cut short still reads
+// the Xing count and has nothing to compare it with. The measurement walks
+// the frames and comes back with the count, the same one a read reports.
+func TestLossOfALazyPayloadComesFromTheMeasurement(t *testing.T) {
+	r := NewRunner(RunnerConfig{})
+	ctx := context.Background()
+	dir := t.TempDir()
+	intact := encodedFixture(t, dir, CodecMP3) // 2 s, with a Xing frame
+	whole, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := writeFixture(t, dir, "cut.mp3", whole[:len(whole)*6/10])
+
+	pr := mustProbe(t, r, cut)
+	if !pr.LengthClaimed || pr.Loss.TruncatedSamples != 0 {
+		t.Fatalf("probe: LengthClaimed = %v, Loss = %+v, want a claimed length and nothing counted yet", pr.LengthClaimed, pr.Loss)
+	}
+	length, err := r.MeasureLength(ctx, cut)
+	if err != nil {
+		t.Fatalf("MeasureLength: %v", err)
+	}
+	if length.Loss.TruncatedSamples <= 0 || length.Loss.LostSamples != 0 {
+		t.Fatalf("the measurement's Loss = %+v, want the frames the Xing count runs past the file", length.Loss)
+	}
+	res, err := r.AnalyzeFile(ctx, cut, 0)
+	if err != nil {
+		t.Fatalf("AnalyzeFile: %v", err)
+	}
+	if got := AnalysisLoss(res); got != length.Loss {
+		t.Errorf("a read counts %+v, the measurement %+v; want one number", got, length.Loss)
+	}
+	if clean, err := r.MeasureLength(ctx, intact); err != nil || clean.Loss.Note() != "" {
+		t.Errorf("a whole file's measurement counts %+v (err %v)", clean.Loss, err)
+	}
+}
+
+// A short-decode check holds a read to a declared length and credits the
+// truncation the engine counted, but only the part that length still
+// includes. Crediting the read's whole count against a length that already
+// has it out subtracts it twice, and hides a decode that ended early behind a
+// file that was also cut short.
+func TestTruncatedPastCreditsOnlyWhatTheLengthStillIncludes(t *testing.T) {
+	at := func(d time.Duration) Loss {
+		return Loss{TruncatedSamples: int64(d.Seconds() * 44100), Rate: 44100}
+	}
+	const cut = 450 * time.Millisecond
+	read := at(cut)
+
+	// A length the headers only claimed: the probe counted nothing, the claim
+	// still includes the missing tail, and all of it is credited.
+	if got := read.TruncatedPast(Loss{}); got != read.Truncated() {
+		t.Errorf("against a claimed length: credit %v, want the read's whole %v", got, read.Truncated())
+	}
+	// A length opening the file restated: the probe counted it all and the
+	// length has it out, so nothing is credited.
+	if got := read.TruncatedPast(at(cut)); got != 0 {
+		t.Errorf("against a restated length: credit %v, want 0", got)
+	}
+	// A cut that stops short of the end counts none of a truncation the probe
+	// did; that is no negative credit.
+	if got := (Loss{Rate: 44100}).TruncatedPast(at(cut)); got != 0 {
+		t.Errorf("a read that counted less than the probe: credit %v, want 0", got)
+	}
+	// The same audio counted at two rates is still the same audio.
+	resampled := Loss{TruncatedSamples: int64(cut.Seconds() * 48000), Rate: 48000}
+	if got := resampled.TruncatedPast(at(cut)); got > time.Millisecond {
+		t.Errorf("one truncation counted at 48 kHz and at 44.1 kHz: credit %v, want none", got)
+	}
+
+	// The case the double subtraction hid: a file restated to 9.55 s (0.45 s
+	// cut short) whose read then ends at 8.65 s. 0.9 s of what the file holds
+	// did not read, whatever the truncation.
+	restated, got := 9550*time.Millisecond, 8650*time.Millisecond
+	if note := ShortMeasureNote(got, restated, read.TruncatedPast(at(cut))); note == "" {
+		t.Error("a read 0.9 s short of a restated length drew no note")
+	}
+	if note := ShortMeasureNote(got, restated, read.Truncated()); note != "" {
+		t.Error("the fixture no longer shows the bug: the whole count credited still draws a note")
+	}
+	// The same read against the 10 s the headers claimed is short by 1.35 s,
+	// of which the engine counted 0.45: 0.9 s is still unexplained.
+	if note := ShortMeasureNote(got, 10*time.Second, read.TruncatedPast(Loss{})); note == "" {
+		t.Error("a read 0.9 s short past its counted truncation drew no note")
+	}
+	// And a claimed length the count explains in full draws none.
+	if note := ShortMeasureNote(restated, 10*time.Second, read.TruncatedPast(Loss{})); note != "" {
+		t.Errorf("a shortfall the engine counted in full drew %q", note)
+	}
+	if !read.Counted() || (Loss{Rate: 44100}).Counted() {
+		t.Error("Counted disagrees with the counts")
+	}
+}
+
+// The two counts are judged together and timed only at a known rate, and the
+// line that states them leads a read's findings without touching the list it
+// was given.
+func TestLossArithmetic(t *testing.T) {
+	half := Loss{LostSamples: 13230, TruncatedSamples: 13230, Rate: 44100} // 0.3 s of each
+	if half.Lost() != 300*time.Millisecond || half.Truncated() != 300*time.Millisecond {
+		t.Errorf("Lost, Truncated = %v, %v, want 300ms each", half.Lost(), half.Truncated())
+	}
+	if !half.Material() {
+		t.Error("0.3 s of silence and 0.3 s cut short are 0.6 s missing; want that material")
+	}
+	if (Loss{LostSamples: 13230, Rate: 44100}).Material() {
+		t.Error("0.3 s alone is material; it is under the threshold")
+	}
+	bare := Loss{LostSamples: 1 << 40, TruncatedSamples: 1 << 40}
+	if bare.Lost() != 0 || bare.Truncated() != 0 || bare.Material() {
+		t.Errorf("counts with no rate timed at %v and %v; nothing says how long they are", bare.Lost(), bare.Truncated())
+	}
+	if (Loss{}).Note() != "" {
+		t.Errorf("a source that lost nothing drew %q", (Loss{}).Note())
+	}
+
+	findings := []string{"a finding", "another"}
+	led := half.Lead(findings)
+	if len(led) != 3 || led[0] != half.Note() || led[1] != "a finding" {
+		t.Errorf("Lead = %q, want the loss line ahead of the findings", led)
+	}
+	if len(findings) != 2 || findings[0] != "a finding" {
+		t.Errorf("Lead rewrote its argument: %q", findings)
+	}
+	if again := half.Lead(led); len(again) != 3 {
+		t.Errorf("Lead added the line twice: %q", again)
+	}
+	if got := (Loss{}).Lead(findings); len(got) != 2 {
+		t.Errorf("a source that lost nothing changed the notes: %q", got)
 	}
 }
 

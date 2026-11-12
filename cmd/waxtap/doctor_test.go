@@ -461,6 +461,70 @@ func TestProbeSidecarsPing(t *testing.T) {
 		}
 	})
 
+	// WaxSeal serves through a failed launch and keeps the ping at 200 under
+	// the idle window's word, so the entry carries what tells the two apart:
+	// the count, the daemon's account of the last failure, and its wait.
+	t.Run("no-session behind failed launches stays healthy and says so", func(t *testing.T) {
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "youtube refused attestation", LaunchFailures: 3, RetryAfter: 41500 * time.Millisecond}, nil),
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 1 {
+			t.Fatalf("probes = %+v, want the ping alone", probes)
+		}
+		p := probes[0]
+		if !p.OK || p.Status != "healthy" || p.Error != nil {
+			t.Errorf("ping = %+v, want the daemon's own verdict kept: healthy", p)
+		}
+		if p.LaunchFailures != 3 || p.LaunchError != "youtube refused attestation" || p.RetryAfterSeconds != 42 {
+			t.Errorf("ping = %+v, want 3 failed launches, the daemon's account, and the wait rounded up to 42s", p)
+		}
+	})
+
+	// A ping that failed on a tenant whose launches were already failing
+	// states the probe's failure in the one account the body has. The entry
+	// keeps the count, takes the wait from the refusal so the line and the
+	// run's error agree, and does not pass the probe's account off as a
+	// launch's.
+	t.Run("a failed ping behind failed launches", func(t *testing.T) {
+		refusal := &waxtap.SidecarResponseError{Label: "sidecar health endpoint", Endpoint: "http://127.0.0.1:4416/ping",
+			StatusCode: 503, Code: "probe-failed", Reason: "page crashed", RetryAfter: 120 * time.Second}
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", LaunchFailures: 2, RetryAfter: 120 * time.Second}, refusal),
+		}, "dummyVideo0", time.Minute)
+		p := probes[0]
+		if p.OK || p.Status != "failed" || p.Error == nil {
+			t.Fatalf("ping = %+v, want the failure it is", p)
+		}
+		if p.LaunchFailures != 2 || p.LaunchError != "" {
+			t.Errorf("ping = %+v, want the count kept and no launchError: the account is the probe's", p)
+		}
+		if sre, _ := errors.AsType[*waxtap.SidecarResponseError](firstSidecarProbeError(probes)); sre == nil || p.RetryAfterSeconds != ceilSeconds(sre.RetryAfter) || p.RetryAfterSeconds != 120 {
+			t.Errorf("entry waits %ds and the run's error %v; want one wait, the refusal's", p.RetryAfterSeconds, sre)
+		}
+		// With no wait on the refusal the entry states none either, whatever
+		// the health says: a line that printed one the error lacks would
+		// disagree with the hint under it.
+		bare := *refusal
+		bare.RetryAfter = 0
+		probes = probeSidecars(context.Background(), sidecarProviders{
+			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", LaunchFailures: 2, RetryAfter: 120 * time.Second}, &bare),
+		}, "dummyVideo0", time.Minute)
+		if probes[0].RetryAfterSeconds != 0 {
+			t.Errorf("entry waits %ds beside an error that states none", probes[0].RetryAfterSeconds)
+		}
+	})
+
+	// The account is the launch's only while launches are failing: an idle
+	// daemon's no-session carries its own words and names no launch.
+	t.Run("an idle no-session names no launch", func(t *testing.T) {
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session"}, nil),
+		}, "dummyVideo0", time.Minute)
+		if p := probes[0]; p.LaunchFailures != 0 || p.LaunchError != "" || p.RetryAfterSeconds != 0 {
+			t.Errorf("ping = %+v, want no launch fields", p)
+		}
+	})
+
 	t.Run("benign window with a relaunch stays healthy", func(t *testing.T) {
 		probes := probeSidecars(context.Background(), sidecarProviders{
 			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserRelaunched: true}, nil),
@@ -598,6 +662,10 @@ func TestDoctorHumanPingLines(t *testing.T) {
 		{"daemon scope", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 9, Probe: "daemon", Reason: "ok"}, "sidecar:  ping ok (9 ms, daemon ok)"},
 		{"benign with a relaunch", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2300, Probe: "tenant", Reason: "no-session", BrowserRelaunched: true}, "sidecar:  ping ok (2.3 s, tenant no-session, browser relaunched)"},
 		{"older daemon without a probe scope", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Reason: "busy"}, "sidecar:  ping ok (12 ms, reason busy)"},
+		// The launches that failed sit beside the reason they explain; the
+		// daemon's account and the wait are the caveat note's.
+		{"no-session behind one failed launch", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "no-session", LaunchFailures: 1, LaunchError: "E", RetryAfterSeconds: 15}, "sidecar:  ping ok (12 ms, tenant no-session, 1 launch failed)"},
+		{"no-session behind failed launches, keyed", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "no-session", LaunchFailures: 4, Keyed: true}, "sidecar:  ping ok (12 ms, tenant no-session, 4 launches failed, keyed)"},
 		{"answered without a health body", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 3}, "sidecar:  ping ok (3 ms)"},
 		{"probe scope without a reason word", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant"}, "sidecar:  ping ok (12 ms, tenant probe)"},
 		{"not offered", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2, StatusCode: 404, Code: "not-found"}, "sidecar:  ping not offered (HTTP 404, 2 ms)"},
@@ -612,6 +680,10 @@ func TestDoctorHumanPingLines(t *testing.T) {
 		{"confirmed loss after a relaunch, with a wait", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 40000, StatusCode: 503, Code: "probe-failed", Probe: "daemon", Reason: "probe-failed", BrowserRelaunched: true, RetryAfterSeconds: 5,
 			Error: &errorJSON{Code: "network", Message: "M"}},
 			"sidecar:  ping FAILED: M (daemon probe, browser relaunched); retry in 5s"},
+		// A failed ping still says how many launches had failed before it.
+		{"confirmed loss behind failed launches", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 40000, StatusCode: 503, Code: "probe-failed", Probe: "tenant", Reason: "probe-failed", LaunchFailures: 2, BrowserRelaunched: true, RetryAfterSeconds: 120,
+			Error: &errorJSON{Code: "network", Message: "M"}},
+			"sidecar:  ping FAILED: M (tenant probe, 2 launches failed, browser relaunched); retry in 120s"},
 		{"unreachable, nothing decoded", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 3, Error: &errorJSON{Code: "network", Message: "M"}}, "sidecar:  ping FAILED: M"},
 	}
 	for _, tc := range cases {
@@ -655,9 +727,20 @@ func TestDoctorJSONPingEntry(t *testing.T) {
 	if first["via"] != "session" || first["probe"] != "tenant" || first["reason"] != "no-session" || first["browserRelaunched"] != true || first["keyed"] != true {
 		t.Errorf("sidecars[0] = %v, want via, probe, reason, browserRelaunched, and keyed", first)
 	}
+	// The launch fields ride under their own keys, and only on a ping that
+	// reported failed launches.
+	if _, ok := first["launchFailures"]; ok {
+		t.Errorf("sidecars[0] = %v, want no launchFailures from a daemon that reported none", first)
+	}
+	refused := decode(&doctorReport{Healthy: true, Sidecars: []doctorSidecarProbe{
+		{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "no-session", LaunchFailures: 3, LaunchError: "youtube refused attestation", RetryAfterSeconds: 42},
+	}})
+	if entry, _ := refused[0].(map[string]any); entry["launchFailures"] != float64(3) || entry["launchError"] != "youtube refused attestation" || entry["retryAfterSeconds"] != float64(42) {
+		t.Errorf("sidecars[0] = %v, want launchFailures, launchError, and retryAfterSeconds", entry)
+	}
 	for i := 1; i < 3; i++ {
 		entry, _ := arr[i].(map[string]any)
-		for _, key := range []string{"via", "probe", "reason", "browserRelaunched", "keyed"} {
+		for _, key := range []string{"via", "probe", "reason", "browserRelaunched", "keyed", "launchFailures", "launchError"} {
 			if _, ok := entry[key]; ok {
 				t.Errorf("sidecars[%d] = %v, want %q omitted when the daemon said nothing", i, entry, key)
 			}
@@ -737,6 +820,49 @@ func TestDoctorKeyingCaveats(t *testing.T) {
 			}
 			if len(notes) != 1 || notes[0].Code != string(noteDoctorCaveat) || !strings.Contains(notes[0].Detail, tc.want) {
 				t.Fatalf("notes = %v, want one doctor-caveat containing %q", notes, tc.want)
+			}
+		})
+	}
+}
+
+// A healthy ping that says no-session reads as an idle daemon. When the
+// daemon reported failed launches behind it, a caveat says what the line
+// cannot: that it has no session because it could not get one, in its own
+// account, and how long it refuses before it tries again.
+func TestDoctorLaunchFailureCaveat(t *testing.T) {
+	cases := []struct {
+		name  string
+		probe doctorSidecarProbe
+		want  string // "" for no note
+	}{
+		{"one failed launch inside its cool-down",
+			doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", LaunchFailures: 1, LaunchError: "youtube refused attestation", RetryAfterSeconds: 15},
+			"the daemon's last launch failed, and it refuses requests for another 15s before launching again: youtube refused attestation"},
+		{"several, with the cool-down over",
+			doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", LaunchFailures: 4, LaunchError: "E"},
+			"the daemon's last 4 launches failed: E"},
+		{"a count with no account",
+			doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", LaunchFailures: 2},
+			"the daemon's last 2 launches failed"},
+		{"an idle no-session", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session"}, ""},
+		{"a live session", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "ok"}, ""},
+		// A failed ping already prints its own failure.
+		{"a confirmed loss", doctorSidecarProbe{Endpoint: "ping", Probe: "tenant", Reason: "probe-failed", LaunchFailures: 2}, ""},
+		{"an endpoint probe", doctorSidecarProbe{Endpoint: "session", OK: true, LaunchFailures: 2}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := &appEnv{out: io.Discard, errOut: io.Discard, cfg: &appConfig{}, notes: &noteCollector{}}
+			noteSidecarLaunchFailures(env, []doctorSidecarProbe{tc.probe})
+			notes := env.notesJSON()
+			if tc.want == "" {
+				if len(notes) != 0 {
+					t.Fatalf("notes = %v, want none", notes)
+				}
+				return
+			}
+			if len(notes) != 1 || notes[0].Code != string(noteDoctorCaveat) || notes[0].Detail != tc.want {
+				t.Fatalf("notes = %v, want one doctor-caveat reading %q", notes, tc.want)
 			}
 		})
 	}

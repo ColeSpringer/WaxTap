@@ -283,29 +283,90 @@ func TestPlanSplitRefusals(t *testing.T) {
 }
 
 // A truncated rip whose header still covers the sheet is refused up front,
-// rather than on a later piece with the earlier ones already written.
+// rather than on a later piece with the earlier ones already written. The
+// sheet's refusal reads as a sheet for some other file, so it carries the
+// engine's count of how far the rip ends short of its own header: from the
+// measurement for an MP3, whose probe leaves the frames unwalked, and from
+// the probe for a FLAC, whose open settles the length.
 func TestPlanSplitRefusesATruncatedRip(t *testing.T) {
 	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		format TranscodeFormat
+		ext    string
+	}{{"mp3", FormatMP3, ".mp3"}, {"flac", FormatFLAC, ".flac"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c := newOfflineClient(t)
+			wav := splitRip(t, dir, "src.wav")
+			rip := filepath.Join(dir, "rip"+tc.ext)
+			if _, err := c.Process(ctx, ProcessRequest{Input: wav, ProcessSpec: ProcessSpec{
+				Output: ToFile(rip), Transcode: &TranscodeSpec{Format: tc.format},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			whole, err := os.ReadFile(rip)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cut := filepath.Join(dir, "cut"+tc.ext)
+			if err := os.WriteFile(cut, whole[:len(whole)/2], 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.PlanSplit(ctx, cut, []byte(splitSheet))
+			if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not describe this") {
+				t.Errorf("err = %v, want the up-front refusal", err)
+			}
+			for _, want := range []string{"the rip is cut short", "short of the length its source declares"} {
+				if err != nil && !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to say %q", err, want)
+				}
+			}
+		})
+	}
+
+	// A sheet that would be refused at any length is not explained by the
+	// rip being cut short: the count is added only where the same sheet fits
+	// the length the rip declares.
+	{
+		dir := t.TempDir()
+		c := newOfflineClient(t)
+		rip := filepath.Join(dir, "rip.flac")
+		if _, err := c.Process(ctx, ProcessRequest{Input: splitRip(t, dir, "src.wav"), ProcessSpec: ProcessSpec{
+			Output: ToFile(rip), Transcode: &TranscodeSpec{Format: FormatFLAC},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		whole, err := os.ReadFile(rip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cut := filepath.Join(dir, "cut.flac")
+		if err := os.WriteFile(cut, whole[:len(whole)/2], 0o644); err != nil {
+			t.Fatal(err)
+		}
+		oneTrack := "FILE \"rip.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n"
+		_, err = c.PlanSplit(ctx, cut, []byte(oneTrack))
+		if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "names one track") {
+			t.Fatalf("a one-track sheet = %v, want its own refusal", err)
+		}
+		if strings.Contains(err.Error(), "cut short") {
+			t.Errorf("err = %q, want the sheet's refusal left alone: no length would make one track a split", err)
+		}
+	}
+
+	// A whole rip the sheet does not fit is the sheet's mismatch alone.
 	dir := t.TempDir()
-	c := newOfflineClient(t)
-	wav := splitRip(t, dir, "src.wav")
-	mp3 := filepath.Join(dir, "rip.mp3")
-	if _, err := c.Process(ctx, ProcessRequest{Input: wav, ProcessSpec: ProcessSpec{
-		Output: ToFile(mp3), Transcode: &TranscodeSpec{Format: FormatMP3},
-	}}); err != nil {
+	small := filepath.Join(dir, "small.wav")
+	if err := os.WriteFile(small, mediatest.SineWAV(3, 2), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	whole, err := os.ReadFile(mp3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cut := filepath.Join(dir, "cut.mp3")
-	if err := os.WriteFile(cut, whole[:len(whole)/2], 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = c.PlanSplit(ctx, cut, []byte(splitSheet))
+	_, err := newOfflineClient(t).PlanSplit(ctx, small, []byte(splitSheet))
 	if !errors.Is(err, ErrIncompatibleSpec) || !strings.Contains(err.Error(), "does not describe this") {
-		t.Errorf("err = %v, want the up-front refusal", err)
+		t.Fatalf("a 3 s rip against a 6 s sheet = %v, want the refusal", err)
+	}
+	if strings.Contains(err.Error(), "cut short") {
+		t.Errorf("err = %q, want no claim that a whole rip is cut short", err)
 	}
 }
 
@@ -1006,5 +1067,100 @@ func TestSplitDoesNotCarryAMeasurementToAnotherRip(t *testing.T) {
 	outs := []string{filepath.Join(dir, "1.flac"), filepath.Join(dir, "2.flac"), filepath.Join(dir, "3.flac")}
 	if _, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC}); err != nil {
 		t.Fatalf("Split: %v", err)
+	}
+}
+
+// The rip's findings repeat on every piece whose read meets them, and one made
+// when the rip is opened repeats on all of them, so they cannot say which
+// piece the damage fell in. The engine's count can: a hole is counted by the
+// piece it falls in and a rip cut short by the piece that runs to its end, and
+// that piece is the one the warning names.
+func TestSplitNamesThePieceThatLostAudio(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	c := newOfflineClient(t)
+	rip := filepath.Join(dir, "rip.flac")
+	if _, err := c.Process(ctx, ProcessRequest{
+		Input:       splitRip(t, dir, "rip.wav"),
+		ProcessSpec: ProcessSpec{Output: ToFile(rip), Transcode: &TranscodeSpec{Format: FormatFLAC}},
+	}); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	whole, err := os.ReadFile(rip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cut short inside track 3, which starts at 4 s of 6.
+	short := filepath.Join(dir, "short.flac")
+	if err := os.WriteFile(short, whole[:len(whole)*85/100], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A stretch overwritten inside track 2, which runs from 2 s to 4 s.
+	holed := filepath.Join(dir, "holed.flac")
+	damaged := slices.Clone(whole)
+	for i := range 512 {
+		damaged[len(damaged)/2+i] = 0xA5
+	}
+	if err := os.WriteFile(holed, damaged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, rip string
+		piece     int    // the piece that lost audio, from 1
+		count     string // the engine's line for what it lost
+		others    string // how the fold counts the pieces that only repeat the findings
+		truncated bool   // the loss is off the end, not a hole
+	}{
+		{"cut short", short, 3, "short of the length its source declares", "(and 2 more tracks)", true},
+		{"a hole", holed, 2, "silence where damage took the audio", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := c.PlanSplit(ctx, tc.rip, []byte(splitSheet))
+			if err != nil {
+				t.Fatalf("PlanSplit: %v", err)
+			}
+			out := t.TempDir()
+			outs := []string{filepath.Join(out, "1.flac"), filepath.Join(out, "2.flac"), filepath.Join(out, "3.flac")}
+			res, err := c.Split(ctx, plan, outs, TranscodeSpec{Format: FormatFLAC})
+			if err != nil {
+				t.Fatalf("Split: %v, want the pieces written with the damage warned", err)
+			}
+			var damage []Warning
+			for _, w := range res.Warnings {
+				if w.Code == WarnInputDamage {
+					damage = append(damage, w)
+				}
+			}
+			if len(damage) != 1 {
+				t.Fatalf("input-damage warnings = %+v, want one", res.Warnings)
+			}
+			detail := damage[0].Detail
+			if want := filepath.Base(outs[tc.piece-1]) + ": the input is damaged: "; !strings.HasPrefix(detail, want) {
+				t.Errorf("detail = %q, want it to name piece %d, the one that lost audio", detail, tc.piece)
+			}
+			if !strings.Contains(detail, tc.count) {
+				t.Errorf("detail = %q, want the piece's own count (%q)", detail, tc.count)
+			}
+			if tc.others != "" && !strings.HasSuffix(detail, tc.others) {
+				t.Errorf("detail = %q, want it to end %q", detail, tc.others)
+			}
+			// The same fact as numbers, on the piece it belongs to alone.
+			if len(res.InputLoss) != len(outs) {
+				t.Fatalf("InputLoss has %d entries, want one per piece", len(res.InputLoss))
+			}
+			for i, l := range res.InputLoss {
+				switch {
+				case i != tc.piece-1:
+					if l != nil {
+						t.Errorf("piece %d counts %+v, want nil: its span lost nothing", i+1, l)
+					}
+				case l == nil || l.SampleRate != 44100:
+					t.Errorf("piece %d counts %+v, want its own loss at 44100 Hz", i+1, l)
+				case tc.truncated != (l.TruncatedSamples > 0) || tc.truncated == (l.LostSamples > 0):
+					t.Errorf("piece %d counts %+v, want truncated=%v", i+1, *l, tc.truncated)
+				}
+			}
+		})
 	}
 }

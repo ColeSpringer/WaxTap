@@ -108,6 +108,8 @@ func (c *Client) Process(ctx context.Context, req ProcessRequest) (res *Result, 
 	}
 	res = newProcessResult(SourceLocalFile, pres, srcFmt, loudnessTarget(req.Loudness))
 	res.InputPath = req.Input
+	// Beside the warning that words it, and local-only for its reason.
+	res.InputLoss = inputLossOf(pres.SourceLoss)
 
 	deliver := pres.OutputPath
 	measureOnly := deliver == ""
@@ -239,6 +241,11 @@ type AlbumLoudnessResult struct {
 	// from. The same set a processing run reports, since the reading is the
 	// same reading.
 	Warnings []Warning
+	// InputLoss counts what each track lost that its measured length does not
+	// show, in input order, each at its own track's rate; a nil entry is a
+	// track that lost nothing by either count. Only a loss under the half
+	// second an album refuses a track over is ever here. See InputLoss.
+	InputLoss []*InputLoss
 }
 
 // MeasureResult reports a single file's loudness and what the read found in
@@ -250,6 +257,10 @@ type MeasureResult struct {
 	// from. The same set Process reports for a measure-only spec, since the
 	// reading is the same reading.
 	Warnings []Warning
+	// InputLoss counts what the file lost that the measured length does not
+	// show, at the file's own rate; nil when it lost nothing by either
+	// count. See InputLoss.
+	InputLoss *InputLoss
 }
 
 // Measure reports EBU R128 loudness for a single local audio file, and what
@@ -269,7 +280,7 @@ func (c *Client) Measure(ctx context.Context, path string) (*MeasureResult, erro
 	if res.Loudness == nil || res.Loudness.Input == nil {
 		return nil, fmt.Errorf("waxtap.Measure: no loudness measured for %s", path)
 	}
-	return &MeasureResult{Loudness: *res.Loudness.Input, Warnings: res.Warnings}, nil
+	return &MeasureResult{Loudness: *res.Loudness.Input, Warnings: res.Warnings, InputLoss: res.InputLoss}, nil
 }
 
 // MeasureAlbum measures local audio files as one album and also returns each
@@ -296,14 +307,24 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 		return nil, err
 	}
 	res := &AlbumLoudnessResult{
-		Album:    loudnessInfo(album),
-		PerTrack: make([]LoudnessInfo, len(perTrack)),
-		Warnings: albumInputWarnings(paths, probes, perTrack, album),
+		Album:     loudnessInfo(album),
+		PerTrack:  make([]LoudnessInfo, len(perTrack)),
+		Warnings:  albumInputWarnings(paths, probes, perTrack, album, nil),
+		InputLoss: make([]*InputLoss, len(perTrack)),
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
+		res.InputLoss[i] = inputLossOf(l.Loss)
 	}
 	return res, nil
+}
+
+// albumRead is what one track's write found in its input: the damage notes,
+// which reach past the headers the way a measurement's do, and the engine's
+// count of what the input lost, at the rate of the file written.
+type albumRead struct {
+	found []string
+	loss  media.Loss
 }
 
 // albumInputWarnings folds what a read of an album's inputs found into the
@@ -311,9 +332,11 @@ func (c *Client) MeasureAlbum(ctx context.Context, paths []string) (*AlbumLoudne
 // figure no gain could be derived from. ProcessAlbum raises the same set from
 // the same facts, plus what its own writes found.
 //
-// extra, when given, is each track's additional damage notes, the ones only a
-// write's read reaches; a measurement has none.
-func albumInputWarnings(inputs []string, probes []albumProbe, perTrack []loudness.Loudness, album loudness.Loudness, extra ...[]string) []Warning {
+// written, when given, is what each track's write found. Its count is the one
+// the track's detail leads with, so the sentence and the numbers on the
+// result are one read's, on the timeline of the file delivered; a measurement
+// has no writes and leads with its own.
+func albumInputWarnings(inputs []string, probes []albumProbe, perTrack []loudness.Loudness, album loudness.Loudness, written []albumRead) []Warning {
 	em := newEmitter(nil, "")
 	damaged := albumInputRemarks{code: WarnInputDamage}
 	noted := albumInputRemarks{code: WarnInputNote}
@@ -324,16 +347,19 @@ func albumInputWarnings(inputs []string, probes []albumProbe, perTrack []loudnes
 			p = probes[i]
 		}
 		var measured []string
+		var loss media.Loss
 		if i < len(perTrack) {
-			measured = perTrack[i].Warnings
+			measured, loss = perTrack[i].Warnings, perTrack[i].Loss
 		}
 		var found []string
-		if i < len(extra) {
-			found = extra[i]
+		if i < len(written) {
+			found, loss = written[i].found, written[i].loss
 		}
 		empty.observe(in, p.empty)
-		damaged.observe(in, inputDamageNote(mergeRemarks(p.damage, measured, found)))
-		noted.observe(in, inputNote(p.notes))
+		// The count of what the track lost leads its findings. Only a loss
+		// under the threshold albumShortDecode refuses reaches here.
+		damaged.observe(in, inputDamageNote(loss.Lead(mergeRemarks(p.damage, measured, found))), loss.Counted())
+		noted.observe(in, inputNote(p.notes), false)
 	}
 	damaged.warn(em)
 	noted.warn(em)
@@ -371,6 +397,12 @@ type AlbumProcessResult struct {
 	// TagCarry itemizes each track's metadata carry, in track order; a nil
 	// entry is a track whose carry did not run (nothing to carry). See TagCarry.
 	TagCarry []*TagCarry
+	// InputLoss counts what each track's input lost that its output's length
+	// does not show, in track order, as the track's write counted it and at
+	// the rate of the file written; a nil entry is a track that lost nothing
+	// by either count. Only a loss under the half second an album refuses a
+	// track over is ever here. See InputLoss.
+	InputLoss []*InputLoss
 	// Delivered is the loudness of the normalized album. It is measured, over the
 	// written outputs, only where a measurement is the sole way to know it: a
 	// boosting gain in PeakLimit mode, where the true-peak limiter gives back an
@@ -563,6 +595,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		PerTrack:        make([]LoudnessInfo, len(perTrack)),
 		Outputs:         make([]string, len(tracks)),
 		TagCarry:        make([]*TagCarry, len(tracks)),
+		InputLoss:       make([]*InputLoss, len(tracks)),
 	}
 	for i, l := range perTrack {
 		res.PerTrack[i] = loudnessInfo(l)
@@ -578,7 +611,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	// Each write's own read finds damage past the headers that the probe and
 	// the measurement did not; the rest of the input-side warnings are the
 	// ones a measurement raises too, folded by the shared helper below.
-	written := make([][]string, len(tracks))
+	written := make([]albumRead, len(tracks))
 	for i, t := range tracks {
 		if err := ensureParentDir(t.Output); err != nil {
 			return nil, fmt.Errorf("waxtap.ProcessAlbum: track %d (%s): %w", i, t.Input, err)
@@ -604,7 +637,8 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 		}
 		// The probe's damage list covers the headers; the measurement's and
 		// the encode's cover the whole read, the probe's entries included.
-		written[i] = tres.InputWarnings
+		written[i] = albumRead{found: tres.InputWarnings, loss: tres.Loss}
+		res.InputLoss[i] = inputLossOf(tres.Loss)
 		if !headerGain {
 			// A packet copy encodes nothing, so there are no output levels to
 			// read and no fold to find; both would cost a probe to learn what
@@ -638,7 +672,7 @@ func (c *Client) ProcessAlbum(ctx context.Context, tracks []AlbumTrack, target f
 	fold.warn(em, codec)
 	levels.warn(em, ao.peakMode)
 	carry.warn(em)
-	for _, w := range albumInputWarnings(inputs, probes, perTrack, album, written...) {
+	for _, w := range albumInputWarnings(inputs, probes, perTrack, album, written) {
 		em.warn(w.Code, w.Detail)
 	}
 	res.HeaderGain = headerGain && res.LoudnessApplied
@@ -677,21 +711,31 @@ func (f *albumFold) warn(em *emitter, c media.Codec) {
 // bury the summary under one warning per file. observe takes the track's
 // rendered detail, "" for none, so the class's wording stays with the
 // single-file renderers (inputDamageNote, inputNote).
+//
+// The row that leads is the first whose detail counts what it lost, and the
+// first of any kind when none does. An album's tracks are files of their own
+// and either order would do there; a split's pieces are spans of one rip,
+// where a finding made as the rip is opened repeats on every piece and the
+// count is the only thing that names the span the damage fell in. One rule
+// for both keeps the two folds reading alike.
 type albumInputRemarks struct {
-	code  WarningCode
-	first string
-	n     int
+	code    WarningCode
+	first   string
+	n       int
+	counted bool // first is a row whose detail counts what it lost
 }
 
-func (a *albumInputRemarks) observe(track, detail string) {
+// observe folds one row in. counted says detail leads with the engine's count
+// of what the row lost (media.Loss.Lead).
+func (a *albumInputRemarks) observe(track, detail string, counted bool) {
 	if detail == "" {
 		return
 	}
 	a.n++
-	if a.n == 1 {
+	if a.n == 1 || counted && !a.counted {
 		// Named per track: an album warning that did not say which file is
 		// damaged would send the listener through the whole record to find it.
-		a.first = filepath.Base(track) + ": " + detail
+		a.first, a.counted = filepath.Base(track)+": "+detail, counted
 	}
 }
 
@@ -871,6 +915,10 @@ type albumProbe struct {
 	// declaration and lets an advisory one be whatever it reads.
 	duration time.Duration
 	advisory bool
+	// settled is the truncation opening the file counted, which duration
+	// already has out of it: all of it for a length the open restated, none
+	// for one the headers only claim (media.ProbeResult.Loss).
+	settled media.Loss
 }
 
 func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
@@ -878,7 +926,7 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 	if err != nil {
 		return albumProbe{}
 	}
-	p := albumProbe{damage: pr.Warnings, notes: pr.Notes}
+	p := albumProbe{damage: pr.Warnings, notes: pr.Notes, settled: pr.Loss}
 	if a, ok := pr.AudioStream(); ok {
 		// Exactly 0 frames. -1 means the container states no length, which is
 		// not a claim that there is nothing there.
@@ -889,31 +937,42 @@ func probeAudio(ctx context.Context, r *media.Runner, path string) albumProbe {
 }
 
 // albumShortDecode refuses a member whose measurement covers materially less
-// than the track: one that did not read to the length its container states
-// exactly, or one that read to it with silence where damage took the audio (a
-// FLAC keeps its length through a hole). Every track in an album shares one
-// gain, so a figure computed over the 60% of a track that decodes would
-// normalize the whole record against a number that describes nothing; a
+// than the track. The engine counts two ways a read can look whole and not
+// be: silence where damage took the audio (a FLAC keeps its length through a
+// hole), and a file that ends short of the length its header declares, whose
+// length the probe restates to what is there. The third it leaves to the
+// lengths: a read that stops short of what the container states exactly, the
+// way a damaged Ogg page takes its packets with it. Every track in an album
+// shares one gain, so a figure computed over the 60% of a track that decodes
+// would normalize the whole record against a number that describes nothing; a
 // single file warns past the same damage and delivers what read, because
 // there the user gets the audio and the warning together.
 //
+// The two checks do not overlap. The declared length is the probe's, and one
+// the probe restated already has the truncation out of it, so a read that
+// ends short of that ended early by the whole gap; only a length the headers
+// merely claim (an MP3 on its Xing count) still includes what the read then
+// counted, and is credited it (media.Loss.TruncatedPast).
+//
 // A declaration a decode is never expected to match (ASF, a Matroska on its
 // Info Duration) is not one to hold a member to; those read to their end and
-// the length they deliver is the length. A hole is held against any member,
-// since it is the read's own count of what it lost.
+// the length they deliver is the length. The engine's counts are held against
+// any member: they are the read's own tally of what it lost, and it counts no
+// truncation against a length that was only advisory.
 func albumShortDecode(inputs []string, probes []albumProbe, perTrack []loudness.Loudness) error {
 	refuse := func(i int, note string) error {
 		return fmt.Errorf("track %s: %w: %s; every track in an album shares one gain, so a measurement of part of one cannot derive it",
 			filepath.Base(inputs[i]), waxerr.ErrUnsupportedInput, note)
 	}
 	for i := range perTrack {
-		if note := media.LostAudioNote(perTrack[i].Lost); note != "" {
-			return refuse(i, note)
+		loss := perTrack[i].Loss
+		if loss.Material() {
+			return refuse(i, loss.Note())
 		}
 		if i >= len(probes) || probes[i].advisory || probes[i].duration <= 0 {
 			continue
 		}
-		if note := media.ShortMeasureNote(perTrack[i].Duration, probes[i].duration); note != "" {
+		if note := media.ShortMeasureNote(perTrack[i].Duration, probes[i].duration, loss.TruncatedPast(probes[i].settled)); note != "" {
 			return refuse(i, note)
 		}
 	}

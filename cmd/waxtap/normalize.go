@@ -5,8 +5,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
@@ -396,7 +398,7 @@ func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessRes
 			Tracks        []albumTrackJSON `json:"tracks"`
 			Warnings      []warningJSON    `json:"warnings,omitempty"`
 			Notes         []noteJSON       `json:"notes,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil, nil), warns, env.notesJSON()})
+		}{schemaVersion, albumInfoJSON(res.Album), albumTracksJSON(inputs, res.PerTrack, nil, nil, res.InputLoss), warns, env.notesJSON()})
 	}
 	// A measurement runs without an event stream, so its warnings surface here
 	// rather than through the progress renderer, as the processing path's do.
@@ -405,9 +407,11 @@ func emitAlbumMeasure(env *appEnv, inputs []string, res *waxtap.AlbumLoudnessRes
 	}
 	env.printf("Album:  %s LUFS, LRA %s\n\n", humanLUFS(res.Album.IntegratedLUFS), humanLUFS(res.Album.LRA))
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tLUFS\tTRACK")
+	// MISSING joins the table only when a track lost audio; see lossCell.
+	missing := anyInputLoss(res.InputLoss)
+	fmt.Fprintf(tw, "#\tLUFS\t%sTRACK\n", lossHeader(missing))
 	for i, l := range res.PerTrack {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, humanLUFS(l.IntegratedLUFS), filepath.Base(inputs[i]))
+		fmt.Fprintf(tw, "%d\t%s\t%s%s\n", i+1, humanLUFS(l.IntegratedLUFS), lossColumn(missing, res.InputLoss, i), filepath.Base(inputs[i]))
 	}
 	return tw.Flush()
 }
@@ -433,7 +437,7 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 			Tracks          []albumTrackJSON  `json:"tracks"`
 			Warnings        []warningJSON     `json:"warnings,omitempty"`
 			Notes           []noteJSON        `json:"notes,omitempty"`
-		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, res.HeaderGain, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs, res.TagCarry), warns, env.notesJSON()})
+		}{schemaVersion, albumInfoJSON(res.Album), jsonFloat(res.GainDB), res.LoudnessApplied, res.HeaderGain, delivered, albumTracksJSON(inputs, res.PerTrack, res.Outputs, res.TagCarry, res.InputLoss), warns, env.notesJSON()})
 	}
 	// Album processing runs without an event stream, so carry warnings surface
 	// here rather than through the progress renderer.
@@ -457,11 +461,66 @@ func emitAlbumProcess(env *appEnv, inputs []string, res *waxtap.AlbumProcessResu
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	// Per-track values are input measurements; processed output is not measured
 	// here. METADATA is the track's carry receipt, the single-file Metadata: line.
-	fmt.Fprintln(tw, "#\tIN-LUFS\tMETADATA\tOUTPUT")
+	// MISSING joins the table only when a track lost audio; see lossCell.
+	missing := anyInputLoss(res.InputLoss)
+	fmt.Fprintf(tw, "#\tIN-LUFS\t%sMETADATA\tOUTPUT\n", lossHeader(missing))
 	for i := range res.Outputs {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
+		fmt.Fprintf(tw, "%d\t%s\t%s%s\t%s\n", i+1, humanLUFS(res.PerTrack[i].IntegratedLUFS), lossColumn(missing, res.InputLoss, i), albumCarryCell(res.TagCarry, i), displayPath(res.Outputs[i]))
 	}
 	return tw.Flush()
+}
+
+// anyInputLoss reports whether any row has a count to show, which is what
+// puts the MISSING column in a table: the warning above the table folds every
+// damaged row into one line that names the first, so the column is where the
+// others say how much they lost. A run with nothing missing keeps the table
+// it always had.
+func anyInputLoss(losses []*waxtap.InputLoss) bool {
+	return slices.ContainsFunc(losses, func(l *waxtap.InputLoss) bool { return l != nil })
+}
+
+// lossHeader and lossColumn are the MISSING column's header and cell, each
+// with its trailing tab, or nothing when the table has no such column.
+func lossHeader(show bool) string {
+	if !show {
+		return ""
+	}
+	return "MISSING\t"
+}
+
+func lossColumn(show bool, losses []*waxtap.InputLoss, i int) string {
+	if !show {
+		return ""
+	}
+	return lossCell(losses, i) + "\t"
+}
+
+// lossCell is a row's count of what its input lost, "-" for one that lost
+// nothing: how much of the audio is silence where damage took it, and how
+// much the file declared past its end. In seconds, as the warning words it;
+// --json has the samples.
+func lossCell(losses []*waxtap.InputLoss, i int) string {
+	if i >= len(losses) || losses[i] == nil {
+		return "-"
+	}
+	l := losses[i]
+	amount := func(n int64, d time.Duration) string {
+		if l.SampleRate <= 0 {
+			return countOf(int(n), "sample") // no rate to time them at
+		}
+		return fmt.Sprintf("%.2f s", d.Seconds())
+	}
+	var parts []string
+	if l.LostSamples > 0 {
+		parts = append(parts, amount(l.LostSamples, l.Lost())+" as silence")
+	}
+	if l.TruncatedSamples > 0 {
+		parts = append(parts, amount(l.TruncatedSamples, l.Truncated())+" off the end")
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // albumCarryCell is a track's metadata receipt for the album table, "-" for a
@@ -478,11 +537,15 @@ type albumTrackJSON struct {
 	Output         string        `json:"output,omitempty"`
 	IntegratedLUFS jsonFloat     `json:"integratedLufs"`
 	TagCarry       *tagCarryJSON `json:"tagCarry,omitempty"`
+	// InputLoss counts what the track's input lost; see inputLossJSON.
+	InputLoss *inputLossJSON `json:"inputLoss,omitempty"`
 }
 
 // albumTracksJSON renders the per-track rows. outputs and carries are nil for
-// a measurement, which writes nothing and carries nothing.
-func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []string, carries []*waxtap.TagCarry) []albumTrackJSON {
+// a measurement, which writes nothing and carries nothing. losses is each
+// track's count of what its input lost, a nil entry for a track that lost
+// nothing.
+func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []string, carries []*waxtap.TagCarry, losses []*waxtap.InputLoss) []albumTrackJSON {
 	out := make([]albumTrackJSON, len(perTrack))
 	for i, l := range perTrack {
 		out[i] = albumTrackJSON{Input: displayPath(inputs[i]), IntegratedLUFS: jsonFloat(l.IntegratedLUFS)}
@@ -491,6 +554,9 @@ func albumTracksJSON(inputs []string, perTrack []waxtap.LoudnessInfo, outputs []
 		}
 		if carries != nil {
 			out[i].TagCarry = tagCarryToJSON(carries[i])
+		}
+		if i < len(losses) {
+			out[i].InputLoss = inputLossToJSON(losses[i])
 		}
 	}
 	return out

@@ -847,7 +847,9 @@ func warnEmptyInput(em *emitter, pres pipeline.Result) {
 
 // inputDamageNote renders the source's damage notes as one detail line, or ""
 // when there are none: the verdict, then the notes in the decoder's (or the
-// short-decode check's) exact words. The verdict is honest now that the list
+// short-decode check's) exact words, the engine's count of what the source
+// lost ahead of them when the caller led with it (media.Loss.Lead), so the
+// cap below never drops the one line with a total. The verdict is honest now that the list
 // holds damage alone. While the engine folded its remarks on well-formed files
 // into the same list (an extra stream ignored, a trailing tag skipped, a
 // rescaled timescale), a lead like this lied about half the entries and the

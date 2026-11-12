@@ -266,7 +266,22 @@ the header, sent once. The `ping` line reports the daemon's own words: the
 scope it checked (`tenant`, or `daemon` when a keyed daemon got no key), its
 reason (`ok`, `no-session`, `busy`, `probe-failed`), whether the daemon is
 `keyed`, and a browser relaunch when the probe made one. The `--json` ping entry also carries
-`status`: healthy, answered, not-offered, or failed. The run's `--api-key`
+`status`: healthy, answered, not-offered, or failed. `no-session` names two
+daemons: an idle one, whose next request establishes a session, and one whose
+launches failed, which WaxSeal serves through instead of exiting and keeps at
+200 under the same word. The ping tells them apart by
+`consecutive_launch_failures`: above 0 the line adds the count
+(`2 launches failed`), the `--json` entry carries `launchFailures`,
+`launchError` (the daemon's account of the last one) and `retryAfterSeconds`
+(what is left of the cool-down in which it refuses without launching again),
+and a `doctor-caveat` note says all three. The verdict stays the daemon's, so
+the ping is still healthy; the endpoint probes after it are what fail, with
+the refusal and its `Retry-After`. A probe can also fail on such a tenant (the
+browser check that follows a `no-session` finds it wedged): the body's one
+`error` is then the probe's, so the entry keeps `launchFailures`, sets no
+`launchError`, names the count on the `FAILED` line, and its wait is the
+refusal's own, a `Retry-After` header or else the body's
+`retry_after_seconds`. The run's `--api-key`
 and the daemon's keying are compared: a key given to a keyless daemon is not
 checked, and a keyed daemon asked without one answers the endpoint probes at
 daemon scope. Either mismatch is a `doctor-caveat` note. A 200 is healthy or a benign window and
@@ -295,6 +310,15 @@ rather than sleeping through it: the context arm is parked for the stated wait
 meanwhile. With nothing delivering, it is exit 9 with the wait in the hint. The
 other shape is the daemon's confirmation budget running out, which carries no
 `Retry-After`; WaxTap retries it once after 500 ms as it does any 5xx.
+
+A daemon whose session launch failed (YouTube unreachable or refusing, or its
+browser unable to set the session up) keeps serving and refuses what needs a
+session as `mint-failed`, `player-context-failed`, or `no-session`, with a
+`Retry-After` of 15 s that doubles per consecutive failure up to 5 minutes. No
+code here is specific to it: a wait inside the 60 s cap is slept through and
+the one retry is the request that launches again, and a longer one is reported
+with the wait in the hint and parks the context arm for it, as the bot check's
+does. `doctor`'s ping is what names the state (above).
 
 Error precedence across a download's attempts: `waxerr.PreferErr` ranks
 availability verdicts above everything else, but an attempt that reached the
