@@ -643,13 +643,17 @@ single-client `--profile-override`, since an adopted session cannot span the
 several clients the default chain tries. With
 sidecar URLs configured, the daemon behind them is asked for its health first
 (WaxSeal's `/ping`, one round trip, reported with its reason: `ok`,
-`no-session`, `busy`, or `probe-failed`, whether the daemon is keyed, and, for
-a daemon with no session because it could not launch one, how many launches
-failed, with its account and its wait in a `doctor-caveat` note), then
+`no-session`, `busy`, or `probe-failed`, whether the daemon is keyed, whether
+it is asleep (`browser idle`: its idle timeout closed the browser, and the
+ping does not wake it), and, for a daemon with no session because it could
+not launch one, how many launches failed, with its account and its wait in a
+`doctor-caveat` note), then
 each endpoint is probed once (session, PO token, player-context), so a cold
 daemon's first-call cost and any refusal code are visible; the `--json` ping
 entry carries a one-word `status`: healthy, answered, not-offered, or failed; the token and context probe latencies include WaxSeal's separation
-waits, which is the cost a first download pays, not a relaunch. A probe that
+waits, which is the cost a first download pays. They hold a browser launch
+only behind `browser idle`, where the first probe that needs a session is
+what wakes the daemon. A probe that
 relays the video's own playability verdict still counts as a healthy sidecar. The
 [maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
 failures, SABR changes, fixtures, and releases. Work cut from a change is

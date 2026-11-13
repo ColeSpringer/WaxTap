@@ -1513,9 +1513,38 @@ func TestPingSidecar(t *testing.T) {
 			want: SidecarHealth{Probe: "tenant", Reason: "busy", Error: "the page is held by a request"},
 		},
 		{
-			// A daemon that serves through a failed launch answers the idle
-			// window's word at 200. The count, its account of the last failure
-			// and what is left of the cool-down say it is not idle.
+			// A daemon whose browser the idle timeout closed answers the same
+			// benign word and says which no-session it is. The probe left it
+			// asleep, so nothing was relaunched.
+			name: "no-session from a daemon asleep", status: 200,
+			body: `{"ok":false,"probe":"tenant","keyed":false,"reason":"no-session","error":"no attested session","consecutive_launch_failures":0,"browser_relaunched":false,"browser_idle":true}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserIdle: true},
+		},
+		{
+			// At daemon scope a closed browser is not ok and not a fault: the
+			// one answer at that scope that is neither ok nor probe-failed.
+			name: "daemon scope, asleep", status: 200,
+			body: `{"ok":false,"probe":"daemon","keyed":true,"reason":"no-session","browser_relaunched":false,"browser_idle":true}`,
+			want: SidecarHealth{Probe: "daemon", Reason: "no-session", Keyed: true, BrowserIdle: true},
+		},
+		{
+			// Asleep and refused are separate facts: a tenant whose launch
+			// failed goes to sleep like any other, and keeps its count.
+			name: "asleep behind a failed launch", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"no attested session: the last session launch failed: youtube refused attestation","consecutive_launch_failures":1,"browser_idle":true}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session: the last session launch failed: youtube refused attestation", LaunchFailures: 1, BrowserIdle: true},
+		},
+		{
+			// Every health body carries the field, false while a browser runs.
+			name: "between sessions, browser running", status: 200,
+			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"no attested session","browser_idle":false}`,
+			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session"},
+		},
+		{
+			// A daemon that serves through a failed launch answers the word a
+			// daemon between sessions does, at 200. The count, its account of
+			// the last failure and what is left of the cool-down tell them
+			// apart.
 			name: "no-session behind failed launches", status: 200,
 			body: `{"ok":false,"probe":"tenant","reason":"no-session","error":"youtube refused attestation","consecutive_launch_failures":3,"retry_after_seconds":42}`,
 			want: SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "youtube refused attestation", LaunchFailures: 3, RetryAfter: 42 * time.Second},
@@ -1559,6 +1588,16 @@ func TestPingSidecar(t *testing.T) {
 			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"page crashed","consecutive_launch_failures":2,"retry_after_seconds":120}`,
 			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", LaunchFailures: 2, RetryAfter: 120 * time.Second},
 			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "page crashed", RetryAfter: 120 * time.Second},
+		},
+		{
+			// A closed browser does not soften a verdict. A probe that
+			// confirmed a tenant's loss can find the browser closed for
+			// idleness a moment later: the loss is still the refusal, and the
+			// health beside it still says no browser runs.
+			name: "probe-failed beside a closed browser", status: 503,
+			body:    `{"ok":false,"probe":"tenant","reason":"probe-failed","error":"page crashed","browser_relaunched":false,"browser_idle":true}`,
+			want:    SidecarHealth{Probe: "tenant", Reason: "probe-failed", Error: "page crashed", BrowserIdle: true},
+			wantErr: &SidecarResponseError{StatusCode: 503, Code: "probe-failed", Reason: "page crashed"},
 		},
 		{
 			// A Retry-After header wins over the body's, as on any refusal.

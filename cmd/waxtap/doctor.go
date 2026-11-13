@@ -331,16 +331,22 @@ type doctorSidecarProbe struct {
 	Probe             string `json:"probe,omitempty"`
 	Reason            string `json:"reason,omitempty"`
 	BrowserRelaunched bool   `json:"browserRelaunched,omitempty"`
+	// BrowserIdle reports a daemon asleep: its idle timeout closed the shared
+	// browser, the ping left it closed, and the first endpoint probe that
+	// needs a session starts it again, in that probe's latency. Only the
+	// ping sets it.
+	BrowserIdle bool `json:"browserIdle,omitempty"`
 	// Keyed reports that the daemon requires an API key, which the ping says
 	// whatever scope it answered at. Only the ping sets it.
 	Keyed bool `json:"keyed,omitempty"`
 	// LaunchFailures counts the daemon's session launches in a row that
 	// failed, whatever the ping's own verdict. Above 0 a "no-session" is a
-	// daemon that cannot get a session, not an idle one. LaunchError is its
-	// account of the last one, set only on a ping that did not fail: a
-	// failed ping's account is of the probe, and is the entry's error. On
-	// either, RetryAfterSeconds is what is left of the cool-down in which the
-	// daemon refuses without launching again. Only the ping sets them.
+	// daemon that cannot get a session, not one that is only between
+	// sessions or asleep. LaunchError is its account of the last one, set
+	// only on a ping that did not fail: a failed ping's account is of the
+	// probe, and is the entry's error. On either, RetryAfterSeconds is what
+	// is left of the cool-down in which the daemon refuses without launching
+	// again. Only the ping sets them.
 	LaunchFailures int    `json:"launchFailures,omitempty"`
 	LaunchError    string `json:"launchError,omitempty"`
 	// Status is the ping's verdict in one word, so a consumer reads it
@@ -383,6 +389,12 @@ type doctorSidecarProbe struct {
 // therefore binds a GVS-scope request to the session probe's visitorData when
 // that probe delivered one (the mint the download needs), else asks for a
 // player-scope token on the video ID.
+//
+// A daemon asleep under WaxSeal's idle timeout answers the ping without
+// waking and says so (browser idle). The first probe that needs a session is
+// then the request that wakes it, and its latency carries the browser launch
+// and the attestation as well, which is again the cost a first download
+// would pay.
 func probeSidecars(ctx context.Context, s sidecarProviders, videoID string, budget time.Duration) []doctorSidecarProbe {
 	var probes []doctorSidecarProbe
 	var visitorData string
@@ -429,7 +441,13 @@ func probeSidecars(ctx context.Context, s sidecarProviders, videoID string, budg
 			return err
 		})
 		p.Via = s.pingVia
-		p.Probe, p.Reason, p.BrowserRelaunched, p.Keyed = health.Probe, health.Reason, health.BrowserRelaunched, health.Keyed
+		// What the health body said, one field a line in the entry's order,
+		// so a field the health has and the entry lacks is easy to see.
+		p.Probe = health.Probe
+		p.Reason = health.Reason
+		p.BrowserRelaunched = health.BrowserRelaunched
+		p.BrowserIdle = health.BrowserIdle
+		p.Keyed = health.Keyed
 		p.LaunchFailures = health.LaunchFailures
 		if p.OK && p.LaunchFailures > 0 {
 			// A healthy ping has no refusal to carry the daemon's account or
@@ -616,8 +634,10 @@ func noteSidecarKeying(env *appEnv, probes []doctorSidecarProbe) {
 // daemon has no session because the launches it tried failed, in its own
 // account of the last one, and how long it goes on refusing without trying
 // again. WaxSeal serves through a failed launch and keeps the ping at 200, so
-// without this the line reads as the idle window the same word names, and the
-// endpoint probes below it fail with nothing above them to say why.
+// without this the line reads as the daemon between sessions the same word
+// names, and the endpoint probes below it fail with nothing above them to say
+// why. A daemon asleep gets no note of its own: nothing failed, and its line
+// already says the browser is idle.
 func noteSidecarLaunchFailures(env *appEnv, probes []doctorSidecarProbe) {
 	for _, p := range probes {
 		if p.Endpoint != doctorProbePing || p.LaunchFailures == 0 || !p.OK {
@@ -659,9 +679,9 @@ func pingStatus(p doctorSidecarProbe) string {
 // healthDetail renders what a ping's health body said, after the latency: the
 // daemon's scope and reason in its own words ("tenant ok", "daemon ok",
 // "tenant no-session"), a reason alone as "reason busy" (a daemon that
-// predates the scope field), a scope alone as "tenant probe", the launches
-// that failed behind a no-session, then a relaunch. A daemon that answered
-// without a health body adds nothing.
+// predates the scope field), a scope alone as "tenant probe", then what
+// pingStateParts adds, the keying included. A daemon that answered without a
+// health body adds nothing.
 func healthDetail(p doctorSidecarProbe) string {
 	var parts []string
 	switch {
@@ -672,15 +692,7 @@ func healthDetail(p doctorSidecarProbe) string {
 	case p.Probe != "":
 		parts = append(parts, p.Probe+" probe")
 	}
-	if n := launchesFailed(p.LaunchFailures); n != "" {
-		parts = append(parts, n)
-	}
-	if p.Keyed {
-		parts = append(parts, "keyed")
-	}
-	if p.BrowserRelaunched {
-		parts = append(parts, "browser relaunched")
-	}
+	parts = append(parts, pingStateParts(p, true)...)
 	if len(parts) == 0 {
 		return ""
 	}
@@ -688,21 +700,38 @@ func healthDetail(p doctorSidecarProbe) string {
 }
 
 // pingFailureDetail is what a failed ping's health body adds after its
-// message: the scope the daemon checked, the launches that had failed before
-// the probe did, and a relaunch it made, none of which the daemon's own
-// account need say. The reason is already the message's code.
+// message: the scope the daemon checked, then what pingStateParts adds,
+// without the keying. None of it need be in the daemon's own account, and the
+// reason is already the message's code.
 func pingFailureDetail(p doctorSidecarProbe) string {
 	var parts []string
 	if p.Probe != "" {
 		parts = append(parts, p.Probe+" probe")
 	}
+	return strings.Join(append(parts, pingStateParts(p, false)...), ", ")
+}
+
+// pingStateParts words what a ping's health body said beyond its scope and
+// reason, in the one order both line shapes print it: the launches that had
+// failed, a browser closed for idleness (WaxSeal's own ping command words it
+// the same), the daemon's keying where the line states it, which the healthy
+// one does, and a relaunch the probe made. The first two explain a
+// no-session, so they sit nearest the reason.
+func pingStateParts(p doctorSidecarProbe, keyed bool) []string {
+	var parts []string
 	if n := launchesFailed(p.LaunchFailures); n != "" {
 		parts = append(parts, n)
+	}
+	if p.BrowserIdle {
+		parts = append(parts, "browser idle")
+	}
+	if keyed && p.Keyed {
+		parts = append(parts, "keyed")
 	}
 	if p.BrowserRelaunched {
 		parts = append(parts, "browser relaunched")
 	}
-	return strings.Join(parts, ", ")
+	return parts
 }
 
 // launchesFailed words a ping's count of failed launches for its line, "" for

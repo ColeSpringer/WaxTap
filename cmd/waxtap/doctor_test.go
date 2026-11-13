@@ -462,7 +462,8 @@ func TestProbeSidecarsPing(t *testing.T) {
 	})
 
 	// WaxSeal serves through a failed launch and keeps the ping at 200 under
-	// the idle window's word, so the entry carries what tells the two apart:
+	// the word a daemon between sessions answers, so the entry carries what
+	// tells the two apart:
 	// the count, the daemon's account of the last failure, and its wait.
 	t.Run("no-session behind failed launches stays healthy and says so", func(t *testing.T) {
 		probes := probeSidecars(context.Background(), sidecarProviders{
@@ -514,14 +515,38 @@ func TestProbeSidecarsPing(t *testing.T) {
 		}
 	})
 
-	// The account is the launch's only while launches are failing: an idle
-	// daemon's no-session carries its own words and names no launch.
-	t.Run("an idle no-session names no launch", func(t *testing.T) {
+	// The account is the launch's only while launches are failing: a daemon
+	// between sessions answers no-session in its own words and names no
+	// launch.
+	t.Run("a no-session between sessions names no launch", func(t *testing.T) {
 		probes := probeSidecars(context.Background(), sidecarProviders{
 			ping: pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session"}, nil),
 		}, "dummyVideo0", time.Minute)
-		if p := probes[0]; p.LaunchFailures != 0 || p.LaunchError != "" || p.RetryAfterSeconds != 0 {
-			t.Errorf("ping = %+v, want no launch fields", p)
+		if p := probes[0]; p.LaunchFailures != 0 || p.LaunchError != "" || p.RetryAfterSeconds != 0 || p.BrowserIdle {
+			t.Errorf("ping = %+v, want no launch fields and no idle browser", p)
+		}
+	})
+
+	// A daemon whose browser the idle timeout closed is healthy, and its
+	// entry says which no-session this is. The session probe after it still
+	// runs: it is the request that wakes the daemon.
+	t.Run("a daemon asleep stays healthy and says so", func(t *testing.T) {
+		probes := probeSidecars(context.Background(), sidecarProviders{
+			ping:    pingWith(waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserIdle: true}, nil),
+			session: fakeSessionProvider{sess: potoken.Session{VisitorData: "vd"}},
+		}, "dummyVideo0", time.Minute)
+		if len(probes) != 2 || probes[1].Endpoint != "session" || !probes[1].OK {
+			t.Fatalf("probes = %+v, want the session probe run after the ping", probes)
+		}
+		p := probes[0]
+		if !p.OK || p.Status != "healthy" || p.Error != nil || !p.BrowserIdle {
+			t.Errorf("ping = %+v, want healthy and browserIdle", p)
+		}
+		if p.LaunchFailures != 0 || p.LaunchError != "" {
+			t.Errorf("ping = %+v, want no launch fields: nothing failed", p)
+		}
+		if !sidecarProbesHealthy(probes) {
+			t.Error("a daemon asleep is the daemon's own 200 under strict; the run stays healthy")
 		}
 	})
 
@@ -666,6 +691,11 @@ func TestDoctorHumanPingLines(t *testing.T) {
 		// daemon's account and the wait are the caveat note's.
 		{"no-session behind one failed launch", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "no-session", LaunchFailures: 1, LaunchError: "E", RetryAfterSeconds: 15}, "sidecar:  ping ok (12 ms, tenant no-session, 1 launch failed)"},
 		{"no-session behind failed launches, keyed", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant", Reason: "no-session", LaunchFailures: 4, Keyed: true}, "sidecar:  ping ok (12 ms, tenant no-session, 4 launches failed, keyed)"},
+		// A closed browser explains the reason like a failed launch does, so
+		// it sits beside it, and after the launch that came first.
+		{"asleep", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 4, Probe: "tenant", Reason: "no-session", BrowserIdle: true}, "sidecar:  ping ok (4 ms, tenant no-session, browser idle)"},
+		{"asleep at daemon scope", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 4, Probe: "daemon", Reason: "no-session", BrowserIdle: true, Keyed: true}, "sidecar:  ping ok (4 ms, daemon no-session, browser idle, keyed)"},
+		{"asleep behind a failed launch", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 4, Probe: "tenant", Reason: "no-session", LaunchFailures: 1, LaunchError: "E", BrowserIdle: true}, "sidecar:  ping ok (4 ms, tenant no-session, 1 launch failed, browser idle)"},
 		{"answered without a health body", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 3}, "sidecar:  ping ok (3 ms)"},
 		{"probe scope without a reason word", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 12, Probe: "tenant"}, "sidecar:  ping ok (12 ms, tenant probe)"},
 		{"not offered", doctorSidecarProbe{Endpoint: "ping", OK: true, LatencyMs: 2, StatusCode: 404, Code: "not-found"}, "sidecar:  ping not offered (HTTP 404, 2 ms)"},
@@ -684,6 +714,11 @@ func TestDoctorHumanPingLines(t *testing.T) {
 		{"confirmed loss behind failed launches", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 40000, StatusCode: 503, Code: "probe-failed", Probe: "tenant", Reason: "probe-failed", LaunchFailures: 2, BrowserRelaunched: true, RetryAfterSeconds: 120,
 			Error: &errorJSON{Code: "network", Message: "M"}},
 			"sidecar:  ping FAILED: M (tenant probe, 2 launches failed, browser relaunched); retry in 120s"},
+		// A probe can confirm a tenant's loss and then find the browser
+		// closed for idleness. Rare, and the line still says none is running.
+		{"confirmed loss beside a closed browser", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 9000, StatusCode: 503, Code: "probe-failed", Probe: "tenant", Reason: "probe-failed", BrowserIdle: true,
+			Error: &errorJSON{Code: "network", Message: "M"}},
+			"sidecar:  ping FAILED: M (tenant probe, browser idle)"},
 		{"unreachable, nothing decoded", doctorSidecarProbe{Endpoint: "ping", LatencyMs: 3, Error: &errorJSON{Code: "network", Message: "M"}}, "sidecar:  ping FAILED: M"},
 	}
 	for _, tc := range cases {
@@ -738,9 +773,26 @@ func TestDoctorJSONPingEntry(t *testing.T) {
 	if entry, _ := refused[0].(map[string]any); entry["launchFailures"] != float64(3) || entry["launchError"] != "youtube refused attestation" || entry["retryAfterSeconds"] != float64(42) {
 		t.Errorf("sidecars[0] = %v, want launchFailures, launchError, and retryAfterSeconds", entry)
 	}
+	// So does the closed browser, and only from a daemon that is asleep.
+	if _, ok := first["browserIdle"]; ok {
+		t.Errorf("sidecars[0] = %v, want no browserIdle from a daemon whose browser runs", first)
+	}
+	// This entry comes from the probe itself, so the status beside the flag
+	// is the one pingStatus gives a daemon asleep, not one written here.
+	asleep := decode(&doctorReport{Healthy: true, Sidecars: probeSidecars(context.Background(), sidecarProviders{
+		ping: func(context.Context) (waxtap.SidecarHealth, error) {
+			return waxtap.SidecarHealth{Probe: "tenant", Reason: "no-session", Error: "no attested session", BrowserIdle: true}, nil
+		},
+	}, "dummyVideo0", time.Minute)})
+	if len(asleep) != 1 {
+		t.Fatalf("sidecars = %v, want the ping alone", asleep)
+	}
+	if entry, _ := asleep[0].(map[string]any); entry["browserIdle"] != true || entry["reason"] != "no-session" || entry["status"] != "healthy" || entry["ok"] != true {
+		t.Errorf("sidecars[0] = %v, want browserIdle beside a healthy no-session", entry)
+	}
 	for i := 1; i < 3; i++ {
 		entry, _ := arr[i].(map[string]any)
-		for _, key := range []string{"via", "probe", "reason", "browserRelaunched", "keyed", "launchFailures", "launchError"} {
+		for _, key := range []string{"via", "probe", "reason", "browserRelaunched", "browserIdle", "keyed", "launchFailures", "launchError"} {
 			if _, ok := entry[key]; ok {
 				t.Errorf("sidecars[%d] = %v, want %q omitted when the daemon said nothing", i, entry, key)
 			}
@@ -758,6 +810,7 @@ func TestDoctorPingStatus(t *testing.T) {
 	}{
 		{"health body", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "ok"}, "healthy"},
 		{"benign window", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "busy"}, "healthy"},
+		{"asleep", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "daemon", Reason: "no-session", BrowserIdle: true}, "healthy"},
 		{"no health body", doctorSidecarProbe{Endpoint: "ping", OK: true}, "answered"},
 		{"missing route", doctorSidecarProbe{Endpoint: "ping", OK: true, StatusCode: 404}, "not-offered"},
 		{"failed", doctorSidecarProbe{Endpoint: "ping", Probe: "tenant", Reason: "probe-failed"}, "failed"},
@@ -825,10 +878,11 @@ func TestDoctorKeyingCaveats(t *testing.T) {
 	}
 }
 
-// A healthy ping that says no-session reads as an idle daemon. When the
-// daemon reported failed launches behind it, a caveat says what the line
-// cannot: that it has no session because it could not get one, in its own
-// account, and how long it refuses before it tries again.
+// A healthy ping that says no-session reads as a daemon between sessions.
+// When the daemon reported failed launches behind it, a caveat says what the
+// line cannot: that it has no session because it could not get one, in its
+// own account, and how long it refuses before it tries again. A daemon asleep
+// earns none: nothing failed, and the line already says the browser is idle.
 func TestDoctorLaunchFailureCaveat(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -844,7 +898,12 @@ func TestDoctorLaunchFailureCaveat(t *testing.T) {
 		{"a count with no account",
 			doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", LaunchFailures: 2},
 			"the daemon's last 2 launches failed"},
-		{"an idle no-session", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session"}, ""},
+		{"a no-session between sessions", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session"}, ""},
+		{"a daemon asleep", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", BrowserIdle: true}, ""},
+		// Asleep changes nothing about a launch that failed before it.
+		{"asleep behind a failed launch",
+			doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "no-session", LaunchFailures: 1, LaunchError: "E", BrowserIdle: true},
+			"the daemon's last launch failed: E"},
 		{"a live session", doctorSidecarProbe{Endpoint: "ping", OK: true, Probe: "tenant", Reason: "ok"}, ""},
 		// A failed ping already prints its own failure.
 		{"a confirmed loss", doctorSidecarProbe{Endpoint: "ping", Probe: "tenant", Reason: "probe-failed", LaunchFailures: 2}, ""},

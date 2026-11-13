@@ -264,13 +264,28 @@ configured (`--session-url`, else `--player-context-url`, else
 `--potoken-url`; the `--json` entry's `via` names which), with `--api-key` in
 the header, sent once. The `ping` line reports the daemon's own words: the
 scope it checked (`tenant`, or `daemon` when a keyed daemon got no key), its
-reason (`ok`, `no-session`, `busy`, `probe-failed`), whether the daemon is
-`keyed`, and a browser relaunch when the probe made one. The `--json` ping entry also carries
-`status`: healthy, answered, not-offered, or failed. `no-session` names two
-daemons: an idle one, whose next request establishes a session, and one whose
-launches failed, which WaxSeal serves through instead of exiting and keeps at
-200 under the same word. The ping tells them apart by
-`consecutive_launch_failures`: above 0 the line adds the count
+reason (`ok`, `no-session`, `busy`, `probe-failed`), how many launches failed
+and whether the browser is closed for idleness (both below), whether the
+daemon is `keyed`, and a browser relaunch when the probe made one. The `--json` ping entry also carries
+`status`: healthy, answered, not-offered, or failed. `no-session` names three
+daemons: one between sessions, whose next request establishes one; one asleep,
+whose idle timeout (WaxSeal's `--idle-timeout`) closed every tenant's session
+and then the browser; and one whose launches failed, which WaxSeal serves
+through instead of exiting and keeps at 200 under the same word. The ping
+tells them apart, and the last two can both hold: a daemon whose launches
+fail goes to sleep like any other and keeps its count. A daemon asleep says
+`browser_idle`: the line adds `browser idle`, the `--json` entry carries
+`browserIdle`, and a keyless ping of a keyed daemon reads
+`daemon no-session`, the one answer at that scope that is neither `ok` nor
+`probe-failed`. The ping does not wake it, so it cannot say whether a browser
+would start. The first endpoint probe that needs a session is the wake, and
+its latency carries the launch and the attestation. `browser_idle` describes
+the browser, not the tenant: a tenant whose session the timeout closed while
+another kept the browser up reads as a plain `no-session`. Nor is it a
+verdict: a tenant probe that confirmed a loss and then found the browser
+closed still answers `probe-failed`, and the run fails on it with
+`browser idle` on the `FAILED` line. Failed launches
+show as `consecutive_launch_failures`: above 0 the line adds the count
 (`2 launches failed`), the `--json` entry carries `launchFailures`,
 `launchError` (the daemon's account of the last one) and `retryAfterSeconds`
 (what is left of the cool-down in which it refuses without launching again),
@@ -319,6 +334,20 @@ code here is specific to it: a wait inside the 60 s cap is slept through and
 the one retry is the request that launches again, and a longer one is reported
 with the wait in the hint and parks the context arm for it, as the bot check's
 does. `doctor`'s ping is what names the state (above).
+
+A daemon run with `--idle-timeout` closes its browser once nothing has needed
+it for that long and launches it again for the next request that does: a
+token its cache does not hold, a context, or a session export, from any
+client or tenant. No code here is specific to that either. WaxSeal documents
+the wake at about 4 s for a token and about 20 s for a context, inside the
+60 s request bound, and serves cached tokens without one. The session behind
+a wake is a new one, as after any recycle, so a client can still hold a
+context or an adoption from the closed one. A `/report` naming that one is
+not accepted: as already retired while the tenant has no session, and as
+stale once a later request has launched its next. Neither answer states a
+wait and WaxTap does not read `accepted`, so both are the retirement it asked
+for. `doctor`'s ping names this state too (`browser idle`, above), and
+library callers read it from `SidecarHealth.BrowserIdle`.
 
 Error precedence across a download's attempts: `waxerr.PreferErr` ranks
 availability verdicts above everything else, but an attempt that reached the

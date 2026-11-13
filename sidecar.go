@@ -234,11 +234,17 @@ func (r sidecarReporter) invalidate(ctx context.Context, inv potoken.SessionInva
 // bgutil server reports its uptime and version) leaves every field empty: the
 // ping proved it answers, and nothing more.
 //
-// "no-session" names two different daemons. One is idle: a report retired its
-// session and the next request establishes another. The other tried to
-// establish one and was refused, by YouTube or by its own browser, and since
-// WaxSeal serves through a failed launch instead of exiting it answers the
-// same word. LaunchFailures tells them apart.
+// "no-session" names three different daemons. One is between sessions: a
+// report retired its session and the next request establishes another. One is
+// asleep: WaxSeal's idle timeout closed every tenant's session and then the
+// shared browser, so the next request that needs a session pays for a browser
+// launch and an attestation first. A daemon-scope probe answers the same word
+// then, with OK false, since no browser runs and nothing is wrong. The third
+// tried to establish a session and was refused, by YouTube or by its own
+// browser, and since WaxSeal serves through a failed launch instead of
+// exiting it answers the same word. BrowserIdle names the second and
+// LaunchFailures the third, and neither rules the other out: a daemon whose
+// launches fail goes to sleep like any other and keeps its count.
 type SidecarHealth struct {
 	// OK reports a live session (a tenant probe) or a running browser (a daemon
 	// probe). It is false inside the benign windows, which are still healthy.
@@ -269,6 +275,18 @@ type SidecarHealth struct {
 	// and relaunched it before answering, which otherwise shows only in the
 	// daemon's log.
 	BrowserRelaunched bool
+	// BrowserIdle reports that the daemon is asleep: WaxSeal's idle timeout
+	// (--idle-timeout) closed the shared browser, and the probe left it
+	// closed, since a ping is not use and never wakes one. It says no browser
+	// runs and is not a verdict; Reason and the error are. The Reason beside
+	// it is nearly always "no-session", at either scope, but a tenant probe
+	// keeps the reason it reached when it then finds the browser closed, so a
+	// "probe-failed" beside it is still the loss it says. It describes the
+	// browser, not the tenant: a tenant whose own session the timeout closed
+	// while another kept the browser up reads as a plain no-session. False
+	// while a browser runs, from a daemon run without the timeout, and from
+	// one that predates the field.
+	BrowserIdle bool
 	// Keyed reports that the daemon requires an API key. Every health body
 	// carries it, tenant and daemon scope alike; false from a keyless daemon
 	// and from one that predates the field.
@@ -305,24 +323,28 @@ const sidecarPingTimeout = 110 * time.Second
 // strict keeps at 200 (no-session, busy), and returns the health with a nil
 // error. That includes a no-session whose LaunchFailures is above 0: the probe
 // observed no loss, so the daemon keeps it at 200, and the health says the
-// tenant cannot get a session. A 200 whose JSON carries no health body counts as answered, which is
+// tenant cannot get a session. It includes one whose BrowserIdle is set too:
+// the daemon is asleep, the ping did not wake it, and so it cannot say
+// whether a browser would start; the request that wakes the daemon finds
+// out. A 200 whose JSON carries no health body counts as answered, which is
 // all a daemon that is not WaxSeal can say; one that is not JSON is the
 // unusable response it is from any sidecar. A 503 is the loss the probe
 // confirmed, returned as a [SidecarResponseError] whose Code is the reason,
 // whose Reason is the daemon's account, and whose RetryAfter is the wait it
 // stated (a Retry-After header, else the body's retry_after_seconds, as on
-// any refusal), beside the decoded health; so is a 200
-// whose reason is "probe-failed", which a daemon that predates ?strict sends
-// where a 503 goes today. Any other status is the refusal it is everywhere
-// else (401 for a wrong key, 404 from a daemon with no /ping), and a
-// connection failure is a [SidecarError].
+// any refusal), beside the decoded health; so is a 200 whose reason is
+// "probe-failed", which a daemon that predates ?strict sends where a 503 goes
+// today. Any other status is the refusal it is everywhere else (401 for a
+// wrong key, 404 from a daemon with no /ping), and a connection failure is a
+// [SidecarError].
 //
-// A healthy ping costs the daemon one page round trip. One that finds the
-// browser wedged tears it down and relaunches it before answering, which
-// WaxSeal bounds at 105 s, so without [WithSidecarTimeout] the request is
-// allowed the 110 s WaxSeal's own healthcheck allows rather than the 60 s the
-// other endpoints default to. A timeout that is given is the bound, as on any
-// other request, and ctx bounds the call for a caller that will not wait.
+// A healthy ping costs the daemon one page round trip, or nothing when it is
+// asleep. One that finds the browser wedged tears it down and relaunches it
+// before answering, which WaxSeal bounds at 105 s, so without
+// [WithSidecarTimeout] the request is allowed the 110 s WaxSeal's own
+// healthcheck allows rather than the 60 s the other endpoints default to. A
+// timeout that is given is the bound, as on any other request, and ctx bounds
+// the call for a caller that will not wait.
 func PingSidecar(ctx context.Context, baseURL string, opts ...SidecarOption) (SidecarHealth, error) {
 	endpoint, err := sidecarPingURL(baseURL)
 	if err != nil {
@@ -369,6 +391,7 @@ type sidecarHealthBody struct {
 	Reason            string `json:"reason"`
 	Error             string `json:"error"`
 	BrowserRelaunched bool   `json:"browser_relaunched"`
+	BrowserIdle       bool   `json:"browser_idle"`
 	Keyed             *bool  `json:"keyed"`
 	LaunchFailures    int    `json:"consecutive_launch_failures"`
 	RetryAfterSeconds int    `json:"retry_after_seconds"`
@@ -419,6 +442,7 @@ func pingSidecar(ctx context.Context, client *http.Client, endpoint, apiKey stri
 		Reason:            capRunes(strings.TrimSpace(body.Reason), sidecarCodeRunes),
 		Error:             capRunes(strings.TrimSpace(body.Error), sidecarReasonRunes),
 		BrowserRelaunched: body.BrowserRelaunched,
+		BrowserIdle:       body.BrowserIdle,
 		Keyed:             body.Keyed != nil && *body.Keyed,
 		LaunchFailures:    max(body.LaunchFailures, 0),
 		RetryAfter:        time.Duration(max(body.RetryAfterSeconds, 0)) * time.Second,
