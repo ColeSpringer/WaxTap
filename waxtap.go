@@ -295,12 +295,14 @@ type InfoResult struct {
 	// WEB stream; SubstitutedFrom stays empty because WEB is not substituted for
 	// itself.
 	ViaWatchPage bool
-	// FullMetadata reports that watch-page enrichment (PublishDate, Chapters, and
-	// Availability) was populated, either by the opt-in WithFullMetadata pass or
-	// because the primary extraction already scraped the watch page (ViaWatchPage).
-	// This is a different axis from ViaWatchPage, which reports where the base
-	// metadata came from. When false, an empty Chapters slice or Unknown
-	// Availability means enrichment did not run, not that the video has none.
+	// FullMetadata reports that watch-page enrichment (PublishDate, Chapters,
+	// Availability, and the Music card) was populated, either by the opt-in
+	// WithFullMetadata pass or because the primary extraction already scraped the
+	// watch page (ViaWatchPage). This is a different axis from ViaWatchPage, which
+	// reports where the base metadata came from. When false, an empty Chapters
+	// slice or Unknown Availability means enrichment did not run, not that the
+	// video has none, and a nil Music means only that its description states no
+	// recording: the card was never looked for.
 	FullMetadata bool
 	// Probed reports that InfoProbe read the resolved best-audio stream's
 	// headers, so that row's sample rate, channels, and duration come from the
@@ -387,10 +389,11 @@ func WithSourcePolicy(policy SourcePolicy) ReadOption {
 }
 
 // WithFullMetadata makes Info and InfoResult run a token-free watch-page pass
-// that backfills PublishDate (when the primary client omitted it), Chapters, and
-// Availability. The native clients leading the default chain (VISIONOS,
-// ANDROID_VR) omit these, so this is what makes them reliable across clients. InfoResult.FullMetadata reports whether the data
-// was populated.
+// that backfills PublishDate (when the primary client omitted it), Chapters,
+// Availability, and, for a video whose description states no recording, Music
+// from the page's Music card. The native clients leading the default chain
+// (VISIONOS, ANDROID_VR) omit these, so this is what makes them reliable across
+// clients. InfoResult.FullMetadata reports whether the data was populated.
 //
 // It costs one extra HTTP request unless the primary extraction already scraped
 // the watch page (InfoResult.ViaWatchPage), in which case the data is already
@@ -462,7 +465,8 @@ func (c *Client) InfoResult(ctx context.Context, url string, depth InfoDepth, op
 	res := &InfoResult{Video: video, Client: ext.ClientName(), SubstitutedFrom: ext.SubstitutedFrom(), ViaWatchPage: ext.Attempt() == youtube.AttemptWatchPage, BestIndex: -1}
 	if res.ViaWatchPage {
 		// The primary extraction already scraped the watch page, so chapters,
-		// availability, and publish date are already on the Video.
+		// availability, publish date, and the Music card are already on the
+		// Video.
 		res.FullMetadata = true
 	}
 	// The watch-page enrichment pass fills PublishDate/Chapters/Availability. It is
@@ -643,9 +647,10 @@ func (c *Client) probeStaged(ctx context.Context, runner *media.Runner, src down
 }
 
 // fullMetadataPass runs the token-free watch-page metadata fetch and merges
-// PublishDate (only if the primary client left it zero), Chapters, and
-// Availability onto the extracted Video. Caller cancellation is fatal; any other
-// failure is best-effort and leaves the base metadata with FullMetadata false.
+// PublishDate (only if the primary client left it zero), Chapters,
+// Availability, and Music (only if the description stated none) onto the
+// extracted Video. Caller cancellation is fatal; any other failure is
+// best-effort and leaves the base metadata with FullMetadata false.
 func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id string) error {
 	meta, err := c.watchPageMeta(ctx, id)
 	if err != nil {

@@ -85,6 +85,7 @@ func (c *Client) ExtractWebContext(ctx context.Context, videoID string) (*Extrac
 		LiveStatus: liveStatusFrom(false, false, pc.IsLiveContent),
 		Formats:    mapFormats(raw),
 	}
+	video.Music = parseArtTrack(video.Title, video.Description)
 	for _, t := range pc.Thumbnails {
 		video.Thumbnails = append(video.Thumbnails, Thumbnail{URL: t.URL, Width: t.Width, Height: t.Height})
 	}

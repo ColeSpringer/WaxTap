@@ -310,6 +310,7 @@ type infoSidecarJSON struct {
 	DurationSeconds float64       `json:"durationSeconds,omitempty"`
 	PublishDate     string        `json:"publishDate,omitempty"`
 	Description     string        `json:"description,omitempty"`
+	Music           *musicJSON    `json:"music,omitempty"`
 	Chapters        []chapterJSON `json:"chapters,omitempty"`
 	Formats         []formatJSON  `json:"formats,omitempty"`
 }
@@ -322,6 +323,7 @@ func writeInfoSidecar(outputPath string, res *waxtap.Result) error {
 		doc.ChannelID = m.ChannelID
 		doc.DurationSeconds = m.Duration.Seconds()
 		doc.Description = m.Description
+		doc.Music = musicToJSON(m.Music)
 		doc.Chapters = chaptersToJSON(m.Chapters)
 		if !m.PublishDate.IsZero() {
 			doc.PublishDate = m.PublishDate.Format("2006-01-02")

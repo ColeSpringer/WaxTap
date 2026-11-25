@@ -385,3 +385,23 @@ func TestPlayabilityRefusesNativeClientLiveFlag(t *testing.T) {
 		t.Errorf("liveStatus = %v, want LiveNow", got)
 	}
 }
+
+// YouTube states the publish time in its own zone and shows that zone's date
+// on the page, so that is the date a caller reads off PublishDate: converting
+// to UTC moved every evening upload to the next day, and a New Year's Eve one
+// to the next year.
+func TestParseDateKeepsTheStatedDate(t *testing.T) {
+	got := parseDate("2016-12-31T18:00:00-08:00")
+	if d := got.Format("2006-01-02"); d != "2016-12-31" {
+		t.Errorf("date = %s, want the stated 2016-12-31", d)
+	}
+	if want := time.Date(2017, 1, 1, 2, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("instant = %v, want %v unchanged", got, want)
+	}
+	if d := parseDate("2021-05-20").Format("2006-01-02"); d != "2021-05-20" {
+		t.Errorf("bare date = %s, want 2021-05-20", d)
+	}
+	if !parseDate("").IsZero() || !parseDate("not a date").IsZero() {
+		t.Error("an absent or unreadable date must be zero")
+	}
+}

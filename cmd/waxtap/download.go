@@ -123,7 +123,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.Float64Var(&df.loudTarget, "loudness-target", -14, "target integrated loudness (LUFS) for --normalize")
 	bindPeakModeFlag(f, &df.peakMode)
 	f.BoolVar(&df.embedThumbnail, "embed-thumbnail", false, "embed the YouTube thumbnail as cover art (when the format supports it)")
-	f.BoolVar(&df.embedMetadata, "embed-metadata", false, "write basic tags (title, artist, date, chapters) into the output")
+	f.BoolVar(&df.embedMetadata, "embed-metadata", false, "write tags (title, artist, album, year, copyright, chapters) into the output")
 	bindCoverArtFlag(f, &df.coverArt)
 	f.StringVar(&df.sourcePolicy, "source-policy", "minimize-loss", "source policy: minimize-loss|best-native|prefer:<codec> (prefer:<codec> is a preference, not a filter)")
 	f.StringVar(&df.archivePath, "download-archive", "", "record fetched IDs to this file and skip them on future runs")
@@ -969,8 +969,9 @@ func (df *downloadFlags) buildRequest(url, outPath string) (waxtap.Request, erro
 	} else {
 		spec.Output = outputFor(outPath, df.collision)
 	}
-	// Publish date and chapters come only from the watch-page pass, and both
-	// --embed-metadata and --write-info-json promise them.
+	// Publish date, chapters, and the page's Music card come only from the
+	// watch-page pass, and both --embed-metadata and --write-info-json promise
+	// them.
 	return waxtap.Request{
 		URL:          url,
 		Audio:        sel,

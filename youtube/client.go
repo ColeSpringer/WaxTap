@@ -779,34 +779,46 @@ func (c *Client) extractFromWatchPage(ctx context.Context, videoID string) (*Ext
 	if err != nil {
 		return nil, err
 	}
-	// The watch page carries chapters (in ytInitialData) and the availability
-	// microformat, so fill them now rather than re-fetching for WithFullMetadata.
+	// The watch page carries chapters and the Music card (in ytInitialData) and
+	// the availability microformat, so fill them now rather than re-fetching for
+	// WithFullMetadata.
 	fillWatchPageEnrichment(video, body, pr)
 	return buildExtraction(video, profile, sess, raw, pr, AttemptWatchPage), nil
 }
 
-// fillWatchPageEnrichment fills chapters and availability into v from
-// already-fetched watch-page HTML and its parsed player response. The watch page
-// is a WEB response, so its microformat determines availability; publishDate was
-// already set by toVideo from the same microformat.
+// fillWatchPageEnrichment fills chapters, availability, and the Music card
+// into v from already-fetched watch-page HTML and its parsed player response.
+// The watch page is a WEB response, so its microformat determines availability;
+// publishDate was already set by toVideo from the same microformat, and so was
+// Music when the description states it, which the card never replaces.
 func fillWatchPageEnrichment(v *Video, body []byte, pr *playerResponse) {
-	v.Chapters = parseChapters(body, v.Duration)
+	chapters, card, hasCard := parseWatchPageData(body, v.Duration)
+	v.Chapters = chapters
 	v.Availability = AvailabilityFromUnlisted(pr.Microformat.PlayerMicroformatRenderer.IsUnlisted)
+	if v.Music == nil && hasCard {
+		v.Music = card.music(v.Title, v.Author)
+	}
 }
 
 // WatchPageMeta is the metadata a watch-page fetch adds beyond a /player
 // response: the publish date and unlisted state from the WEB microformat, and the
-// chapters from ytInitialData.
+// chapters and Music card from ytInitialData.
 type WatchPageMeta struct {
 	PublishDate time.Time // zero when the page carried none
 	Chapters    []Chapter // nil when the video has no chapters
 	Unlisted    bool      // the video is unlisted (link-only)
+	// Music is the page's Music card, already held against the page's own
+	// title and channel, or nil when the page has no card for one song or the
+	// card is not borne out. It never restates the description: a caller
+	// keeps a Music the video already carries.
+	Music *Music
 }
 
 // WatchPageMetadata fetches the watch page for videoID and returns the metadata
-// only the WEB watch page carries: publish date, chapters, and unlisted state. It
-// is the token-free enrichment behind waxtap.WithFullMetadata for extractions
-// that did not already scrape the watch page.
+// only the WEB watch page carries: publish date, chapters, unlisted state, and
+// the Music card. It is the token-free enrichment behind
+// waxtap.WithFullMetadata for extractions that did not already scrape the
+// watch page.
 //
 // Context cancellation is returned as a fatal error. A fetch or parse failure is
 // also returned, but callers treating enrichment as best-effort should keep the
@@ -823,11 +835,16 @@ func (c *Client) WatchPageMetadata(ctx context.Context, videoID string) (WatchPa
 		c.dumpArtifact(ctx, "watchpage-"+videoID+".html", body)
 		return WatchPageMeta{}, &waxerr.ExtractionError{Stage: "watch-page-metadata", Cause: err}
 	}
-	return WatchPageMeta{
+	meta := WatchPageMeta{
 		PublishDate: parseDate(pr.Microformat.PlayerMicroformatRenderer.PublishDate),
-		Chapters:    parseChapters(body, pr.duration()),
 		Unlisted:    pr.Microformat.PlayerMicroformatRenderer.IsUnlisted,
-	}, nil
+	}
+	chapters, card, hasCard := parseWatchPageData(body, pr.duration())
+	meta.Chapters = chapters
+	if hasCard {
+		meta.Music = card.music(pr.VideoDetails.Title, pr.VideoDetails.Author)
+	}
+	return meta, nil
 }
 
 // Info returns video metadata and candidate formats.

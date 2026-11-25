@@ -289,6 +289,7 @@ func (pr *playerResponse) toVideo(videoID string) (*Video, []rawFormat, error) {
 		LiveStatus:  pr.liveStatus(),
 	}
 
+	v.Music = parseArtTrack(v.Title, v.Description)
 	v.Duration = pr.duration()
 	// Non-WEB clients omit Microformat, leaving PublishDate at its zero value.
 	v.PublishDate = parseDate(pr.Microformat.PlayerMicroformatRenderer.PublishDate)
@@ -508,13 +509,19 @@ func parseMillis(s string) time.Duration {
 	return time.Duration(atoi64(s)) * time.Millisecond
 }
 
+// parseDate reads a publish date as YouTube states it: a timestamp with the
+// offset of YouTube's own zone, or a bare date. The time is kept in the zone
+// it was stated in, because the date in that zone is the one the page shows
+// and the one a caller formatting the result should get. Converting to UTC
+// moves every evening upload to the next day and a New Year's Eve one to the
+// next year. It is zero for an absent or unreadable value.
 func parseDate(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
 	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.UTC()
+			return t
 		}
 	}
 	return time.Time{}

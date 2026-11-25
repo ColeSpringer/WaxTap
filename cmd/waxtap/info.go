@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/colespringer/waxtap/v3"
 	"github.com/spf13/cobra"
 )
@@ -112,7 +114,7 @@ func newInfoCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&showURLs, "show-url", false, "resolve and print the signed URL of the selected stream (sensitive, expires)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "read the selected stream's headers for its rate, channels, and length")
-	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters) via a token-free watch-page pass")
+	cmd.Flags().BoolVar(&full, "full", false, "fetch full metadata (publish date, chapters, the page's Music card) via a token-free watch-page pass")
 	cmd.Flags().StringVar(&channels, "channels", "stereo", "channel layout to prefer for 'Best audio': mono|stereo|surround|any")
 	cmd.Flags().IntVar(&itag, "itag", 0, "report an exact itag instead of the best audio")
 	cmd.Flags().StringVar(&codec, "codec", "", "report the best source matching a codec (hard filter)")
@@ -156,6 +158,7 @@ func renderInfoHuman(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr 
 	v := info.Video
 	env.printf("Title:     %s\n", v.Title)
 	env.printf("Author:    %s\n", v.Author)
+	renderMusic(env, v)
 	env.printf("Video ID:  %s\n", v.ID)
 	if info.Client != "" {
 		env.printf("Client:    %s%s\n", info.Client, watchPageSuffix(info.ViaWatchPage))
@@ -265,6 +268,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		// so the rate, channels, and length in its row are the stream's own
 		// rather than the listing's. Omitted when it did not.
 		Probed        bool          `json:"probed,omitempty"`
+		Music         *musicJSON    `json:"music,omitempty"` // omitted for a video that states no recording
 		ChapterCount  *int          `json:"chapterCount,omitempty"`
 		Chapters      []chapterJSON `json:"chapters,omitempty"`
 		Formats       []formatJSON  `json:"formats"`
@@ -297,6 +301,7 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 		// liveStatus/availability, which a consumer should not trust without it.
 		FullMetadata: info.FullMetadata,
 		Probed:       info.Probed,
+		Music:        musicToJSON(v.Music),
 		Chapters:     chaptersToJSON(v.Chapters),
 		Formats:      formats,
 	}
@@ -331,6 +336,60 @@ func emitInfoJSON(env *appEnv, info *waxtap.InfoResult, bestIdx int, bestErr err
 	}
 	out.Notes = env.notesJSON()
 	return env.emitJSON(out)
+}
+
+// renderMusic prints what the video states about the recording it carries,
+// nothing for a video that states none. The track is named only when it is not
+// the video's own title, which the Title line already printed: an Art Track's
+// is unless YouTube cut the video's short, and a Music card's often is a
+// shorter one. Spacing is no difference: Music.Title has its runs collapsed.
+func renderMusic(env *appEnv, v *waxtap.Video) {
+	m := v.Music
+	if m == nil {
+		return
+	}
+	if m.Title != strings.Join(strings.Fields(v.Title), " ") {
+		env.printf("Track:     %s\n", m.Title)
+	}
+	env.printf("Artist:    %s\n", strings.Join(m.Artists, ", "))
+	if m.Album != "" {
+		env.printf("Album:     %s\n", m.Album)
+	}
+	if !m.ReleaseDate.IsZero() {
+		env.printf("Released:  %s\n", m.ReleaseDate.Format("2006-01-02"))
+	}
+}
+
+// musicJSON is a Video's Music in --json and the info sidecar. Every key but
+// title, artists, and source is omitted when the video does not state it.
+type musicJSON struct {
+	Title       string   `json:"title"`
+	Artists     []string `json:"artists"`
+	Album       string   `json:"album,omitempty"`
+	ReleaseDate string   `json:"releaseDate,omitempty"`
+	Copyright   string   `json:"copyright,omitempty"`
+	// Source is "description" for an Art Track's generated description and
+	// "watch-page" for the page's Music card.
+	Source string `json:"source"`
+}
+
+// musicToJSON returns nil for a video that states no recording, so the key is
+// omitted rather than emitted empty.
+func musicToJSON(m *waxtap.Music) *musicJSON {
+	if m == nil {
+		return nil
+	}
+	out := &musicJSON{
+		Title:     m.Title,
+		Artists:   m.Artists,
+		Album:     m.Album,
+		Copyright: m.Copyright,
+		Source:    m.Source.String(),
+	}
+	if !m.ReleaseDate.IsZero() {
+		out.ReleaseDate = m.ReleaseDate.Format("2006-01-02")
+	}
+	return out
 }
 
 // infoLiveStatus renders a Video's live status for --json, emitting only the new

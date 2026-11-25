@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+// parseChapters is the chapter half of parseWatchPageData.
+func parseChapters(body []byte, duration time.Duration) []Chapter {
+	chapters, _, _ := parseWatchPageData(body, duration)
+	return chapters
+}
+
 // TestParseChaptersFromFixture proves the parser skips the decoy ytInitialData,
 // prefers the creator DESCRIPTION_CHAPTERS entry over the AUTO_CHAPTERS and
 // heatmap siblings, and closes the last chapter at the video duration.

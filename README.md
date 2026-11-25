@@ -90,8 +90,11 @@ waxtap doctor
 ```
 
 `info --show-url` adds a signed, expiring stream URL and content length under
-`resolved.*`; treat that output as sensitive. `info --full` adds publish date
-and chapters via a token-free watch-page fetch.
+`resolved.*`; treat that output as sensitive. `info --full` adds publish date,
+chapters, and the page's Music card via a token-free watch-page fetch. What a
+video states about its recording is printed as `Artist`, `Album`, and
+`Released` lines, with a `Track` line when its title is not the video's own,
+and emitted as `music` in `--json`; an Art Track needs no `--full` for it.
 
 `transcode` and `normalize` also take directories: `-r` recurses and `--dir`
 sets an output directory. `transcode --force` re-encodes an input already in
@@ -269,10 +272,29 @@ Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
   (pass `--downmix`). APE additionally caps at 24 bits and refuses a 32-bit
   integer source rather than narrowing it silently (pass `--bit-depth 24`).
 - `--embed-thumbnail` writes the video's thumbnail as front cover art, and
-  `--embed-metadata` writes title, artist, date, and chapters. Chapter marks
-  follow any cut: shifted by the audio removed before them, dropped when their
-  content was removed. Both flags are best-effort: a failure warns and still
-  delivers valid audio. WebM cannot hold a
+  `--embed-metadata` writes title, artist, album, year, copyright line, and
+  chapters. Chapter
+  marks follow any cut: shifted by the audio removed before them, dropped when
+  their content was removed. Both flags are best-effort: a failure warns and
+  still delivers valid audio. The tags come from what the video itself states;
+  nothing is looked up elsewhere, and a title is never split into an artist and
+  a track. An Art Track, the auto-generated upload on an "<Artist> - Topic"
+  channel, states its artists, album, release date, and copyright line in its
+  description, and the tags are taken from those, each artist as its own ARTIST
+  value. Its title is taken from there too: YouTube cuts a video title past
+  100 characters short, and the description keeps it whole.
+  Any other video is credited to its channel and dated by its upload year. The
+  watch page's Music card can add an artist and album to one: it counts when it
+  lists a single song that the video's title names, by an artist who is the
+  channel or is named in the title too, and the title stays the video's own.
+  The date written is a year
+  and no more: the stated release date's, else the copyright line's when that
+  is no later than the upload, since catalog reaches YouTube years after it
+  came out, else the upload's. The full dates are there for whatever wants to
+  write a day: `info` prints what the video states, and `--json` and the
+  `--write-info-json` sidecar carry it as `music` (with `releaseDate`) beside
+  `publishDate`. WebM
+  cannot hold a
   picture, so a cover-art request remuxes Opus-in-WebM to Ogg-Opus (lossless) when
   the output extension allows it, reported as the `cover-art-remuxed` note;
   `--json` then names the Ogg container under `outputFormat`, since that is the
@@ -483,8 +505,12 @@ fetching it; a selector that names its own layout beats `WithChannels`, which
 only fills in one that named none. `Resolve` takes its selector as a parameter,
 so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist or
 channel URL with `Skip`/`Stop` predicates for an archive cursor, and
-`WithFullMetadata()` adds publish date and chapters to `Info`, or through
-`EnrichOptions` to each enriched entry. `Client.PlanSplit` reads a CUE sheet
+`WithFullMetadata()` adds publish date, chapters, and the watch page's Music
+card to `Info`, or through `EnrichOptions` to each enriched entry. `Video.Music`
+is what a video states about the recording it carries (title, artists, album,
+release date, copyright line), read from an Art Track's description on every
+client and from that card otherwise, and nil for a video that states none;
+`EmbedMetadata` tags from it. `Client.PlanSplit` reads a CUE sheet
 against a local rip and reports where the pieces fall, with the data tracks it
 skips in `SplitPlan.Skipped`, and `Client.Split` writes them, tagged from the
 sheet; the `split` subcommand is that pair. What a damaged local input lost

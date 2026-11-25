@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
@@ -167,22 +169,24 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 	}
 
 	if o.metadata {
-		// Title and artist come from VideoDetails and are always present. Date and
-		// chapters are WEB/mobile-shaped and often absent on the default path; skip
-		// them when missing rather than stamping a zero value.
-		if v.Title != "" {
-			ed.Set(tag.Title, v.Title)
-			changed = true
-		}
-		if v.Author != "" {
-			// YouTube exposes channel metadata, not an authoritative artist, so the
-			// channel name is deliberately mapped to ARTIST.
-			ed.Set(tag.Artist, v.Author)
-			changed = true
-		}
-		if !v.PublishDate.IsZero() {
-			ed.Set(tag.RecordingDate, v.PublishDate.Format("2006-01-02"))
-			changed = true
+		// Each tag is written only when the video has a value for it, never as
+		// an empty or zero one: what a field holds depends on the client that
+		// answered and on what the video states (see tagsFor).
+		t := tagsFor(v)
+		for _, f := range []struct {
+			key  tag.Key
+			vals []string
+		}{
+			{tag.Title, nonEmpty(t.title)},
+			{tag.Artist, t.artists},
+			{tag.Album, nonEmpty(t.album)},
+			{tag.RecordingDate, nonEmpty(t.year)},
+			{tag.Copyright, nonEmpty(t.copyright)},
+		} {
+			if len(f.vals) > 0 {
+				ed.Set(f.key, f.vals...)
+				changed = true
+			}
 		}
 		if len(v.Chapters) > 0 {
 			if caps.Chapters.Write == waxlabel.AccessNone {
@@ -224,6 +228,113 @@ func (c *Client) doEmbed(ctx context.Context, path, targetExt string, v *youtube
 		committed = true
 	}
 	return remuxedTo, skipReason, nil
+}
+
+// embedTags is the text EmbedMetadata writes for a video. An empty field is a
+// tag left unwritten.
+type embedTags struct {
+	title     string
+	artists   []string
+	album     string
+	year      string // YYYY
+	copyright string
+}
+
+// topicSuffix ends the name of an auto-generated artist channel, the kind Art
+// Tracks are uploaded to. YouTube appends it to the artist's name; it is not
+// part of one.
+const topicSuffix = " - Topic"
+
+// tagsFor derives the tags from what the video states, best effort and
+// without looking anything up.
+//
+// The title is the video's own, with one exception: an Art Track's is the one
+// its description states, which is the same title except that it is whole
+// where YouTube cut the video's short. The Music card is no such exception.
+// It may name a shorter title than the video's, which says more (a featured
+// credit, a version), so the video's is not rewritten from it.
+//
+// The artists, album, and copyright line are the ones v.Music states. A video
+// that states none is credited to its channel, which is the best YouTube
+// offers, less the suffix of an auto-generated one.
+func tagsFor(v *youtube.Video) embedTags {
+	t := embedTags{title: v.Title, year: tagYear(v)}
+	if m := v.Music; m != nil {
+		if m.Source == youtube.MusicFromDescription {
+			t.title = m.Title
+		}
+		t.artists, t.album, t.copyright = m.Artists, m.Album, m.Copyright
+		return t
+	}
+	t.artists = nonEmpty(strings.TrimSpace(strings.TrimSuffix(v.Author, topicSuffix)))
+	return t
+}
+
+// tagYear picks the year to file the video's audio under, the most specific
+// claim first:
+//
+//   - the year of the release date the video states;
+//   - the year of its copyright line, when that is no later than the year it
+//     was uploaded. Catalog is delivered to YouTube years after it came out,
+//     so there the upload dates the delivery and the copyright year, though
+//     it can be a remaster's, is the nearer one;
+//   - the year it was uploaded, which for a new release is the release year
+//     and for anything else is the only date there is.
+//
+// It returns "" when the video carries none of them, as on the default client
+// without a watch-page pass.
+//
+// A year is all the tag takes. Only one of the three sources knows the
+// release day, and the upload's day is the delivery's; a caller that wants
+// more has Music.ReleaseDate and Video.PublishDate in full.
+func tagYear(v *youtube.Video) string {
+	uploaded := v.PublishDate.Year()
+	if m := v.Music; m != nil {
+		if !m.ReleaseDate.IsZero() {
+			return strconv.Itoa(m.ReleaseDate.Year())
+		}
+		// With no upload date to hold the year against, this year bounds it:
+		// a later one is a label's name, not a date.
+		latest := uploaded
+		if v.PublishDate.IsZero() {
+			latest = time.Now().Year()
+		}
+		if y := copyrightYear(m.Copyright); y != 0 && y <= latest {
+			return strconv.Itoa(y)
+		}
+	}
+	if v.PublishDate.IsZero() {
+		return ""
+	}
+	return strconv.Itoa(uploaded)
+}
+
+// copyrightYear returns the year a copyright line opens with, or 0 when it
+// opens with anything else. Only the leading number counts ("1981, 2017" is
+// 1981, the first publication), and only as a plausible year standing alone:
+// labels are named for numbers too.
+func copyrightYear(line string) int {
+	rest := strings.TrimLeft(line, "\u2117\u00a9 ")
+	digits := 0
+	for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+		digits++
+	}
+	if digits != 4 {
+		return 0
+	}
+	y, _ := strconv.Atoi(rest[:4])
+	if y < 1900 {
+		return 0
+	}
+	return y
+}
+
+// nonEmpty returns s as a one-value list, or nil when it is empty.
+func nonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
 }
 
 // executeSaveBack runs plan against its parsed file in place, applying

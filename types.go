@@ -129,6 +129,12 @@ type (
 	// Availability reports whether a video is publicly listed. It is set only when a
 	// watch-page metadata pass runs (see WithFullMetadata), else AvailabilityUnknown.
 	Availability = youtube.Availability
+	// Music is what a video states about the one recording it carries: title,
+	// artists, album, release date, and copyright line. Video.Music is nil for
+	// a video that states none.
+	Music = youtube.Music
+	// MusicSource names the statement a Music was read from.
+	MusicSource = youtube.MusicSource
 )
 
 // LiveStatus values.
@@ -144,6 +150,16 @@ const (
 	AvailabilityUnknown  = youtube.AvailabilityUnknown
 	AvailabilityPublic   = youtube.AvailabilityPublic
 	AvailabilityUnlisted = youtube.AvailabilityUnlisted
+)
+
+// MusicSource values.
+const (
+	// MusicFromDescription marks an Art Track's generated description, which
+	// every client returns.
+	MusicFromDescription = youtube.MusicFromDescription
+	// MusicFromWatchPage marks the watch page's Music card, read only where a
+	// watch-page pass ran (see WithFullMetadata).
+	MusicFromWatchPage = youtube.MusicFromWatchPage
 )
 
 // PO-token provider contract (package potoken).
@@ -243,12 +259,26 @@ type ProcessSpec struct {
 	// local-file Process.
 	CoverArt CoverArtMode
 
-	// EmbedMetadata writes basic tags (title, artist, date, chapters) into the
-	// written audio file, when the output format can carry them. It is off by
-	// default and applies to YouTube downloads only. On the default token-free
-	// path only title and artist are reliably available; date and chapters land
-	// only when richer metadata is present (see FullMetadata). A failure never
-	// fails the download.
+	// EmbedMetadata writes tags (title, artist, album, year, copyright line,
+	// chapters) into the written audio file, when the output format can carry
+	// them. It is off by default and applies to YouTube downloads only. A
+	// failure never fails the download.
+	//
+	// The tags are what the video states, best effort, with nothing looked up
+	// elsewhere. The title is the video's, or for an Art Track the one its
+	// description states, which is whole where YouTube cut the video's short.
+	// The artists, album, and copyright line are Video.Music's; a video with
+	// none is credited to its channel, less the " - Topic" suffix of an
+	// auto-generated one, and gets no album.
+	// The date is a year and no more: that of the release date Music states,
+	// else of its copyright line when that is no later than the upload (or
+	// the upload date is unknown), else of the upload. A caller that wants a
+	// day has Music.ReleaseDate and Video.PublishDate to write its own from.
+	//
+	// On the default token-free path an Art Track is tagged in full, since its
+	// description states everything, and any other video gets title and artist
+	// only: the upload year, chapters, and the watch page's Music card need
+	// richer metadata (see FullMetadata).
 	EmbedMetadata bool
 }
 
@@ -272,18 +302,19 @@ type Request struct {
 	// Read methods use WithNoFallback for the same behavior.
 	NoFallback bool
 
-	// FullMetadata runs a token-free watch-page pass during the download, adding the
-	// PublishDate and Chapters that the default /player client omits, so an ingest
-	// that needs them is one call instead of a separate Info(..., WithFullMetadata())
-	// plus Download. It requires IncludeMetadata or EmbedMetadata, the two consumers
-	// of the enrichment, and feeds whichever is set: the fields reach Result.Metadata
-	// only with IncludeMetadata (which is what populates it at all) and the written
-	// tags only with EmbedMetadata. The combination with neither is refused with
-	// ErrIncompatibleSpec, since it pays for a round trip whose answer nothing
-	// reads. It is
-	// a no-op with NoFallback (which forbids the watch page). The extra fetch is
-	// skipped when extraction already scraped the watch page. Enrichment is
-	// best-effort: a failure leaves the base metadata and never fails the download.
+	// FullMetadata runs a token-free watch-page pass during the download, adding
+	// the PublishDate and Chapters that the default /player client omits, and
+	// the Music the page's card states for a video whose description states
+	// none, so an ingest that needs them is one call instead of a separate
+	// Info(..., WithFullMetadata()) plus Download. It requires IncludeMetadata
+	// or EmbedMetadata, the two consumers of the enrichment, and feeds whichever
+	// is set: the fields reach Result.Metadata only with IncludeMetadata (which
+	// is what populates it at all) and the written tags only with EmbedMetadata.
+	// The combination with neither is refused with ErrIncompatibleSpec, since it
+	// pays for a round trip whose answer nothing reads. It is a no-op with
+	// NoFallback (which forbids the watch page). The extra fetch is skipped when
+	// extraction already scraped the watch page. Enrichment is best-effort: a
+	// failure leaves the base metadata and never fails the download.
 	FullMetadata bool
 
 	ProcessSpec
@@ -731,7 +762,12 @@ type VideoMetadata struct {
 	// Request.FullMetadata ran the watch-page pass (the default /player response
 	// omits them); nil otherwise.
 	Chapters []Chapter
-	Formats  []Format // full candidate audio (and incidental video) formats
+	// Music is what the video states about the recording it carries, nil when
+	// it states none. An Art Track's is always present; any other video's
+	// comes from the watch page's Music card, so only when Request.FullMetadata
+	// ran that pass.
+	Music   *Music
+	Formats []Format // full candidate audio (and incidental video) formats
 }
 
 // StreamInfo is the initial metadata returned by Client.Stream alongside the

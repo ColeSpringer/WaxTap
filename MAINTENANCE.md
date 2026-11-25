@@ -64,6 +64,9 @@ an authored, minimized fixture; never commit them.
 | Signature or `n` solve failure | `youtube/internal/resolver/solver.go`, `env.js` |
 | WEB `/player` is `UNPLAYABLE` while mobile works | `youtube/internal/resolver/cipher.go`, player discovery |
 | Player response shape changed | `youtube/playerresponse.go` |
+| Chapters missing under `--full` | `youtube/watchpagedata.go`, `youtube/chapters.go` |
+| An Art Track tagged with its artist alone (no album, copyright, or release year), or `music` gone from `info --json` | `youtube/music.go`: the description layout in `parseArtTrack` |
+| A music video's `music` gone from `info --json --full`, or there on some runs only | `youtube/music.go` `musicCard`: YouTube serves the description in two layouts (a card shelf, a details list) and each has its own reader; `youtube/watchpagedata.go` for where the page states `ytInitialData` |
 | WEB audio stalls, truncates, or misdecodes | `youtube/internal/sabr` |
 
 The cipher solver executes the whole player in goja, fingerprints descrambler

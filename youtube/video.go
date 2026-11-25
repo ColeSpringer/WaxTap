@@ -10,17 +10,27 @@ import (
 // than authoritative artist tags, so WaxTap returns the raw fields and leaves
 // tagging policy to the caller.
 type Video struct {
-	ID          string        // YouTube video ID (canonical, stable identity anchor)
-	URL         string        // canonical watch URL (https://www.youtube.com/watch?v=<ID>)
-	Title       string        // video title
-	Author      string        // channel / uploader name
-	ChannelID   string        // YouTube channel ID (canonical UC identity anchor)
-	Duration    time.Duration // video duration, or 0 when unknown
-	PublishDate time.Time     // publication date, or zero when unknown
-	Description string        // video description
+	ID        string        // YouTube video ID (canonical, stable identity anchor)
+	URL       string        // canonical watch URL (https://www.youtube.com/watch?v=<ID>)
+	Title     string        // video title
+	Author    string        // channel / uploader name
+	ChannelID string        // YouTube channel ID (canonical UC identity anchor)
+	Duration  time.Duration // video duration, or 0 when unknown
+	// PublishDate is when the video was published, or zero when unknown. It is
+	// in the zone YouTube states it in, so its calendar date is the one the
+	// watch page shows; call UTC for the instant in UTC.
+	PublishDate time.Time
+	Description string // video description
 
 	Thumbnails []Thumbnail // cover-art candidates, largest pixel area first
 	Chapters   []Chapter   // chapter markers in playback order
+
+	// Music is what the video states about the one recording it carries, or
+	// nil when it states none. An Art Track states it in its description,
+	// which every client returns. Another video can state it on the watch
+	// page's Music card, read only where a watch-page pass ran and only when
+	// the video's title and channel bear the card out; see [Music].
+	Music *Music
 
 	Formats []format.Format // candidate audio (and incidental video) formats
 

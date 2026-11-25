@@ -1679,6 +1679,7 @@ func videoMetadataFor(req Request, v *youtube.Video) *VideoMetadata {
 		Description:  v.Description,
 		Availability: v.Availability,
 		Chapters:     v.Chapters,
+		Music:        v.Music,
 		Formats:      v.Formats,
 	}
 }
@@ -1693,7 +1694,7 @@ func (c *Client) watchPageMeta(ctx context.Context, id string) (youtube.WatchPag
 }
 
 // applyFullMetadata backfills the acquired video with watch-page chapters,
-// publish date, and availability when Request.FullMetadata is set. It runs after
+// publish date, availability, and Music card when Request.FullMetadata is set. It runs after
 // a successful acquisition so an ingest gets full metadata in one call. It is
 // best-effort: a failure leaves the base metadata (a completed download is never
 // failed for an enrichment error). It is skipped without IncludeMetadata or
@@ -1715,15 +1716,20 @@ func (c *Client) applyFullMetadata(ctx context.Context, req Request, a *acquired
 }
 
 // mergeWatchPageMeta merges a watch-page metadata pass into v. The pass backfills
-// what extraction left empty and never replaces it, so PublishDate and Chapters
-// are filled only when v carries none. Availability is unconditional because this
-// pass is its only source. It is shared by the download and Info enrichment paths.
+// what extraction left empty and never replaces it, so PublishDate, Chapters, and
+// Music are filled only when v carries none: a Music extraction found is the
+// description's, which states more than the page's card. Availability is
+// unconditional because this pass is its only source. It is shared by the
+// download and Info enrichment paths.
 func mergeWatchPageMeta(v *youtube.Video, meta youtube.WatchPageMeta) {
 	if v.PublishDate.IsZero() {
 		v.PublishDate = meta.PublishDate
 	}
 	if len(v.Chapters) == 0 {
 		v.Chapters = meta.Chapters
+	}
+	if v.Music == nil {
+		v.Music = meta.Music
 	}
 	v.Availability = youtube.AvailabilityFromUnlisted(meta.Unlisted)
 }
