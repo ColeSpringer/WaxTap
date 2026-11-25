@@ -13,14 +13,14 @@ import (
 const knownWarningCodes = 28
 
 // The codes are a closed vocabulary: each spells itself, no two spell the
-// same thing, and README documents every one. A consumer matching on the
-// strings has nothing else to read.
+// same thing, and docs/warnings-and-notes.md documents every one. A consumer
+// matching on the strings has nothing else to read.
 func TestWarningCodesAreNamedAndDocumented(t *testing.T) {
-	readme, err := os.ReadFile("README.md")
+	b, err := os.ReadFile("docs/warnings-and-notes.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := string(readme)
+	doc := string(b)
 
 	seen := map[string]WarningCode{}
 	n := 0
@@ -31,7 +31,7 @@ func TestWarningCodesAreNamedAndDocumented(t *testing.T) {
 		}
 		seen[name] = c
 		if !strings.Contains(doc, "`"+name+"`") {
-			t.Errorf("warning %q is not documented in README", name)
+			t.Errorf("warning %q is not documented in docs/warnings-and-notes.md", name)
 		}
 		n++
 		if n > 200 {
@@ -39,6 +39,6 @@ func TestWarningCodesAreNamedAndDocumented(t *testing.T) {
 		}
 	}
 	if n != knownWarningCodes {
-		t.Errorf("%d named warning codes, want %d; a new code needs a String arm, a README row, and this constant bumped", n, knownWarningCodes)
+		t.Errorf("%d named warning codes, want %d; a new code needs a String arm, a docs/warnings-and-notes.md row, and this constant bumped", n, knownWarningCodes)
 	}
 }

@@ -1,37 +1,14 @@
 # WaxTap
 
-WaxTap downloads and processes YouTube audio. It ships as a Go library and the
-`waxtap` CLI, both on the same processing core. Processing is opt-in: transcode,
-cut time ranges, drop SponsorBlock segments, measure or normalize loudness. A
-plain download keeps the selected source stream without re-encoding.
+WaxTap downloads YouTube audio and processes audio files: transcode, cut, drop
+SponsorBlock segments, split by CUE sheet, and measure or normalize loudness.
+It is a Go library and the `waxtap` CLI, one static binary in pure Go with no
+yt-dlp or ffmpeg behind it.
+
+A plain download keeps the source stream untouched. Processing is opt-in.
 
 > WaxTap targets public videos. Private, age-restricted, and login-gated videos
-> are expected failures, not bypass targets. YouTube changes without notice; see
-> [MAINTENANCE.md](MAINTENANCE.md) when extraction breaks.
-
-## Highlights
-
-- Pure-Go extraction via InnerTube and goja. No `yt-dlp` dependency.
-- Token-free VISIONOS is the default, with ANDROID_VR as fallback (since
-  2026-08 the server refuses ANDROID_VR delivery of videos longer than about a
-  minute). Full WEB audio is opt-in and needs an attested identity; forced iOS
-  delivery is best-effort.
-- One pure-Go pass can combine cuts, SponsorBlock removal, normalization, and
-  transcoding, via the WaxFlow audio engine.
-- Lossless output such as FLAC is still a re-encode of YouTube's lossy source.
-  Only copy/remux avoids re-encoding.
-
-The stable facade is the root `waxtap` package. YouTube code is isolated under
-`youtube`; audio processing lives in `internal/media` (a WaxFlow-backed engine)
-and `internal/pipeline`.
-
-## Requirements
-
-- Go 1.26+
-
-WaxTap is a single static binary with no external runtime dependency: all audio
-work (transcode, cut, normalize, probe) runs in-process via the pure-Go WaxFlow
-engine.
+> are expected failures.
 
 ## Install
 
@@ -40,42 +17,22 @@ go install github.com/colespringer/waxtap/v3/cmd/waxtap@latest   # CLI
 go get github.com/colespringer/waxtap/v3                         # library
 ```
 
-[Release archives](https://github.com/colespringer/waxtap/releases/latest) hold
-Linux, macOS, and Windows binaries for amd64 and arm64. Put `waxtap` on `PATH`
-and run `waxtap --help`. Unsigned macOS binaries may need
-`xattr -d com.apple.quarantine /path/to/waxtap`; Windows may prompt SmartScreen.
+Both need Go 1.26+. [Release archives](https://github.com/colespringer/waxtap/releases/latest)
+hold Linux, macOS, and Windows binaries for amd64 and arm64. Unsigned macOS
+binaries may need `xattr -d com.apple.quarantine /path/to/waxtap`; Windows may
+prompt SmartScreen.
 
-## CLI
-
-Media commands accept a YouTube URL or bare video or playlist ID. `download`
-also accepts a channel URL or bare `UC` ID, resolving to the channel's uploads
-feed; a channel with no uploads feed reports the missing playlist by the
-channel's own name, not by the `UU` id it resolved to. `cut`, `transcode`, and
-`normalize` also take local files. Every command
-has `--help`, and `--json` is a stable scriptable contract (`schemaVersion` 3).
-
-`--quiet` and `--verbose` are mutually exclusive; passing both is exit 2.
-
-In `schemaVersion` 3 every failure, in every document, is an object:
-`{"code": "needs-po-token", "message": "..."}`. Playlist and batch item errors
-used to be bare strings, so only the top-level envelope could be switched on.
-Documents also carry a `notes` array in the same `{code, detail}` shape as
-`warnings`, holding the diagnostics that previously appeared only as `note:`
-lines on stderr and vanished under `--quiet`. Batch items that failed or never
-ran no longer name an output path they did not write, batch summary counts are
-always present and include `total`, and `chapterCount` is omitted rather than
-reported as 0 when chapters were never fetched.
-
-A playlist run's exit code is the worst single item's classified code, so a
-one-item playlist whose video needs a PO token exits 8 rather than a generic 1.
+## Usage
 
 ```sh
-waxtap info <video-url>                         # metadata and best audio
-waxtap info <video-url> --itag 251 --probe       # read the stream's own headers (--json marks it probed)
-waxtap formats <video-url>                      # all audio formats (--json names the client they came from)
-waxtap download <video-url> -o track            # keep source
-waxtap download <video-url> --format flac -o track.flac
-waxtap download <video-url> --sponsorblock --normalize --format mp3 -o track.mp3
+waxtap info <url>                               # metadata and best audio
+waxtap formats <url>                            # every audio format
+waxtap download <url> -o track                  # keep the source stream
+waxtap download <url> --format flac -o track.flac
+waxtap download <url> --sponsorblock --normalize --format mp3 -o track.mp3
+waxtap download <url> --embed-metadata --embed-thumbnail
+waxtap download <playlist-url> -d ./music --download-archive archive.txt
+waxtap download <channel-url> --list            # list entries, no download
 
 waxtap transcode song.flac song.mp3
 waxtap cut song.flac --cut-range 0:00-0:12 --cut-range 3:40-4:05 -o song-cut.flac
@@ -83,386 +40,59 @@ waxtap normalize song.wav --loudness-target -14 --format flac -o song.flac
 waxtap normalize --album --format flac --dir ./normalized ./album/*.flac
 waxtap split rip.flac --cue rip.cue -d ./tracks
 
-waxtap download <playlist-url> -d ./music --download-archive archive.txt
-waxtap download <channel-url> -d ./music        # channel uploads, newest first
-waxtap download <channel-url> --list            # list entries, no download
-waxtap doctor
+waxtap sponsorblock <url>                       # preview segments
+waxtap doctor                                   # check that extraction works
 ```
 
-`info --show-url` adds a signed, expiring stream URL and content length under
-`resolved.*`; treat that output as sensitive. `info --full` adds publish date,
-chapters, and the page's Music card via a token-free watch-page fetch. What a
-video states about its recording is printed as `Artist`, `Album`, and
-`Released` lines, with a `Track` line when its title is not the video's own,
-and emitted as `music` in `--json`; an Art Track needs no `--full` for it.
+Commands that fetch take a YouTube URL or a bare ID; `download` also takes
+playlists and channels. `transcode`, `cut`, and `normalize` take a URL or a
+local file, `transcode` and `normalize` also a directory (`-r` recurses), and
+`split` a local rip only. `--help` on any command is the full flag reference.
 
-`transcode` and `normalize` also take directories: `-r` recurses and `--dir`
-sets an output directory. `transcode --force` re-encodes an input already in
-the target codec, naming the container's encoder for an output named by
-extension alone, so `implicit-lossy` is not raised; it names an encoder, so it
-cannot pair with `--format copy`.
-
-Album normalization applies one gain to every track: `--peak-mode cap`
-leaves the true-peak limiter idle and reproduces the input's track-to-track
-spacing exactly, at the cost of landing short; the default `limit` reaches for
-the target and lets the per-track limiter compress that spacing. Every track is
-measured at the width its own encode delivers, so a lossy target's fold of a
-surround master is in the figures the gain comes from, and the album figure is
-EBU R128's gates run over every track's blocks at once rather than over a
-concatenation: a mono track is measured as mono, not as the dual-mono a stereo
-timeline would make of it, and a track whose channel positions differ from its
-neighbours' is measured as it is. A track that does not read to the length its
-container states exactly is refused, naming the file, and so is one missing
-more than half a second some other way: read to its length with silence where
-damage took the audio, or cut short of the length its header declares. Every
-track shares one gain, and one derived from part of a track describes nothing.
-Loudness uses EBU R128 (integrated LUFS, true peak dBTP, range LU).
-
-### Notes
-
-- `--cut-range START-END` removes a span, repeatable or several comma-separated
-  in one flag. Times are `[HH:]MM:SS[.frac]`, a Go duration (`90s`, `1m30s`), or
-  bare seconds, never signed. `--cut-mode smart|copy|accurate` picks how the
-  cut is rendered: `smart` (the default) stream-copies when it can, `copy`
-  refuses anything that would need a decode, `accurate` always decodes. A
-  packet-level copy (`smart` on an Opus or AAC source, and `copy`) keeps whole
-  packets: the first cut point and the last are exact, and every interior join
-  moves inward to the packet grid, so up to one frame (20 ms Opus, 21 to 23 ms
-  AAC) of wanted audio is missing at each join and nothing from a removed span
-  is delivered; the run reports it as `cut-snapped`, and `--json` carries
-  `cutMode`, `cutSnaps`, and `cutSnapMaxMs`. `smart` on any other source (MP3,
-  Vorbis, FLAC, ALAC, WavPack, APE, PCM) decodes and re-encodes in the source's
-  own family: bit exact for a lossless source, and for a lossy one a second
-  generation, which is the case reported as `cut-decoded`. A copy into raw
-  ADTS (`.aac`), which cannot state the cut's trims, decodes the same way. `copy-exact` keeps the copy and
-  makes each interior tail exact, with the decoder converged across the join,
-  through per-packet trims that only `.mka`/`.mkv`/`.webm` can carry (Firefox
-  rejects such a file; other players honour it); the heads still land within one
-  frame. `--crossfade` blends each join and forces a decode; `accurate` and
-  `--crossfade` re-encode, so they need `--format` or an output extension that
-  names a format. Ranges are clamped to the
-  media and merged; ranges that fall entirely outside it are a request error.
-- `split` cuts a single-file rip into one file per track at the sheet's
-  `INDEX 01` positions, exact to the CD frame (1/75 s). Pieces are named
-  `NN - Title.ext` and tagged from the sheet (title, performer, track numbers,
-  disc title as album, `REM DATE`/`GENRE`, `CATALOG`, `ISRC`), with the rip's
-  own tags and cover art carried underneath. Audio before the first track's
-  `INDEX 01` becomes `00 - Hidden Track` rather than being folded into track 1
-  or dropped, unless it follows a data track in a FILE of its own, when it is
-  that track's pregap and is skipped. A data track (`TRACK 01 MODE1/2352` on a
-  mixed-mode disc) is never written as audio: it is skipped with a
-  `cue-data-track` note, listed under `skipped` in `--json` beside the disc's
-  `trackTotal`, and the audio keeps the disc's own numbering, so the pieces
-  start at `02` of a total that counts it. `--cue` defaults to a sheet beside
-  the rip with the rip's stem. A split always decodes, so `--format` names the
-  encoder; it is inferred from the rip's extension only when that is a lossless
-  one. A sheet indexing its audio against several files is refused, since its
-  tracks are already separate; a FILE holding no audio, as EAC and XLD write
-  the data track, is not one of them.
-- `--channels mono|stereo|surround|any` picks a native layout, defaulting to
-  stereo. It selects among a video's source streams, so it needs a URL input: on
-  a local file or a directory it exits 2, unless `--downmix` is set too, where it
-  names the fold target instead. (`normalize --album` and `--measure-loudness`
-  reject it either way; neither writes a layout you chose.) `--downmix` allows
-  surround-to-stereo/mono; it never upmixes, and on a file that already has the
-  target layout it is a no-op that costs no re-encode. `--itag` names an exact
-  encoding, so it overrides `--channels`; the run prints a note when the
-  delivered layout is not the one asked for.
-- An output extension names a container. Without `--format`, a format-named
-  extension (`.flac`, `.mp3` (`.mpga`), `.opus`, `.wav` (`.wave`, `.rf64`,
-  `.bw64`), `.aiff`, `.wv`, `.ape`) selects that format; a container that holds several codecs (`.ogg`/`.oga`,
-  `.mka`/`.mkv`, `.webm`, `.mp4`/`.m4a`/`.m4b`, `.aac`) keeps the source codec
-  when it can carry it (a copy, or under `normalize --peak-mode cap` the Opus
-  header gain) and otherwise runs the container's usual encoder (`.ogg` Vorbis,
-  `.mka`/`.webm` Opus, `.mp4` AAC), reported as `implicit-lossy`. A URL's codec
-  is checked after the download, so `transcode <url> out.mka` copies an Opus
-  stream, cuts it at the packet grid like `cut` does when a cut is asked for,
-  and `out.m4a` encodes it. `--format ogg` still means Vorbis. A format-named
-  extension, or `--format`, names the codec to deliver: a source already in it
-  is copied rather than re-encoded, a URL's once the download is staged, so
-  `transcode <url> out.opus` and `download --format opus` keep an Opus delivery
-  and say so; `--force` is the request to encode it anyway. An accurate cut, a
-  crossfade, and a fold always run the encoder, and so does a copy the stream's
-  own shape rules out (a Vorbis stream that starts before time zero cannot go
-  into Ogg unchanged); `--format copy` of such a stream is refused, naming the
-  container that takes it.
-- `--format` takes `copy|flac|alac|wav|aiff|wavpack|ape|mp3|aac|he-aac|opus|vorbis`.
-  Names are case-insensitive and trimmed, and a few spellings are aliases:
-  `ogg` for vorbis, `m4a` for aac, `aif`/`aifc`/`afc` for aiff,
-  `wave`/`rf64`/`bw64` for wav, `mpga` for mp3, `wv` for wavpack, `heaac` for
-  he-aac, and `remux` for copy. `he-aac` encodes HE-AAC v1
-  in `.m4a` at 64 kbps by default (a low-bitrate preset; `aac` stays the
-  256 kbps AAC-LC one), and `--format aac` on a source that is already HE-AAC
-  copies it under its own identity rather than re-encoding it to AAC-LC.
-  WavPack, Monkey's Audio (APE), WMA (versions 1 and 2, Pro, Voice, and
-  Lossless), and Musepack (`.mpc`) files are also accepted as local inputs, as
-  are WAV, AIFF-C, and MP4/MOV files carrying G.711 or IMA ADPCM audio or MP3
-  frames, Microsoft ADPCM in WAV and MP4/MOV, and uncompressed PCM in
-  MP4/MOV. WMA, Musepack, G.711, and ADPCM are decode-only, so
-  `--format copy` on one is refused; an MP3 carried in a WAV or MP4 copies
-  out to a bare `.mp3`. WavPack is read from its own `.wv` file, 4.0 and
-  later: a stream behind a WAV header, as files from before 4.0 were written,
-  and a bare pre-4.0 stream are refused by name rather than read as noise.
-  Chapters (ASF markers, SV8 chapter packets) carry
-  like any other input's. `--format copy` is refused on WAV and AIFF (PCM
-  belongs to its container), and a same-container PCM request is delivered as a
-  byte copy with `same-format-copied`; `--bit-depth`, `--downmix`, and
-  `--force` still re-encode. `--bitrate` is what the encoder is asked for; each
-  encoder has its own range and grid, and a rate it cannot use exactly is
-  snapped to the nearest it supports and reported as `bitrate-adjusted`: MP3
-  keeps to its CBR table (32 to 320 kbps at 32, 44.1, and 48 kHz; 8 to
-  160 kbps below), Opus takes 6 to 510 kbps (a lower request is refused), AAC
-  and HE-AAC 8 kbps per channel and up. Vorbis is quality-driven and ignores
-  `--bitrate` (noted as `flag-inert`).
-- `--output-template` takes `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`,
-  and `{index}`. `{index}` numbers playlist items and expands empty for a single
-  video, taking one adjacent `-`, `_`, or space with it: `{index}-{title}.{ext}`
-  gives `Song.opus`. It takes only one, so a placeholder padded on both sides
-  (`{index} - {title}.{ext}`) leaves the other separator behind as `- Song.opus`.
-- `--no-fallback` disables watch-page, WEB-context, and incomplete-download
-  fallbacks. Results report the client that actually delivered: the attested
-  player-context path reports its client as `WEB_CONTEXT`, while the session
-  and static adoption paths report `WEB`. A delivery that
-  came from the watch-page scrape rather than the player endpoint is labeled
-  `via watch page` beside the client (`viaWatchPage: true` in `--json`), since
-  the client name alone reads as a player delivery.
-- Normalization applies one scalar gain. `--peak-mode cap` (the default) caps it
-  so the true peak stays under -1.0 dBTP: transparent, but a source already
-  peaking at 0 dBTP takes at most -1.0 dB whatever the target, so the miss can be
-  10 LU or more (reported as the `loudness-target-missed` warning).
-  `--peak-mode limit` applies the full gain and lets the true-peak limiter catch
-  the overshoot, at the cost of transparency. The limiter gives back part of the
-  gain it is handed, so `limit` measures its own output and corrects, re-encoding
-  up to 4 times to land within 0.3 LU of the target, and reports
-  `loudness-target-missed` when the limiter saturates before reaching it. Ordinary
-  material costs one extra encode pass. `--album` applies one gain in a single
-  pass and defaults to `limit`, and takes files, not a directory; correcting per track would undo the spacing album
-  mode exists to keep. Its `cap` clamps the one gain by the album's least
-  true-peak headroom rather than per track, so the loudest track sets the
-  headroom for all of them and the miss can be large. The reporting threshold
-  follows the mode's own promise: `limit` iterates onto the target, so it reports
-  any miss past the 0.3 LU it converges to, while the single-pass policies
-  (`cap`, and `--album` in either mode) report a miss over 1 LU, below which the
-  clamp they can name is inside the noise of the encode. `normalize` re-encodes
-  whatever codec the output keeps or names, so a lossy source kept by its
-  extension (an MP3 to `.mp3`, an AAC to `.mka`) pays a second lossy generation;
-  the Opus header-gain path is the one normalize that does not.
-- On an Opus source that stays Opus, `--peak-mode cap` writes the gain into the
-  Opus header (the `OpusHead` output gain, which every compliant player applies)
-  and copies the packets untouched, in whichever container the output names
-  (`.opus`, `.ogg`, `.mka`, `.webm`), so
-  the run costs no generation of loss; `--json` reports `loudness.headerGain`
-  beside `loudness.gainDb`, and the result is a remux (`transcoded: false`),
-  which like every other local copy omits `outputFormat`: the delivered codec
-  is the source's, under `sourceFormat`. `loudness.gainDb` is the amount the
-  header moved by, so a source whose head already stated a gain keeps it and
-  the file leaves with the sum.
-  `--peak-mode limit`, an explicit `--bitrate`, a cut, or a downmix re-encode as
-  before, and `--album` takes the same path under `cap` when every member is
-  Opus. The ReplayGain and R128 tags are dropped on that path: the header now
-  carries the gain they would restate.
-- Decoding runs in float, so output depth follows the decoded stream: a lossy
-  source gives 32-bit float WAV, 24-bit FLAC, and AIFF-C float rather than plain
-  AIFF. That is lossless but larger, and some older DAWs and hardware players
-  reject float WAV. `--bit-depth 16|24` forces integer output for
-  wav/aiff/flac/alac/wavpack/ape; narrowing is dithered (TPDF), not truncated.
-  The lossy formats encode in float and ignore it. WavPack and APE hold integer
-  PCM only, so a float decode quantizes to 24 bits there by default, and both
-  hold at most stereo: a surround source is refused rather than silently folded
-  (pass `--downmix`). APE additionally caps at 24 bits and refuses a 32-bit
-  integer source rather than narrowing it silently (pass `--bit-depth 24`).
-- `--embed-thumbnail` writes the video's thumbnail as front cover art, and
-  `--embed-metadata` writes title, artist, album, year, copyright line, and
-  chapters. Chapter
-  marks follow any cut: shifted by the audio removed before them, dropped when
-  their content was removed. Both flags are best-effort: a failure warns and
-  still delivers valid audio. The tags come from what the video itself states;
-  nothing is looked up elsewhere, and a title is never split into an artist and
-  a track. An Art Track, the auto-generated upload on an "<Artist> - Topic"
-  channel, states its artists, album, release date, and copyright line in its
-  description, and the tags are taken from those, each artist as its own ARTIST
-  value. Its title is taken from there too: YouTube cuts a video title past
-  100 characters short, and the description keeps it whole.
-  Any other video is credited to its channel and dated by its upload year. The
-  watch page's Music card can add an artist and album to one: it counts when it
-  lists a single song that the video's title names, by an artist who is the
-  channel or is named in the title too, and the title stays the video's own.
-  The date written is a year
-  and no more: the stated release date's, else the copyright line's when that
-  is no later than the upload, since catalog reaches YouTube years after it
-  came out, else the upload's. The full dates are there for whatever wants to
-  write a day: `info` prints what the video states, and `--json` and the
-  `--write-info-json` sidecar carry it as `music` (with `releaseDate`) beside
-  `publishDate`. WebM
-  cannot hold a
-  picture, so a cover-art request remuxes Opus-in-WebM to Ogg-Opus (lossless) when
-  the output extension allows it, reported as the `cover-art-remuxed` note;
-  `--json` then names the Ogg container under `outputFormat`, since that is the
-  file on disk. The image comes from the largest rung YouTube
-  lists, and WaxTap also probes the deterministic 1280x720 endpoints when that
-  ladder falls short of them.
-- `--cover-art square` crops the embedded picture to the release art. A music
-  "Art Track" composites square cover art onto a 16:9 canvas and letterboxes that
-  into a 4:3 variant, and both sets of bars are pixels rather than metadata, so
-  every player that resizes without cropping ships them. `square` peels the
-  uniform borders and center-crops what remains; it never scales, so the art keeps
-  its proportions and an image already square within 1% is left untouched. The
-  default, `--cover-art frame`, embeds the delivered bytes verbatim.
-- Processing a local file (`transcode`, `normalize`, `cut`, `--album` included)
-  carries the input's embedded metadata - tags, cover art, chapters, synced
-  lyrics - onto the rewritten output. Anything the output format cannot hold is
-  reported as the `tag-carry-incomplete` warning, never dropped silently; the
-  summary prints a `Metadata:` receipt (a column per track under `--album`)
-  and `--json` itemizes the carry as `tagCarry`. Chapter marks follow a cut the
-  same way the embed flags do. Synced lyric lines follow a cut too, whether
-  they are stored as a synced set or as LRC text in the plain lyrics field: a
-  line whose timestamp lands in removed audio is dropped - including a line at
-  0:00 when the cut starts at zero - and reported through the same warning.
-  Prose in that field is carried verbatim, since it has no timestamps to move. Tags describing
-  the source audio itself (ReplayGain, encoder stamps) carry only on a pure
-  `--format copy` remux; a re-encode or cut invalidates them, so they are left
-  off. WavPack and APE outputs are tagged the same way as every other format:
-  their APEv2 block holds text tags and cover art (a Cover Art item), while
-  chapters and synced lyrics have no APEv2 form and are reported as carry
-  losses.
-- A damaged local input is processed from the part that reads and reported as
-  `input-damage`. Two kinds of loss leave the length looking whole, and both
-  are counted: the silence standing in for frames a FLAC lost, and how far a
-  file cut short ends short of the length its header declares. The warning
-  leads with them, and `--json` carries them as `inputLoss` (`lostSamples`,
-  `truncatedSamples`, and the `sampleRate` both are at: the written file's, so
-  the output's when the encode resamples, and the input's own for a
-  measurement, which writes none): on a single file's document, on each track
-  under `--album`, on each piece of a `split`, and on each batch item. The key is
-  absent for an input that lost nothing by either count. An album or a split
-  folds its damaged rows into one warning naming the first, so their tables
-  add a `MISSING` column, in seconds, when any row lost audio.
-- SponsorBlock cuts on a download take the same packet-level path, so the same
-  snap and `cut-snapped` warning apply.
-- The `sponsorblock` preview fetches the video's length and marks segments the
-  database holds past its end, leaving them out of the removal total. `--json`
-  carries `durationSeconds` and a per-segment `pastEnd`; a length it could not
-  fetch omits `durationSeconds`, counts every segment at its word, and is
-  reported as the `length-unchecked` note.
-- SponsorBlock requests get a 10-second budget, so a `429` there fails fast and
-  exits 5 (rate limited) rather than waiting out a `Retry-After` it cannot
-  outlast. On a download, `--sponsorblock-on-error` decides whether that is fatal
-  or delivers the audio uncut with a warning.
-- Playlist downloads support `--concurrency`, pacing, attempt limits, collision
-  policies, and yt-dlp-compatible `--download-archive` files.
-- `--collision fail` (the default) and `auto-number` claim the output path with
-  the publish itself, so two single-file runs writing the same path cannot both
-  report success. Under `fail` the loser exits 2 with the existing-file message
-  and the winner's file is intact. Under `auto-number` the loser renumbers
-  instead, so N runs of one basename produce N distinct files; the numbering is
-  not deterministic under concurrency, and racing runs can land `(2)` and `(3)`
-  with `(1)` belonging to neither. `overwrite` opts into last-writer-wins. `skip` leaves
-  the existing file alone and exits 0. On a single-file `transcode`, `normalize`,
-  or `cut` it reports `{"skipped":"exists"}` with the path under `--json`, and
-  prints that path under `--quiet` as a write does; `download` emits the same
-  document without a path, and a directory batch reports the skip as one of its
-  NDJSON item records.
-  Two exceptions: `normalize --album` writes its tracks with a replacing rename,
-  and on a filesystem without hard links (FAT, exFAT, some network shares) the
-  publish degrades to a check-then-rename that a concurrent writer can still
-  beat. `split` refuses `--collision skip`: a partly written set is worse than
-  a refusal.
-- `waxtap cache dir` and `waxtap cache clean` manage the persistent player-JS
-  cache; `--no-cache` disables it. `cache clean` removes only what WaxTap wrote
-  (the entry directories it marks with a `CACHEDIR.TAG` naming WaxTap as the
-  writer, which is read rather than taken on the file's name) and then the
-  cache directory itself when that empties it, so a mistyped `--cache-dir`
-  cannot cost you files: a path that is not a directory is a usage error, and
-  one holding nothing of WaxTap's is left alone. `cache dir --json` reports
-  `exists` for the path and `populated` for a WaxTap cache inside it.
-
-### Exit codes
-
-The CLI maps failures to stable exit codes. The same class appears in `--json`
-as `error.code`. Run `waxtap exit-codes` for the built-in table.
-
-| Code | Meaning |
-|---|---|
-| 0 | success |
-| 1 | unclassified error |
-| 2 | invalid request/config, including a playlist or channel URL passed to a video command, unsupported input, or unavailable requested format |
-| 3 | unavailable/restricted video or playlist (private, age-restricted, members-only, geo-blocked, removed), login required, live or upcoming, or no audio |
-| 4 | extraction, cipher, or playlist parsing failure; WaxTap may need an update |
-| 5 | rate limited |
-| 6 | retired (formerly ffmpeg/ffprobe not found) |
-| 7 | incomplete stream or expired stream URL |
-| 8 | PO token required, missing, rejected, or not minted |
-| 9 | network failure, including a proxy that is unreachable, never answers, or rejects CONNECT, an unreachable sidecar, or an upstream HTTP error response |
-| 10 | local I/O failure |
-| 130 | canceled by SIGINT or SIGTERM |
-| 141 | the stdout reader closed the pipe (`download -o -`); the shell reports the SIGPIPE, WaxTap prints nothing |
-
-Malformed targets exit 2; a well-formed but nonexistent or private video can
-only be classified after a network request and exits 3.
-
-### Warnings and notes
-
-A run that succeeds can still have something to say. Warnings are conditions
-the library observed; notes are decisions the command line made. Both carry a
-stable code and a human detail, both go to stderr in human mode, and both
-appear in `--json` as `warnings[]` and `notes[]`.
-
-| Warning | Meaning |
-|---|---|
-| `proceed-uncut` | the SponsorBlock fetch failed; the audio was delivered uncut |
-| `fallback-profile` | a fallback client profile delivered the stream |
-| `url-re-resolved` | an expired stream URL was re-resolved mid-transfer |
-| `playlist-entry-failed` | one playlist entry failed; the others were returned |
-| `rate-limited-retried` | a request was retried after a 429 |
-| `sponsorblock-empty` | SponsorBlock matched no segments |
-| `ranges-empty` | every SponsorBlock segment fell outside the media |
-| `throttled` | a host rate-limited the run; further requests to it are held back for the stated wait |
-| `web-context-fallback` | the WEB player context failed; the configured chain took over |
-| `incomplete-fallback` | a client returned an incomplete stream; another client was tried |
-| `web-context-retry` | the WEB player context was capped; it was retried once with a fresh one |
-| `metadata-embed-failed` | `--embed-thumbnail`/`--embed-metadata` could not write everything asked for |
-| `loudness-target-missed` | the loudness target was not reached; the detail says what held it back |
-| `session-rotated` | a fresh guest session replaced one whose URLs the server kept rejecting |
-| `tag-carry-incomplete` | some of the input's embedded metadata did not reach the output |
-| `implicit-downmix` | the encoder folded channels the request never asked to lose |
-| `output-clipping` | the delivered file's level is past full scale |
-| `implicit-lossy` | the output container could not carry the source codec, so a lossy encoder the request never named ran (a `cut`, or an extension-named output with no `--format`) |
-| `input-damage` | the decoder worked around problems in the input; the readable audio was delivered, with silence the length of whatever a FLAC lost. Where the engine can count what is missing, the detail leads with it (how much is that silence, and how far the audio ends short of the length the file declares) and `--json` carries the numbers as `inputLoss` |
-| `loudness-unmeasurable` | an integrated loudness came back non-finite; the detail names the side and the cause |
-| `source-policy-unmatched` | `--source-policy prefer:<codec>` named a family this video does not offer |
-| `empty-input` | the input's audio track holds no frames |
-| `input-note` | the engine's own remarks on an undamaged input |
-| `cut-snapped` | a packet-level copy cut moved interior joins to the packet grid; the detail counts them and names the largest move |
-| `bitrate-adjusted` | the encoder used the nearest bit rate it supports; the detail names the requested and the delivered rate |
-| `watch-page-no-token` | a WEB run fell back to the watch page, so the PO token it minted was never exercised |
-| `gapless-dropped` | a copy into raw ADTS (`.aac`) delivered the source's encoder delay and padding as audio, since ADTS states no gapless trim and no length |
-| `cut-decoded` | a `smart` cut could not copy packets and decoded a lossy source, re-encoding it in its own family: a second generation; the detail says why (the codec, an HE-AAC cut past the start, raw ADTS, or the cut's shape) |
-
-| Note | Meaning |
-|---|---|
-| `alac-mp4-container` | `.alac` output is an MP4 container; `.m4a` is the conventional name |
-| `archive-not-recorded` | a finished file was not added to the download archive; a re-run fetches it again |
-| `channels-ignored` | `--itag` names an exact encoding, so `--channels` did not affect selection |
-| `channels-unavailable` | the requested layout was not available; the delivered one is named |
-| `concurrency-clamped` | `--concurrency` exceeded the maximum and was clamped |
-| `container-ext-mismatch` | the output extension does not match the source container, which was copied unchanged |
-| `cover-art-remuxed` | a source whose container cannot hold a picture was remuxed into its codec's own so the cover art could be embedded; packets unchanged |
-| `cue-data-track` | the CUE sheet lists a data track, which was skipped rather than written as audio; the pieces keep the disc's numbering |
-| `cue-file-mismatch` | the CUE sheet names another file than the rip being split |
-| `doctor-caveat` | a `doctor` check passed with a caveat; the detail says what it did not prove |
-| `enumeration-error` | a playlist page failed to enumerate; the run continued |
-| `flag-inert` | a flag had no effect on this run |
-| `forced-client-risky` | a forced `--client` is known to deliver unreliably |
-| `kept-output` | a finished file was kept after a failure elsewhere in the run |
-| `length-unchecked` | the SponsorBlock preview could not fetch the video's length, so segments were not checked against it |
-| `playlist-ignored` | a playlist URL was passed to a video command; the video was used |
-| `probe-skipped` | `--probe` read nothing: the selected stream is SABR-only |
-| `same-format-copied` | the input, or the delivery, is already the target format and was copied; `--force` re-encodes (`transcode --force` for a download) |
-| `selection-unmatched` | no audio format matched the requested selection |
-| `sidecar-write-failed` | the `--write-info-json` sidecar could not be written |
-| `unaltered-copy` | the output is a byte-for-byte copy of the source |
-| `watch-page-formats` | the format list came from the watch-page fallback, which needs no PO token |
-| `web-sources` | a single WEB identity source is configured; it fires before info/formats and after a download a second source could have helped, including a WEB delivery that fell back to the watch page |
+- Formats: `--format` takes `copy`, `flac`, `alac`, `wav`, `aiff`, `wavpack`,
+  `ape`, `mp3`, `aac`, `he-aac`, `opus`, or `vorbis`. Without it the output
+  extension picks the format, and a container that holds several codecs
+  (`.mka`, `.m4a`, `.ogg`) keeps the source codec when it can. YouTube's audio
+  is lossy, so FLAC from a download is a larger file, not a better one. A
+  source already in the target format is copied; `transcode --force` re-encodes
+  it. Local inputs can be any of those formats, plus WMA and Musepack, which
+  are decode-only.
+- Cuts: `--cut-range START-END` removes a span and repeats. `--cut-mode smart`,
+  the default, copies packets when the codec allows it (Opus, AAC), which costs
+  up to one frame, about 20 ms, at each interior join. `accurate` decodes for
+  exact cuts, `copy` refuses to decode, and `copy-exact` makes the tail of each
+  join exact on a `.mka` or `.webm` output. `--crossfade` blends each join.
+- Loudness: EBU R128. `--normalize` on a download, or `waxtap normalize`, aims
+  for -14 LUFS (`--loudness-target`). `--peak-mode cap`, the default, holds the
+  true peak under -1 dBTP without limiting, so a loud master can land short of
+  the target; `limit` reaches the target through a true-peak limiter. `--album`
+  gives every track the same gain and defaults to `limit`. An Opus source kept
+  as Opus under `cap` gets the gain in its header and no re-encode.
+  `--measure-loudness` reports without changing the audio.
+- Channels: `--channels mono|stereo|surround|any` picks among a video's streams
+  and defaults to stereo. `--downmix` folds surround down; nothing is upmixed.
+- Tags and cover art: `--embed-metadata` writes title, artist, album, year,
+  copyright, and chapters. `--embed-thumbnail` adds the thumbnail as cover
+  art, and `--cover-art square` crops the bars off an Art Track's release art.
+  Tags come from the video and its page; nothing is looked up elsewhere.
+  Processing a local file carries its tags, cover art, chapters, and lyrics to
+  the output and reports whatever the new format cannot hold.
+- Playlists and channels: `--download-archive` (yt-dlp compatible) skips what
+  an earlier run fetched. `--concurrency`, `--sleep-interval`, `--max-items`,
+  and `--max-downloads` pace and bound a run. `--output-template` names files
+  from `{title}`, `{id}`, `{author}`, `{itag}`, `{ext}`, and `{index}`.
+  `--collision fail|overwrite|auto-number|skip` settles an existing file and
+  defaults to `fail`.
+- SponsorBlock: `--sponsorblock` removes `music_offtopic` segments. Other
+  categories attach with `=`, as in `--sponsorblock=sponsor,selfpromo`. A
+  failed lookup delivers the audio uncut with a warning;
+  `--sponsorblock-on-error fail` makes it an error.
+- Scripting: `--json` is a stable contract (`schemaVersion` 3) and `--quiet`
+  prints only the output path. Failures are `{"code", "message"}` objects, and
+  a run that succeeds reports what it had to say as `warnings` and `notes`,
+  whose codes are listed in
+  [docs/warnings-and-notes.md](docs/warnings-and-notes.md). Exit codes are
+  [below](#exit-codes).
 
 ## Library
 
@@ -495,65 +125,28 @@ func main() {
 }
 ```
 
-A default `Download` (nil `ProcessSpec`) delivers the source stream
-byte-for-byte: no processing, `SourceBytes == OutputBytes`, `Transcoded` false.
-Library selection starts from `LayoutAny` and can rank a surround track highest;
-pass `WithChannels(LayoutStereo)` to match the CLI. `WithSelector` and
-`WithSourcePolicy` give `Info` and `InfoResult` the same selection `Download`
-takes, so a caller can see what a given `--itag` or codec would pick without
-fetching it; a selector that names its own layout beats `WithChannels`, which
-only fills in one that named none. `Resolve` takes its selector as a parameter,
-so only `WithSourcePolicy` applies there. `Client.Enumerate` expands a playlist or
-channel URL with `Skip`/`Stop` predicates for an archive cursor, and
-`WithFullMetadata()` adds publish date, chapters, and the watch page's Music
-card to `Info`, or through `EnrichOptions` to each enriched entry. `Video.Music`
-is what a video states about the recording it carries (title, artists, album,
-release date, copyright line), read from an Art Track's description on every
-client and from that card otherwise, and nil for a video that states none;
-`EmbedMetadata` tags from it. `Client.PlanSplit` reads a CUE sheet
-against a local rip and reports where the pieces fall, with the data tracks it
-skips in `SplitPlan.Skipped`, and `Client.Split` writes them, tagged from the
-sheet; the `split` subcommand is that pair. What a damaged local input lost
-that its length does not show is counted in `InputLoss`: on `Result` and
-`MeasureResult`, and per track or per piece on the album and split results,
-beside the `WarnInputDamage` warning that words it.
+The root `waxtap` package is the stable API. `Download`, `Stream`, `Info`,
+`Enumerate`, and `DownloadPlaylist` work on YouTube; `Process`, `ProcessAlbum`,
+`Measure`, and `Split` work on local files.
 
-Bulk enumeration retires its guest identity and re-asks when YouTube's metadata
-throttle starts refusing entries, because the refusal is worded exactly like a
-removed video and only a fresh identity tells them apart. Entries left over
-after the rotation budget report `ErrTemporarilyUnavailable`, which means retry
-rather than skip. `Enrich` attaches what each call fetched as
-`PlaylistEntry.Video` and overlays the entry's title, author, and duration with
-it, keeping a listing value where the fetch had none, `MaxEnrich` caps the pass
-at the first n fetchable entries so a per-entry budget is spent inside the loop
-that rotates, `EnrichOptions` pass `WithFullMetadata()` or `WithNoFallback()` to
-each call, and a failed entry is an `EnrichError` naming it. Entries the listing
-marked live or upcoming (`PlaylistEntry.LiveStatus`) are passed over: `Info`
-refuses them, so the call would spend a request, and a budget slot, on what the
-badge already said. `--list` shows the marker in the duration column and as
-`liveStatus` in `--json`.
+- A `Download` with no `ProcessSpec` delivers the source stream byte for byte.
+- Selection defaults to stereo, as the CLI's does. To let a surround track
+  win, set `Request.Audio` to `BestAudio().WithChannels(LayoutAny)`, or pass
+  `WithChannels(LayoutAny)` to `Info`.
+- Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
+  `ErrGeoBlocked`, `ErrLiveContent`, and siblings) are typed sentinels a feed
+  consumer should skip. `ErrTemporarilyUnavailable` means retry.
 
-Availability failures (`ErrVideoUnavailable`, `ErrAgeRestricted`,
-`ErrMembersOnly`, `ErrGeoBlocked`, `ErrLiveContent`, `ErrLiveNotStarted`, and
-siblings) are typed sentinels a feed consumer should skip rather than treat as
-fatal; see the package doc's skip-vs-fail taxonomy. For full WEB SABR audio,
-wire a sidecar through `NewSidecarPOTokenProvider`,
-`NewSidecarPlayerContextProvider`, or `NewSidecarSessionProvider` (see below).
-[`example_test.go`](example_test.go) covers streaming, local processing,
-playlists, SponsorBlock, album measurement, metadata, and WEB SABR.
+The [package documentation](https://pkg.go.dev/github.com/colespringer/waxtap/v3)
+has the full error taxonomy, and [`example_test.go`](example_test.go) has
+runnable examples.
 
 ## Configuration
 
-CLI precedence, highest to lowest: explicit flag, `WAXTAP_*` environment
-variable, JSON config file, built-in default. The default file is `config.json`
-under `os.UserConfigDir()/waxtap`; override with `--config` or `WAXTAP_CONFIG`.
-A file named by `--config` or `WAXTAP_CONFIG` must exist; only the default
-location is optional. Unknown JSON keys and malformed environment values are
-errors.
-
-`--json`, `--quiet`, and `--verbose` are global. Other flags appear only on the
-commands that use them. Timeout values are seconds; keys with no flag are
-config/environment only.
+Precedence, highest first: flag, `WAXTAP_*` environment variable, JSON config
+file, default. The file is `config.json` under `os.UserConfigDir()/waxtap`, or
+the path in `--config` or `WAXTAP_CONFIG`. Unknown keys and malformed values
+are errors.
 
 | Config key | Environment variable | Flag |
 |---|---|---|
@@ -588,110 +181,68 @@ config/environment only.
 | `sponsorBlockTimeoutSeconds` | `WAXTAP_SPONSORBLOCK_TIMEOUT` | - |
 | `stallTimeoutSeconds` | `WAXTAP_STALL_TIMEOUT` | - |
 
-`tempDir` names where downloaded sources and processed downloads are staged
-before delivery; a local file is processed beside its own output, so the
-setting does not apply to it. A path that exists must be a writable directory,
-checked at startup; a missing one is created on first use, so a command that
-stages nothing creates nothing.
-
 Timeouts default to 45 s extraction, 30 s resolve, 60 s web context, 60 s per
 sidecar request, 10 s SponsorBlock, and a 30 s stall. The stall timeout bounds
-the wait for the next byte of a transfer, not the transfer: a response that has
-not begun within the window is abandoned and the request retried, and a body
-that stops arriving is abandoned and the chunk or stream resumed after the
-bytes already received, so a slow link finishes while a hung connection fails
-fast. A SABR round whose body stalls is resumed too: the segments it delivered
-whole are kept and the next round continues from them. There is no whole-chunk
-deadline to size for the slowest link. The web-context timeout
-bounds one attested handoff as a whole, a `/player-context` call or a `/session`
-resolution together with the wait the sidecar asks for and the one retry; the
-sidecar timeout bounds each request inside it. Setting `sidecarTimeoutSeconds`
-or `stallTimeoutSeconds` to 0 selects its default rather than "no deadline",
-unlike the other timeout keys: the handoff budget already bounds the sidecar
-call and the retry needs a per-request bound to be reachable, and a transfer
-with no stall bound hangs for as long as the connection does.
+the wait for the next byte, not the whole transfer, so a slow link finishes and
+a hung connection fails fast. A timeout of 0 means no deadline, except the
+sidecar and stall timeouts, where 0 selects the default. `procs` caps
+concurrent audio operations; 0 follows `GOMAXPROCS` and a negative value lifts
+the cap.
 
-A proxy dial is bounded at 10 s and not retried, so a proxy that never answers
-fails inside any budget with the proxy named rather than consuming the whole
-extraction budget and reporting a bare timeout. A proxy the first request
-cannot dial at all ends the run there, with exit 9, rather than paying a
-second dial to learn the same thing.
+## WEB client and PO tokens
 
-`procs` bounds the concurrent audio-processing operations. Zero, the default,
-follows `GOMAXPROCS`; a negative value disables the limit entirely. Both are
-deliberate, so neither is rejected.
-
-## PO tokens and WEB
-
-VISIONOS and ANDROID_VR are token-free for public videos. WEB-family clients use URL-less
-SABR/UMP audio, and complete delivery needs three things together: a GVS-scope
-PO-token provider (`Options.POTokenProvider` or `--potoken-url`), an attested
-identity (a `/player-context` handoff or an adopted `/session`), and a shared
-egress IP for the attesting service and the download. A PO token alone does not
-lift the WEB preview cap.
+The default clients, VISIONOS with ANDROID_VR as fallback, need no token for
+public videos. WEB is opt-in and needs three things together: a PO-token
+provider, an attested identity (a `/player-context` handoff or an adopted
+`/session`), and one egress IP shared by the attesting service and the
+download. A PO token alone does not lift WEB's preview cap.
 
 ```sh
-# Attested player context, adopted WEB session as fallback
 waxtap download <url> --client web \
   --player-context-url http://127.0.0.1:4416/player-context \
   --session-url http://127.0.0.1:4416/session \
   --potoken-url http://127.0.0.1:4416/get_pot
 ```
 
-WaxTap tries the attested player context first; if it fails or caps, the WEB
-chain can use the adopted session.
+Library callers wire the same sidecar through `NewSidecarPOTokenProvider`,
+`NewSidecarPlayerContextProvider`, and `NewSidecarSessionProvider`.
+[MAINTENANCE.md](MAINTENANCE.md) has the sidecar contracts.
 
-A refusal the sidecar codes is read: `video-unavailable` is the video's
-playability verdict (exit 3, skip-class, the chain still tries the native
-clients), and a refusal that states a wait (`Retry-After` or
-`retry_after_seconds`) is retried once after it, up to 60 s. A `/session` or
-`/player-context` that exports `user_agent` and `client_version` has WaxTap's
-WEB requests carry that browser's identity. A context that carries the video's
-channel, description, thumbnail ladder, live flags, and publish date fills
-`Result.Metadata`,
-`--write-info-json`, and the cover-art ladder on that path as every other path
-does.
+## When it breaks
 
-Static adoption is also available with
-`--visitor-data` and optional `--cookies`. Library callers get the same handoff
-via the `NewSidecar*` providers, each taking a base URL or full endpoint plus an
-optional `WithSidecarAPIKey`; `PingSidecar` asks the daemon behind such a URL
-for its health; `ParseNetscapeCookies` loads a static session from a browser
-`cookies.txt`. See [MAINTENANCE.md](MAINTENANCE.md) for sidecar
-contracts and SABR diagnostics.
+YouTube changes without notice. `waxtap doctor` probes any configured sidecars,
+then extracts a known video, resolves its audio, and reads a few KiB; `--full`
+downloads a whole track instead. [MAINTENANCE.md](MAINTENANCE.md) is the
+runbook for breakage, profile refreshes, and releases. Deferred work is tracked
+in [docs/deferred-work.md](docs/deferred-work.md), and asks of WaxFlow,
+WaxLabel, and WaxSeal in [docs/upstream-requests.md](docs/upstream-requests.md).
 
-## Maintenance
+## Exit codes
 
-`waxtap doctor` runs a low-cost extraction, resolution, and byte-read health
-check; `waxtap doctor --full` verifies complete delivery. A `--session-url`
-needs a uniform client chain: a single `--client` of any name, or a
-single-client `--profile-override`, since an adopted session cannot span the
-several clients the default chain tries. With
-sidecar URLs configured, the daemon behind them is asked for its health first
-(WaxSeal's `/ping`, one round trip, reported with its reason: `ok`,
-`no-session`, `busy`, or `probe-failed`, whether the daemon is keyed, whether
-it is asleep (`browser idle`: its idle timeout closed the browser, and the
-ping does not wake it), and, for a daemon with no session because it could
-not launch one, how many launches failed, with its account and its wait in a
-`doctor-caveat` note), then
-each endpoint is probed once (session, PO token, player-context), so a cold
-daemon's first-call cost and any refusal code are visible; the `--json` ping
-entry carries a one-word `status`: healthy, answered, not-offered, or failed; the token and context probe latencies include WaxSeal's separation
-waits, which is the cost a first download pays. They hold a browser launch
-only behind `browser idle`, where the first probe that needs a session is
-what wakes the daemon. A probe that
-relays the video's own playability verdict still counts as a healthy sidecar. The
-[maintenance runbook](MAINTENANCE.md) covers dumps, profile refreshes, cipher
-failures, SABR changes, fixtures, and releases. Work cut from a change is
-tracked in [docs/deferred-work.md](docs/deferred-work.md), and what WaxTap
-wants from WaxFlow, WaxLabel, and WaxSeal in
-[docs/upstream-requests.md](docs/upstream-requests.md).
+`waxtap exit-codes` prints these in more detail. The same class is
+`error.code` in `--json`. A playlist or batch run exits with the highest code
+among its items.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | unclassified error |
+| 2 | invalid request or config, unsupported input, or a requested format that is unavailable |
+| 3 | video or playlist unavailable or restricted: private, age-restricted, members-only, geo-blocked, removed, login required, live or upcoming, or no audio |
+| 4 | extraction, cipher, or playlist parsing failure; WaxTap may need an update |
+| 5 | rate limited |
+| 6 | retired, never returned |
+| 7 | incomplete stream or expired stream URL |
+| 8 | PO token required: none configured, mint failed, or rejected |
+| 9 | network failure: a connection, proxy, or sidecar error, or an upstream HTTP error response |
+| 10 | local I/O failure |
+| 130 | canceled by SIGINT or SIGTERM |
+| 141 | the reader of `download -o -` closed the pipe (SIGPIPE) |
 
 ## Acknowledgements
 
 WaxTap was influenced by [kkdai/youtube](https://github.com/kkdai/youtube) and
-[yt-dlp](https://github.com/yt-dlp/yt-dlp), but ships no code from either and
-does not invoke yt-dlp.
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), but ships no code from either.
 
 ## Disclaimer
 

@@ -226,8 +226,9 @@ const (
 )
 
 // allNoteCodes is every note the CLI can record. A new code is added here as
-// well as above; TestNoteCodesDocumented reads this list to check that README
-// documents the vocabulary a --json consumer matches on.
+// well as above; TestNoteCodesDocumented reads this list to check that
+// docs/warnings-and-notes.md documents the vocabulary a --json consumer
+// matches on.
 var allNoteCodes = []noteCode{
 	noteALACContainer,
 	noteArchiveNotRecorded,

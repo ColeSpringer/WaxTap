@@ -53,6 +53,8 @@ archives:
       # internal/notices.
       - THIRD-PARTY-NOTICES.md
       - MAINTENANCE.md
+      # README links to it for the warning and note codes.
+      - docs/warnings-and-notes.md
 
 checksum:
   name_template: checksums.txt

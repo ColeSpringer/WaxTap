@@ -11,14 +11,20 @@ import (
 	"testing"
 )
 
-// readme returns the repo's README, which sits one level up from cmd/waxtap.
-func readme(t *testing.T) string {
+// repoDoc returns a document by its path from the repo root, which sits two
+// levels up from cmd/waxtap.
+func repoDoc(t *testing.T, path string) string {
 	t.Helper()
-	b, err := os.ReadFile("../../README.md")
+	b, err := os.ReadFile("../../" + path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func readme(t *testing.T) string {
+	t.Helper()
+	return repoDoc(t, "README.md")
 }
 
 var readmeExitRow = regexp.MustCompile(`(?m)^\| (\d+) \|`)
@@ -52,10 +58,10 @@ func TestExitCodeTableMatchesReadme(t *testing.T) {
 // Every note code the CLI can record is documented, the way the warning codes
 // are: both are vocabularies a --json consumer matches on.
 func TestNoteCodesDocumented(t *testing.T) {
-	doc := readme(t)
+	doc := repoDoc(t, "docs/warnings-and-notes.md")
 	for _, c := range allNoteCodes {
 		if !strings.Contains(doc, "`"+string(c)+"`") {
-			t.Errorf("note %q is not documented in README", c)
+			t.Errorf("note %q is not documented in docs/warnings-and-notes.md", c)
 		}
 	}
 }
@@ -119,7 +125,7 @@ func TestAllNoteCodesMatchesTheConstants(t *testing.T) {
 	}
 	for code := range declared {
 		if !listed[code] {
-			t.Errorf("note %q is a constant and not in allNoteCodes; add it there and to README", code)
+			t.Errorf("note %q is a constant and not in allNoteCodes; add it there and to docs/warnings-and-notes.md", code)
 		}
 	}
 }
