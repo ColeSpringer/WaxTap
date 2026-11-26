@@ -1,0 +1,95 @@
+{
+  "responseContext": { "visitorData": "Cgtwa..." },
+  "metadata": { "playlistMetadataRenderer": { "title": "Page Header Playlist" } },
+  "header": {
+    "pageHeaderRenderer": {
+      "pageTitle": "Page Header Playlist",
+      "content": {
+        "pageHeaderViewModel": {
+          "title": { "dynamicTextViewModel": { "text": { "content": "Page Header Playlist" } } },
+          "metadata": {
+            "contentMetadataViewModel": {
+              "metadataRows": [
+                {
+                  "metadataParts": [
+                    { "avatarStack": { "avatarStackViewModel": { "text": { "content": "by Owner Name" } } } }
+                  ]
+                },
+                {
+                  "metadataParts": [
+                    { "text": { "content": "Playlist" } },
+                    { "text": { "content": "14 videos" } },
+                    { "text": { "content": "62,115 views" } }
+                  ]
+                }
+              ],
+              "delimiter": "•"
+            }
+          }
+        }
+      }
+    }
+  },
+  "sidebar": {
+    "playlistSidebarRenderer": {
+      "items": [
+        {
+          "playlistSidebarPrimaryInfoRenderer": {
+            "title": { "runs": [{ "text": "Page Header Playlist" }] },
+            "stats": [
+              { "runs": [{ "text": "14" }, { "text": " videos" }] },
+              { "simpleText": "62,115 views" },
+              { "runs": [{ "text": "Last updated on " }, { "text": "May 22, 2026" }] }
+            ]
+          }
+        },
+        {
+          "playlistSidebarSecondaryInfoRenderer": {
+            "videoOwner": { "videoOwnerRenderer": { "title": { "runs": [{ "text": "Owner Name" }] } } }
+          }
+        }
+      ]
+    }
+  },
+  "topbar": { "desktopTopbarRenderer": {} },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo0",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "metadata": {
+                              "lockupMetadataViewModel": { "title": { "content": "Talk A" } }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "dummyVideo1",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "metadata": {
+                              "lockupMetadataViewModel": { "title": { "content": "Talk B" } }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

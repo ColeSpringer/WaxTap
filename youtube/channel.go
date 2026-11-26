@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/waxerr"
@@ -35,50 +37,54 @@ type ChannelRef struct {
 	URL string
 }
 
-// ExtractChannelRef classifies a channel reference: a bare UC channel ID, or a
-// URL of the form /channel/<id>, /@handle, /c/name, or /user/name, each with an
-// optional trailing tab segment such as /videos, /streams, or /shorts, which is
-// stripped. A bare @handle (no host) is also accepted. Anything else returns an
-// error, so a caller can fall through to playlist handling.
+// ExtractChannelRef classifies a channel reference: a bare UC channel ID or
+// @handle, or a YouTube URL of the form /channel/<id>, /@handle, /c/name,
+// or /user/name. Each may end in a tab segment such as /videos, /streams, or
+// /shorts, which is stripped. youtu.be names videos only. Anything else
+// returns an error, so a caller can fall through to playlist handling. It
+// reads the input as Classify does.
 func ExtractChannelRef(input string) (ChannelRef, error) {
-	s := strings.TrimSpace(input)
-	if s == "" {
-		return ChannelRef{}, errNotChannelRef
-	}
-	// Bare channel ID.
-	if isChannelID(s) {
-		return ChannelRef{ID: s}, nil
-	}
-	// Bare @handle with no host.
-	if isHandle(s) {
-		return ChannelRef{URL: "https://www.youtube.com/" + s}, nil
-	}
-
-	u, err := parseLoose(s)
-	if err != nil || u.Host == "" || !isYouTubeHost(u.Hostname()) {
-		return ChannelRef{}, errNotChannelRef
-	}
-	segs := pathSegments(u.Path)
-	if len(segs) == 0 {
-		return ChannelRef{}, errNotChannelRef
-	}
-	switch {
-	case isHandle(segs[0]):
-		return ChannelRef{URL: "https://www.youtube.com/" + segs[0]}, nil
-	case segs[0] == "channel" && len(segs) >= 2:
-		if isChannelID(segs[1]) {
-			return ChannelRef{ID: segs[1]}, nil
-		}
-		return ChannelRef{}, errNotChannelRef
-	case (segs[0] == "c" || segs[0] == "user") && len(segs) >= 2:
-		return ChannelRef{URL: "https://www.youtube.com/" + segs[0] + "/" + segs[1]}, nil
+	if ref := parseLink(input, true).channel; ref != (ChannelRef{}) {
+		return ref, nil
 	}
 	return ChannelRef{}, errNotChannelRef
 }
 
-// isHandle reports whether s is a bare @handle: @ followed by 3-30 handle
-// characters (letters, digits, _, -, .), matching YouTube's handle rules so a
-// stray token like "@notes.txt" is not treated as a channel.
+// channelFromPath reads a channel from a YouTube URL's decoded path segments,
+// any trailing tab segment ignored. The name goes back into the URL escaped.
+func channelFromPath(segs []string) ChannelRef {
+	switch {
+	case len(segs) == 0:
+		return ChannelRef{}
+	case isURLHandle(segs[0]):
+		return ChannelRef{URL: "https://www.youtube.com/" + url.PathEscape(segs[0])}
+	case segs[0] == "channel" && len(segs) >= 2 && isChannelID(segs[1]):
+		return ChannelRef{ID: segs[1]}
+	case (segs[0] == "c" || segs[0] == "user") && len(segs) >= 2:
+		return ChannelRef{URL: "https://www.youtube.com/" + segs[0] + "/" + url.PathEscape(segs[1])}
+	}
+	return ChannelRef{}
+}
+
+// isURLHandle reports whether a URL path segment is an @handle. A YouTube URL's
+// handle is YouTube's own, so unlike a bare one it may be short or in any
+// script: letters, marks, and digits of any script, and "_", "-", ".", "·".
+func isURLHandle(seg string) bool {
+	rest, ok := strings.CutPrefix(seg, "@")
+	if !ok || rest == "" {
+		return false
+	}
+	for _, r := range rest {
+		if !unicode.In(r, unicode.L, unicode.M, unicode.N) && !strings.ContainsRune("_-.·", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHandle reports whether s is a bare @handle: @ followed by 3-30 ASCII
+// letters, digits, "_", "-", or ".". Only the shape is checked, so a token
+// like "@notes.txt" passes too; only loose callers read a bare handle.
 func isHandle(s string) bool {
 	rest, ok := strings.CutPrefix(s, "@")
 	if !ok || len(rest) < 3 || len(rest) > 30 {
@@ -238,8 +244,12 @@ func (c *Client) newResolveRequest(p ClientProfile, s *session, channelURL strin
 	}
 }
 
-// redactChannelURL trims a channel URL to its path for error messages.
+// redactChannelURL trims a channel URL to its host and path for error
+// messages, unescaped so a non-ASCII handle reads as written.
 func redactChannelURL(raw string) string {
+	if s, err := url.PathUnescape(raw); err == nil {
+		raw = s
+	}
 	if i := strings.Index(raw, "youtube.com"); i >= 0 {
 		return raw[i:]
 	}

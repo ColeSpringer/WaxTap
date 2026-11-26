@@ -26,6 +26,8 @@ func TestExtractChannelRef(t *testing.T) {
 		{"handle url", "https://www.youtube.com/@SomeHandle", "", "https://www.youtube.com/@SomeHandle", false},
 		{"handle url with tab", "https://www.youtube.com/@SomeHandle/streams", "", "https://www.youtube.com/@SomeHandle", false},
 		{"bare handle", "@SomeHandle", "", "https://www.youtube.com/@SomeHandle", false},
+		{"bare handle with tab", "@SomeHandle/videos", "", "https://www.youtube.com/@SomeHandle", false},
+		{"bare channel id with tab", testChannelID + "/streams", testChannelID, "", false},
 		{"/c/ vanity", "https://www.youtube.com/c/SomeName", "", "https://www.youtube.com/c/SomeName", false},
 		{"/user/ vanity with tab", "https://www.youtube.com/user/SomeName/featured", "", "https://www.youtube.com/user/SomeName", false},
 		{"watch url", "https://www.youtube.com/watch?v=dummyVideo0", "", "", true},
@@ -33,6 +35,16 @@ func TestExtractChannelRef(t *testing.T) {
 		{"bare playlist id", "PLabcdefghijklmno", "", "", true},
 		{"empty", "", "", "", true},
 		{"non-youtube host", "https://example.com/@SomeHandle", "", "", true},
+		// A handle in a YouTube URL is YouTube's own, so its length and script are
+		// not second-guessed; the path is re-escaped for the request.
+		{"short handle url", "https://www.youtube.com/@ab", "", "https://www.youtube.com/@ab", false},
+		{"non-ASCII handle url", "https://www.youtube.com/@日本語", "", "https://www.youtube.com/@%E6%97%A5%E6%9C%AC%E8%AA%9E", false},
+		{"escaped handle url", "https://www.youtube.com/@%E6%97%A5%E6%9C%AC%E8%AA%9E/videos", "", "https://www.youtube.com/@%E6%97%A5%E6%9C%AC%E8%AA%9E", false},
+		{"non-ASCII vanity url", "https://www.youtube.com/c/名前", "", "https://www.youtube.com/c/%E5%90%8D%E5%89%8D", false},
+		{"empty handle url", "https://www.youtube.com/@", "", "", true},
+		// youtu.be names videos only; YouTube redirects youtu.be/@x to watch?v=@x.
+		{"youtu.be path", "https://youtu.be/@SomeHandle", "", "", true},
+		{"handle url with a space", "https://www.youtube.com/@a%20b", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,6 +161,25 @@ func TestResolveChannelIDNotFound(t *testing.T) {
 		_, _, err := c.ResolveUploadsPlaylist(context.Background(), ChannelRef{URL: "https://www.youtube.com/@ghost"})
 		if !errors.Is(err, waxerr.ErrVideoUnavailable) {
 			t.Errorf("err = %v, want ErrVideoUnavailable for a 404 channel page", err)
+		}
+	})
+
+	// The handle is named as the caller wrote it, not as the escaped URL
+	// WaxTap requested.
+	t.Run("non-ASCII handle", func(t *testing.T) {
+		c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/navigation/resolve_url") {
+				return fixtureResp(http.StatusOK, []byte(`{"endpoint":{}}`)), nil
+			}
+			return fixtureResp(http.StatusNotFound, nil), nil
+		}))
+		ref, err := ExtractChannelRef("https://www.youtube.com/@한글")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = c.ResolveUploadsPlaylist(context.Background(), ref)
+		if !errors.Is(err, waxerr.ErrVideoUnavailable) || !strings.Contains(err.Error(), "youtube.com/@한글 ") {
+			t.Errorf("err = %v, want the handle unescaped", err)
 		}
 	})
 }

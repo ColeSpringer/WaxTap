@@ -12,8 +12,9 @@ import (
 	"github.com/colespringer/waxtap/v3"
 )
 
-// minimalBrowse is a one-entry playlist browse response with no continuation.
-const minimalBrowse = `{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"playlistVideoRenderer":{"videoId":"vidvidvid00","title":{"runs":[{"text":"V"}]},"lengthSeconds":"60"}}]}}]}}}}]}}}`
+// minimalBrowse is a one-entry playlist browse response with no continuation,
+// headed the way an uploads feed is.
+const minimalBrowse = `{"header":{"playlistHeaderRenderer":{"numVideosText":{"runs":[{"text":"1"},{"text":" video"}]}}},"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"playlistVideoRenderer":{"videoId":"vidvidvid00","title":{"runs":[{"text":"V"}]},"lengthSeconds":"60"}}]}}]}}}}]}}}`
 
 // TestFacade_EnumerateChannelURLResolvesUploads routes a channel handle to its
 // uploads playlist (VLUU) and stamps every entry with the resolved channel ID.
@@ -54,6 +55,9 @@ func TestFacade_EnumerateChannelURLResolvesUploads(t *testing.T) {
 	}
 	if pl.Entries[0].ChannelID != channelID {
 		t.Errorf("entry ChannelID = %q, want the resolved %q (channel-feed stamp)", pl.Entries[0].ChannelID, channelID)
+	}
+	if pl.VideoCount != 1 {
+		t.Errorf("VideoCount = %d, want the header's 1", pl.VideoCount)
 	}
 }
 
@@ -100,15 +104,28 @@ func TestFacade_EnumerateChannelURLWithListHonorsPlaylist(t *testing.T) {
 // A channel whose uploads feed YouTube will not list is refused by the
 // channel's own name. The caller asked for a channel; "playlist unavailable"
 // about a UU id they never typed leaves them nothing to connect it to.
+//
+// The refusal is left unclassified: a channel with no uploads answers exactly
+// as a deleted one, so not-found would mislead, and no oEmbed GET is spent.
 func TestFacade_EnumerateChannelNamesTheChannelWhenUploadsAreUnlistable(t *testing.T) {
-	const handle = "@fixturechannel"
+	// A non-ASCII handle is named as written, not percent-escaped.
+	for _, handle := range []string{"@fixturechannel", "https://www.youtube.com/@한글채널"} {
+		t.Run(handle, func(t *testing.T) { checkUnlistableChannelNamed(t, handle) })
+	}
+}
+
+func checkUnlistableChannelNamed(t *testing.T, handle string) {
 	const channelID = "UCabcdefghijklmnopqrstuv"
+	var oembedGETs int
 	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/navigation/resolve_url"):
 			return resp(http.StatusOK, []byte(`{"endpoint":{"browseEndpoint":{"browseId":"`+channelID+`"}}}`)), nil
 		case strings.HasSuffix(r.URL.Path, "/browse"):
-			return resp(http.StatusOK, []byte(`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"This playlist does not exist."}]}}}]}`)), nil
+			return resp(http.StatusOK, []byte(`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"The playlist does not exist."}]}}}],"topbar":{"desktopTopbarRenderer":{}}}`)), nil
+		case r.URL.Path == "/oembed":
+			oembedGETs++
+			return resp(http.StatusNotFound, nil), nil
 		default:
 			return resp(http.StatusNotFound, nil), nil
 		}
@@ -122,8 +139,8 @@ func TestFacade_EnumerateChannelNamesTheChannelWhenUploadsAreUnlistable(t *testi
 	if !errors.Is(err, waxtap.ErrPlaylistUnavailable) {
 		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
 	}
-	if !strings.Contains(err.Error(), handle) {
-		t.Errorf("err = %q, want it to name the channel the caller gave", err)
+	if want := handle[strings.Index(handle, "@"):]; !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %q, want it to name the channel the caller gave, %s", err, want)
 	}
 	if !strings.Contains(err.Error(), "uploads playlist") {
 		t.Errorf("err = %q, want it to say what is missing", err)
@@ -131,5 +148,11 @@ func TestFacade_EnumerateChannelNamesTheChannelWhenUploadsAreUnlistable(t *testi
 	// The original reason is kept, so the cause is not lost to the rewording.
 	if !strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("err = %q, want YouTube's own reason kept", err)
+	}
+	if pu, ok := errors.AsType[*waxtap.PlaylistUnavailableError](err); !ok || pu.Kind != waxtap.PlaylistUnavailableUnknown {
+		t.Errorf("err = %#v, want a PlaylistUnavailableError of kind unknown", err)
+	}
+	if oembedGETs != 0 {
+		t.Errorf("oEmbed GETs = %d, want 0 for a channel's uploads feed", oembedGETs)
 	}
 }

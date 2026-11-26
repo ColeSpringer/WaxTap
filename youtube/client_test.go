@@ -3,6 +3,7 @@ package youtube
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -778,6 +779,9 @@ func TestEnumerate(t *testing.T) {
 	if pl.Author != "Owner Name" {
 		t.Errorf("author = %q", pl.Author)
 	}
+	if pl.VideoCount != 6131 {
+		t.Errorf("VideoCount = %d, want the header's 6131", pl.VideoCount)
+	}
 	if len(pl.Errors) != 0 {
 		t.Errorf("errors = %v", pl.Errors)
 	}
@@ -825,16 +829,213 @@ func TestEnumerate_BadRequestIsInvalidPlaylistID(t *testing.T) {
 	}
 }
 
+// refusedPlaylist fakes a playlist browse refuses: browse answers with body
+// (or browseStatus), and oEmbed with oembed, where 0 holds the GET until its
+// context ends. It records each oEmbed GET's url parameter.
+type refusedPlaylist struct {
+	browseStatus int
+	body         string
+	oembed       int
+	profiles     []ClientProfile // nil for the default chain
+	gets         []string
+}
+
+func (w *refusedPlaylist) client(hl string) *Client {
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/oembed" {
+			w.gets = append(w.gets, r.URL.Query().Get("url"))
+			if w.oembed == 0 {
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
+			return fixtureResp(w.oembed, []byte(http.StatusText(w.oembed))), nil
+		}
+		if w.browseStatus != 0 {
+			return fixtureResp(w.browseStatus, []byte(`{"error":{"code":404,"message":"Not Found"}}`)), nil
+		}
+		return fixtureResp(http.StatusOK, []byte(w.body)), nil
+	})
+	return New(Config{HL: hl, Profiles: w.profiles, HTTP: httpx.New(httpx.Config{
+		HTTPClient:   &http.Client{Transport: rt},
+		MaxRetries:   1,
+		MaxRetryWait: 50 * time.Millisecond,
+		BaseBackoff:  time.Millisecond,
+		MaxBackoff:   2 * time.Millisecond,
+	})})
+}
+
+// alertPage is a browse refusal in the live shape: the alert in runs, and the
+// page shell beside it unless topbar is false.
+func alertPage(text string, topbar bool) string {
+	q, _ := json.Marshal(text)
+	b := `{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":` + string(q) + `}]}}}]`
+	if topbar {
+		b += `,"topbar":{"desktopTopbarRenderer":{}}`
+	}
+	return b + `,"microformat":{"microformatDataRenderer":{"noindex":true}}}`
+}
+
+// The kind of a refused playlist follows the evidence in a fixed order: an
+// account list's ID, the unviewable wording, oEmbed's 401/403, a page with no
+// shell, oEmbed's 404, else unknown. Each case runs in English and German,
+// whose alerts share no words, so only the English unviewable alert is settled
+// without the GET.
+func TestEnumerate_UnavailableKind(t *testing.T) {
+	locales := []struct{ hl, missing, unviewable string }{
+		{"en", "The playlist does not exist.", "This playlist type is unviewable."},
+		{"de", "Die Playlist ist nicht vorhanden.", "Dieser Playlist-Typ ist nicht verfügbar."},
+	}
+	defer func(d time.Duration) { oembedTimeout = d }(oembedTimeout)
+	oembedTimeout = 100 * time.Millisecond
+
+	for _, loc := range locales {
+		cases := []struct {
+			name     string
+			id       string
+			text     string
+			topbar   bool
+			oembed   int
+			want     waxerr.PlaylistUnavailableKind
+			wantGETs int // -1: at least one
+		}{
+			{"watch later", "WL", loc.missing, true, http.StatusNotFound, waxerr.PlaylistUnavailablePrivate, 0},
+			{"liked videos", "LL", loc.missing, true, http.StatusNotFound, waxerr.PlaylistUnavailablePrivate, 0},
+			{"liked music", "LM", loc.missing, true, http.StatusNotFound, waxerr.PlaylistUnavailablePrivate, 0},
+			{"mix", "RDdummyVideo0", loc.unviewable, false, http.StatusNotFound, waxerr.PlaylistUnavailableUnviewable, map[string]int{"en": 0, "de": 1}[loc.hl]},
+			{"private", "PLprivateprivate00", loc.missing, true, http.StatusForbidden, waxerr.PlaylistUnavailablePrivate, 1},
+			{"private, 401", "PLprivateprivate00", loc.missing, true, http.StatusUnauthorized, waxerr.PlaylistUnavailablePrivate, 1},
+			{"private outranks a missing shell", "PLprivateprivate00", loc.missing, false, http.StatusForbidden, waxerr.PlaylistUnavailablePrivate, 1},
+			{"no shell, reworded", "hello", "This list cannot be shown.", false, http.StatusBadRequest, waxerr.PlaylistUnavailableUnviewable, 1},
+			{"not found", "PLmissingmissing00", loc.missing, true, http.StatusNotFound, waxerr.PlaylistUnavailableNotFound, 1},
+			{"oembed lists it", "PLmissingmissing00", loc.missing, true, http.StatusOK, waxerr.PlaylistUnavailableUnknown, 1},
+			{"oembed 500", "PLmissingmissing00", loc.missing, true, http.StatusInternalServerError, waxerr.PlaylistUnavailableUnknown, -1},
+			{"oembed past its timeout", "PLmissingmissing00", loc.missing, true, 0, waxerr.PlaylistUnavailableUnknown, 1},
+		}
+		for _, tc := range cases {
+			t.Run(loc.hl+"/"+tc.name, func(t *testing.T) {
+				w := &refusedPlaylist{body: alertPage(tc.text, tc.topbar), oembed: tc.oembed}
+				start := time.Now()
+				_, err := w.client(loc.hl).Enumerate(context.Background(), tc.id, EnumOptions{})
+				if el := time.Since(start); el > 2*time.Second {
+					t.Errorf("Enumerate took %v, want the probe bounded by oembedTimeout", el)
+				}
+				pu, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err)
+				if !ok {
+					t.Fatalf("err = %v, want *PlaylistUnavailableError", err)
+				}
+				if pu.Kind != tc.want {
+					t.Errorf("kind = %v, want %v", pu.Kind, tc.want)
+				}
+				if pu.Reason != tc.text {
+					t.Errorf("reason = %q, want YouTube's %q", pu.Reason, tc.text)
+				}
+				switch {
+				case tc.wantGETs < 0 && len(w.gets) == 0:
+					t.Error("oEmbed was not asked")
+				case tc.wantGETs >= 0 && len(w.gets) != tc.wantGETs:
+					t.Errorf("oEmbed GETs = %d, want %d", len(w.gets), tc.wantGETs)
+				}
+				for _, u := range w.gets {
+					if want := "https://www.youtube.com/playlist?list=" + tc.id; u != want {
+						t.Errorf("oEmbed url = %q, want %q", u, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// A caller who cancels while oEmbed is being asked gets the cancellation, not a
+// refusal whose kind the cancel cut short. An expired deadline is not a
+// cancellation: the refusal browse already gave stays the answer.
+func TestEnumerate_CancelDuringOEmbedIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &refusedPlaylist{body: alertPage("The playlist does not exist.", true), oembed: 0}
+	c := w.client("en")
+	c.http = httpx.New(httpx.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/oembed" {
+			cancel()
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		return fixtureResp(http.StatusOK, []byte(w.body)), nil
+	})}, MaxRetries: -1})
+	_, err := c.Enumerate(ctx, "PLmissingmissing00", EnumOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if _, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err); ok {
+		t.Errorf("err = %v, want no refusal beside the cancellation", err)
+	}
+
+	dctx, dcancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer dcancel()
+	_, err = (&refusedPlaylist{body: alertPage("The playlist does not exist.", true), oembed: 0}).client("en").Enumerate(dctx, "PLmissingmissing00", EnumOptions{})
+	if _, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err); !ok {
+		t.Errorf("past the deadline err = %v, want the refusal", err)
+	}
+}
+
+// A channel with no uploads answers exactly as a deleted one, so an uploads
+// feed is refused unclassified and costs no GET, whether Enumerate was given
+// the channel or the feed's own UU-family ID.
+func TestEnumerate_UnavailableChannelFeedIsNotProbed(t *testing.T) {
+	cases := []struct {
+		name, id string
+		o        EnumOptions
+	}{
+		{"resolved from a channel", "UUabcdefghijklmnopqrstuv", EnumOptions{ChannelID: testChannelID}},
+		{"uploads ID", "UUabcdefghijklmnopqrstuv", EnumOptions{}},
+		{"long-form uploads ID", "UULFabcdefghijklmnopqrstuv", EnumOptions{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &refusedPlaylist{body: alertPage("The playlist does not exist.", true), oembed: http.StatusNotFound}
+			_, err := w.client("en").Enumerate(context.Background(), tc.id, tc.o)
+			pu, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err)
+			if !ok {
+				t.Fatalf("err = %v, want *PlaylistUnavailableError", err)
+			}
+			if pu.Kind != waxerr.PlaylistUnavailableUnknown || pu.Reason != "The playlist does not exist." {
+				t.Errorf("err = %+v, want kind unknown with YouTube's reason", *pu)
+			}
+			if len(w.gets) != 0 {
+				t.Errorf("oEmbed GETs = %d, want 0 for a channel feed", len(w.gets))
+			}
+		})
+	}
+}
+
+// The page-shell signal was measured on WEB, so a refusal another browse
+// client serves without a topbar is not read as unviewable.
+func TestEnumerate_PageShellStepIsWebOnly(t *testing.T) {
+	mweb := makeProfile(ClientProfile{Name: "MWEB", InnerTubeName: "MWEB", InnerTubeID: 2, Version: "2.0", SupportsPlaylists: true})
+	w := &refusedPlaylist{body: alertPage("Die Playlist ist nicht vorhanden.", false), oembed: http.StatusNotFound, profiles: []ClientProfile{mweb}}
+	_, err := w.client("de").Enumerate(context.Background(), "PLmissingmissing00", EnumOptions{})
+	pu, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err)
+	if !ok {
+		t.Fatalf("err = %v, want *PlaylistUnavailableError", err)
+	}
+	if pu.Kind != waxerr.PlaylistUnavailableNotFound {
+		t.Errorf("kind = %v, want not-found from oEmbed", pu.Kind)
+	}
+}
+
+// A browse 404 is the typed error too, classified like an alert, and its text
+// keeps the internal endpoint out.
 func TestEnumerate_NotFoundIsPlaylistUnavailable(t *testing.T) {
-	// A 404 from the browse endpoint means the playlist is deleted or nonexistent.
-	// It should surface as ErrPlaylistUnavailable, not as a raw HTTP status that
-	// leaks the internal browse URL.
-	c := newTestClient(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		return fixtureResp(http.StatusNotFound, []byte(`{"error":{"code":404,"message":"Not Found"}}`)), nil
-	}))
-	_, err := c.Enumerate(context.Background(), "PLmissing", EnumOptions{})
-	if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
-		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+	w := &refusedPlaylist{browseStatus: http.StatusNotFound, oembed: http.StatusNotFound}
+	_, err := w.client("en").Enumerate(context.Background(), "PLmissingmissing00", EnumOptions{})
+	pu, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err)
+	if !ok {
+		t.Fatalf("err = %v, want *PlaylistUnavailableError", err)
+	}
+	if pu.Kind != waxerr.PlaylistUnavailableNotFound {
+		t.Errorf("kind = %v, want not-found", pu.Kind)
+	}
+	if strings.Contains(err.Error(), "youtubei") || strings.Contains(err.Error(), "http") {
+		t.Errorf("err = %q, want no endpoint URL", err)
 	}
 }
 
@@ -878,6 +1079,27 @@ func TestEnumerate_MaxItemsAtPageBoundary(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1 (stopped at limit, no continuation fetch)", calls)
+	}
+}
+
+// The count rides on the first page, which every call fetches, so a one-entry
+// listing carries it at no extra request.
+func TestEnumerate_VideoCountAtNoExtraRequest(t *testing.T) {
+	browse := readFixture(t, "playlist_browse.json") // states 6,131
+	var calls int
+	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return fixtureResp(http.StatusOK, browse), nil
+	}))
+	pl, err := c.Enumerate(context.Background(), "PLtest", EnumOptions{MaxItems: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pl.VideoCount != 6131 || len(pl.Entries) != 1 {
+		t.Errorf("VideoCount = %d with %d entries, want 6131 with 1", pl.VideoCount, len(pl.Entries))
+	}
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1", calls)
 	}
 }
 

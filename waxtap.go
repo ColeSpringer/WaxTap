@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -665,6 +666,22 @@ func (c *Client) fullMetadataPass(ctx context.Context, res *InfoResult, id strin
 	return nil
 }
 
+// Classify reports what input names, the way WaxTap's commands route it,
+// without a request. Kind is a video when the input carries a video ID, else a
+// playlist, else a channel, and every ID found is returned: watch?v=X&list=Y
+// is a video with PlaylistID Y.
+//
+// An input naming none of them is an error: an invalid, too short, or too long
+// video ID ([ErrInvalidVideoID] and its siblings), a URL off YouTube, or
+// [ErrInvalidPlaylistID] for a playlist URL with no usable list=; never
+// [ErrIsPlaylist] or [ErrIsChannel]. The Link returned with an error still
+// holds any playlist or channel the input names, with Kind LinkUnknown.
+//
+// It is as lenient as the commands: any 11-character token shaped like an ID
+// reads as a video, so "information" and "please download information now"
+// both do. And it refuses watch?v=bad&list=Y, whose list Enumerate accepts.
+func Classify(input string) (Link, error) { return youtube.Classify(input) }
+
 // Enumerate expands a playlist or channel URL into entries without downloading
 // media. A channel reference (a bare UC ID, or a /channel/, /@handle, /c/, or
 // /user/ URL, with any trailing tab stripped) resolves to the channel's uploads
@@ -725,18 +742,23 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 //
 // Only a channel reference is reworded: an explicit playlist is already the
 // thing the caller asked about.
-func channelEnumerateError(err error, url, channelID string) error {
+func channelEnumerateError(err error, target, channelID string) error {
 	if channelID == "" || !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
 		return err
 	}
 	// The handle or UC id the caller gave, not the resolved one: naming a
-	// channel back to them in terms they did not use helps nobody.
+	// channel back to them in terms they did not use helps nobody. A handle
+	// URL comes back escaped, so it is unescaped to read as written.
 	ref := channelID
-	if r, cerr := youtube.ExtractChannelRef(url); cerr == nil {
-		if r.ID != "" {
+	if r, cerr := youtube.ExtractChannelRef(target); cerr == nil {
+		switch {
+		case r.ID != "":
 			ref = r.ID
-		} else if r.URL != "" {
+		case r.URL != "":
 			ref = r.URL
+			if s, uerr := url.PathUnescape(r.URL); uerr == nil {
+				ref = s
+			}
 		}
 	}
 	reason := fmt.Sprintf("channel %s has no uploads playlist that YouTube will list", ref)

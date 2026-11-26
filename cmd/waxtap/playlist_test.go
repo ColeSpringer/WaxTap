@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -20,7 +22,7 @@ func TestEmitPlaylistListRendersUnknownDurationAsDash(t *testing.T) {
 		{VideoID: "dummyVideo0", Title: "Known", Duration: 90 * time.Second},
 		{VideoID: "dummyVideo1", Title: "Unknown", Index: 1},
 	}}
-	if err := emitPlaylistList(env, pl); err != nil {
+	if err := emitPlaylistList(env, pl, 0); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -43,7 +45,7 @@ func TestEmitPlaylistListRendersLiveMarkers(t *testing.T) {
 		{VideoID: "dummyVideo0", Title: "Now", LiveStatus: waxtap.LiveNow},
 		{VideoID: "dummyVideo1", Title: "Soon", Index: 1, LiveStatus: waxtap.LiveUpcoming},
 	}}
-	if err := emitPlaylistList(env, pl); err != nil {
+	if err := emitPlaylistList(env, pl, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"dummyVideo0  live", "dummyVideo1  upcoming"} {
@@ -54,11 +56,77 @@ func TestEmitPlaylistListRendersLiveMarkers(t *testing.T) {
 
 	out.Reset()
 	env.cfg.json = true
-	if err := emitPlaylistList(env, pl); err != nil {
+	if err := emitPlaylistList(env, pl, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), `"liveStatus": "live"`) || !strings.Contains(out.String(), `"liveStatus": "upcoming"`) {
 		t.Errorf("want liveStatus keys in:\n%s", out.String())
+	}
+}
+
+// The title line says what a --max-items cap cut, or that YouTube counts more
+// than it listed; the document carries the count and the owner when known.
+func TestEmitPlaylistListCountAndAuthor(t *testing.T) {
+	entries := func(n int) []waxtap.PlaylistEntry {
+		out := make([]waxtap.PlaylistEntry, n)
+		for i := range out {
+			out[i] = waxtap.PlaylistEntry{VideoID: fmt.Sprintf("dummyVide%02d", i), Title: "T", Index: i}
+		}
+		return out
+	}
+	cases := []struct {
+		name     string
+		pl       *waxtap.Playlist
+		maxItems int
+		header   string
+	}{
+		{"cut by --max-items", &waxtap.Playlist{Title: "List", VideoCount: 120, Entries: entries(5)}, 5, "List (5 of 120 items)\n"},
+		{"uncut, YouTube counts more", &waxtap.Playlist{Title: "List", VideoCount: 120, Entries: entries(117)}, 0, "List (117 items; YouTube counts 120)\n"},
+		{"cap above the listing", &waxtap.Playlist{Title: "List", VideoCount: 120, Entries: entries(117)}, 200, "List (117 items; YouTube counts 120)\n"},
+		{"count matches", &waxtap.Playlist{Title: "List", VideoCount: 3, Entries: entries(3)}, 0, "List (3 items)\n"},
+		{"listing past the stated count", &waxtap.Playlist{Title: "List", VideoCount: 2, Entries: entries(3)}, 0, "List (3 items)\n"},
+		{"no count", &waxtap.Playlist{Title: "List", Entries: entries(5)}, 5, "List (5 items)\n"},
+		{"one", &waxtap.Playlist{Title: "List", VideoCount: 7, Entries: entries(1)}, 1, "List (1 of 7 items)\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+			if err := emitPlaylistList(env, tc.pl, tc.maxItems); err != nil {
+				t.Fatal(err)
+			}
+			if first, _, _ := strings.Cut(out.String(), "\n"); first+"\n" != tc.header {
+				t.Errorf("header = %q, want %q", first+"\n", tc.header)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		pl     *waxtap.Playlist
+		count  any
+		author any
+	}{
+		{"stated", &waxtap.Playlist{ID: "PLx", VideoCount: 120, Author: "Owner Name", Entries: entries(1)}, float64(120), "Owner Name"},
+		{"unstated", &waxtap.Playlist{ID: "PLx", Entries: entries(1)}, nil, nil},
+	} {
+		t.Run("json "+tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
+			if err := emitPlaylistList(env, tc.pl, 1); err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+				t.Fatalf("unmarshal %q: %v", out.String(), err)
+			}
+			if doc["videoCount"] != tc.count || doc["author"] != tc.author {
+				t.Errorf("videoCount = %v, author = %v; want %v, %v", doc["videoCount"], doc["author"], tc.count, tc.author)
+			}
+			if doc["count"] != float64(1) {
+				t.Errorf("count = %v, want the 1 entry listed", doc["count"])
+			}
+		})
 	}
 }
 
@@ -73,7 +141,7 @@ func TestEmitPlaylistListErrorsNameTheEntry(t *testing.T) {
 		Entries: []waxtap.PlaylistEntry{{VideoID: "dummyVideo0", Title: "One"}},
 		Errors:  []error{&waxtap.EnrichError{VideoID: "dummyVideo1", Index: 4, Err: waxtap.ErrVideoUnavailable}},
 	}
-	if err := emitPlaylistList(env, pl); err != nil {
+	if err := emitPlaylistList(env, pl, 0); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()

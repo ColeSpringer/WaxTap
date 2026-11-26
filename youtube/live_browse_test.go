@@ -3,7 +3,7 @@
 // Live capture helpers for playlist browse shapes (the moving part behind
 // ErrPlaylistParse). Excluded from the default build; run with
 // -tags=integration. Capture what YouTube serves, then re-run the parser over
-// the file offline:
+// the file offline. WAXTAP_TEST_HL sets the request locale (default en):
 //
 //	WAXTAP_TEST_PLAYLIST=<id> go test -tags=integration -run TestLive_BrowseCapture ./youtube/ -v
 //	WAXTAP_TEST_BROWSE_FILE=<path> go test -tags=integration -run TestLive_ParseBrowseFile ./youtube/ -v
@@ -16,14 +16,15 @@ import (
 )
 
 // TestLive_BrowseCapture fetches a playlist's initial browse page through the
-// same request path Enumerate uses and writes the raw body next to -v output,
-// so a shape change can be inspected and minimized into a fixture.
+// same request path Enumerate uses and writes the raw body to
+// browse-<id>.real.json in the package directory, a name .gitignore keeps out
+// of the repo, so a shape change can be inspected and minimized into a fixture.
 func TestLive_BrowseCapture(t *testing.T) {
 	id := os.Getenv("WAXTAP_TEST_PLAYLIST")
 	if id == "" {
 		t.Skip("set WAXTAP_TEST_PLAYLIST=<playlistID> to capture a live browse response")
 	}
-	c := New(Config{})
+	c := New(Config{HL: os.Getenv("WAXTAP_TEST_HL")})
 	sess, err := c.newBootstrappedSession(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestLive_BrowseCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := "browse-" + id + ".json"
+	out := "browse-" + id + ".real.json"
 	if err := os.WriteFile(out, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestLive_ParseBrowseFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("title=%q author=%q items=%d token=%dB", meta.title, meta.author, len(items), len(token))
+	t.Logf("title=%q author=%q count=%d items=%d token=%dB", meta.title, meta.author, meta.videoCount, len(items), len(token))
 	for i, it := range items[:min(3, len(items))] {
 		e, err := it.toEntry(i)
 		if err != nil {

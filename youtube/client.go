@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -863,6 +865,11 @@ const (
 	browseRetryDelay = 500 * time.Millisecond
 )
 
+// oembedTimeout bounds the oEmbed GET that classifies a refused playlist, its
+// retries and any Retry-After wait included. It is a var so a test can lower
+// it; nothing sets it at runtime.
+var oembedTimeout = 5 * time.Second
+
 // EnumOptions configures Client.Enumerate. The facade builds one from its own
 // EnumerateOptions plus any resolved channel ID.
 type EnumOptions struct {
@@ -904,6 +911,9 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 
 	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)
 	if err != nil {
+		if alert, ok := errors.AsType[*browseAlert](err); ok {
+			return nil, c.refusedPlaylist(ctx, sess, profile, playlistID, o.ChannelID, alert)
+		}
 		// Map YouTube's browse status to a user-facing playlist error. The raw error
 		// carries the internal endpoint URL, so keep it on the debug log for
 		// --verbose diagnosis and leave the CLI to render a clean message.
@@ -913,10 +923,9 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 			case http.StatusBadRequest:
 				return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidPlaylistID, err)
 			case http.StatusNotFound:
-				// A deleted or nonexistent playlist. Private playlists return HTTP 200
-				// with an in-body alert, and a 403 is an anti-bot or attestation block,
-				// so neither case is folded into this status mapping.
-				return nil, fmt.Errorf("%w: %v", waxerr.ErrPlaylistUnavailable, err)
+				// A refusal like an alert. A 403 is not one: it is an anti-bot or
+				// attestation block, so it stays an HTTP error.
+				return nil, c.refusedPlaylist(ctx, sess, profile, playlistID, o.ChannelID, nil)
 			}
 		}
 		return nil, explainBareDeadline(err, sess)
@@ -924,6 +933,7 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 	sess.learnVisitorData(meta.visitorData)
 	pl.Title = meta.title
 	pl.Author = meta.author
+	pl.VideoCount = meta.videoCount
 
 	// rawPos is the true playlist position, advanced for every video entry (kept or
 	// skipped) so PlaylistEntry.Index survives Skip. It lives here, not in
@@ -963,6 +973,76 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 		pl.Continuation = token
 	}
 	return pl, nil
+}
+
+// refusedPlaylist builds the error for a playlist browse refused, with an alert
+// or (alert nil) an HTTP 404. A channel's uploads feed, resolved from the
+// channel or named by its UU-family ID, is left unclassified: a channel with
+// no uploads answers exactly as a deleted one.
+func (c *Client) refusedPlaylist(ctx context.Context, sess *session, profile ClientProfile, playlistID, channelID string, alert *browseAlert) error {
+	pu := &waxerr.PlaylistUnavailableError{}
+	if alert != nil {
+		pu.Reason = alert.reason
+	}
+	if channelID == "" && !strings.HasPrefix(playlistID, "UU") {
+		pu.Kind = c.refusalKind(ctx, sess, profile, playlistID, alert)
+	}
+	c.log.DebugContext(ctx, "playlist refused", "playlist", playlistID, "kind", pu.Kind.String(), "reason", pu.Reason)
+	// A cancellation outranks the refusal, whose kind it may have cut short; an
+	// expired deadline does not, as in httpx.PauseBlocked.
+	if err := ctx.Err(); errors.Is(err, context.Canceled) {
+		return err
+	}
+	return pu
+}
+
+// refusalKind classifies a playlist the profile's browse refused. Browse words
+// a private list and a missing one alike, in the request's locale, so the kind
+// comes from the ID, the English unviewable wording, oEmbed's status, and the
+// page shell, first match winning.
+func (c *Client) refusalKind(ctx context.Context, sess *session, profile ClientProfile, playlistID string, alert *browseAlert) waxerr.PlaylistUnavailableKind {
+	switch playlistID {
+	case "WL", "LL", "LM":
+		// Watch Later and the Liked lists belong to a signed-in account, and
+		// oEmbed words them as nonexistent too.
+		return waxerr.PlaylistUnavailablePrivate
+	}
+	if alert != nil && strings.Contains(strings.ToLower(alert.reason), "unviewable") {
+		return waxerr.PlaylistUnavailableUnviewable
+	}
+	status := c.oembedStatus(ctx, sess, playlistID)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return waxerr.PlaylistUnavailablePrivate
+	}
+	// On WEB, the client it was measured on, the unviewable answer alone comes
+	// without the page shell. This is the wording check above for any locale,
+	// read after the GET so that a change to the shell cannot hide a private
+	// list.
+	if alert != nil && !alert.topbar && IsWebClient(profile.InnerTubeName) {
+		return waxerr.PlaylistUnavailableUnviewable
+	}
+	if status == http.StatusNotFound {
+		return waxerr.PlaylistUnavailableNotFound
+	}
+	return waxerr.PlaylistUnavailableUnknown
+}
+
+// oembedStatus asks oEmbed about a playlist and returns the HTTP status, or 0
+// when the GET failed. oEmbed answers 403 for a private list and 404 for one
+// that does not exist, where browse answers both alike.
+func (c *Client) oembedStatus(ctx context.Context, sess *session, playlistID string) int {
+	ctx, cancel := context.WithTimeout(ctx, oembedTimeout)
+	defer cancel()
+	target := "https://www.youtube.com/playlist?list=" + url.QueryEscape(playlistID)
+	_, err := c.httpGet(ctx, adoptedProfile(c.webFallback, sess), sess, "https://www.youtube.com/oembed?url="+url.QueryEscape(target))
+	if err == nil {
+		return http.StatusOK
+	}
+	if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok {
+		return hse.StatusCode
+	}
+	c.log.DebugContext(ctx, "oEmbed probe of a refused playlist failed", "playlist", playlistID, "err", err)
+	return 0
 }
 
 // browseInitial fetches and parses the first browse page of a playlist,

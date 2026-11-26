@@ -227,8 +227,23 @@ func listDuration(e waxtap.PlaylistEntry) string {
 	return durationOrDash(e.Duration)
 }
 
-// emitPlaylistList prints enumerated entries without downloading (the --list flag).
-func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
+// listCount is the --list title line's count: what a --max-items cap cut, or
+// that YouTube counts more than it listed, from the header's VideoCount.
+func listCount(pl *waxtap.Playlist, maxItems int) string {
+	n := len(pl.Entries)
+	switch {
+	case pl.VideoCount > n && maxItems > 0 && n >= maxItems:
+		return fmt.Sprintf("%d of %s", n, countOf(pl.VideoCount, "item"))
+	case pl.VideoCount > n:
+		return fmt.Sprintf("%s; YouTube counts %d", countOf(n, "item"), pl.VideoCount)
+	default:
+		return countOf(n, "item")
+	}
+}
+
+// emitPlaylistList prints enumerated entries without downloading (the --list
+// flag). maxItems is the --max-items cap, 0 for none.
+func emitPlaylistList(env *appEnv, pl *waxtap.Playlist, maxItems int) error {
 	if env.jsonMode() {
 		type entryJSON struct {
 			Index           int     `json:"index"`
@@ -273,18 +288,22 @@ func emitPlaylistList(env *appEnv, pl *waxtap.Playlist) error {
 			errs = append(errs, row)
 		}
 		return env.emitJSON(struct {
-			SchemaVersion int             `json:"schemaVersion"`
-			PlaylistID    string          `json:"playlistId"`
-			Title         string          `json:"title,omitempty"`
-			Count         int             `json:"count"`
-			Entries       []entryJSON     `json:"entries"`
-			Errors        []listErrorJSON `json:"errors,omitempty"`
-			Notes         []noteJSON      `json:"notes,omitempty"`
-		}{schemaVersion, pl.ID, pl.Title, len(pl.Entries), entries, errs, env.notesJSON()})
+			SchemaVersion int    `json:"schemaVersion"`
+			PlaylistID    string `json:"playlistId"`
+			Title         string `json:"title,omitempty"`
+			Author        string `json:"author,omitempty"`
+			// VideoCount is the total YouTube's header states, beside count,
+			// the entries listed; neither bounds the other.
+			VideoCount int             `json:"videoCount,omitempty"`
+			Count      int             `json:"count"`
+			Entries    []entryJSON     `json:"entries"`
+			Errors     []listErrorJSON `json:"errors,omitempty"`
+			Notes      []noteJSON      `json:"notes,omitempty"`
+		}{schemaVersion, pl.ID, pl.Title, pl.Author, pl.VideoCount, len(pl.Entries), entries, errs, env.notesJSON()})
 	}
 
 	if pl.Title != "" {
-		env.printf("%s (%s)\n\n", pl.Title, countOf(len(pl.Entries), "item"))
+		env.printf("%s (%s)\n\n", pl.Title, listCount(pl, maxItems))
 	}
 	tw := tabwriter.NewWriter(env.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tID\tDURATION\tTITLE")

@@ -189,19 +189,30 @@ func TestExitCodeFor(t *testing.T) {
 		// defect, not an interrupt, and reporting 130 would blame the user.
 		{context.Canceled, 1},
 		{waxtap.ErrVideoUnavailable, 3},
+		{waxtap.ErrVideoRestricted, 3},
+		{waxtap.ErrLoginRequired, 3},
+		{waxtap.ErrLiveContent, 3},
 		{waxtap.ErrLiveNotStarted, 3}, // availability verdicts share exit 3
 		{waxtap.ErrAgeRestricted, 3},
 		{waxtap.ErrMembersOnly, 3},
 		{waxtap.ErrGeoBlocked, 3},
+		{waxtap.ErrNoAudioFormats, 3},
+		{waxtap.ErrPlaylistUnavailable, 3},
+		{&waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailablePrivate}, 3},
+		{&waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailableUnviewable}, 3},
+		{waxtap.ErrPlaylistEmpty, 3},
 		{waxtap.ErrExtractionFailed, 4},
+		{waxtap.ErrCipherSolve, 4},
 		{fmt.Errorf("fetch: %w", iox.ErrResponseTooLarge), 4}, // over-cap body = anomalous extraction failure (player/innertube/SABR agree)
 		{waxtap.ErrPlaylistParse, 4},                          // maintainer-must-act, same class as extraction
 		{waxtap.ErrRateLimited, 5},
+		{waxtap.ErrTemporarilyUnavailable, 5},
 		{waxtap.ErrIncompleteStream, 7}, // distinct from extraction and cipher failures
 		{waxtap.ErrNeedsPOToken, 8},     // distinct precondition failure
 		{&usageError{msg: "bad"}, 2},
 		{waxtap.ErrInvalidVideoID, 2},
 		{waxtap.ErrVideoIDTooShort, 2},
+		{waxtap.ErrVideoIDTooLong, 2},
 		{waxtap.ErrInvalidPlaylistID, 2},
 		{waxtap.ErrIncompatibleSpec, 2},
 		{waxtap.ErrUnsupportedInput, 2}, // a correctable bad local input
@@ -604,7 +615,7 @@ func TestFinalError(t *testing.T) {
 }
 
 func TestClassifyError_PlaylistAvailability(t *testing.T) {
-	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "This playlist does not exist."}); c.exitCode != 3 || c.code != "playlist-unavailable" {
+	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "The playlist does not exist."}); c.exitCode != 3 || c.code != "playlist-unavailable" {
 		t.Errorf("unavailable = %+v, want code playlist-unavailable and exit 3", c)
 	}
 	if c := classifyError(waxtap.ErrPlaylistEmpty); c.exitCode != 3 || c.code != "playlist-empty" {
@@ -614,12 +625,11 @@ func TestClassifyError_PlaylistAvailability(t *testing.T) {
 		t.Errorf("malformed ID exit = %d, want 2", c.exitCode)
 	}
 	// Preserve YouTube's reason in the user-facing message.
-	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "This playlist does not exist."}); !strings.Contains(c.message, "does not exist") {
+	if c := classifyError(&waxtap.PlaylistUnavailableError{Reason: "The playlist does not exist."}); !strings.Contains(c.message, "does not exist") {
 		t.Errorf("message = %q, want YouTube's reason preserved", c.message)
 	}
-	// A browse 404 wraps the sentinel around an HTTPStatusError that embeds the
-	// internal endpoint URL. Classification should keep the exit code while hiding
-	// that URL from user-facing output.
+	// A sentinel wrapped around an HTTPStatusError, the shape a browse 404 had
+	// before it was typed, keeps the exit code and hides the endpoint URL.
 	wrapped := fmt.Errorf("%w: %v", waxtap.ErrPlaylistUnavailable,
 		&waxtap.HTTPStatusError{StatusCode: 404, URL: "https://www.youtube.com/youtubei/v1/browse"})
 	if c := classifyError(wrapped); c.exitCode != 3 || c.code != "playlist-unavailable" {
@@ -627,6 +637,70 @@ func TestClassifyError_PlaylistAvailability(t *testing.T) {
 	}
 	if c := classifyError(wrapped); strings.Contains(c.message, "youtubei") {
 		t.Errorf("message = %q, leaked the internal endpoint URL", c.message)
+	}
+}
+
+// The kind rides under the code as error.kind, absent while unknown, and the
+// private and unviewable kinds say what to do. A private list keeps WaxTap's
+// own words, since YouTube's say it does not exist.
+func TestClassifyError_PlaylistKind(t *testing.T) {
+	const gone = "The playlist does not exist."
+	cases := []struct {
+		name    string
+		err     error
+		kind    string
+		message string
+		hint    string // a word the hint must carry; "" for no hint
+	}{
+		{"unknown", &waxtap.PlaylistUnavailableError{Reason: gone}, "", gone, ""},
+		{"not found", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailableNotFound, Reason: gone}, "not-found", gone, ""},
+		// A browse 404 has no reason: the message follows the kind rather than
+		// guessing at one the kind rules out.
+		{"not found from a 404", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailableNotFound}, "not-found", "YouTube reports no such playlist", ""},
+		{"private", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailablePrivate, Reason: gone}, "private", "playlist is private", "guest"},
+		{"private from a 404", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailablePrivate}, "private", "playlist is private", "Watch Later"},
+		{"unviewable", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailableUnviewable, Reason: "This playlist type is unviewable."}, "unviewable", "This playlist type is unviewable.", "mixes"},
+		{"wrapped", fmt.Errorf("enumerate: %w", &waxtap.PlaylistUnavailableError{Kind: waxtap.PlaylistUnavailablePrivate}), "private", "playlist is private", "guest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := classifyError(tc.err)
+			if c.exitCode != 3 || c.code != "playlist-unavailable" {
+				t.Errorf("classified = %+v, want playlist-unavailable, exit 3", c)
+			}
+			if c.kind != tc.kind {
+				t.Errorf("kind = %q, want %q", c.kind, tc.kind)
+			}
+			if c.message != tc.message {
+				t.Errorf("message = %q, want %q", c.message, tc.message)
+			}
+			switch {
+			case tc.hint == "" && c.hint != "":
+				t.Errorf("hint = %q, want none", c.hint)
+			case !strings.Contains(c.hint, tc.hint):
+				t.Errorf("hint = %q, want it to mention %q", c.hint, tc.hint)
+			}
+
+			var doc bytes.Buffer
+			renderError(&doc, true, tc.err)
+			var envelope struct {
+				Error map[string]any `json:"error"`
+			}
+			if err := json.Unmarshal(doc.Bytes(), &envelope); err != nil {
+				t.Fatalf("unmarshal %q: %v", doc.String(), err)
+			}
+			got, has := envelope.Error["kind"]
+			switch {
+			case tc.kind == "" && has:
+				t.Errorf("error.kind = %v, want the key absent for an unknown kind", got)
+			case tc.kind != "" && got != tc.kind:
+				t.Errorf("error.kind = %v, want %q", got, tc.kind)
+			}
+		})
+	}
+	// Only a playlist refusal has a kind.
+	if c := classifyError(waxtap.ErrVideoUnavailable); c.kind != "" {
+		t.Errorf("video-unavailable kind = %q, want none", c.kind)
 	}
 }
 

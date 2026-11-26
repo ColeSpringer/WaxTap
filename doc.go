@@ -6,7 +6,8 @@
 // loudness normalization are opt-in. By default, downloads keep the selected
 // source stream and do not re-encode it.
 //
-// [Client.Download] and [Client.Stream] handle one video.
+// [Classify] tells a video link from a playlist or channel link without a
+// request. [Client.Download] and [Client.Stream] handle one video.
 // [Client.DownloadPlaylist] downloads playlist entries with bounded concurrency,
 // optional pacing, and an optional limit on download attempts. [Options]
 // configures per-host request rates and post-rate-limit cooldowns.
@@ -76,6 +77,13 @@
 // which a lone Info call cannot do; spend a per-entry budget through
 // [EnumerateOptions.MaxEnrich] rather than on Info calls, and read each entry's
 // failure from the [EnrichError] that names it.
+//
+// Enumerate reports a playlist YouTube will not list as [ErrPlaylistUnavailable].
+// Its [PlaylistUnavailableError] says why in Kind (not-found, private,
+// unviewable, or unknown), read from the ID, an oEmbed lookup, and the layout
+// of the refusal page, so it comes out the same in any locale; in English the
+// page's wording settles unviewable without the lookup. Not-found is YouTube's
+// answer to a guest, not proof of deletion.
 //
 // Everything else is a hard error the consumer should surface: extraction and
 // cipher maintenance signals ([ErrExtractionFailed], [ErrCipherSolve],

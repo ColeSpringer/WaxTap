@@ -41,9 +41,15 @@ type PlaylistEntry struct {
 // Playlist is the result of enumerating a playlist URL. Enumeration is
 // tolerant: one bad entry is collected in Errors rather than failing the list.
 type Playlist struct {
-	ID           string          // YouTube playlist ID
-	Title        string          // playlist title
-	Author       string          // playlist owner name
+	ID     string // YouTube playlist ID
+	Title  string // playlist title
+	Author string // playlist owner name
+	// VideoCount is the total YouTube's header states, 0 when it states none.
+	// It is neither a floor nor a ceiling on len(Entries): YouTube counts
+	// entries the listing hides, and an uploads feed states at most 20,000
+	// however many it holds. It comes with the first page, which every call
+	// fetches, so MaxItems: 1 carries it at no extra request.
+	VideoCount   int
 	Entries      []PlaylistEntry // entries in playlist order
 	Errors       []error         // per-entry failures, enrichment's included (partial enumeration is not fatal)
 	Continuation string          // opaque token for the next page; "" when exhausted

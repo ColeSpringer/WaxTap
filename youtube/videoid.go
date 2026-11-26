@@ -45,11 +45,12 @@ func isShortsPlaylistID(id string) bool {
 // from loose text, such as an ID trailed by "&feature=...", which suits pasted
 // download/info targets.
 //
-// A playlist-only URL (a list= parameter or /playlist path with no video)
-// returns ErrIsPlaylist so the caller can route it to Enumerate. Inputs that
-// carry a candidate of the wrong shape return ErrInvalidVideoID; an
-// all-ID-character token of the wrong length returns ErrVideoIDTooShort or
-// ErrVideoIDTooLong.
+// An input naming a playlist and no video returns ErrIsPlaylist, and one naming
+// a channel and neither returns ErrIsChannel, so the caller can route it to
+// Enumerate; a /playlist URL or list= with no usable playlist ID returns
+// ErrInvalidPlaylistID. Inputs that carry a candidate of the wrong shape return
+// ErrInvalidVideoID; an all-ID-character token of the wrong length returns
+// ErrVideoIDTooShort or ErrVideoIDTooLong. It reads the input as Classify does.
 func ExtractVideoID(input string) (string, error) {
 	return extractVideoID(input, true)
 }
@@ -63,70 +64,10 @@ func ExtractVideoIDStrict(input string) (string, error) {
 	return extractVideoID(input, false)
 }
 
-// extractVideoID is the shared implementation. allowLoose enables extraction from
-// surrounding text; clean IDs, recognized URLs, playlist routing, and length
-// classification apply either way.
+// extractVideoID is the video view of parseLink.
 func extractVideoID(input string, allowLoose bool) (string, error) {
-	s := strings.TrimSpace(input)
-	if s == "" {
-		return "", waxerr.ErrVideoIDTooShort
-	}
-	if idExact.MatchString(s) {
-		return s, nil
-	}
-
-	if u, err := parseLoose(s); err == nil && u.Host != "" {
-		// Distinguish an unrelated URL from a malformed YouTube video ID.
-		if !isYouTubeHost(u.Hostname()) {
-			return "", errNotYouTubeURL
-		}
-		q := u.Query()
-		if v := q.Get("v"); v != "" {
-			return validateID(v)
-		}
-		if id := videoIDFromPath(u); id != "" {
-			return validateID(id)
-		}
-		seg := firstSegment(u.Path)
-		// A URL on a known host with no video, but a playlist reference.
-		if q.Get("list") != "" || seg == "playlist" {
-			return "", waxerr.ErrIsPlaylist
-		}
-		// Classify channel URLs separately so callers can provide specific guidance.
-		if strings.HasPrefix(seg, "@") || seg == "c" || seg == "channel" || seg == "user" {
-			return "", waxerr.ErrIsChannel
-		}
-		// Report a recognized YouTube URL without a video separately from malformed
-		// input.
-		return "", errNoVideoInURL
-	}
-
-	// No recognizable host. Loose callers accept a bounded, exactly-11-character
-	// ID token from text such as an ID trailed by "&feature=..."; a longer
-	// contiguous token is rejected rather than truncated into a different valid ID.
-	// Strict callers skip that extraction, so a file path that embeds an
-	// 11-character run is rejected here.
-	if allowLoose {
-		// A bare UC channel ID or @handle is a channel, not a video. Classify it in
-		// the loose (target) path only, and above idFromLooseText so an @handle whose
-		// body is an 11-character run is not mis-extracted as a video ID. The strict
-		// path (process sources) deliberately skips this so a mistyped @-prefixed or
-		// UC-shaped local path reports "no such file" rather than "that is a channel".
-		// Real 11-character IDs never reach here (idExact matched them above).
-		if isChannelID(s) || isHandle(s) {
-			return "", waxerr.ErrIsChannel
-		}
-		if id, ok := idFromLooseText(s); ok {
-			return id, nil
-		}
-	}
-	// Route bare playlist IDs to Enumerate instead of treating them as malformed
-	// video IDs.
-	if playlistID.MatchString(s) {
-		return "", waxerr.ErrIsPlaylist
-	}
-	// Keep malformed bare IDs on the same length-specific errors used by URL IDs.
-	return "", classifyMalformedID(s)
+	l := parseLink(input, allowLoose)
+	return l.videoID, l.videoErr
 }
 
 // classifyMalformedID returns the most specific error for an invalid ID token.
@@ -175,20 +116,13 @@ func idCharsOnly(s string) bool {
 	return true
 }
 
-// ExtractPlaylistID extracts a playlist ID from a bare ID or a URL carrying a
-// list= parameter.
+// ExtractPlaylistID extracts a playlist ID from a bare ID, which may carry a
+// pasted query such as a share link's "&si=...", or from the list= parameter of
+// a YouTube URL, whatever else the URL names. A list= value must be made of ID
+// characters. It reads the input as Classify does.
 func ExtractPlaylistID(input string) (string, error) {
-	s := strings.TrimSpace(input)
-	if s == "" {
-		return "", waxerr.ErrInvalidPlaylistID
-	}
-	if u, err := parseLoose(s); err == nil && u.Host != "" {
-		if list := u.Query().Get("list"); list != "" {
-			return list, nil
-		}
-	}
-	if playlistID.MatchString(s) {
-		return s, nil
+	if id := parseLink(input, true).listID; id != "" {
+		return id, nil
 	}
 	return "", waxerr.ErrInvalidPlaylistID
 }
@@ -221,9 +155,15 @@ func (noVideoInURLError) Error() string {
 }
 func (noVideoInURLError) Unwrap() error { return waxerr.ErrInvalidVideoID }
 
+// bareHost lowercases host and drops a leading "www.", in that order, so
+// WWW.YOUTUBE-NOCOOKIE.COM compares as youtube-nocookie.com.
+func bareHost(host string) string {
+	return strings.TrimPrefix(strings.ToLower(host), "www.")
+}
+
 // isYouTubeHost reports whether host is a YouTube domain WaxTap recognizes.
 func isYouTubeHost(host string) bool {
-	h := strings.ToLower(strings.TrimPrefix(host, "www."))
+	h := bareHost(host)
 	switch h {
 	case "youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "youtube-nocookie.com":
 		return true
@@ -235,7 +175,7 @@ func isYouTubeHost(host string) bool {
 // but the input still looks like a YouTube URL (has a path or a known host
 // prefix). Host-less inputs come back with an empty Host.
 func parseLoose(s string) (*url.URL, error) {
-	if !strings.Contains(s, "://") {
+	if !hasScheme(s) {
 		lower := strings.ToLower(s)
 		if strings.Contains(s, "/") ||
 			strings.HasPrefix(lower, "youtu.be") ||
@@ -249,8 +189,24 @@ func parseLoose(s string) (*url.URL, error) {
 	return url.Parse(s)
 }
 
+// hasScheme reports whether s starts with a URL scheme and "://". A "://"
+// further in, as in a query value carrying a URL, does not count.
+func hasScheme(s string) bool {
+	i := strings.Index(s, "://")
+	if i <= 0 {
+		return false
+	}
+	for j, r := range s[:i] {
+		letter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+		if !letter && (j == 0 || !(r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.')) {
+			return false
+		}
+	}
+	return true
+}
+
 func videoIDFromPath(u *url.URL) string {
-	host := strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
+	host := bareHost(u.Hostname())
 	segs := pathSegments(u.Path)
 	if host == "youtu.be" {
 		if len(segs) >= 1 {
@@ -260,7 +216,14 @@ func videoIDFromPath(u *url.URL) string {
 	}
 	if len(segs) >= 2 {
 		switch segs[0] {
-		case "embed", "shorts", "v", "live":
+		case "embed":
+			// Routes that happen to be 11 characters long: an embedded
+			// playlist (list=) and a channel's live stream (channel=).
+			if segs[1] == "videoseries" || segs[1] == "live_stream" {
+				return ""
+			}
+			return segs[1]
+		case "shorts", "v", "live":
 			return segs[1]
 		}
 	}

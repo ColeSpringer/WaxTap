@@ -72,6 +72,8 @@ func TestNoteDroppedPlaylist(t *testing.T) {
 		{"plain video url", "https://www.youtube.com/watch?v=dummyVideo0", false, false},
 		{"bare video id", "dummyVideo0", false, false},
 		{"watch with list but quiet", "https://www.youtube.com/watch?v=dummyVideo0&list=PLtest123456789", true, false},
+		// Off YouTube the input names nothing, so there is no playlist to drop.
+		{"foreign host", "https://example.com/watch?v=dummyVideo0&list=PLtest123456789", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

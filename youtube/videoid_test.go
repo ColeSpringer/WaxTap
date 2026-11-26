@@ -20,6 +20,7 @@ func TestExtractVideoID(t *testing.T) {
 		{"watch url", "https://www.youtube.com/watch?v=" + id, id, nil},
 		{"watch url extra params", "https://www.youtube.com/watch?v=" + id + "&t=43s&feature=share", id, nil},
 		{"watch url no scheme", "youtube.com/watch?v=" + id, id, nil},
+		{"no scheme, a URL in a query value", "youtube.com/watch?v=" + id + "&u=https://a.example", id, nil},
 		{"youtu.be", "https://youtu.be/" + id, id, nil},
 		{"youtu.be no scheme", "youtu.be/" + id, id, nil},
 		{"youtu.be with query", "https://youtu.be/" + id + "?t=10", id, nil},
@@ -30,14 +31,23 @@ func TestExtractVideoID(t *testing.T) {
 		{"music host", "https://music.youtube.com/watch?v=" + id, id, nil},
 		{"m host", "https://m.youtube.com/watch?v=" + id, id, nil},
 		{"nocookie embed", "https://www.youtube-nocookie.com/embed/" + id, id, nil},
+		// Two embed names are routes, not 11-character IDs.
+		{"embedded playlist", "https://www.youtube.com/embed/videoseries?list=PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
+		{"embedded live stream", "https://www.youtube.com/embed/live_stream?channel=UCabcdefghijklmnopqrstuv", "", waxerr.ErrInvalidVideoID},
+		{"uppercase nocookie host", "WWW.YOUTUBE-NOCOOKIE.COM/embed/" + id, id, nil},
 		{"watch in a playlist still downloads the video", "https://www.youtube.com/watch?v=" + id + "&list=PLabcdefghijabcdef", id, nil},
 
 		{"playlist only url", "https://www.youtube.com/playlist?list=PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
 		{"list param no video", "https://www.youtube.com/watch?list=PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
+		// A playlist route needs a playlist: these name none, and say so.
+		{"playlist path without a list", "https://www.youtube.com/playlist", "", waxerr.ErrInvalidPlaylistID},
+		{"list of non-ID characters", "https://www.youtube.com/watch?list=a%20b", "", waxerr.ErrInvalidPlaylistID},
 
 		// Bare playlist IDs are not malformed video IDs.
 		{"bare playlist id", "PLabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
 		{"bare radio playlist id", "RDabcdefghijabcdef", "", waxerr.ErrIsPlaylist},
+		// A share link's si= holds an 11-character token; the playlist is what was meant.
+		{"bare playlist id with a share parameter", "PLabcdefghijabcdef&si=abcdefghijk", "", waxerr.ErrIsPlaylist},
 
 		// Recognized YouTube URLs can still lack a video reference.
 		{"youtube homepage", "https://www.youtube.com/", "", waxerr.ErrInvalidVideoID},
@@ -48,6 +58,11 @@ func TestExtractVideoID(t *testing.T) {
 		{"c channel", "https://www.youtube.com/c/Blender", "", waxerr.ErrIsChannel},
 		{"channel id", "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv", "", waxerr.ErrIsChannel},
 		{"user channel", "https://www.youtube.com/user/Blender", "", waxerr.ErrIsChannel},
+		// A channel route naming no channel is no channel, so the hint to list
+		// its uploads cannot send the caller into a usage error.
+		{"c without a name", "https://www.youtube.com/c", "", waxerr.ErrInvalidVideoID},
+		{"user without a name", "https://www.youtube.com/user", "", waxerr.ErrInvalidVideoID},
+		{"channel without a UC id", "https://www.youtube.com/channel/foo", "", waxerr.ErrInvalidVideoID},
 
 		// Bare channel IDs and @handles are channels too, mirroring the URL branch so
 		// info/formats can guide the caller instead of rejecting an overlong ID.
@@ -110,6 +125,7 @@ func TestExtractVideoIDStrict(t *testing.T) {
 		"/tmp/x/" + id,        // path separator
 		"D:" + id,             // Windows drive prefix
 		id + "&feature=share", // query-style junk
+		"PLabcdefghijabcdef&si=abcdefghijk",
 	}
 	for _, in := range reject {
 		t.Run("reject "+in, func(t *testing.T) {
@@ -123,6 +139,8 @@ func TestExtractVideoIDStrict(t *testing.T) {
 		id:                                      id,
 		"https://www.youtube.com/watch?v=" + id: id,
 		"https://youtu.be/" + id:                id,
+		// A scheme inside a query value does not make the input host-less.
+		"youtube.com/watch?v=" + id + "&u=https://a.example": id,
 	}
 	for in, want := range accept {
 		t.Run("accept "+in, func(t *testing.T) {
@@ -192,7 +210,7 @@ func TestExtractVideoID_ChannelMessage(t *testing.T) {
 func TestExtractVideoID_BareChannel(t *testing.T) {
 	// "@elevenchars" has an exactly-11-character body; the loose extractor must still
 	// report a channel rather than returning "elevenchars" as a video ID.
-	for _, in := range []string{"UCabcdefghijklmnopqrstuv", "@Blender", "@elevenchars"} {
+	for _, in := range []string{"UCabcdefghijklmnopqrstuv", "@Blender", "@elevenchars", "@Blender/videos", "UCabcdefghijklmnopqrstuv/streams"} {
 		if _, err := ExtractVideoID(in); !errors.Is(err, waxerr.ErrIsChannel) {
 			t.Errorf("ExtractVideoID(%q) err = %v, want ErrIsChannel", in, err)
 		}
@@ -204,6 +222,9 @@ func TestExtractVideoID_BareChannel(t *testing.T) {
 	}
 	if _, err := ExtractVideoIDStrict("UCabcdefghijklmnopqrstuv"); !errors.Is(err, waxerr.ErrVideoIDTooLong) {
 		t.Errorf("ExtractVideoIDStrict(UC...) err = %v, want ErrVideoIDTooLong", err)
+	}
+	if _, err := ExtractVideoIDStrict("@Blender/videos"); !errors.Is(err, waxerr.ErrInvalidVideoID) {
+		t.Errorf("ExtractVideoIDStrict(@Blender/videos) err = %v, want ErrInvalidVideoID", err)
 	}
 }
 
@@ -218,10 +239,17 @@ func TestExtractPlaylistID(t *testing.T) {
 		{"bare", list, list, nil},
 		{"playlist url", "https://www.youtube.com/playlist?list=" + list, list, nil},
 		{"watch with list", "https://www.youtube.com/watch?v=testVideo01&list=" + list, list, nil},
+		{"no scheme, a URL in a query value", "youtube.com/playlist?list=" + list + "&u=https://a.example", list, nil},
 		{"radio mix", "https://www.youtube.com/watch?v=testVideo01&list=RDabcdefghij", "RDabcdefghij", nil},
 		{"education course", "ECabcdefghijklmnop", "ECabcdefghijklmnop", nil},
+		{"bare with a share parameter", list + "&si=abcdefghijk", list, nil},
 		{"popular uploads", "PUabcdefghijklmnop", "PUabcdefghijklmnop", nil},
 		{"not a playlist", "https://www.youtube.com/watch?v=testVideo01", "", waxerr.ErrInvalidPlaylistID},
+		{"foreign host", "example.com/?list=" + list, "", waxerr.ErrInvalidPlaylistID},
+		{"list of non-ID characters", "https://www.youtube.com/watch?list=a%20b", "", waxerr.ErrInvalidPlaylistID},
+		{"list of a plus", "https://www.youtube.com/watch?list=+", "", waxerr.ErrInvalidPlaylistID},
+		// YouTube answers a made-up list "unviewable"; it is still a list to ask about.
+		{"made-up list", "https://www.youtube.com/watch?list=hello", "hello", nil},
 		// Exactly 11 chars: a video-id-shaped token that happens to start with a
 		// playlist prefix pair must not validate as a playlist.
 		{"video-id-shaped token", "PLabcdefghi", "", waxerr.ErrInvalidPlaylistID},

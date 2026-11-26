@@ -2,6 +2,7 @@ package waxerr
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -82,6 +83,57 @@ func TestPreferErr_AvailabilityFamily(t *testing.T) {
 		// The new verdicts must outrank a generic/network error, like their siblings.
 		if got := PreferErr(errors.New("generic"), sentinel); got != sentinel {
 			t.Errorf("PreferErr(generic, %v) = %v, want %v (rank 5)", sentinel, got, sentinel)
+		}
+	}
+}
+
+// The spellings are what --json reports as error.kind.
+func TestPlaylistUnavailableKind_String(t *testing.T) {
+	cases := []struct {
+		kind PlaylistUnavailableKind
+		want string
+	}{
+		{PlaylistUnavailableUnknown, "unknown"},
+		{PlaylistUnavailableNotFound, "not-found"},
+		{PlaylistUnavailablePrivate, "private"},
+		{PlaylistUnavailableUnviewable, "unviewable"},
+		{PlaylistUnavailableKind(200), "unknown"},
+	}
+	for _, tc := range cases {
+		if got := tc.kind.String(); got != tc.want {
+			t.Errorf("PlaylistUnavailableKind(%d).String() = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// YouTube words a private list as one that does not exist, so that kind says
+// so itself; every other kind keeps YouTube's reason.
+func TestPlaylistUnavailableError_ErrorPerKind(t *testing.T) {
+	const gone = "The playlist does not exist."
+	cases := []struct {
+		err  *PlaylistUnavailableError
+		want string
+	}{
+		{&PlaylistUnavailableError{}, "waxtap: playlist unavailable"},
+		{&PlaylistUnavailableError{Reason: gone}, "waxtap: " + gone},
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailableNotFound, Reason: gone}, "waxtap: " + gone},
+		// A browse 404 carries no reason, so the kind speaks for itself.
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailableNotFound}, "waxtap: YouTube reports no such playlist"},
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailableUnviewable}, "waxtap: YouTube serves no listing for this playlist ID"},
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailablePrivate, Reason: gone}, "waxtap: playlist is private"},
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailablePrivate}, "waxtap: playlist is private"},
+		{&PlaylistUnavailableError{Kind: PlaylistUnavailableUnviewable, Reason: "This playlist type is unviewable."}, "waxtap: This playlist type is unviewable."},
+	}
+	for _, tc := range cases {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("%+v.Error() = %q, want %q", *tc.err, got, tc.want)
+		}
+		wrapped := fmt.Errorf("enumerate: %w", tc.err)
+		if !errors.Is(wrapped, ErrPlaylistUnavailable) {
+			t.Errorf("%+v does not unwrap to ErrPlaylistUnavailable", *tc.err)
+		}
+		if pu, ok := errors.AsType[*PlaylistUnavailableError](wrapped); !ok || pu.Kind != tc.err.Kind {
+			t.Errorf("AsType through a wrap = %v, %v; want kind %v", pu, ok, tc.err.Kind)
 		}
 	}
 }

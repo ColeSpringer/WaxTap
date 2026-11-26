@@ -57,8 +57,8 @@ var (
 	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
 	// response parsed but matched no known shape.
 	ErrPlaylistParse = waxerr.ErrPlaylistParse
-	// ErrPlaylistUnavailable indicates that a playlist is private, deleted, or
-	// otherwise inaccessible. See [PlaylistUnavailableError].
+	// ErrPlaylistUnavailable indicates that YouTube refused to list a playlist.
+	// [PlaylistUnavailableError] carries the reason and the kind of refusal.
 	ErrPlaylistUnavailable = waxerr.ErrPlaylistUnavailable
 	// ErrPlaylistEmpty indicates that a valid playlist contains no videos.
 	ErrPlaylistEmpty = waxerr.ErrPlaylistEmpty
@@ -94,4 +94,25 @@ type (
 	// PlaylistUnavailableError reports why YouTube considers a playlist
 	// inaccessible.
 	PlaylistUnavailableError = waxerr.PlaylistUnavailableError
+)
+
+// PlaylistUnavailableKind is why YouTube refused a playlist, as far as a
+// signed-out guest can tell.
+type PlaylistUnavailableKind = waxerr.PlaylistUnavailableKind
+
+// PlaylistUnavailableKind values.
+const (
+	// PlaylistUnavailableUnknown means the refusal was not classified. A
+	// channel's uploads feed is always this: a channel with no uploads answers
+	// exactly as a deleted one.
+	PlaylistUnavailableUnknown = waxerr.PlaylistUnavailableUnknown
+	// PlaylistUnavailableNotFound means YouTube reports no such playlist to a
+	// guest, which is not proof of deletion.
+	PlaylistUnavailableNotFound = waxerr.PlaylistUnavailableNotFound
+	// PlaylistUnavailablePrivate means the playlist exists but is hidden from
+	// this session. Watch Later and the Liked lists always are.
+	PlaylistUnavailablePrivate = waxerr.PlaylistUnavailablePrivate
+	// PlaylistUnavailableUnviewable means the ID names no type YouTube serves a
+	// listing for, such as a mix or radio, or is not a playlist ID at all.
+	PlaylistUnavailableUnviewable = waxerr.PlaylistUnavailableUnviewable
 )

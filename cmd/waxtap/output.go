@@ -24,7 +24,6 @@ import (
 	"github.com/colespringer/waxtap/v3/internal/httpx"
 	"github.com/colespringer/waxtap/v3/internal/iox"
 	"github.com/colespringer/waxtap/v3/internal/tempfile"
-	"github.com/colespringer/waxtap/v3/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -486,7 +485,10 @@ var errInterrupted = errors.New("interrupted by a signal")
 // aggregating a run reads error.code in a playlist item, a batch item and the
 // top-level envelope alike instead of matching message prose in two of the three.
 type errorJSON struct {
-	Code    string `json:"code"`
+	Code string `json:"code"`
+	// Kind is the finer class under some codes, absent when there is none:
+	// under playlist-unavailable, not-found, private, or unviewable.
+	Kind    string `json:"kind,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -518,7 +520,7 @@ func errorObject(err error) *errorJSON {
 		return nil
 	}
 	c := classifyError(err)
-	return &errorJSON{Code: c.code, Message: c.message}
+	return &errorJSON{Code: c.code, Kind: c.kind, Message: c.message}
 }
 
 // jsonError is the --json error envelope. outputPath and outputBytes are set only
@@ -561,7 +563,7 @@ func renderErrorKept(w io.Writer, jsonMode bool, err error, kept *keptOutput) {
 	if jsonMode {
 		je := jsonError{
 			SchemaVersion: schemaVersion,
-			Error:         &errorJSON{Code: c.code, Message: c.message},
+			Error:         &errorJSON{Code: c.code, Kind: c.kind, Message: c.message},
 			Notes:         currentRunNotes(),
 		}
 		if kept != nil {
@@ -602,6 +604,7 @@ func cleanMessage(msg string) string {
 type classifiedError struct {
 	exitCode int
 	code     string
+	kind     string // the finer class under code, or ""
 	message  string
 	hint     string
 }
@@ -678,6 +681,7 @@ func classifyError(err error) classifiedError {
 		c.exitCode, c.code = 3, "no-audio-formats"
 	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
 		c.exitCode, c.code = 3, "playlist-unavailable"
+		c.kind, c.hint = playlistRefusal(err)
 	case errors.Is(err, waxtap.ErrPlaylistEmpty):
 		c.exitCode, c.code = 3, "playlist-empty"
 	case errors.Is(err, waxtap.ErrRequestedFormatUnavailable):
@@ -704,6 +708,9 @@ func classifyError(err error) classifiedError {
 		errors.Is(err, waxtap.ErrVideoIDTooLong),
 		errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		c.exitCode, c.code = 2, "invalid-input"
+		if vl, ok := errors.AsType[*videoBesideListError](err); ok {
+			c.hint = "the URL also names playlist " + vl.playlistID + ": pass the playlist URL to download every item, or add --list to enumerate"
+		}
 	case errors.Is(err, waxtap.ErrInvalidConfig):
 		c.exitCode, c.code = 2, "invalid-config"
 	// An exclusive publish that lost the path is a collision, not an I/O failure,
@@ -760,6 +767,22 @@ func classifyError(err error) classifiedError {
 	return c
 }
 
+// playlistRefusal returns the kind of a playlist refusal for error.kind, ""
+// while unknown, and the hint that goes with it.
+func playlistRefusal(err error) (kind, hint string) {
+	pu, ok := errors.AsType[*waxtap.PlaylistUnavailableError](err)
+	if !ok || pu.Kind == waxtap.PlaylistUnavailableUnknown {
+		return "", ""
+	}
+	switch pu.Kind {
+	case waxtap.PlaylistUnavailablePrivate:
+		hint = "WaxTap browses as a signed-out guest, which cannot see a private playlist; Watch Later and the Liked lists are always private"
+	case waxtap.PlaylistUnavailableUnviewable:
+		hint = "the ID names no playlist YouTube will list; mixes and radios are among them"
+	}
+	return pu.Kind.String(), hint
+}
+
 const (
 	// poTokenHint covers a missing provider, a failed mint, or a token YouTube
 	// rejected. A status-2 cap is classified as ErrIncompleteStream instead.
@@ -785,8 +808,8 @@ func watchPageSuffix(via bool) string {
 // process. hint gives the command-specific next step for handling the whole
 // playlist. The note stays on stderr, keeping JSON and -o - stdout parseable.
 func noteDroppedPlaylist(env *appEnv, input, hint string) {
-	if id, err := youtube.ExtractPlaylistID(input); err == nil {
-		env.note(notePlaylistIgnored, "ignoring playlist %s; %s", id, hint)
+	if link, err := waxtap.Classify(input); err == nil && link.VideoID != "" && link.PlaylistID != "" {
+		env.note(notePlaylistIgnored, "ignoring playlist %s; %s", link.PlaylistID, hint)
 	}
 }
 
@@ -875,10 +898,10 @@ func friendlyError(err error) string {
 	if rle, ok := errors.AsType[*waxtap.RateLimitError](err); ok {
 		return rle.Error() + "; back off and retry later"
 	}
-	// A typed playlist-unavailable error carries YouTube's own reason (no URL), so
-	// surface it. The bare wrapped sentinel from a browse 403/404 embeds the
-	// internal endpoint URL and is handled by the switch with a fixed message.
-	if pue, ok := errors.AsType[*waxtap.PlaylistUnavailableError](err); ok && pue.Reason != "" {
+	// A typed playlist refusal names no URL, so its own words are safe: YouTube's
+	// reason, or what its kind says. An unclassified one with no reason falls to
+	// the fixed message below.
+	if pue, ok := errors.AsType[*waxtap.PlaylistUnavailableError](err); ok && (pue.Reason != "" || pue.Kind != waxtap.PlaylistUnavailableUnknown) {
 		return pue.Error()
 	}
 	switch {
@@ -893,7 +916,7 @@ func friendlyError(err error) string {
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
 	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
-		// A fixed message keeps the wrapped browse URL out of the output.
+		// A refusal that says nothing more: unclassified, with no reason.
 		return "this playlist is unavailable; it may be private, deleted, or nonexistent"
 	case errors.Is(err, waxtap.ErrPlaylistEmpty):
 		return "this playlist has no videos"

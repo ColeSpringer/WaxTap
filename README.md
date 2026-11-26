@@ -88,10 +88,12 @@ local file, `transcode` and `normalize` also a directory (`-r` recurses), and
   failed lookup delivers the audio uncut with a warning;
   `--sponsorblock-on-error fail` makes it an error.
 - Scripting: `--json` is a stable contract (`schemaVersion` 3) and `--quiet`
-  prints only the output path. Failures are `{"code", "message"}` objects, and
-  a run that succeeds reports what it had to say as `warnings` and `notes`,
-  whose codes are listed in
-  [docs/warnings-and-notes.md](docs/warnings-and-notes.md). Exit codes are
+  prints only the output path. Failures are `{"code", "message"}` objects; a
+  refused playlist adds `kind` (`not-found`, `private`, or `unviewable`).
+  `--list --json` carries the playlist's `author` and the `videoCount` YouTube
+  states, which can differ from the entries listed. A run that succeeds
+  reports what it had to say as `warnings` and `notes`, whose codes are listed
+  in [docs/warnings-and-notes.md](docs/warnings-and-notes.md). Exit codes are
   [below](#exit-codes).
 
 ## Library
@@ -127,7 +129,8 @@ func main() {
 
 The root `waxtap` package is the stable API. `Download`, `Stream`, `Info`,
 `Enumerate`, and `DownloadPlaylist` work on YouTube; `Process`, `ProcessAlbum`,
-`Measure`, and `Split` work on local files.
+`Measure`, and `Split` work on local files. `Classify` tells a video link from
+a playlist or channel link without a request.
 
 - A `Download` with no `ProcessSpec` delivers the source stream byte for byte.
 - Selection defaults to stereo, as the CLI's does. To let a surround track

@@ -68,6 +68,7 @@ an authored, minimized fixture; never commit them.
 | An Art Track tagged with its artist alone (no album, copyright, or release year), or `music` gone from `info --json` | `youtube/music.go`: the description layout in `parseArtTrack` |
 | A music video's `music` gone from `info --json --full`, or there on some runs only | `youtube/music.go` `musicCard`: YouTube serves the description in two layouts (a card shelf, a details list) and each has its own reader; `youtube/watchpagedata.go` for where the page states `ytInitialData` |
 | WEB audio stalls, truncates, or misdecodes | `youtube/internal/sabr` |
+| A playlist refused with the wrong `error.kind`, or `videoCount` gone from `--list --json` | `youtube/playlist_parse.go`, `refusalKind` in `youtube/client.go`. Capture the page WaxTap gets with `WAXTAP_TEST_PLAYLIST=<id> go test -tags=integration -run TestLive_BrowseCapture ./youtube/` (`WAXTAP_TEST_HL` sets the locale); it writes `youtube/browse-<id>.real.json` |
 
 The cipher solver executes the whole player in goja, fingerprints descrambler
 candidates, and requires consensus. Common failures:

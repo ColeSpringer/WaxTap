@@ -114,8 +114,7 @@ const (
 // a non-nil empty slice.
 var DefaultCategories = sponsorblock.DefaultCategories
 
-// Extraction models (package youtube). Part of the volatile surface; may evolve
-// pre-1.0.
+// Extraction models (package youtube).
 type (
 	Video          = youtube.Video
 	Thumbnail      = youtube.Thumbnail
@@ -135,6 +134,22 @@ type (
 	Music = youtube.Music
 	// MusicSource names the statement a Music was read from.
 	MusicSource = youtube.MusicSource
+)
+
+// Link classification (package youtube). See [Classify].
+type (
+	// Link is what an input names: its kind and every ID it carries.
+	Link = youtube.Link
+	// LinkKind is what an input names, as WaxTap's commands route it.
+	LinkKind = youtube.LinkKind
+)
+
+// LinkKind values.
+const (
+	LinkUnknown  = youtube.LinkUnknown
+	LinkVideo    = youtube.LinkVideo
+	LinkPlaylist = youtube.LinkPlaylist
+	LinkChannel  = youtube.LinkChannel
 )
 
 // LiveStatus values.

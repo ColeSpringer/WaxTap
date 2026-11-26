@@ -123,22 +123,159 @@ func TestParseBrowseInitial_MessageOnlyIsEmpty(t *testing.T) {
 	}
 }
 
+// An ERROR alert is a refusal. It reaches Enumerate with YouTube's reason and
+// whether the page shell came with it, which every refusal but the unviewable
+// one carries; the kind is decided there. The bodies are the live shapes.
 func TestParseBrowseInitial_ErrorAlertIsUnavailable(t *testing.T) {
+	cases := []struct {
+		name, body, reason string
+		topbar             bool
+	}{
+		{
+			"does not exist",
+			`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"The playlist does not exist."}]}}}],"topbar":{"desktopTopbarRenderer":{}},"microformat":{"microformatDataRenderer":{"noindex":true}}}`,
+			"The playlist does not exist.", true,
+		},
+		{
+			"unviewable",
+			`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"This playlist type is unviewable."}]}}}],"microformat":{"microformatDataRenderer":{"noindex":true}}}`,
+			"This playlist type is unviewable.", false,
+		},
+		{
+			"localized, simpleText",
+			`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"simpleText":"Die Playlist ist nicht vorhanden."}}}],"topbar":{"desktopTopbarRenderer":{}}}`,
+			"Die Playlist ist nicht vorhanden.", true,
+		},
+		{
+			"null topbar is no topbar",
+			`{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"runs":[{"text":"x"}]}}}],"topbar":null}`,
+			"x", false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := parseBrowseInitial([]byte(tc.body))
+			if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
+				t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+			}
+			if errors.Is(err, waxerr.ErrInvalidPlaylistID) || errors.Is(err, waxerr.ErrPlaylistEmpty) {
+				t.Error("a refused playlist must not read as an invalid or empty ID")
+			}
+			a, ok := errors.AsType[*browseAlert](err)
+			if !ok {
+				t.Fatalf("err = %#v, want *browseAlert", err)
+			}
+			if a.reason != tc.reason || a.topbar != tc.topbar {
+				t.Errorf("alert = {reason:%q topbar:%v}, want {%q %v}", a.reason, a.topbar, tc.reason, tc.topbar)
+			}
+		})
+	}
+}
+
+// parseCount reads the one run of ASCII digits and group separators, wherever
+// the locale puts it, and refuses what it cannot read exactly.
+func TestParseCount(t *testing.T) {
+	runs := func(parts ...string) textRuns {
+		var tr textRuns
+		for _, p := range parts {
+			tr.Runs = append(tr.Runs, struct {
+				Text string `json:"text"`
+			}{p})
+		}
+		return tr
+	}
+	cases := []struct {
+		name string
+		text textRuns
+		want int
+	}{
+		{"en", runs("6,131", " videos"), 6131},
+		{"de", runs("6.131", " Videos"), 6131},
+		{"fr", runs("6\u202f131", "\u00a0vidéos"), 6131},
+		{"ko", runs("동영상 ", "6,131", "개"), 6131},
+		{"th", runs("วิดีโอ ", "6,131", " รายการ"), 6131},
+		{"sw", runs("Video ", "6,131"), 6131},
+		{"es ungrouped", runs("6131", " vídeos"), 6131},
+		{"NBSP", runs("6\u00a0131", " videos"), 6131},
+		{"space", runs("6 131", " videos"), 6131},
+		{"apostrophe", runs("6'131", " Videos"), 6131},
+		{"right single quote", runs("6\u2019131", " Videos"), 6131},
+		{"small", runs("14", " videos"), 14},
+		{"ceiling", runs("20,000", " videos"), 20000},
+		{"millions", runs("1,234,567", " views"), 1234567},
+		{"abbreviated", runs("1.2", "K videos"), 0},
+		{"abbreviated in one run", runs("1.2K", " videos"), 0},
+		{"lakh", runs("1,80,202", " views"), 0},
+		{"long first group", runs("6131,000", " videos"), 0},
+		{"mixed separators", runs("1,234.567", " videos"), 0},
+		{"two counts", runs("6", " of ", "14"), 0},
+		{"words only", runs("No videos"), 0},
+		{"simpleText", textRuns{SimpleText: "14 videos"}, 0},
+		{"empty", textRuns{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseCount(tc.text); got != tc.want {
+				t.Errorf("parseCount(%q) = %d, want %d", tc.text.String(), got, tc.want)
+			}
+		})
+	}
+}
+
+// The count comes from the header on an uploads feed and from the sidebar on
+// an ordinary list, whose page header holds only localized text.
+func TestParseBrowseInitial_VideoCount(t *testing.T) {
+	cases := []struct {
+		fixture string
+		want    int
+	}{
+		{"playlist_browse.json", 6131},
+		{"playlist_browse_pageheader.json", 14},
+		{"playlist_browse_lockup.json", 0},
+	}
+	for _, tc := range cases {
+		meta, _, _, err := parseBrowseInitial(readFixture(t, tc.fixture))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.fixture, err)
+		}
+		if meta.videoCount != tc.want {
+			t.Errorf("%s: videoCount = %d, want %d", tc.fixture, meta.videoCount, tc.want)
+		}
+	}
+}
+
+// The page header's own row ("Playlist", "14 videos", "62,115 views") is not
+// read: choosing a part by position over localized words could misread one.
+func TestParseBrowseInitial_PageHeaderTextIsNotACount(t *testing.T) {
 	body := []byte(`{
-		"alerts": [{"alertRenderer": {"type": "ERROR", "text": {"simpleText": "This playlist does not exist."}}}]
+		"header": {"pageHeaderRenderer": {"content": {"pageHeaderViewModel": {"metadata": {"contentMetadataViewModel": {"metadataRows": [
+			{"metadataParts": [{"text": {"content": "Playlist"}}, {"text": {"content": "14 videos"}}, {"text": {"content": "62,115 views"}}]}
+		]}}}}}},
+		"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [
+			{"lockupViewModel": {"contentId": "dummyVideo0", "metadata": {"lockupMetadataViewModel": {"title": {"content": "Talk A"}}}}}
+		]}}]}}}}]}}
 	}`)
-	_, _, _, err := parseBrowseInitial(body)
-	if !errors.Is(err, waxerr.ErrPlaylistUnavailable) {
-		t.Fatalf("err = %v, want ErrPlaylistUnavailable", err)
+	meta, _, _, err := parseBrowseInitial(body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if errors.Is(err, waxerr.ErrInvalidPlaylistID) || errors.Is(err, waxerr.ErrPlaylistEmpty) {
-		t.Error("a private or deleted playlist must not read as an invalid or empty ID")
+	if meta.videoCount != 0 {
+		t.Errorf("videoCount = %d, want 0 without a header or sidebar count", meta.videoCount)
 	}
-	if _, ok := errors.AsType[*waxerr.PlaylistUnavailableError](err); !ok {
-		t.Fatalf("err = %#v, want *PlaylistUnavailableError", err)
+}
+
+// An ordinary PL list serves the page-header layout, whose owner is one
+// localized "by X" span, so the sidebar's owner is its only author source.
+func TestParseBrowseInitial_PageHeaderLayout(t *testing.T) {
+	meta, items, token, err := parseBrowseInitial(readFixture(t, "playlist_browse_pageheader.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "does not exist") {
-		t.Errorf("err = %q, want YouTube's reason preserved", err)
+	if meta.title != "Page Header Playlist" || meta.author != "Owner Name" {
+		t.Errorf("meta = {title:%q author:%q}, want the playlist title and the sidebar owner", meta.title, meta.author)
+	}
+	if len(items) != 2 || token != "" {
+		t.Errorf("items = %d, token = %q, want 2 and none", len(items), token)
 	}
 }
 

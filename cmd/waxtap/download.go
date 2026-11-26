@@ -156,36 +156,66 @@ func runDownload(cmd *cobra.Command, df *downloadFlags, arg string) error {
 		}
 	}
 
-	// Classify the argument before doing network work. A watch URL with a list
-	// parameter follows the video path unless --list is set; playlist-only and
-	// channel inputs expand (a channel resolves to its uploads feed).
-	_, idErr := youtube.ExtractVideoID(arg)
-	_, plErr := youtube.ExtractPlaylistID(arg)
-	_, chErr := youtube.ExtractChannelRef(arg)
-	isVideo := idErr == nil
-	hasPlaylist := plErr == nil
-	isChannel := chErr == nil
+	// Classify the argument before doing network work.
+	link, lerr := waxtap.Classify(arg)
+	route, err := routeDownload(link, lerr, df.listOnly)
+	if err != nil {
+		return err
+	}
+	if route == routePlaylist {
+		return runPlaylistDownload(cmd.Context(), env, df, arg)
+	}
+	if err := rejectChangedFlags(cmd, "is only used with a playlist input",
+		"max-items", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
+		return err
+	}
+	// A watch?v=X&list=Y URL downloads only the video; note the dropped playlist.
+	noteDroppedPlaylist(env, arg, "pass the playlist URL to download every item, or add --list to enumerate")
+	return runSingleDownload(cmd.Context(), env, df, arg)
+}
 
+// downloadRoute is the path a download argument takes.
+type downloadRoute uint8
+
+const (
+	routeSingle   downloadRoute = iota // one video
+	routePlaylist                      // a playlist or a channel's uploads, listed or downloaded
+)
+
+// routeDownload picks the path for an argument Classify read. A video
+// downloads alone, a watch URL's list= dropped; a playlist or channel expands.
+// --list ignores the video, a malformed one included, as Enumerate does, so it
+// refuses only an input naming no playlist or channel.
+func routeDownload(link waxtap.Link, err error, listOnly bool) (downloadRoute, error) {
+	if listOnly {
+		if link.PlaylistID == "" && link.ChannelID == "" && link.ChannelURL == "" {
+			return routeSingle, usagef("--list needs a playlist or channel URL or ID")
+		}
+		return routePlaylist, nil
+	}
 	switch {
-	case df.listOnly:
-		if !hasPlaylist && !isChannel {
-			return usagef("--list needs a playlist or channel URL or ID")
-		}
-		return runPlaylistDownload(cmd.Context(), env, df, arg)
-	case isVideo:
-		if err := rejectChangedFlags(cmd, "is only used with a playlist input",
-			"max-items", "concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
-			return err
-		}
-		// A watch?v=X&list=Y URL downloads only the video; note the dropped playlist.
-		noteDroppedPlaylist(env, arg, "pass the playlist URL to download every item, or add --list to enumerate")
-		return runSingleDownload(cmd.Context(), env, df, arg)
-	case hasPlaylist || isChannel || errors.Is(idErr, waxtap.ErrIsPlaylist):
-		return runPlaylistDownload(cmd.Context(), env, df, arg)
+	case err != nil && link.PlaylistID != "":
+		return routeSingle, &videoBesideListError{err: err, playlistID: link.PlaylistID}
+	case err != nil:
+		return routeSingle, err
+	case link.Kind == waxtap.LinkVideo:
+		return routeSingle, nil
 	default:
-		return idErr
+		return routePlaylist, nil
 	}
 }
+
+// videoBesideListError is a malformed video ID in an input that also names a
+// playlist, which download once took as the whole playlist. It keeps the
+// video's error and carries the list for the hint.
+type videoBesideListError struct {
+	err        error
+	playlistID string
+}
+
+func (e *videoBesideListError) Error() string { return e.err.Error() }
+
+func (e *videoBesideListError) Unwrap() error { return e.err }
 
 // maxConcurrency bounds the CLI playlist worker pool. DownloadPlaylist applies
 // the same limit for library callers.
@@ -398,7 +428,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		if err != nil {
 			return err
 		}
-		return emitPlaylistList(env, pl)
+		return emitPlaylistList(env, pl, df.maxItems)
 	}
 
 	// Report the clamp here rather than in resolve: this is the only path that

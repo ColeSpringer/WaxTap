@@ -15,6 +15,7 @@ import (
 type playlistMeta struct {
 	title       string
 	author      string
+	videoCount  int // the header's stated total; 0 when it states none
 	visitorData string
 }
 
@@ -33,11 +34,18 @@ type browseResponse struct {
 		PlaylistHeaderRenderer struct {
 			Title     textRuns `json:"title"`
 			OwnerText textRuns `json:"ownerText"`
+			// NumVideosText is the count on an uploads feed or Shorts shelf.
+			NumVideosText textRuns `json:"numVideosText"`
 		} `json:"playlistHeaderRenderer"`
 	} `json:"header"`
 	Sidebar struct {
 		PlaylistSidebarRenderer struct {
 			Items []struct {
+				// Stats lead with the count on an ordinary list, whose page
+				// header has no playlistHeaderRenderer.
+				PlaylistSidebarPrimaryInfoRenderer struct {
+					Stats []textRuns `json:"stats"`
+				} `json:"playlistSidebarPrimaryInfoRenderer"`
 				PlaylistSidebarSecondaryInfoRenderer struct {
 					VideoOwner struct {
 						VideoOwnerRenderer struct {
@@ -71,7 +79,21 @@ type browseResponse struct {
 			Text textRuns `json:"text"`
 		} `json:"alertRenderer"`
 	} `json:"alerts"`
+	// Topbar is the page shell. A refusal carries it unless it is the
+	// unviewable one, in every locale, so only its presence is read.
+	Topbar json.RawMessage `json:"topbar"`
 }
+
+// browseAlert is a first browse page that answered with an ERROR alert instead
+// of a listing. Enumerate classifies it into a PlaylistUnavailableError.
+type browseAlert struct {
+	reason string // YouTube's alert text, in the request's locale
+	topbar bool   // whether the page shell came with it
+}
+
+func (a *browseAlert) Error() string { return "waxtap: " + a.reason }
+
+func (a *browseAlert) Unwrap() error { return waxerr.ErrPlaylistUnavailable }
 
 // continuationResponse is a paginated browse continuation. YouTube uses two
 // shapes: the modern onResponseReceivedActions, and a legacy continuationContents
@@ -426,6 +448,62 @@ func parseBadgeDuration(s string) (time.Duration, bool) {
 	return time.Duration(total) * time.Second, true
 }
 
+// countSeparators are the group separators YouTube's locales put in a count:
+// comma, period, space, NBSP, narrow NBSP, apostrophe, right single quote.
+const countSeparators = ",. \u00a0\u202f'\u2019"
+
+// parseCount reads a localized count such as "6,131 videos" or "동영상 6,131개"
+// from the one run made only of ASCII digits and group separators, wherever
+// the locale puts it. Anything it cannot read exactly is 0, which beats a
+// wrong count.
+func parseCount(t textRuns) int {
+	n := -1
+	for _, r := range t.Runs {
+		v, ok := countRun(r.Text)
+		if !ok {
+			continue
+		}
+		if n >= 0 {
+			return 0 // two numbers, and which one counts would be a guess
+		}
+		n = v
+	}
+	return max(n, 0)
+}
+
+// countRun parses one run as a count: ungrouped digits, or groups of exactly
+// three after a first of one to three under a single separator. So "1.2" is no
+// count, and neither is a lakh grouping; an uploads feed states at most 20,000.
+func countRun(s string) (int, bool) {
+	s = strings.Trim(s, " \u00a0\u202f")
+	var sep rune
+	var digits strings.Builder
+	group, groups := 0, 0 // digits in the open group, and groups closed
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+			group++
+		case strings.ContainsRune(countSeparators, r):
+			if sep != 0 && r != sep {
+				return 0, false
+			}
+			sep = r
+			if (groups == 0 && (group < 1 || group > 3)) || (groups > 0 && group != 3) {
+				return 0, false
+			}
+			group, groups = 0, groups+1
+		default:
+			return 0, false
+		}
+	}
+	if group == 0 || (groups > 0 && group != 3) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits.String())
+	return n, err == nil
+}
+
 // textRuns models YouTube's {runs:[{text}]} or {simpleText} text nodes.
 type textRuns struct {
 	SimpleText string `json:"simpleText"`
@@ -494,9 +572,8 @@ func parseBrowseInitial(body []byte) (playlistMeta, []playlistItem, string, erro
 
 	for _, a := range br.Alerts {
 		if strings.EqualFold(a.AlertRenderer.Type, "ERROR") {
-			// Preserve YouTube's reason while distinguishing an unavailable playlist
-			// from a malformed ID.
-			return playlistMeta{}, nil, "", &waxerr.PlaylistUnavailableError{Reason: a.AlertRenderer.Text.String()}
+			topbar := len(br.Topbar) > 0 && string(br.Topbar) != "null"
+			return playlistMeta{}, nil, "", &browseAlert{reason: a.AlertRenderer.Text.String(), topbar: topbar}
 		}
 	}
 
@@ -514,6 +591,16 @@ func parseBrowseInitial(body []byte) (playlistMeta, []playlistItem, string, erro
 				meta.author = a
 				break
 			}
+		}
+	}
+	// The sidebar's first stat is the count wherever measured, its digits a run
+	// of their own. The views stat beside it is served as one localized
+	// string, as are the page header's parts ("14 videos"), and parseCount
+	// reads no count from those.
+	meta.videoCount = parseCount(br.Header.PlaylistHeaderRenderer.NumVideosText)
+	for _, item := range br.Sidebar.PlaylistSidebarRenderer.Items {
+		if stats := item.PlaylistSidebarPrimaryInfoRenderer.Stats; meta.videoCount == 0 && len(stats) > 0 {
+			meta.videoCount = parseCount(stats[0])
 		}
 	}
 

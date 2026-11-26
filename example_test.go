@@ -322,3 +322,23 @@ func ExampleNewSidecarPOTokenProvider() {
 	}
 	fmt.Printf("delivered %d bytes via %s\n", res.OutputBytes, res.Client)
 }
+
+// Classify tells a video link from a playlist or channel link without a
+// request, returning every ID it carries.
+func ExampleClassify() {
+	for _, in := range []string{
+		"https://www.youtube.com/watch?v=dummyVideo0&list=PLdummyPlaylist000",
+		"https://www.youtube.com/playlist?list=PLdummyPlaylist000",
+		"https://www.youtube.com/@SomeHandle/videos",
+	} {
+		link, err := waxtap.Classify(in)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("%s video=%q list=%q channel=%q\n", link.Kind, link.VideoID, link.PlaylistID, link.ChannelURL)
+	}
+	// Output:
+	// video video="dummyVideo0" list="PLdummyPlaylist000" channel=""
+	// playlist video="" list="PLdummyPlaylist000" channel=""
+	// channel video="" list="" channel="https://www.youtube.com/@SomeHandle"
+}

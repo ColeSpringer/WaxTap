@@ -3,7 +3,8 @@
   "metadata": { "playlistMetadataRenderer": { "title": "My Playlist" } },
   "header": {
     "playlistHeaderRenderer": {
-      "ownerText": { "runs": [{ "text": "Owner Name" }] }
+      "ownerText": { "runs": [{ "text": "Owner Name" }] },
+      "numVideosText": { "runs": [{ "text": "6,131" }, { "text": " videos" }] }
     }
   },
   "contents": {

@@ -104,8 +104,8 @@ var (
 	// maintenance signal in the ErrExtractionFailed class: YouTube likely
 	// changed the playlist page and the parser needs updating.
 	ErrPlaylistParse = errors.New("waxtap: playlist response shape not recognized (parser may be stale)")
-	// ErrPlaylistUnavailable indicates that YouTube reports a playlist as private,
-	// deleted, or otherwise inaccessible. See [PlaylistUnavailableError].
+	// ErrPlaylistUnavailable indicates that YouTube refused to list a playlist.
+	// [PlaylistUnavailableError] carries YouTube's reason and the kind of refusal.
 	ErrPlaylistUnavailable = errors.New("waxtap: playlist unavailable")
 	// ErrPlaylistEmpty indicates a valid playlist that contains no videos.
 	ErrPlaylistEmpty = errors.New("waxtap: playlist has no videos")
@@ -241,15 +241,63 @@ func (e *PlayabilityError) Error() string {
 
 func (e *PlayabilityError) Unwrap() error { return e.Sentinel }
 
-// PlaylistUnavailableError reports YouTube's reason for an inaccessible
-// playlist. It unwraps to [ErrPlaylistUnavailable].
-type PlaylistUnavailableError struct {
-	Reason string // human-readable reason from YouTube's alert
+// PlaylistUnavailableKind is why YouTube refused a playlist, as far as a
+// signed-out guest can tell. Browse words a private list and a missing one
+// alike, in the request's locale, so the kind rests on the ID, oEmbed's answer,
+// and the layout of the refusal page, and comes out the same in any locale.
+type PlaylistUnavailableKind uint8
+
+const (
+	// PlaylistUnavailableUnknown means the refusal was not classified: the
+	// evidence was missing or unclear, or the playlist is a channel's uploads
+	// feed, where a channel with no uploads answers exactly as a deleted one.
+	PlaylistUnavailableUnknown PlaylistUnavailableKind = iota
+	// PlaylistUnavailableNotFound means YouTube reports no such playlist to a
+	// guest. It is not proof of deletion: oEmbed, which supplies it, says the
+	// same of some lists browse does serve, so it is asked only after browse
+	// has refused.
+	PlaylistUnavailableNotFound
+	// PlaylistUnavailablePrivate means the playlist exists but is hidden from
+	// this session. An account's Watch Later and Liked lists are always this.
+	PlaylistUnavailablePrivate
+	// PlaylistUnavailableUnviewable means the ID names no type YouTube serves a
+	// listing for, such as a mix or radio, or is not a playlist ID at all.
+	PlaylistUnavailableUnviewable
+)
+
+func (k PlaylistUnavailableKind) String() string {
+	switch k {
+	case PlaylistUnavailableNotFound:
+		return "not-found"
+	case PlaylistUnavailablePrivate:
+		return "private"
+	case PlaylistUnavailableUnviewable:
+		return "unviewable"
+	default:
+		return "unknown"
+	}
 }
 
+// PlaylistUnavailableError reports an inaccessible playlist. It unwraps to
+// [ErrPlaylistUnavailable].
+type PlaylistUnavailableError struct {
+	Kind   PlaylistUnavailableKind
+	Reason string // human-readable reason from YouTube's alert, in the request's locale
+}
+
+// Error reports Reason, except for a private playlist, which YouTube words as
+// one that does not exist. Without a reason, as for a browse 404, the kind
+// speaks for itself.
 func (e *PlaylistUnavailableError) Error() string {
-	if e.Reason != "" {
+	switch {
+	case e.Kind == PlaylistUnavailablePrivate:
+		return "waxtap: playlist is private"
+	case e.Reason != "":
 		return "waxtap: " + e.Reason
+	case e.Kind == PlaylistUnavailableNotFound:
+		return "waxtap: YouTube reports no such playlist"
+	case e.Kind == PlaylistUnavailableUnviewable:
+		return "waxtap: YouTube serves no listing for this playlist ID"
 	}
 	return ErrPlaylistUnavailable.Error()
 }
