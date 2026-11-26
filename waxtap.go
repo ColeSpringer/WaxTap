@@ -687,7 +687,10 @@ func Classify(input string) (Link, error) { return youtube.Classify(input) }
 // /user/ URL, with any trailing tab stripped) resolves to the channel's uploads
 // feed, which is newest-first and lists Shorts and past live streams as ordinary
 // entries. EnumerateOptions.MaxItems caps the listing, and Skip/Stop drive an
-// archive cursor. With Enrich set, InfoBasic calls refresh entries at bounded
+// archive cursor. A listing that MaxItems or a failed page ended short returns
+// Playlist.Continuation, and EnumerateOptions.Continuation resumes it in a
+// later call; a context deadline that runs out after the first page is such a
+// failure, so what was listed comes back with it. With Enrich set, InfoBasic calls refresh entries at bounded
 // concurrency, MaxEnrich caps how many from the front, and EnrichOptions shape
 // each call. A successful call overlays its entry's title, author, and duration
 // with what it fetched, keeping a listing value where the fetch had none, and
@@ -713,16 +716,25 @@ func (c *Client) Enumerate(ctx context.Context, url string, opts EnumerateOption
 			return nil, configErr("Enumerate: EnrichOptions require Enrich")
 		}
 	}
+	// Checked here as well as against the playlist below, so that a value that
+	// is no token is refused before a channel reference costs a request to
+	// resolve.
+	if opts.Continuation != "" {
+		if err := youtube.CheckContinuation(opts.Continuation); err != nil {
+			return nil, err
+		}
+	}
 	id, channelID, err := c.resolveEnumerateTarget(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	pl, err := c.yt.Enumerate(ctx, id, youtube.EnumOptions{
-		MaxItems:  opts.MaxItems,
-		OnPage:    opts.OnProgress,
-		Skip:      opts.Skip,
-		Stop:      opts.Stop,
-		ChannelID: channelID,
+		MaxItems:     opts.MaxItems,
+		OnPage:       opts.OnProgress,
+		Skip:         opts.Skip,
+		Stop:         opts.Stop,
+		ChannelID:    channelID,
+		Continuation: opts.Continuation,
 	})
 	if err != nil {
 		return nil, channelEnumerateError(err, url, channelID)

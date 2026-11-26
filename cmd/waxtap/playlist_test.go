@@ -22,7 +22,7 @@ func TestEmitPlaylistListRendersUnknownDurationAsDash(t *testing.T) {
 		{VideoID: "dummyVideo0", Title: "Known", Duration: 90 * time.Second},
 		{VideoID: "dummyVideo1", Title: "Unknown", Index: 1},
 	}}
-	if err := emitPlaylistList(env, pl, 0); err != nil {
+	if err := emitPlaylistList(env, pl, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -45,7 +45,7 @@ func TestEmitPlaylistListRendersLiveMarkers(t *testing.T) {
 		{VideoID: "dummyVideo0", Title: "Now", LiveStatus: waxtap.LiveNow},
 		{VideoID: "dummyVideo1", Title: "Soon", Index: 1, LiveStatus: waxtap.LiveUpcoming},
 	}}
-	if err := emitPlaylistList(env, pl, 0); err != nil {
+	if err := emitPlaylistList(env, pl, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"dummyVideo0  live", "dummyVideo1  upcoming"} {
@@ -56,7 +56,7 @@ func TestEmitPlaylistListRendersLiveMarkers(t *testing.T) {
 
 	out.Reset()
 	env.cfg.json = true
-	if err := emitPlaylistList(env, pl, 0); err != nil {
+	if err := emitPlaylistList(env, pl, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), `"liveStatus": "live"`) || !strings.Contains(out.String(), `"liveStatus": "upcoming"`) {
@@ -92,7 +92,7 @@ func TestEmitPlaylistListCountAndAuthor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
-			if err := emitPlaylistList(env, tc.pl, tc.maxItems); err != nil {
+			if err := emitPlaylistList(env, tc.pl, tc.maxItems, false); err != nil {
 				t.Fatal(err)
 			}
 			if first, _, _ := strings.Cut(out.String(), "\n"); first+"\n" != tc.header {
@@ -113,7 +113,7 @@ func TestEmitPlaylistListCountAndAuthor(t *testing.T) {
 		t.Run("json "+tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{json: true}}
-			if err := emitPlaylistList(env, tc.pl, 1); err != nil {
+			if err := emitPlaylistList(env, tc.pl, 1, false); err != nil {
 				t.Fatal(err)
 			}
 			var doc map[string]any
@@ -141,7 +141,7 @@ func TestEmitPlaylistListErrorsNameTheEntry(t *testing.T) {
 		Entries: []waxtap.PlaylistEntry{{VideoID: "dummyVideo0", Title: "One"}},
 		Errors:  []error{&waxtap.EnrichError{VideoID: "dummyVideo1", Index: 4, Err: waxtap.ErrVideoUnavailable}},
 	}
-	if err := emitPlaylistList(env, pl, 0); err != nil {
+	if err := emitPlaylistList(env, pl, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -149,5 +149,66 @@ func TestEmitPlaylistListErrorsNameTheEntry(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("want %q in:\n%s", want, got)
 		}
+	}
+}
+
+// A listing with entries left carries the token that resumes it, as --json's
+// continuation alone: a human listing has no use for the blob. One that
+// reached the end carries none.
+func TestEmitPlaylistListContinuation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  any
+	}{
+		{"entries left", "RESUME_POINT", "RESUME_POINT"},
+		{"the end", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pl := &waxtap.Playlist{ID: "PLx", Title: "List", Continuation: tc.token,
+				Entries: []waxtap.PlaylistEntry{{VideoID: "dummyVideo0", Title: "T"}}}
+			var out, errOut bytes.Buffer
+			env := &appEnv{out: &out, errOut: &errOut, cfg: &appConfig{json: true}}
+			if err := emitPlaylistList(env, pl, 1, false); err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+				t.Fatalf("unmarshal %q: %v", out.String(), err)
+			}
+			if doc["continuation"] != tc.want {
+				t.Errorf("continuation = %v, want %v", doc["continuation"], tc.want)
+			}
+
+			out.Reset()
+			env.cfg.json = false
+			if err := emitPlaylistList(env, pl, 1, false); err != nil {
+				t.Fatal(err)
+			}
+			if tc.token != "" && strings.Contains(out.String()+errOut.String(), tc.token) {
+				t.Errorf("the human listing prints the token:\n%s%s", out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+// A resumed listing is a stretch of the playlist, so its title line counts it
+// against YouTube's total, capped or not, where a listing from the top that
+// came up short reports the difference.
+func TestEmitPlaylistListResumedCount(t *testing.T) {
+	pl := &waxtap.Playlist{Title: "List", VideoCount: 120}
+	for i := 100; i < 120; i++ {
+		pl.Entries = append(pl.Entries, waxtap.PlaylistEntry{VideoID: fmt.Sprintf("dummyVid%03d", i), Title: "T", Index: i})
+	}
+	var out bytes.Buffer
+	env := &appEnv{out: &out, errOut: io.Discard, cfg: &appConfig{}}
+	if err := emitPlaylistList(env, pl, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if first, _, _ := strings.Cut(out.String(), "\n"); first != "List (20 of 120 items)" {
+		t.Errorf("header = %q, want %q", first, "List (20 of 120 items)")
+	}
+	if !strings.Contains(out.String(), "101  dummyVid100") {
+		t.Errorf("want the first row numbered 101, its playlist position, in:\n%s", out.String())
 	}
 }

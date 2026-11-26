@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -858,7 +859,7 @@ func (c *Client) Info(ctx context.Context, videoID string) (*Video, error) {
 	return ext.video, nil
 }
 
-// Bounds for retrying the initial playlist browse page. Continuation pages
+// Bounds for retrying a call's first browse page. The pages after it
 // soft-fail per page instead.
 const (
 	browseRetries    = 2 // extra attempts after the first
@@ -891,16 +892,33 @@ type EnumOptions struct {
 	// ChannelID, when set, is stamped onto every entry. A channel-feed enumeration
 	// already knows the uploader, so no per-video Enrich is needed.
 	ChannelID string
+	// Continuation is an earlier call's Playlist.Continuation for the same
+	// playlist. The listing picks up there, with MaxItems counting from it.
+	Continuation string
 }
 
 // Enumerate expands a playlist into lightweight entries without downloading. It
 // pages through continuations until exhausted, MaxItems is reached, or Stop halts
-// paging. Per-page failures after the first page are collected in Playlist.Errors
-// rather than discarding the entries already gathered.
+// paging. Per-page failures after the call's first page are collected in
+// Playlist.Errors rather than discarding the entries already gathered, a
+// context deadline that runs out there among them. A cancellation is the
+// call's error.
+//
+// A listing that MaxItems or a failed page ended short returns
+// Playlist.Continuation, and a call given it back as o.Continuation lists on
+// from there: a point at a page's edge fetches the next page, and one inside a
+// page reads that page again and lists on after the last entry listed.
 func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions) (*Playlist, error) {
 	// Reject negative caps instead of treating them as an unlimited request.
 	if o.MaxItems < 0 {
 		return nil, fmt.Errorf("%w: maxItems must be >= 0, got %d", waxerr.ErrInvalidConfig, o.MaxItems)
+	}
+	var from resumePoint
+	if o.Continuation != "" {
+		var err error
+		if from, err = parseResumePoint(o.Continuation, playlistID); err != nil {
+			return nil, err
+		}
 	}
 	sess, err := c.newBootstrappedSession(ctx)
 	if err != nil {
@@ -909,23 +927,30 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 	profile := adoptedProfile(c.playlistProfile(), sess)
 	pl := &Playlist{ID: playlistID}
 
-	meta, items, token, err := c.browseInitial(ctx, profile, sess, playlistID)
+	// page is the token that fetched the page in hand, "" for the first page,
+	// and next the token of the page after it.
+	page := from.Token
+	meta, items, next, err := c.browseFirst(ctx, profile, sess, playlistID, page)
 	if err != nil {
-		if alert, ok := errors.AsType[*browseAlert](err); ok {
+		if alert, refused := pageRefusal(err); refused {
+			c.log.DebugContext(ctx, "playlist browse refused", "playlist", playlistID, "resumed", page != "", "err", err)
 			return nil, c.refusedPlaylist(ctx, sess, profile, playlistID, o.ChannelID, alert)
 		}
 		// Map YouTube's browse status to a user-facing playlist error. The raw error
 		// carries the internal endpoint URL, so keep it on the debug log for
 		// --verbose diagnosis and leave the CLI to render a clean message.
 		if hse, ok := errors.AsType[*waxerr.HTTPStatusError](err); ok {
-			c.log.DebugContext(ctx, "initial playlist browse failed", "playlist", playlistID, "status", hse.StatusCode, "err", err)
-			switch hse.StatusCode {
-			case http.StatusBadRequest:
+			c.log.DebugContext(ctx, "initial playlist browse failed", "playlist", playlistID, "status", hse.StatusCode, "resumed", page != "", "err", err)
+			// A 400 is what YouTube answers an ID, or a token, it cannot read.
+			// Its other 400 refuses the client context whatever the ID or token
+			// beside it (measured 2026-11), and stays an HTTP error. So does a
+			// 403, an anti-bot or attestation block.
+			ie, _ := errors.AsType[*innertubeError](err)
+			if hse.StatusCode == http.StatusBadRequest && (ie == nil || ie.apiStatus != "FAILED_PRECONDITION") {
+				if page != "" {
+					return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidContinuation, err)
+				}
 				return nil, fmt.Errorf("%w: %v", waxerr.ErrInvalidPlaylistID, err)
-			case http.StatusNotFound:
-				// A refusal like an alert. A 403 is not one: it is an anti-bot or
-				// attestation block, so it stays an HTTP error.
-				return nil, c.refusedPlaylist(ctx, sess, profile, playlistID, o.ChannelID, nil)
 			}
 		}
 		return nil, explainBareDeadline(err, sess)
@@ -935,44 +960,85 @@ func (c *Client) Enumerate(ctx context.Context, playlistID string, o EnumOptions
 	pl.Author = meta.author
 	pl.VideoCount = meta.videoCount
 
+	// A resume point inside a page: drop the items an earlier call listed.
+	dropped := from.cut(items)
+	items = items[dropped:]
+
 	// rawPos is the true playlist position, advanced for every video entry (kept or
 	// skipped) so PlaylistEntry.Index survives Skip. It lives here, not in
 	// appendPlaylistItems, so it persists across pages.
-	rawPos := 0
-	truncated, halted := c.appendPlaylistItems(pl, items, o, &rawPos)
+	rawPos := from.Index
+	used, halted := c.appendPlaylistItems(pl, items, o, &rawPos)
 	if o.OnPage != nil {
 		o.OnPage(len(pl.Entries))
 	}
 
-	for token != "" && !halted && !reachedLimit(pl, o.MaxItems) {
-		if err := ctx.Err(); err != nil {
-			return pl, err
+	for next != "" && !halted && !reachedLimit(pl, o.MaxItems) {
+		var more []playlistItem
+		var after string
+		err := ctx.Err()
+		if err == nil {
+			_, more, after, err = c.browseContinuation(ctx, profile, sess, next)
 		}
-		body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, "", token))
 		if err != nil {
+			if alert, refused := pageRefusal(err); refused {
+				err = c.refusedPlaylist(ctx, sess, profile, playlistID, o.ChannelID, alert)
+			}
+			// A cancellation is the call's error. Any other failure is the
+			// page's, an expired deadline included: the entries gathered are
+			// kept, and the listing resumes at this page.
+			if cerr := ctx.Err(); errors.Is(cerr, context.Canceled) {
+				return pl, cerr
+			}
 			pl.Errors = append(pl.Errors, err)
 			break
 		}
-		var items []playlistItem
-		items, token, err = parseBrowseContinuation(body)
-		if err != nil {
-			pl.Errors = append(pl.Errors, err)
-			break
-		}
-		truncated, halted = c.appendPlaylistItems(pl, items, o, &rawPos)
+		page, items, next, dropped = next, more, after, 0
+		used, halted = c.appendPlaylistItems(pl, items, o, &rawPos)
 		if o.OnPage != nil {
 			o.OnPage(len(pl.Entries))
 		}
 	}
 
-	// Continuation tokens are page-granular. Only expose one when the current
-	// page was fully consumed at the MaxItems boundary: a mid-page cutoff
-	// (truncated) has no precise resume point, and an early Stop (halted) has no
-	// meaningful resume point at all.
-	if reachedLimit(pl, o.MaxItems) && !truncated && !halted {
-		pl.Continuation = token
+	// Stop leaves no point to resume from. Otherwise the listing resumes inside
+	// the page in hand when the cap cut it with a video still unlisted, after
+	// the last entry it listed, or at the next page when the cap or a failure
+	// kept that page from being read.
+	switch {
+	case halted:
+	case slices.ContainsFunc(items[used:], func(it playlistItem) bool { return it.itemVideoID() != "" }):
+		pl.Continuation = resumePoint{Playlist: playlistID, Token: page, Offset: dropped + used, After: lastListed(pl), Index: rawPos}.String()
+	case next != "":
+		pl.Continuation = resumePoint{Playlist: playlistID, Token: next, Index: rawPos}.String()
 	}
 	return pl, nil
+}
+
+// lastListed is the video ID of the last entry in pl, "" when it has none.
+func lastListed(pl *Playlist) string {
+	if n := len(pl.Entries); n > 0 {
+		return pl.Entries[n-1].VideoID
+	}
+	return ""
+}
+
+// pageRefusal reports whether a page's failure is YouTube refusing the
+// playlist: an alert, which it returns, or an HTTP 404, which has none.
+func pageRefusal(err error) (*browseAlert, bool) {
+	if alert, ok := errors.AsType[*browseAlert](err); ok {
+		return alert, true
+	}
+	hse, ok := errors.AsType[*waxerr.HTTPStatusError](err)
+	return nil, ok && hse.StatusCode == http.StatusNotFound
+}
+
+// browseContinuation fetches and parses the page a continuation token names.
+func (c *Client) browseContinuation(ctx context.Context, profile ClientProfile, sess *session, token string) (playlistMeta, []playlistItem, string, error) {
+	body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, "", token))
+	if err != nil {
+		return playlistMeta{}, nil, "", err
+	}
+	return parseBrowseContinuation(body)
 }
 
 // refusedPlaylist builds the error for a playlist browse refused, with an alert
@@ -1018,7 +1084,7 @@ func (c *Client) refusalKind(ctx context.Context, sess *session, profile ClientP
 	// without the page shell. This is the wording check above for any locale,
 	// read after the GET so that a change to the shell cannot hide a private
 	// list.
-	if alert != nil && !alert.topbar && IsWebClient(profile.InnerTubeName) {
+	if alert != nil && alert.bare && IsWebClient(profile.InnerTubeName) {
 		return waxerr.PlaylistUnavailableUnviewable
 	}
 	if status == http.StatusNotFound {
@@ -1045,29 +1111,40 @@ func (c *Client) oembedStatus(ctx context.Context, sess *session, playlistID str
 	return 0
 }
 
-// browseInitial fetches and parses the first browse page of a playlist,
-// retrying transient failures a bounded number of times so a single flaky
-// page does not fail the whole enumeration.
-func (c *Client) browseInitial(ctx context.Context, profile ClientProfile, sess *session, playlistID string) (playlistMeta, []playlistItem, string, error) {
+// browseFirst fetches and parses a call's first page: the playlist's own, or
+// on a resumed call the one token names. It retries transient failures a
+// bounded number of times so a single flaky page does not fail the whole
+// enumeration.
+func (c *Client) browseFirst(ctx context.Context, profile ClientProfile, sess *session, playlistID, token string) (playlistMeta, []playlistItem, string, error) {
 	for attempt := 0; ; attempt++ {
-		body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))
+		meta, items, next, err := c.browsePage(ctx, profile, sess, playlistID, token)
 		if err == nil {
-			meta, items, token, perr := parseBrowseInitial(body)
-			if perr == nil {
-				return meta, items, token, nil
-			}
-			// Shorts shelf responses use a known unsupported shape. Reclassify the
-			// parse error so it is not reported or retried as an unrecognized shape.
-			err = shortsOrParseError(playlistID, perr)
+			return meta, items, next, nil
 		}
 		if attempt >= browseRetries || !retryableBrowse(err) {
 			return playlistMeta{}, nil, "", err
 		}
-		c.log.DebugContext(ctx, "initial browse failed; retrying", "attempt", attempt+1, "playlist", playlistID, "err", err)
+		c.log.DebugContext(ctx, "initial browse failed; retrying", "attempt", attempt+1, "playlist", playlistID, "resumed", token != "", "err", err)
 		if err := httpx.Sleep(ctx, browseRetryDelay); err != nil {
 			return playlistMeta{}, nil, "", err
 		}
 	}
+}
+
+// browsePage fetches and parses one page: the playlist's first when token is
+// empty, else the one token names.
+func (c *Client) browsePage(ctx context.Context, profile ClientProfile, sess *session, playlistID, token string) (playlistMeta, []playlistItem, string, error) {
+	if token != "" {
+		return c.browseContinuation(ctx, profile, sess, token)
+	}
+	body, err := c.innertubePost(ctx, profile, sess, browseEndpoint, c.newPlaylistRequest(profile, sess, playlistID, ""))
+	if err != nil {
+		return playlistMeta{}, nil, "", err
+	}
+	meta, items, next, err := parseBrowseInitial(body)
+	// Shorts shelf responses use a known unsupported shape. Reclassify the
+	// parse error so it is not reported or retried as an unrecognized shape.
+	return meta, items, next, shortsOrParseError(playlistID, err)
 }
 
 // retryableBrowse reports whether an initial-browse failure is worth another
@@ -1119,17 +1196,17 @@ func (c *Client) playlistProfile() ClientProfile {
 
 // appendPlaylistItems adds entries up to MaxItems, applying the Skip/Stop
 // predicates and the channel stamp. rawPos advances for every video entry (kept
-// or skipped) so PlaylistEntry.Index stays the true playlist position. It returns
-// truncated when the MaxItems cap cut the page short (no precise resume point) and
-// halted when Stop matched (pagination must stop with no resume point).
-func (c *Client) appendPlaylistItems(pl *Playlist, items []playlistItem, o EnumOptions, rawPos *int) (truncated, halted bool) {
-	for _, it := range items {
+// or skipped) so PlaylistEntry.Index stays the true playlist position. used is
+// how many items it consumed, short of len(items) when the MaxItems cap or Stop
+// cut the page, and halted reports that Stop did.
+func (c *Client) appendPlaylistItems(pl *Playlist, items []playlistItem, o EnumOptions, rawPos *int) (used int, halted bool) {
+	for i, it := range items {
 		if reachedLimit(pl, o.MaxItems) {
-			return true, false
+			return i, false
 		}
 		id := it.itemVideoID()
 		if o.Stop != nil && id != "" && o.Stop(id) {
-			return false, true
+			return i, true
 		}
 		if o.Skip != nil && id != "" && o.Skip(id) {
 			*rawPos++ // a skipped entry still consumes a playlist position
@@ -1152,7 +1229,7 @@ func (c *Client) appendPlaylistItems(pl *Playlist, items []playlistItem, o EnumO
 		pl.Entries = append(pl.Entries, entry)
 		*rawPos++
 	}
-	return false, false
+	return len(items), false
 }
 
 func reachedLimit(pl *Playlist, maxItems int) bool {

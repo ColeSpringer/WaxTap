@@ -58,7 +58,7 @@ func TestParseBrowseInitial_LockupShape(t *testing.T) {
 // TestParseBrowseContinuation_LockupShape covers lockup items and the
 // view-model continuation marker on a continuation page.
 func TestParseBrowseContinuation_LockupShape(t *testing.T) {
-	items, token, err := parseBrowseContinuation(readFixture(t, "playlist_continuation_lockup.json"))
+	_, items, token, err := parseBrowseContinuation(readFixture(t, "playlist_continuation_lockup.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +165,8 @@ func TestParseBrowseInitial_ErrorAlertIsUnavailable(t *testing.T) {
 			if !ok {
 				t.Fatalf("err = %#v, want *browseAlert", err)
 			}
-			if a.reason != tc.reason || a.topbar != tc.topbar {
-				t.Errorf("alert = {reason:%q topbar:%v}, want {%q %v}", a.reason, a.topbar, tc.reason, tc.topbar)
+			if a.reason != tc.reason || a.bare == tc.topbar {
+				t.Errorf("alert = {reason:%q bare:%v}, want {%q %v}", a.reason, a.bare, tc.reason, !tc.topbar)
 			}
 		})
 	}
@@ -318,7 +318,7 @@ func TestParseBrowseContinuation_UnrecognizedIsParseError(t *testing.T) {
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
-			_, _, err := parseBrowseContinuation([]byte(body))
+			_, _, _, err := parseBrowseContinuation([]byte(body))
 			if !errors.Is(err, waxerr.ErrPlaylistParse) {
 				t.Fatalf("err = %v, want ErrPlaylistParse", err)
 			}
@@ -482,5 +482,21 @@ func TestParseBrowseInitial_LiveMarkers(t *testing.T) {
 				t.Errorf("%s item %d Duration = %v, want the listed 3m", fixture, i, e.Duration)
 			}
 		}
+	}
+}
+
+// A continuation's header is extra: one of its fields in a shape the parser
+// does not expect costs the header, not the entries beside it.
+func TestParseBrowseContinuation_HeaderShapeDoesNotFailThePage(t *testing.T) {
+	body := `{"metadata": "moved", "sidebar": [], "alerts": {}, "responseContext": 7,
+		"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [
+			{"playlistVideoRenderer": {"videoId": "ccccccccccc", "title": {"runs": [{"text": "Song C"}]}, "lengthSeconds": "300"}}
+		]}}]}`
+	meta, items, _, err := parseBrowseContinuation([]byte(body))
+	if err != nil {
+		t.Fatalf("err = %v, want the page parsed", err)
+	}
+	if len(items) != 1 || meta.title != "" {
+		t.Errorf("got %d items and title %q, want 1 and no title", len(items), meta.title)
 	}
 }

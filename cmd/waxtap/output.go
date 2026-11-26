@@ -711,6 +711,8 @@ func classifyError(err error) classifiedError {
 		if vl, ok := errors.AsType[*videoBesideListError](err); ok {
 			c.hint = "the URL also names playlist " + vl.playlistID + ": pass the playlist URL to download every item, or add --list to enumerate"
 		}
+	case errors.Is(err, waxtap.ErrInvalidContinuation):
+		c.exitCode, c.code, c.hint = 2, "invalid-continuation", "list again without --continuation"
 	case errors.Is(err, waxtap.ErrInvalidConfig):
 		c.exitCode, c.code = 2, "invalid-config"
 	// An exclusive publish that lost the path is a collision, not an I/O failure,
@@ -915,6 +917,9 @@ func friendlyError(err error) string {
 		return "that is a channel, not a single video; open a specific video"
 	case errors.Is(err, waxtap.ErrInvalidPlaylistID):
 		return "invalid or missing playlist ID"
+	case errors.Is(err, waxtap.ErrInvalidContinuation):
+		// The error can wrap the endpoint URL of the request YouTube refused.
+		return "that continuation is not one this playlist's --list returned, or YouTube no longer reads it"
 	case errors.Is(err, waxtap.ErrPlaylistUnavailable):
 		// A refusal that says nothing more: unclassified, with no reason.
 		return "this playlist is unavailable; it may be private, deleted, or nonexistent"

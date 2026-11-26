@@ -91,7 +91,9 @@ local file, `transcode` and `normalize` also a directory (`-r` recurses), and
   prints only the output path. Failures are `{"code", "message"}` objects; a
   refused playlist adds `kind` (`not-found`, `private`, or `unviewable`).
   `--list --json` carries the playlist's `author` and the `videoCount` YouTube
-  states, which can differ from the entries listed. A run that succeeds
+  states, which can differ from the entries listed. A listing that
+  `--max-items` or a failed page cut short carries a `continuation`, and
+  `--continuation` lists on from it. A run that succeeds
   reports what it had to say as `warnings` and `notes`, whose codes are listed
   in [docs/warnings-and-notes.md](docs/warnings-and-notes.md). Exit codes are
   [below](#exit-codes).

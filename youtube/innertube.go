@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/colespringer/waxtap/v3/internal/iox"
@@ -203,9 +204,38 @@ func (c *Client) innertubePost(ctx context.Context, p ClientProfile, s *session,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: endpoint}
+		hse := &waxerr.HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: endpoint}
+		if status := apiErrorStatus(resp.Body); status != "" {
+			return nil, &innertubeError{HTTPStatusError: hse, apiStatus: status}
+		}
+		return nil, hse
 	}
 	return iox.ReadAllCapped(resp.Body, maxResponseBytes, "innertube response")
+}
+
+// innertubeError is a non-200 InnerTube answer whose body states a Google API
+// status. One HTTP status covers several: a 400 is INVALID_ARGUMENT for an ID
+// or token YouTube cannot read and FAILED_PRECONDITION for a client context
+// it refuses.
+type innertubeError struct {
+	*waxerr.HTTPStatusError
+	apiStatus string
+}
+
+func (e *innertubeError) Unwrap() error { return e.HTTPStatusError }
+
+// apiErrorStatus reads error.status from the head of an error body, "" when
+// the body is not a Google API error.
+func apiErrorStatus(body io.Reader) string {
+	var doc struct {
+		Error struct {
+			Status string `json:"status"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 16<<10)).Decode(&doc); err != nil {
+		return ""
+	}
+	return doc.Error.Status
 }
 
 // httpGet fetches rawURL with the profile's user agent and the session's consent

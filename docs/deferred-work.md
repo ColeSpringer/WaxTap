@@ -17,10 +17,3 @@ Gate tags:
   build when picked up.
 - `[upstream]` needs sibling-repo work first; the ask is in
   upstream-requests.md.
-
-## Open entries
-
-- `[in-repo]` **A capped listing cannot be resumed.** `Enumerate` returns
-  `Playlist.Continuation` when `MaxItems` stops a listing at a page boundary,
-  but no call takes the token back, so the next call starts from the first
-  page again. Accept it in `EnumerateOptions`, or stop returning it.

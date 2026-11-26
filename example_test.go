@@ -133,6 +133,32 @@ func ExampleClient_Enumerate() {
 	}
 }
 
+// ExampleClient_Enumerate_resume lists a long playlist fifty entries at a time,
+// each call picking up where the last one stopped.
+func ExampleClient_Enumerate_resume() {
+	client, err := waxtap.New(waxtap.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	opts := waxtap.EnumerateOptions{MaxItems: 50}
+	for {
+		pl, err := client.Enumerate(context.Background(),
+			"https://www.youtube.com/playlist?list=UUSMOQeBJ2RAnuFungnQOxLg", opts)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, entry := range pl.Entries {
+			fmt.Printf("%d. %s\n", entry.Index, entry.Title)
+		}
+		if pl.Continuation == "" {
+			break // the end of the playlist
+		}
+		// The token holds no session state: it can be stored and used later.
+		opts.Continuation = pl.Continuation
+	}
+}
+
 // ExampleClient_Enumerate_bounded refreshes the first entries of a listing with
 // full metadata, spending a fixed per-entry budget inside the enrichment that
 // escapes YouTube's metadata throttle, and reads each entry's outcome.

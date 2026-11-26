@@ -18,7 +18,7 @@ type exitCodeEntry struct {
 var exitCodeTable = []exitCodeEntry{
 	{0, "success"},
 	{1, "unclassified error"},
-	{2, "invalid request (usage, bad ID, playlist URL to a video command, incompatible spec, unsupported input, requested format unavailable, unknown --client, invalid config)"},
+	{2, "invalid request (usage, bad ID, invalid --continuation, playlist URL to a video command, incompatible spec, unsupported input, requested format unavailable, unknown --client, invalid config)"},
 	{3, "unavailable or restricted video (private, age-restricted, members-only, geo-blocked, removed), login required, live or upcoming content, no audio formats, unavailable or empty playlist"},
 	{4, "extraction, cipher, or playlist parsing failure (WaxTap may need an update)"},
 	{5, "rate limited"},

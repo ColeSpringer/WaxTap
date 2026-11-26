@@ -1058,8 +1058,8 @@ func TestEnumerate_ForbiddenIsNotPlaylistUnavailable(t *testing.T) {
 }
 
 func TestEnumerate_MaxItemsAtPageBoundary(t *testing.T) {
-	// maxItems equals the page's entry count: a clean page boundary, so the
-	// next-page token is a valid resume point.
+	// maxItems equals the page's entry count, so the listing stops without
+	// reading the next page and leaves a point to resume from.
 	browse := readFixture(t, "playlist_browse.json") // 2 entries + token
 	var calls int
 	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1074,15 +1074,15 @@ func TestEnumerate_MaxItemsAtPageBoundary(t *testing.T) {
 	if len(pl.Entries) != 2 {
 		t.Fatalf("entries = %d, want 2", len(pl.Entries))
 	}
-	if pl.Continuation != "CONT_TOKEN_1" {
-		t.Errorf("continuation = %q, want CONT_TOKEN_1 (page boundary is resumable)", pl.Continuation)
+	if pl.Continuation == "" {
+		t.Error("continuation is empty, want a resume point at the page boundary")
 	}
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1 (stopped at limit, no continuation fetch)", calls)
 	}
 }
 
-// The count rides on the first page, which every call fetches, so a one-entry
+// The count rides on the first page a call fetches, so a one-entry
 // listing carries it at no extra request.
 func TestEnumerate_VideoCountAtNoExtraRequest(t *testing.T) {
 	browse := readFixture(t, "playlist_browse.json") // states 6,131
@@ -1100,26 +1100,6 @@ func TestEnumerate_VideoCountAtNoExtraRequest(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("requests = %d, want 1", calls)
-	}
-}
-
-func TestEnumerate_MaxItemsMidPageNoResume(t *testing.T) {
-	// maxItems falls in the middle of the first page. There is no page-granular
-	// resume point for the unreturned entries.
-	browse := readFixture(t, "playlist_browse.json") // 2 entries + token
-	c := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return fixtureResp(http.StatusOK, browse), nil
-	}))
-
-	pl, err := c.Enumerate(context.Background(), "PLtest", EnumOptions{MaxItems: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pl.Entries) != 1 {
-		t.Fatalf("entries = %d, want 1", len(pl.Entries))
-	}
-	if pl.Continuation != "" {
-		t.Errorf("continuation = %q, want empty (mid-page cutoff must not skip entries)", pl.Continuation)
 	}
 }
 

@@ -85,6 +85,13 @@
 // page's wording settles unviewable without the lookup. Not-found is YouTube's
 // answer to a guest, not proof of deletion.
 //
+// A listing that [EnumerateOptions.MaxItems] capped, or that a page failed
+// under, returns [Playlist.Continuation], and a later call given it as
+// [EnumerateOptions.Continuation] lists on from that entry. It holds no
+// session state, so it can be stored and used by another process. One that is
+// not this playlist's, or that YouTube no longer reads, is
+// [ErrInvalidContinuation]: list from the start.
+//
 // Everything else is a hard error the consumer should surface: extraction and
 // cipher maintenance signals ([ErrExtractionFailed], [ErrCipherSolve],
 // [ErrPlaylistParse]), rate limiting ([ErrRateLimited]), incomplete delivery

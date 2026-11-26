@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -76,5 +77,44 @@ func TestRouteDownload_MalformedVideoBesideListHints(t *testing.T) {
 	_, err = routeDownload(link, lerr, false)
 	if c := classifyError(err); c.hint != "" {
 		t.Errorf("hint = %q without a list, want none", c.hint)
+	}
+}
+
+// --continuation resumes a listing, so it is refused on a download, which has
+// the archive for that.
+func TestDownloadContinuationRequiresList(t *testing.T) {
+	df := &downloadFlags{}
+	cmd := newFlagTestDownloadCmd(df)
+	mustSet(t, cmd, "continuation", "RESUME_POINT")
+	err := df.resolve(cmd, testResolveEnv())
+	if !isUsageError(err) || !strings.Contains(err.Error(), "--continuation requires --list") {
+		t.Errorf("err = %v, want a usage error that --continuation requires --list", err)
+	}
+
+	df = &downloadFlags{}
+	cmd = newFlagTestDownloadCmd(df)
+	mustSet(t, cmd, "continuation", "RESUME_POINT")
+	mustSet(t, cmd, "list", "true")
+	if err := df.resolve(cmd, testResolveEnv()); err != nil {
+		t.Errorf("with --list: %v", err)
+	}
+	if df.continuation != "RESUME_POINT" {
+		t.Errorf("continuation = %q, want the flag's value", df.continuation)
+	}
+}
+
+// A continuation YouTube refused wraps the endpoint URL, so the CLI words it
+// itself, under a code of its own that a paging script can restart on.
+func TestClassifyInvalidContinuation(t *testing.T) {
+	err := fmt.Errorf("%w: unexpected HTTP status Bad Request for https://www.youtube.com/youtubei/v1/browse", waxtap.ErrInvalidContinuation)
+	c := classifyError(err)
+	if c.exitCode != 2 || c.code != "invalid-continuation" {
+		t.Errorf("classified {%d %q}, want {2 invalid-continuation}", c.exitCode, c.code)
+	}
+	if strings.Contains(c.message, "http") || !strings.Contains(c.message, "continuation") {
+		t.Errorf("message = %q, want the continuation named and no URL", c.message)
+	}
+	if !strings.Contains(c.hint, "without --continuation") {
+		t.Errorf("hint = %q, want it to say list again without --continuation", c.hint)
 	}
 }

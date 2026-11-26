@@ -799,6 +799,17 @@ type StreamInfo struct {
 type EnumerateOptions struct {
 	// MaxItems caps the number of entries returned (0 = all).
 	MaxItems int
+	// Continuation resumes a listing: an earlier call's Playlist.Continuation,
+	// with the URL of the same playlist or channel. The call lists on from
+	// where that one stopped, MaxItems counting from there and each
+	// PlaylistEntry.Index still the true position. One Enumerate did not
+	// return for this playlist, or that YouTube no longer reads, is
+	// ErrInvalidContinuation.
+	//
+	// Title, Author, and VideoCount are read from the first page a call
+	// fetches. A resumed call's is a later page, which stated all three when
+	// measured.
+	Continuation string
 	// Enrich refreshes entries with InfoBasic calls made at bounded concurrency.
 	// A successful call overlays its entry's title, author, and duration with
 	// what it fetched, keeping a listing value where the fetch had none, and

@@ -60,6 +60,7 @@ type downloadFlags struct {
 	sleepInterval    time.Duration
 	maxSleepInterval time.Duration
 	listOnly         bool
+	continuation     string
 
 	// concurrencyClamped holds the value the user asked for when resolve lowered
 	// it to maxConcurrency, and zero otherwise, so the note can be printed on the
@@ -134,6 +135,7 @@ func bindDownloadFlags(cmd *cobra.Command, df *downloadFlags) {
 	f.DurationVar(&df.sleepInterval, "sleep-interval", 0, "minimum delay before each playlist download after the first (e.g. 5s)")
 	f.DurationVar(&df.maxSleepInterval, "max-sleep-interval", 0, "maximum randomized delay between playlist downloads (requires --sleep-interval)")
 	f.BoolVar(&df.listOnly, "list", false, "list playlist or channel entries without downloading")
+	f.StringVar(&df.continuation, "continuation", "", "resume a --list from the continuation an earlier --list --json returned")
 
 	bindConfigFlags(f)
 	bindNetworkFlags(f)
@@ -259,6 +261,10 @@ func (df *downloadFlags) resolve(cmd *cobra.Command, env *appEnv) error {
 			"concurrency", "max-downloads", "sleep-interval", "max-sleep-interval"); err != nil {
 			return err
 		}
+	}
+	// A download run is resumed by its archive; the token belongs to a listing.
+	if df.continuation != "" && !df.listOnly {
+		return usagef("--continuation requires --list")
 	}
 	// An explicitly empty path flag (usually an unset shell/env $VAR) would
 	// silently fall back to the default location; reject it before that default
@@ -409,7 +415,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		return usagef("--out cannot be used with a playlist; use --dir")
 	}
 	if df.listOnly {
-		opts := waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true}
+		opts := waxtap.EnumerateOptions{MaxItems: df.maxItems, Enrich: true, Continuation: df.continuation}
 		// Listing performs enumeration and enrichment before printing any rows. On
 		// an interactive stderr, show a transient status line for those network
 		// phases. JSON, quiet, piped stderr, and verbose mode stay untouched.
@@ -428,7 +434,7 @@ func runPlaylistDownload(ctx context.Context, env *appEnv, df *downloadFlags, ur
 		if err != nil {
 			return err
 		}
-		return emitPlaylistList(env, pl, df.maxItems)
+		return emitPlaylistList(env, pl, df.maxItems, df.continuation != "")
 	}
 
 	// Report the clamp here rather than in resolve: this is the only path that

@@ -525,3 +525,50 @@ func TestEnumerateEnrich_SkipsLiveEntries(t *testing.T) {
 		t.Errorf("progress = %v, want it to end at (2, 2)", progress)
 	}
 }
+
+// A capped listing hands back a Continuation, and the call given it lists the
+// rest at its true positions, enriched like any other.
+func TestEnumerate_ResumesFromContinuation(t *testing.T) {
+	w := &enrichWorld{}
+	c := enrichClient(t, w)
+
+	first, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{MaxItems: 1})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(first.Entries) != 1 || first.Continuation == "" {
+		t.Fatalf("capped call: %d entries, Continuation %q; want 1 and a resume point", len(first.Entries), first.Continuation)
+	}
+
+	rest, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{Enrich: true, Continuation: first.Continuation})
+	if err != nil {
+		t.Fatalf("resumed Enumerate: %v", err)
+	}
+	var got []string
+	for _, e := range rest.Entries {
+		got = append(got, fmt.Sprintf("%s@%d", e.VideoID, e.Index))
+	}
+	if want := []string{"bbbbbbbbbbb@1", "ccccccccccc@2"}; !slices.Equal(got, want) {
+		t.Errorf("resumed entries = %v, want %v", got, want)
+	}
+	if got := enrichedIDs(rest); len(got) != 2 {
+		t.Errorf("enriched = %v, want both resumed entries", got)
+	}
+	if rest.Continuation != "" {
+		t.Errorf("Continuation = %q at the end of the playlist, want empty", rest.Continuation)
+	}
+}
+
+// A Continuation of another playlist is refused as such, by the root sentinel.
+func TestEnumerate_RejectsAnotherPlaylistsContinuation(t *testing.T) {
+	c := enrichClient(t, &enrichWorld{})
+	first, err := c.Enumerate(context.Background(), enrichPlaylistURL, EnumerateOptions{MaxItems: 1})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	other := "https://www.youtube.com/playlist?list=PLyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+	_, err = c.Enumerate(context.Background(), other, EnumerateOptions{Continuation: first.Continuation})
+	if !errors.Is(err, ErrInvalidContinuation) {
+		t.Errorf("err = %v, want ErrInvalidContinuation", err)
+	}
+}

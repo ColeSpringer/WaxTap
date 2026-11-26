@@ -156,3 +156,25 @@ func checkUnlistableChannelNamed(t *testing.T, handle string) {
 		t.Errorf("oEmbed GETs = %d, want 0 for a channel's uploads feed", oembedGETs)
 	}
 }
+
+// A Continuation that is no token at all is refused before the channel is
+// resolved: the answer needs no request, and offline it would otherwise come
+// back as the resolver's network failure.
+func TestFacade_EnumerateChecksContinuationBeforeResolvingAChannel(t *testing.T) {
+	var requests int
+	rt := roundTripFn(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("offline")
+	})
+	c, err := waxtap.New(waxtap.Options{HTTPClient: &http.Client{Transport: rt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Enumerate(context.Background(), "https://www.youtube.com/@SomeHandle", waxtap.EnumerateOptions{Continuation: "garbage"})
+	if !errors.Is(err, waxtap.ErrInvalidContinuation) {
+		t.Errorf("err = %v, want ErrInvalidContinuation", err)
+	}
+	if requests != 0 {
+		t.Errorf("requests = %d, want none", requests)
+	}
+}

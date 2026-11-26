@@ -54,6 +54,10 @@ var (
 	ErrVideoIDTooShort   = waxerr.ErrVideoIDTooShort
 	ErrVideoIDTooLong    = waxerr.ErrVideoIDTooLong
 	ErrInvalidPlaylistID = waxerr.ErrInvalidPlaylistID
+	// ErrInvalidContinuation indicates an EnumerateOptions.Continuation that
+	// Enumerate did not return for this playlist, or that YouTube no longer
+	// reads. List from the start.
+	ErrInvalidContinuation = waxerr.ErrInvalidContinuation
 	// ErrPlaylistParse is a maintenance signal, not a bad input: the playlist
 	// response parsed but matched no known shape.
 	ErrPlaylistParse = waxerr.ErrPlaylistParse

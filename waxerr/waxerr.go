@@ -99,6 +99,9 @@ var (
 	ErrVideoIDTooShort   = errors.New("waxtap: video ID is too short (expected 11 characters)")
 	ErrVideoIDTooLong    = errors.New("waxtap: video ID is too long (expected 11 characters)")
 	ErrInvalidPlaylistID = errors.New("waxtap: invalid or missing playlist ID")
+	// ErrInvalidContinuation indicates a continuation Enumerate did not return
+	// for this playlist, or one YouTube no longer reads. List from the start.
+	ErrInvalidContinuation = errors.New("waxtap: invalid playlist continuation")
 	// ErrPlaylistParse indicates a playlist browse response that parsed as JSON
 	// but matched no known item shape. Unlike ErrInvalidPlaylistID it is a
 	// maintenance signal in the ErrExtractionFailed class: YouTube likely

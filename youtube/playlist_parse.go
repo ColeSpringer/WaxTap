@@ -19,9 +19,10 @@ type playlistMeta struct {
 	visitorData string
 }
 
-// browseResponse is the subset of the InnerTube /browse response used to
-// enumerate a playlist (web client shape).
-type browseResponse struct {
+// pageHeader is the playlist-level part of a browse page. The first page
+// states all of it. A continuation states what it did when measured on WEB
+// (2026-11): the title and the sidebar, with no header and no shell.
+type pageHeader struct {
 	ResponseContext struct {
 		VisitorData string `json:"visitorData"`
 	} `json:"responseContext"`
@@ -56,6 +57,21 @@ type browseResponse struct {
 			} `json:"items"`
 		} `json:"playlistSidebarRenderer"`
 	} `json:"sidebar"`
+	Alerts []struct {
+		AlertRenderer struct {
+			Type string   `json:"type"`
+			Text textRuns `json:"text"`
+		} `json:"alertRenderer"`
+	} `json:"alerts"`
+	// Topbar is the page shell. A refused first page carries it unless it is
+	// the unviewable one, in every locale, so only its presence is read.
+	Topbar json.RawMessage `json:"topbar"`
+}
+
+// browseResponse is the subset of the InnerTube /browse response used to
+// enumerate a playlist (web client shape).
+type browseResponse struct {
+	pageHeader
 	Contents struct {
 		TwoColumnBrowseResultsRenderer struct {
 			Tabs []struct {
@@ -73,40 +89,106 @@ type browseResponse struct {
 			} `json:"tabs"`
 		} `json:"twoColumnBrowseResultsRenderer"`
 	} `json:"contents"`
-	Alerts []struct {
-		AlertRenderer struct {
-			Type string   `json:"type"`
-			Text textRuns `json:"text"`
-		} `json:"alertRenderer"`
-	} `json:"alerts"`
-	// Topbar is the page shell. A refusal carries it unless it is the
-	// unviewable one, in every locale, so only its presence is read.
-	Topbar json.RawMessage `json:"topbar"`
 }
 
-// browseAlert is a first browse page that answered with an ERROR alert instead
-// of a listing. Enumerate classifies it into a PlaylistUnavailableError.
+// browseAlert is a browse page that answered with an ERROR alert instead of a
+// listing. Enumerate classifies it into a PlaylistUnavailableError.
 type browseAlert struct {
 	reason string // YouTube's alert text, in the request's locale
-	topbar bool   // whether the page shell came with it
+	// bare marks a first page refused without its shell. A continuation never
+	// has the shell, so its alert is never bare.
+	bare bool
 }
 
 func (a *browseAlert) Error() string { return "waxtap: " + a.reason }
 
 func (a *browseAlert) Unwrap() error { return waxerr.ErrPlaylistUnavailable }
 
+// alert returns the page's ERROR alert, or nil when it has none.
+func (h pageHeader) alert() *browseAlert {
+	for _, a := range h.Alerts {
+		if strings.EqualFold(a.AlertRenderer.Type, "ERROR") {
+			return &browseAlert{reason: a.AlertRenderer.Text.String()}
+		}
+	}
+	return nil
+}
+
+// meta reads the playlist-level metadata the page states.
+func (h pageHeader) meta() playlistMeta {
+	meta := playlistMeta{
+		visitorData: h.ResponseContext.VisitorData,
+		title:       h.Metadata.PlaylistMetadataRenderer.Title,
+		author:      h.Header.PlaylistHeaderRenderer.OwnerText.String(),
+	}
+	if meta.title == "" {
+		meta.title = h.Header.PlaylistHeaderRenderer.Title.String()
+	}
+	if meta.author == "" {
+		for _, item := range h.Sidebar.PlaylistSidebarRenderer.Items {
+			if a := item.PlaylistSidebarSecondaryInfoRenderer.VideoOwner.VideoOwnerRenderer.Title.String(); a != "" {
+				meta.author = a
+				break
+			}
+		}
+	}
+	// The sidebar's first stat is the count wherever measured, its digits a run
+	// of their own. The views stat beside it is served as one localized
+	// string, as are the page header's parts ("14 videos"), and parseCount
+	// reads no count from those.
+	meta.videoCount = parseCount(h.Header.PlaylistHeaderRenderer.NumVideosText)
+	for _, item := range h.Sidebar.PlaylistSidebarRenderer.Items {
+		if stats := item.PlaylistSidebarPrimaryInfoRenderer.Stats; meta.videoCount == 0 && len(stats) > 0 {
+			meta.videoCount = parseCount(stats[0])
+		}
+	}
+	return meta
+}
+
 // continuationResponse is a paginated browse continuation. YouTube uses two
 // shapes: the modern onResponseReceivedActions, and a legacy continuationContents
 // form (still returned for some playlists/clients). Both are handled.
 type continuationResponse struct {
+	rawHeader
 	OnResponseReceivedActions []struct {
 		AppendContinuationItemsAction struct {
 			ContinuationItems []playlistItem `json:"continuationItems"`
 		} `json:"appendContinuationItemsAction"`
 	} `json:"onResponseReceivedActions"`
-	ContinuationContents struct {
+	ContinuationContents *struct {
 		PlaylistVideoListContinuation playlistVideoList `json:"playlistVideoListContinuation"`
 	} `json:"continuationContents"`
+}
+
+// rawHeader holds a continuation's header undecoded. Its entries are what a
+// continuation is read for, so a header field in a shape pageHeader does not
+// expect costs that field and not the page.
+type rawHeader struct {
+	ResponseContext json.RawMessage `json:"responseContext"`
+	Metadata        json.RawMessage `json:"metadata"`
+	Header          json.RawMessage `json:"header"`
+	Sidebar         json.RawMessage `json:"sidebar"`
+	Alerts          json.RawMessage `json:"alerts"`
+}
+
+// decode reads what it can of the header and leaves the rest zero.
+func (r rawHeader) decode() pageHeader {
+	var h pageHeader
+	for _, f := range []struct {
+		raw json.RawMessage
+		dst any
+	}{
+		{r.ResponseContext, &h.ResponseContext},
+		{r.Metadata, &h.Metadata},
+		{r.Header, &h.Header},
+		{r.Sidebar, &h.Sidebar},
+		{r.Alerts, &h.Alerts},
+	} {
+		if len(f.raw) > 0 {
+			_ = json.Unmarshal(f.raw, f.dst)
+		}
+	}
+	return h
 }
 
 // playlistVideoList is the contents+continuations container shared by the
@@ -570,39 +652,11 @@ func parseBrowseInitial(body []byte) (playlistMeta, []playlistItem, string, erro
 		return playlistMeta{}, nil, "", fmt.Errorf("decode browse response: %w", err)
 	}
 
-	for _, a := range br.Alerts {
-		if strings.EqualFold(a.AlertRenderer.Type, "ERROR") {
-			topbar := len(br.Topbar) > 0 && string(br.Topbar) != "null"
-			return playlistMeta{}, nil, "", &browseAlert{reason: a.AlertRenderer.Text.String(), topbar: topbar}
-		}
+	if a := br.alert(); a != nil {
+		a.bare = len(br.Topbar) == 0 || string(br.Topbar) == "null"
+		return playlistMeta{}, nil, "", a
 	}
-
-	meta := playlistMeta{
-		visitorData: br.ResponseContext.VisitorData,
-		title:       br.Metadata.PlaylistMetadataRenderer.Title,
-		author:      br.Header.PlaylistHeaderRenderer.OwnerText.String(),
-	}
-	if meta.title == "" {
-		meta.title = br.Header.PlaylistHeaderRenderer.Title.String()
-	}
-	if meta.author == "" {
-		for _, item := range br.Sidebar.PlaylistSidebarRenderer.Items {
-			if a := item.PlaylistSidebarSecondaryInfoRenderer.VideoOwner.VideoOwnerRenderer.Title.String(); a != "" {
-				meta.author = a
-				break
-			}
-		}
-	}
-	// The sidebar's first stat is the count wherever measured, its digits a run
-	// of their own. The views stat beside it is served as one localized
-	// string, as are the page header's parts ("14 videos"), and parseCount
-	// reads no count from those.
-	meta.videoCount = parseCount(br.Header.PlaylistHeaderRenderer.NumVideosText)
-	for _, item := range br.Sidebar.PlaylistSidebarRenderer.Items {
-		if stats := item.PlaylistSidebarPrimaryInfoRenderer.Stats; meta.videoCount == 0 && len(stats) > 0 {
-			meta.videoCount = parseCount(stats[0])
-		}
-	}
+	meta := br.meta()
 
 	isr := firstItemSection(br)
 	list := playlistListFrom(isr)
@@ -636,10 +690,17 @@ func zeroItemsError(isr []playlistItem) error {
 // renames the action or marker shapes. (A marker rename on a page that still
 // yields entries is indistinguishable from the legitimate final page and
 // cannot be detected here.)
-func parseBrowseContinuation(body []byte) ([]playlistItem, string, error) {
+//
+// Two such pages are answers and not shapes (both measured 2026-11). A
+// playlist made private or deleted since the token was issued answers with
+// the alert a first page gives, returned as a browseAlert. A token at or past
+// the end of a playlist, one that shrank since, answers with the header and
+// no action or contents at all: the end of the listing, returned as no
+// entries and no token.
+func parseBrowseContinuation(body []byte) (playlistMeta, []playlistItem, string, error) {
 	var cr continuationResponse
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return nil, "", fmt.Errorf("decode continuation: %w", err)
+		return playlistMeta{}, nil, "", fmt.Errorf("decode continuation: %w", err)
 	}
 	var entries []playlistItem
 	var token string
@@ -649,7 +710,7 @@ func parseBrowseContinuation(body []byte) ([]playlistItem, string, error) {
 		// which reports as ErrPlaylistParse below: a page WaxTap cannot read is
 		// a parser change to make deliberately, not a shape to guess at.
 		entries, token = splitItems(cr.OnResponseReceivedActions[0].AppendContinuationItemsAction.ContinuationItems)
-	} else {
+	} else if cr.ContinuationContents != nil {
 		// Legacy shape.
 		list := cr.ContinuationContents.PlaylistVideoListContinuation
 		entries, token = splitItems(list.Contents)
@@ -657,10 +718,17 @@ func parseBrowseContinuation(body []byte) ([]playlistItem, string, error) {
 			token = list.legacyToken()
 		}
 	}
+	h := cr.decode()
 	if len(entries) == 0 && token == "" {
-		return nil, "", fmt.Errorf("no recognized continuation contents: %w", waxerr.ErrPlaylistParse)
+		if a := h.alert(); a != nil {
+			return playlistMeta{}, nil, "", a
+		}
+		pastEnd := len(cr.OnResponseReceivedActions) == 0 && cr.ContinuationContents == nil
+		if !pastEnd || h.Metadata.PlaylistMetadataRenderer.Title == "" {
+			return playlistMeta{}, nil, "", fmt.Errorf("no recognized continuation contents: %w", waxerr.ErrPlaylistParse)
+		}
 	}
-	return entries, token, nil
+	return h.meta(), entries, token, nil
 }
 
 // firstItemSection returns the contents of the first item section, the level
